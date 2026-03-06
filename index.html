@@ -189,8 +189,9 @@ var SC = {
   group: null,      // { id, name, players, pools, adminPw, data:{statuses,results} }
   isAdmin: false,
   isMaster: false,
-  groupAdmin: false,  // group-level admin (players/pools only), separate from isAdmin panel open state
-  showGroupSettings: false, // whether group settings panel is expanded
+  groupAdmin: false,
+  showGroupSettings: false,
+  globalStatuses: {},  // loaded from globalSettings/statuses, applies to all groups
   createForm: { name:"", adminPw:"", players:["","","",""], pools:[] },
   joinCode: "",
   error: ""
@@ -296,6 +297,137 @@ function draw() {
   else if(s==="create") renderCreate();
   else if(s==="created") renderCreated();
   else if(s==="hub") renderHub();
+  else if(s==="admin") renderAdmin();
+}
+
+// ADMIN SCREEN (Sloop only)
+function renderAdmin() {
+  if(!SC.isMaster) { SC.screen="landing"; draw(); return; }
+  var h = topbar(false);
+  h += '<div class="main fade-up">';
+  h += '<div style="display:flex;align-items:center;justify-content:between;margin-bottom:16px">';
+  h += '<div style="font-size:18px;font-weight:700;color:#fbbf24;flex:1">&#9889; Admin Panel</div>';
+  h += '<button class="btn btn-ghost btn-sm" id="btn-admin-back">&#8592; Back</button>';
+  h += '</div>';
+
+  // Pool status controls
+  h += '<div class="section-label">Competition States</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">These states apply to every group on the platform.</div>';
+  h += '<div class="pool-controls">';
+  POOL_LIBRARY.forEach(function(pool){
+    var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+    h += '<div class="pool-control-row"><div class="pcr-name">'+pool.icon+' '+x(pool.name)+'</div><div class="pcr-btns">';
+    [["open","Open"],["locked","Locked"],["coming-soon","Soon"],["complete","Final"]].forEach(function(pair){
+      var cls="";
+      if(st===pair[0]){ if(pair[0]==="open")cls="sel-open"; else if(pair[0]==="locked")cls="sel-locked"; else if(pair[0]==="coming-soon")cls="sel-soon"; else cls="sel-complete"; }
+      h += '<button class="pcr-btn '+cls+'" id="pcr-'+pool.id+'-'+pair[0]+'">'+pair[1]+'</button>';
+    });
+    h += '</div></div>';
+  });
+  h += '</div></div>';
+
+  // Results entry — uses a representative player list from SC.group if available
+  h += '<div class="section-label">Set Results</div>';
+  h += '<div class="admin-panel">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Enter finish order per competition. Results are saved globally.</div>';
+  h += '<div id="admin-results-area">';
+  h += '<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading groups for player names...</div>';
+  h += '</div>';
+  h += '<button class="save-results-btn" id="save-admin-results-btn" style="margin-top:12px">Save Results</button>';
+  h += '</div>';
+
+  h += '</div>'; // main
+  render(h);
+
+  // Back button
+  document.getElementById("btn-admin-back").addEventListener("click", function(){
+    SC.screen = SC.group ? "hub" : "landing";
+    draw();
+  });
+
+  // Topbar admin
+  var ta = document.getElementById("btn-topbar-admin");
+  if(ta) ta.addEventListener("click", function(){ SC.screen="admin"; draw(); });
+
+  // Status buttons
+  POOL_LIBRARY.forEach(function(pool){
+    [["open","Open"],["locked","Locked"],["coming-soon","Soon"],["complete","Final"]].forEach(function(pair){
+      var btn = document.getElementById("pcr-"+pool.id+"-"+pair[0]);
+      if(btn) btn.addEventListener("click", function(){ setStatus(pool.id, pair[0]); });
+    });
+  });
+
+  // Load all groups to build results form with all unique players
+  loadAllGroups(function(groups){
+    var allPlayers = [];
+    groups.forEach(function(g){
+      (g.players||[]).forEach(function(p){
+        if(p && allPlayers.indexOf(p)<0) allPlayers.push(p);
+      });
+    });
+
+    // Load global results
+    if(DB) {
+      DB.ref("globalSettings/results").once("value", function(sn){
+        var globalResults = sn.val()||{};
+        buildResultsForm(allPlayers, globalResults);
+      });
+    } else {
+      buildResultsForm(allPlayers, {});
+    }
+  });
+}
+
+function buildResultsForm(players, globalResults) {
+  var area = document.getElementById("admin-results-area");
+  if(!area) return;
+  if(players.length===0){
+    area.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No players found across groups yet.</div>';
+    return;
+  }
+  var none='<option value="">--</option>';
+  var opts=players.map(function(p){return'<option value="'+x(p)+'">'+x(p)+'</option>';}).join("");
+  var h="";
+  POOL_LIBRARY.forEach(function(pool){
+    var r=(globalResults||{})[pool.id]||{};
+    h += '<div class="result-row"><div class="result-pool-name">'+pool.icon+' '+x(pool.name.split(" ")[0])+'</div><div class="result-selects">';
+    ["first","second","third"].forEach(function(place){
+      h += '<select class="result-select" id="admin-res-'+pool.id+'-'+place+'">'+none+opts+'</select>';
+    });
+    h += '</div></div>';
+  });
+  area.innerHTML = h;
+  // Set existing values
+  POOL_LIBRARY.forEach(function(pool){
+    var r=(globalResults||{})[pool.id]||{};
+    ["first","second","third"].forEach(function(place){
+      var el = document.getElementById("admin-res-"+pool.id+"-"+place);
+      if(el && r[place]) el.value = r[place];
+    });
+  });
+  // Save button
+  var srb = document.getElementById("save-admin-results-btn");
+  if(srb) srb.addEventListener("click", saveAdminResults);
+}
+
+function saveAdminResults() {
+  var newResults = {};
+  POOL_LIBRARY.forEach(function(pool){
+    var r={};
+    ["first","second","third"].forEach(function(place){
+      var el = document.getElementById("admin-res-"+pool.id+"-"+place);
+      if(el && el.value) r[place]=el.value;
+    });
+    if(Object.keys(r).length>0) newResults[pool.id]=r;
+  });
+  if(DB) {
+    DB.ref("globalSettings/results").set(newResults, function(){
+      toast("Results saved globally &#10003;");
+    });
+  } else {
+    toast("Results saved (offline)");
+  }
 }
 
 // LANDING
@@ -334,6 +466,13 @@ function renderLanding() {
   h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search-landing" placeholder="Search by name or code..." autocomplete="off"></div>';
   h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Code</th><th>Players</th><th></th></tr></thead><tbody id="groups-tbody-landing"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
 
+  // Admin login
+  if(!SC.isMaster) {
+    h += '<div style="text-align:center;padding:20px 0 10px"><button class="btn btn-ghost btn-sm" id="btn-admin-landing" style="font-size:9px;color:#334155;border-color:#1a2535">&#9889; Admin Login</button></div>';
+  } else {
+    h += '<div style="text-align:center;padding:20px 0 10px"><button class="btn btn-gold btn-sm" id="btn-admin-landing">&#9889; Open Admin Panel</button></div>';
+  }
+
   h += '</div>'; // main
   render(h);
 
@@ -354,6 +493,18 @@ function renderLanding() {
     var q=this.value;
     loadAllGroups(function(groups){ renderGroupsTableTo("groups-tbody-landing", groups, q); });
   });
+
+  var al = document.getElementById("btn-admin-landing");
+  if(al) al.addEventListener("click", function(){
+    if(SC.isMaster){ SC.screen="admin"; draw(); return; }
+    var pw = prompt("Admin password:");
+    if(!pw) return;
+    if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted"); }
+    else toast("Wrong password");
+  });
+
+  var ta = document.getElementById("btn-topbar-admin");
+  if(ta) ta.addEventListener("click", function(){ SC.screen="admin"; draw(); });
 }
 
 function doInlineJoin() {
@@ -550,35 +701,9 @@ function renderHub() {
 
   h += '<div class="main fade-up">';
 
-  // Admin panel — Sloop master only: status controls + results
+    // Master admin link (shown in hub if Sloop is logged in)
   if(SC.isMaster) {
-    h += '<div class="admin-panel">';
-    h += '<div class="admin-panel-title"><span>&#9889; Master Controls &mdash; All Groups</span></div>';
-    h += '<div class="pool-controls">';
-    pools.forEach(function(pool){
-      var st = data.statuses[pool.id]||"coming-soon";
-      h += '<div class="pool-control-row"><div class="pcr-name">'+pool.icon+' '+x(pool.name)+'</div><div class="pcr-btns">';
-      [["open","Open"],["locked","Locked"],["coming-soon","Soon"],["complete","Final"]].forEach(function(pair){
-        var cls="";
-        if(st===pair[0]){ if(pair[0]==="open")cls="sel-open"; else if(pair[0]==="locked")cls="sel-locked"; else if(pair[0]==="coming-soon")cls="sel-soon"; else cls="sel-complete"; }
-        h += '<button class="pcr-btn '+cls+'" onclick="setStatus(\''+pool.id+'\',\''+pair[0]+'\')">'+pair[1]+'</button>';
-      });
-      h += '</div></div>';
-    });
-    h += '</div>';
-    h += '<div class="results-title">Set Results (1st / 2nd / 3rd)</div>';
-    var none='<option value="">--</option>';
-    var opts=g.players.map(function(p){return'<option value="'+x(p)+'">'+x(p)+'</option>';}).join("");
-    pools.forEach(function(pool){
-      var r=(data.results||{})[pool.id]||{};
-      h += '<div class="result-row"><div class="result-pool-name">'+pool.icon+' '+x(pool.name.split(" ")[0])+'</div><div class="result-selects">';
-      ["first","second","third"].forEach(function(place){
-        h += '<select class="result-select" id="res-'+pool.id+'-'+place+'">'+none+opts+'</select>';
-      });
-      h += '</div></div>';
-    });
-    h += '<button class="save-results-btn" id="save-results-btn">Save Results &amp; Recalculate</button>';
-    h += '</div>';
+    h += '<div style="text-align:center;padding:10px 0 4px"><button class="btn btn-gold btn-sm" id="btn-go-admin">&#9889; Admin Panel</button></div>';
   }
 
   // Group admin panel — players + pools only, toggled by showGroupSettings
@@ -635,7 +760,7 @@ function renderHub() {
   h += '<div class="section-label">Competitions</div>';
   h += '<div class="pools-grid">';
   pools.forEach(function(pool){
-    var status=(data.statuses||{})[pool.id]||"coming-soon";
+    var status=(SC.globalStatuses||{})[pool.id]||"coming-soon";
     var clickable=(status==="open"||status==="locked");
     var dimmed=(status==="coming-soon");
     var result=(data.results||{})[pool.id];
@@ -718,6 +843,9 @@ function renderHub() {
 
   var srb = document.getElementById("save-results-btn");
   if(srb) srb.addEventListener("click", saveResults);
+
+  var gab = document.getElementById("btn-go-admin");
+  if(gab) gab.addEventListener("click", function(){ SC.screen="admin"; draw(); });
 
   // Group admin: save players + pools
   var sgb = document.getElementById("save-group-btn");
@@ -844,7 +972,11 @@ function topbar(showBack) {
   var h = '<div class="topbar">';
   if(showBack) h += '<button class="btn btn-ghost btn-sm" id="btn-back" style="margin-right:4px">&#8592;</button>';
   h += '<div><div class="logo">PoolPlay</div></div>';
-  h += '<div class="topbar-right"></div></div>';
+  h += '<div class="topbar-right">';
+  if(SC.isMaster && SC.screen!=="admin") {
+    h += '<button class="btn btn-gold btn-sm" id="btn-topbar-admin">&#9889; Admin</button>';
+  }
+  h += '</div></div>';
   return h;
 }
 
@@ -859,31 +991,15 @@ function render(h) {
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────
 function setStatus(poolId, status) {
-  if(!SC.group) return;
-  if(!SC.group.data) SC.group.data={statuses:{},results:{}};
-  if(!SC.group.data.statuses) SC.group.data.statuses={};
-  SC.group.data.statuses[poolId]=status;
-
-  if(SC.isMaster && DB) {
-    // Push status to every group that has this pool
-    DB.ref("groups").once("value", function(sn){
-      var all = sn.val()||{};
-      var updates = {};
-      Object.keys(all).forEach(function(gid){
-        var g = all[gid];
-        if((g.pools||[]).indexOf(poolId)>=0) {
-          updates["groups/"+gid+"/data/statuses/"+poolId] = status;
-        }
-      });
-      if(Object.keys(updates).length>0) DB.ref().update(updates);
+  SC.globalStatuses[poolId] = status;
+  if(DB) {
+    DB.ref("globalSettings/statuses/"+poolId).set(status, function(){
+      toast("Status updated &#10003;");
     });
-    draw();
-    toast("Status pushed to all groups");
   } else {
-    saveGroupData();
-    draw();
-    toast("Status updated");
+    toast("Status updated (offline)");
   }
+  draw();
 }
 
 function saveResults() {
@@ -980,9 +1096,25 @@ function calcStandings(g, data) {
 }
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
+function subscribeGlobalStatuses() {
+  if(!DB) return;
+  DB.ref("globalSettings/statuses").on("value", function(sn){
+    SC.globalStatuses = sn.val() || {};
+    draw();
+  });
+}
+
 // Auto-rejoin last group if code stored
 (function(){
   var last = loadLastGroup();
+  // Start global statuses subscription right away
+  if(DB) subscribeGlobalStatuses();
+  else {
+    // DB may not be ready yet — retry after short delay
+    var t = setInterval(function(){
+      if(DB){ clearInterval(t); subscribeGlobalStatuses(); }
+    }, 200);
+  }
   if(last) {
     loadGroup(last, function(group, err){
       if(group){ SC.group=group; SC.group.data=group.data||{statuses:{},results:{}}; SC.screen="hub"; subscribeGroup(group.id); }
