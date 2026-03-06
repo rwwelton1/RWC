@@ -204,6 +204,17 @@ button,input,select{font-family:'DM Sans',sans-serif}
 .emoji-grid{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-height:280px;overflow-y:auto}
 .emoji-opt{width:46px;height:46px;border-radius:8px;font-size:24px;background:#07090f;border:1px solid #1e2a3a;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color .12s}
 .emoji-opt:hover,.emoji-opt:active{border-color:rgba(99,102,241,.5);background:rgba(99,102,241,.08)}
+
+/* TIER BAR */
+.tier-bar{background:#0d1117;border:1px solid #1e2a3a;border-radius:12px;padding:14px 16px;margin-bottom:24px}
+.tier-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.tier-label{font-size:13px;font-weight:700}
+.tier-pts-label{font-size:10px;color:#475569}
+.tier-track{position:relative;height:8px;background:#07090f;border-radius:4px;margin-bottom:8px;overflow:visible}
+.tier-fill{height:100%;border-radius:4px;transition:width .6s ease}
+.tier-ticks{display:flex;justify-content:space-between;margin-top:4px}
+.tier-tick{font-size:8px;color:#334155;text-align:center}
+.tier-tick.done{color:#64748b}
 /* COPY PICKS */
 .pool-copy-btn{background:none;border:1px solid rgba(99,102,241,.25);border-radius:5px;color:#6366f1;font-size:9px;font-weight:600;padding:2px 7px;cursor:pointer;margin-top:2px;transition:all .12s;font-family:inherit;white-space:nowrap}
 .pool-copy-btn:hover{background:rgba(99,102,241,.1);border-color:rgba(99,102,241,.5)}
@@ -231,6 +242,7 @@ button,input,select{font-family:'DM Sans',sans-serif}
 .copy-back-btn{padding:11px 14px;border-radius:8px;background:#07090f;border:1px solid #1e2a3a;color:#64748b;font-size:13px;font-family:inherit;cursor:pointer}
 .copy-cancel-btn{width:100%;padding:10px;border-radius:8px;background:none;border:none;color:#334155;font-size:12px;font-family:inherit;cursor:pointer;margin-top:4px}
 </style>
+
 </head>
 <body>
 <div class="bg-grid"></div>
@@ -554,10 +566,55 @@ function saveUserEmoji(emoji) {
   DB.ref("users/"+userKey(SC.currentUser.username)+"/emoji").set(emoji);
 }
 
+// ── TIER SYSTEM ──────────────────────────────────────────────────────────────
+var TIERS = [
+  {name:"Bronze",   pts:1,  color:"#cd7f32", gradient:"linear-gradient(90deg,#7c4a1e,#cd7f32)", icon:"🥉"},
+  {name:"Silver",   pts:3,  color:"#94a3b8", gradient:"linear-gradient(90deg,#475569,#94a3b8)", icon:"🥈"},
+  {name:"Gold",     pts:5,  color:"#fbbf24", gradient:"linear-gradient(90deg,#b45309,#fbbf24)", icon:"🥇"},
+  {name:"Platinum", pts:10, color:"#67e8f9", gradient:"linear-gradient(90deg,#0e7490,#67e8f9)", icon:"💎"},
+  {name:"Diamond",  pts:20, color:"#a5b4fc", gradient:"linear-gradient(90deg,#4f46e5,#c4b5fd)", icon:"👑"}
+];
+function getTier(pts) {
+  var tier = null;
+  for(var i=0;i<TIERS.length;i++) { if(pts >= TIERS[i].pts) tier = TIERS[i]; }
+  return tier || {name:"Unranked", pts:0, color:"#334155", gradient:"linear-gradient(90deg,#1e2a3a,#334155)", icon:"🎮"};
+}
+function getNextTier(pts) {
+  for(var i=0;i<TIERS.length;i++) { if(pts < TIERS[i].pts) return TIERS[i]; }
+  return null; // already max
+}
+function renderTierBar(pts) {
+  var cur = getTier(pts);
+  var next = getNextTier(pts);
+  var h = '<div class="tier-bar">';
+  h += '<div class="tier-header">';
+  h += '<span class="tier-label" style="color:'+cur.color+'">'+cur.icon+' '+cur.name+'</span>';
+  if(next) h += '<span class="tier-pts-label">'+pts+' / '+next.pts+' pts to '+next.name+'</span>';
+  else     h += '<span class="tier-pts-label" style="color:#fbbf24">'+pts+' pts — Max Tier!</span>';
+  h += '</div>';
+  // Track
+  var pct = 0;
+  if(next) {
+    var prev = cur.pts || 0;
+    pct = Math.min(100, Math.round((pts - prev) / (next.pts - prev) * 100));
+  } else { pct = 100; }
+  h += '<div class="tier-track">';
+  h += '<div class="tier-fill" style="width:'+pct+'%;background:'+cur.gradient+'"></div>';
+  h += '</div>';
+  // Tick marks
+  h += '<div class="tier-ticks">';
+  TIERS.forEach(function(t){
+    var done = pts >= t.pts;
+    h += '<div class="tier-tick'+(done?" done":"")+'">'+t.icon+'<br>'+t.pts+'</div>';
+  });
+  h += '</div></div>';
+  return h;
+}
+
 function renderProfile() {
   var u = SC.currentUser;
   if(!u) { SC.screen="auth"; draw(); return; }
-  var em = u.emoji || "🎯";
+  var em = u.emoji || "🍺";
   var myGroupIds = u.groups || [];
 
   var h = topbar(false);
@@ -573,15 +630,21 @@ function renderProfile() {
   h += '<div class="profile-since">PoolPlay 2026</div>';
   h += '</div>';
 
-  // Stats — will be populated after group data loads
+  // Stats
   h += '<div class="profile-stats">';
   h += '<div class="pstat"><div class="pstat-val" id="pstat-entered">—</div><div class="pstat-label">Competitions</div></div>';
   h += '<div class="pstat"><div class="pstat-val gold" id="pstat-wins">—</div><div class="pstat-label">Wins</div></div>';
   h += '<div class="pstat"><div class="pstat-val" id="pstat-pts">—</div><div class="pstat-label">Total Pts</div></div>';
   h += '</div>';
 
-  // My groups
+  // Tier bar placeholder — rendered after data loads
+  h += '<div id="profile-tier"></div>';
+
+  // My Groups header + search
   h += '<div class="section-label">My Groups</div>';
+  h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
+  h += '<input class="search-input" id="profile-group-search" placeholder="Search your groups..." autocomplete="off">';
+  h += '</div>';
   h += '<div id="profile-groups">';
   if(myGroupIds.length === 0) {
     h += '<div style="text-align:center;color:#334155;padding:24px;font-size:11px">You\'re not in any groups yet.</div>';
@@ -596,13 +659,10 @@ function renderProfile() {
   h += '<button class="btn btn-ghost" id="btn-join-from-profile" style="flex:1;padding:10px;font-size:12px">Join with Code</button>';
   h += '</div>';
 
-  h += '</div>'; // main
+  h += '</div>';
   render(h);
 
-  // Emoji edit
   document.getElementById("btn-edit-emoji").addEventListener("click", openEmojiPicker);
-
-  // Create / Join buttons
   document.getElementById("btn-create-from-profile").addEventListener("click", function(){
     SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
   });
@@ -610,37 +670,85 @@ function renderProfile() {
     SC.screen="join"; SC.error=""; draw();
   });
 
-  // Load groups
+  // Group search filter
+  var _allGroupsCache = [];
+  function filterGroups(q) {
+    var container = document.getElementById("profile-groups");
+    if(!container) return;
+    var filtered = q ? _allGroupsCache.filter(function(g){
+      return (g.name||"").toLowerCase().indexOf(q.toLowerCase()) >= 0 ||
+             (g.id||"").toLowerCase().indexOf(q.toLowerCase()) >= 0;
+    }) : _allGroupsCache;
+    renderGroupCards(filtered, container);
+  }
+
+  var si = document.getElementById("profile-group-search");
+  if(si) si.addEventListener("input", function(){ filterGroups(this.value.trim()); });
+
+  function renderGroupCards(groups, container) {
+    if(!groups.length) {
+      container.innerHTML = '<div style="text-align:center;color:#334155;padding:24px;font-size:11px">No groups found.</div>';
+      return;
+    }
+    var statuses = SC.globalStatuses || {};
+    var gh = "";
+    groups.forEach(function(g){
+      var pools = groupPools(g);
+      var pillsHtml = "";
+      pools.forEach(function(pool){
+        var st = statuses[pool.id] || "coming-soon";
+        if(st === "open")     pillsHtml += '<span class="gpp gpp-open">'+pool.icon+' Open</span>';
+        else if(st === "locked")   pillsHtml += '<span class="gpp gpp-locked">'+pool.icon+' Live</span>';
+        else if(st === "complete") pillsHtml += '<span class="gpp gpp-complete">'+pool.icon+' Final</span>';
+      });
+      if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">No active competitions</span>';
+      var iconEmoji = "&#127942;";
+      for(var i=0;i<pools.length;i++){
+        var st2 = statuses[pools[i].id]||"coming-soon";
+        if(st2==="open"||st2==="locked"){ iconEmoji = pools[i].icon; break; }
+      }
+      gh += '<div class="group-card" data-gid="'+x(g.id)+'">';
+      gh += '<div class="group-card-icon">'+iconEmoji+'</div>';
+      gh += '<div class="group-card-info">';
+      gh += '<div class="group-card-name">'+x(g.name||"Unnamed")+'</div>';
+      gh += '<div class="group-card-pools">'+pillsHtml+'</div>';
+      gh += '</div>';
+      gh += '<div class="group-card-arrow">&#8250;</div>';
+      gh += '</div>';
+    });
+    container.innerHTML = gh;
+    container.querySelectorAll(".group-card").forEach(function(el){
+      el.addEventListener("click", function(){ joinGroupSilent(this.getAttribute("data-gid")); });
+    });
+  }
+
+  // Load groups from Firebase
   if(myGroupIds.length > 0 && DB) {
     var promises = myGroupIds.map(function(gid){
       return DB.ref("groups/"+gid).once("value").then(function(sn){ return sn.val(); });
     });
     Promise.all(promises).then(function(groups){
       groups = groups.filter(Boolean);
+      _allGroupsCache = groups;
       var container = document.getElementById("profile-groups");
       if(!container) return;
 
-      // Compute stats
+      // Compute stats + pts for tier
       var entered = 0, wins = 0, totalPts = 0;
       groups.forEach(function(g){
         var pools = groupPools(g);
-        var data = g.data || {};
-        var results = data.results || {};
+        var results = (g.data || {}).results || {};
         pools.forEach(function(pool){
           var r = results[pool.id];
-          if(r && (r.first || r.second || r.third)) {
-            // Competition has a result — user was entered
-            if((g.players||[]).indexOf(u.username) >= 0) {
-              entered++;
-              if(r.first === u.username){ wins++; totalPts += 4; }
-              else if(r.second === u.username){ totalPts += 2; }
-              else if(r.third === u.username){ totalPts += 1; }
-            }
+          if(r && (r.first || r.second || r.third) && (g.players||[]).indexOf(u.username) >= 0) {
+            entered++;
+            if(r.first === u.username)       { wins++; totalPts += 4; }
+            else if(r.second === u.username) { totalPts += 2; }
+            else if(r.third === u.username)  { totalPts += 1; }
           }
         });
       });
 
-      // Update stats
       var se = document.getElementById("pstat-entered");
       var sw = document.getElementById("pstat-wins");
       var sp = document.getElementById("pstat-pts");
@@ -648,49 +756,16 @@ function renderProfile() {
       if(sw) sw.textContent = wins;
       if(sp) sp.textContent = totalPts;
 
-      // Render group cards
-      if(groups.length === 0) {
-        container.innerHTML = '<div style="text-align:center;color:#334155;padding:24px;font-size:11px">No groups found.</div>';
-        return;
-      }
-      var gh = "";
-      groups.forEach(function(g){
-        var pools = groupPools(g);
-        var statuses = SC.globalStatuses || {};
-        // Build pool pills — only open/locked pools
-        var pillsHtml = "";
-        pools.forEach(function(pool){
-          var st = statuses[pool.id] || "coming-soon";
-          var cls = "gpp-soon", label = pool.icon;
-          if(st === "open"){ cls="gpp-open"; label = pool.icon+" Open"; }
-          else if(st === "locked"){ cls="gpp-locked"; label = pool.icon+" Live"; }
-          else if(st === "complete"){ cls="gpp-complete"; label = pool.icon+" Final"; }
-          else return; // skip coming-soon entirely
-          pillsHtml += '<span class="gpp '+cls+'">'+label+'</span>';
-        });
-        if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">No active competitions</span>';
+      // Render tier bar
+      var tierEl = document.getElementById("profile-tier");
+      if(tierEl) tierEl.innerHTML = renderTierBar(totalPts);
 
-        // Group icon = first open pool icon or generic
-        var iconEmoji = "&#127942;";
-        for(var i=0;i<pools.length;i++){
-          var st2 = statuses[pools[i].id]||"coming-soon";
-          if(st2==="open"||st2==="locked"){ iconEmoji = pools[i].icon; break; }
-        }
-
-        gh += '<div class="group-card" data-gid="'+x(g.id)+'">';
-        gh += '<div class="group-card-icon">'+iconEmoji+'</div>';
-        gh += '<div class="group-card-info">';
-        gh += '<div class="group-card-name">'+x(g.name||"Unnamed")+'</div>';
-        gh += '<div class="group-card-pools">'+pillsHtml+'</div>';
-        gh += '</div>';
-        gh += '<div class="group-card-arrow">&#8250;</div>';
-        gh += '</div>';
-      });
-      container.innerHTML = gh;
-      container.querySelectorAll(".group-card").forEach(function(el){
-        el.addEventListener("click", function(){ joinGroupSilent(this.getAttribute("data-gid")); });
-      });
+      renderGroupCards(groups, container);
     });
+  } else {
+    // No groups — still render tier at 0
+    var tierEl = document.getElementById("profile-tier");
+    if(tierEl) tierEl.innerHTML = renderTierBar(0);
   }
 }
 
@@ -1605,7 +1680,7 @@ function executeCopy(targetUser){
 <script>
 // ── EMOJI PICKER BINDINGS ─────────────────────────────────────────────────────
 (function(){
-  var EMOJIS = ["🎯","⚡","🔥","🏆","🎲","🦁","🐺","🦊","🐻","🦅","🦋","🌊","🍀","🌙","⭐","🎸","🎮","🏄","🧠","🤠","👑","💎","🚀","🌈","🎪","🎭","🐉","🦄","🍕","🦈","🏹","⚔️","🎺","🌵","🍺","🏔️","🎳","🧊","🎨","🎬","🌸","🧨","💥","🎰","🎻","🏇","🦞","🎂","🌺","🎵"];
+  var EMOJIS = ["🍺","💩","🤡","🦆","🐸","🍔","🌮","🍕","🏈","⚽","🎳","🎯","🪃","🏒","🎰","🃏","🎲","🧨","💣","🔫","🪓","⚔️","🤘","🤙","👊","🌭","🍟","🧀","🥩","🍗","🍻","🥃","🍾","☕","🎸","🥁","🪗","🎺","🏆","💰","🐉","🦁","🐺","🦅","🦈","🏄","🚀","🎮","💎","🏋️"];
   var grid = document.getElementById("emoji-grid");
   EMOJIS.forEach(function(em){
     var btn = document.createElement("button");
