@@ -1382,6 +1382,24 @@ function renderAdmin() {
   h += '<div id="admin-results-area"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
   h += '<button class="save-results-btn" id="save-admin-results-btn" style="margin-top:12px">Save Results</button>';
   h += '</div>';
+
+  h += '<div class="section-label">Registered Users</div>';
+  h += '<div class="admin-panel">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All users registered on PoolPlay. Delete removes their account permanently.</div>';
+  h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
+  h += '<input class="search-input" id="user-search" placeholder="Search users..." autocomplete="off">';
+  h += '</div>';
+  h += '<div id="admin-users-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
+  h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
+  h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">&#43; Add User</div>';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+  h += '<input class="auth-input" id="new-user-name" placeholder="Username" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
+  h += '<input class="auth-input" id="new-user-pw" type="password" placeholder="Password" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
+  h += '<button class="btn btn-green" id="btn-add-user" style="padding:8px 14px;font-size:12px">Add</button>';
+  h += '</div>';
+  h += '<div id="add-user-err" style="font-size:10px;color:#fca5a5;min-height:14px;margin-top:6px"></div>';
+  h += '</div></div>';
+
   h += '</div>';
   render(h);
 
@@ -1406,6 +1424,101 @@ function renderAdmin() {
         buildResultsForm(allPlayers, sn.val()||{});
       });
     } else buildResultsForm(allPlayers, {});
+  });
+
+  // Load users
+  loadAdminUsers("");
+  var us = document.getElementById("user-search");
+  if(us) us.addEventListener("input", function(){ loadAdminUsers(this.value.trim()); });
+
+  // Add user
+  var addBtn = document.getElementById("btn-add-user");
+  if(addBtn) addBtn.addEventListener("click", function(){
+    var name = (document.getElementById("new-user-name").value||"").trim();
+    var pw   = (document.getElementById("new-user-pw").value||"").trim();
+    var errEl = document.getElementById("add-user-err");
+    if(!name){ errEl.textContent="Username required"; return; }
+    if(!pw || pw.length < 3){ errEl.textContent="Password must be at least 3 characters"; return; }
+    var key = userKey(name);
+    if(!key){ errEl.textContent="Invalid username"; return; }
+    if(!DB){ errEl.textContent="Firebase unavailable"; return; }
+    DB.ref("users/"+key).once("value", function(sn){
+      if(sn.val()){ errEl.textContent="Username already exists"; return; }
+      DB.ref("users/"+key).set({ username: name, password: pw, groups: [], emoji: "🍺" }, function(err){
+        if(err){ errEl.textContent="Error creating user"; return; }
+        document.getElementById("new-user-name").value="";
+        document.getElementById("new-user-pw").value="";
+        errEl.textContent="";
+        toast("User "+name+" created ✓");
+        loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+      });
+    });
+  });
+}
+
+// ── USER MANAGEMENT ───────────────────────────────────────────────────────────
+function loadAdminUsers(q) {
+  var list = document.getElementById("admin-users-list");
+  if(!list) return;
+  if(!DB){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>'; return; }
+  DB.ref("users").once("value", function(sn){
+    var all = sn.val()||{};
+    var users = Object.values(all).filter(Boolean);
+    if(q) users = users.filter(function(u){ return (u.username||"").toLowerCase().indexOf(q.toLowerCase())>=0; });
+    users.sort(function(a,b){ return (a.username||"").localeCompare(b.username||""); });
+    if(!users.length){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">No users found.</div>'; return; }
+    var h='<table style="width:100%;border-collapse:collapse;font-size:11px">';
+    h+='<thead><tr>';
+    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">User</th>';
+    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>';
+    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Password</th>';
+    h+='<th></th>';
+    h+='</tr></thead><tbody>';
+    users.forEach(function(u){
+      var em = u.emoji||"🍺";
+      var grpCount = (u.groups||[]).length;
+      h+='<tr style="border-top:1px solid #0f1923">';
+      h+='<td style="padding:7px 6px;color:#f1f5f9;font-weight:600">'+em+' '+x(u.username||"")+'</td>';
+      h+='<td style="padding:7px 6px;color:#475569">'+grpCount+' group'+(grpCount!==1?"s":"")+'</td>';
+      h+='<td style="padding:7px 6px;color:#334155;font-family:monospace;font-size:10px">'+x(u.password||"")+'</td>';
+      h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-user="'+x(u.username||"")+'">Delete</button></td>';
+      h+='</tr>';
+    });
+    h+='</tbody></table>';
+    list.innerHTML=h;
+    list.querySelectorAll("[data-del-user]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var uname = this.getAttribute("data-del-user");
+        if(!confirm("Permanently delete user \""+uname+"\"? This cannot be undone.")) return;
+        deleteUser(uname);
+      });
+    });
+  });
+}
+
+function deleteUser(username) {
+  if(!DB) return;
+  var key = userKey(username);
+  // Remove from Firebase users node
+  DB.ref("users/"+key).remove(function(err){
+    if(err){ toast("Delete failed"); return; }
+    // Also remove from any groups they're in
+    DB.ref("groups").once("value", function(sn){
+      var groups = sn.val()||{};
+      var updates = {};
+      Object.values(groups).forEach(function(g){
+        var players = (g.players||[]).filter(function(p){ return p!==username; });
+        if(players.length !== (g.players||[]).length){
+          updates["groups/"+g.id+"/players"] = players;
+        }
+      });
+      if(Object.keys(updates).length>0){
+        DB.ref().update(updates, function(){ toast("User \""+username+"\" deleted ✓"); loadAdminUsers((document.getElementById("user-search")||{}).value||""); });
+      } else {
+        toast("User \""+username+"\" deleted ✓");
+        loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+      }
+    });
   });
 }
 
