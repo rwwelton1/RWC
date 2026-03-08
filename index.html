@@ -547,6 +547,7 @@ function saveGroupData() {
 function draw() {
   var s = SC.screen;
   try{ if(s==="hub"||s==="profile") localStorage.setItem("pp_last_screen", s); }catch(e){}
+  if(s !== "profile" && s !== "landing") SC._triviaResetChecked = false;
   if(s==="auth")    renderAuth();
   else if(s==="home")    renderHome();
   else if(s==="profile") renderProfile();
@@ -879,6 +880,27 @@ function renderTierBar(pts) {
 function renderProfile() {
   var u = SC.currentUser;
   if(!u) { SC.screen="home"; draw(); return; }
+
+  // Check Firebase for admin trivia reset flag — if set, clear local entry and redraw
+  if(DB && !SC._triviaResetChecked) {
+    SC._triviaResetChecked = true;
+    var _rn = new Date();
+    var _rjan = new Date(_rn.getFullYear(),0,1); var _rjul = new Date(_rn.getFullYear(),6,1);
+    var _rDST = _rn.getTimezoneOffset() < Math.max(_rjan.getTimezoneOffset(), _rjul.getTimezoneOffset());
+    var _rutc = _rn.getTime() + _rn.getTimezoneOffset()*60000;
+    var _ret = new Date(_rutc + (_rDST ? -4 : -5)*3600000);
+    var _rTodayKey = 'pp_trivia_' + _ret.getFullYear() + '_' + (_ret.getMonth()+1) + '_' + _ret.getDate();
+    var _rUkey = (u.username||"").toLowerCase().replace(/[^a-z0-9_]/g,"");
+    if(_rUkey) {
+      DB.ref("triviaResets/" + _rUkey + "/" + _rTodayKey).once("value", function(sn){
+        if(sn.val()) {
+          try { localStorage.removeItem(_rTodayKey); } catch(e){}
+          DB.ref("triviaResets/" + _rUkey + "/" + _rTodayKey).remove();
+          draw(); // redraw now that localStorage is cleared
+        }
+      });
+    }
+  }
   var em = u.emoji || "🍺";
   var myGroupIds = u.groups || [];
 
