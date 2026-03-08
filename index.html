@@ -19,6 +19,11 @@ button,input,select{font-family:'DM Sans',sans-serif}
 .logo{font-family:'Bebas Neue',cursive;font-size:22px;letter-spacing:.1em;background:linear-gradient(135deg,#fff 40%,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .logo-sub{font-size:9px;color:#475569;letter-spacing:.15em;text-transform:uppercase;margin-top:-2px}
 .topbar-right{display:flex;gap:6px;align-items:center}
+.auth-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:600;display:flex;align-items:center;justify-content:center;padding:20px}
+.auth-modal-box{background:#0d1117;border:1px solid #1e2a3a;border-radius:16px;width:100%;max-width:360px;padding:24px 20px;position:relative}
+.auth-modal-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#475569;font-size:20px;cursor:pointer;line-height:1;padding:0}
+.btn-topbar-login{font-size:10px;padding:5px 10px;border-radius:7px;border:1px solid #1e2a3a;background:transparent;color:#94a3b8;cursor:pointer;font-family:inherit;font-weight:600;letter-spacing:.02em}
+.btn-topbar-signup{font-size:10px;padding:5px 10px;border-radius:7px;border:none;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;cursor:pointer;font-family:inherit;font-weight:700;letter-spacing:.02em}
 .btn{border-radius:6px;padding:6px 13px;font-size:11px;font-weight:600;border:1px solid;cursor:pointer;transition:all .15s}
 .btn:active{opacity:.7}
 .btn-ghost{background:transparent;border-color:#2d3f52;color:#64748b}
@@ -564,7 +569,8 @@ function topbar(showBack) {
     var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
     h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
     if(isGuest()) {
-      h += '<button class="btn btn-primary btn-sm" id="btn-home-signup-top" style="font-size:10px">Sign Up</button>';
+      h += '<button class="btn-topbar-login" id="btn-topbar-login">Log In</button>';
+      h += '<button class="btn-topbar-signup" id="btn-topbar-signup">Sign Up</button>';
     }
   }
   if(SC.isMaster && SC.screen!=="admin") {
@@ -639,9 +645,105 @@ function renderHome() {
   document.getElementById("root").innerHTML = h;
 
   document.getElementById("btn-home-groups").onclick = function(){ SC.screen="profile"; draw(); };
-  document.getElementById("btn-home-login").onclick  = function(){ SC.authTab="login"; SC.screen="auth"; draw(); };
+  document.getElementById("btn-home-login").onclick  = function(){ showAuthModal("login"); };
   var topSignup = document.getElementById("btn-home-signup");
   if(topSignup) topSignup.onclick = function(){ SC.authTab="signup"; SC.screen="auth"; draw(); };
+}
+
+function showAuthModal(tab) {
+  SC.authTab = tab || "signup";
+  // Remove any existing modal
+  var existing = document.getElementById("auth-modal-overlay");
+  if(existing) existing.remove();
+
+  function buildModal() {
+    var isLogin = SC.authTab === "login";
+    var el = document.createElement("div");
+    el.id = "auth-modal-overlay";
+    el.className = "auth-modal-overlay";
+    el.innerHTML = '<div class="auth-modal-box">' +
+      '<button class="auth-modal-close" id="auth-modal-close">&#10005;</button>' +
+      '<div class="auth-logo" style="font-size:22px;margin-bottom:2px">PoolPlay</div>' +
+      '<div class="auth-sub" style="margin-bottom:14px">2026 Season</div>' +
+      '<div class="auth-tabs" style="margin-bottom:14px">' +
+        '<button class="auth-tab'+(isLogin?" active":"")+'" id="modal-tab-login">Log In</button>' +
+        '<button class="auth-tab'+(isLogin?"":" active")+'" id="modal-tab-signup">Sign Up</button>' +
+      '</div>' +
+      '<div class="auth-card">' +
+        '<div class="auth-field"><label class="auth-label">Username</label>' +
+        '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false"></div>' +
+        '<div class="auth-field"><label class="auth-label">Password</label>' +
+        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="your password" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
+        '<div class="auth-err" id="modal-auth-err"></div>' +
+        '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Create Account")+'</button>' +
+      '</div></div>';
+    document.body.appendChild(el);
+
+    // Close on overlay click
+    el.addEventListener("click", function(e){ if(e.target===el) el.remove(); });
+    document.getElementById("auth-modal-close").addEventListener("click", function(){ el.remove(); });
+
+    // Tab switching
+    document.getElementById("modal-tab-login").addEventListener("click", function(){
+      SC.authTab="login"; el.remove(); buildModal();
+    });
+    document.getElementById("modal-tab-signup").addEventListener("click", function(){
+      SC.authTab="signup"; el.remove(); buildModal();
+    });
+
+    var unameEl = document.getElementById("modal-auth-username");
+    var pwEl = document.getElementById("modal-auth-password");
+    var errEl = document.getElementById("modal-auth-err");
+    var submitBtn = document.getElementById("modal-auth-submit");
+
+    function doSubmit() {
+      var uname = unameEl.value.trim();
+      var pw = pwEl.value;
+      errEl.textContent = "";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Please wait...";
+      if(isLogin) {
+        authLogin(uname, pw, function(err, user){
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Log In";
+          if(err){ errEl.textContent = err; return; }
+          try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
+          SC.currentUser = user;
+          saveSession(user.username, user.emoji);
+          el.remove();
+          SC.screen = "profile";
+          draw();
+        });
+      } else {
+        authSignup(uname, pw, function(err, user){
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Create Account";
+          if(err){ errEl.textContent = err; return; }
+          var guestName = null;
+          try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
+          var finishSignup = function() {
+            try { localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); } catch(e) {}
+            SC.currentUser = user;
+            saveSession(user.username, user.emoji);
+            el.remove();
+            SC.screen = "profile";
+            toast("Welcome to PoolPlay, "+user.username+"!");
+            draw();
+          };
+          if(guestName) {
+            migrateGuestToUser(guestName, user.username, finishSignup);
+          } else {
+            finishSignup();
+          }
+        });
+      }
+    }
+
+    submitBtn.addEventListener("click", doSubmit);
+    pwEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+    setTimeout(function(){ unameEl.focus(); }, 50);
+  }
+  buildModal();
 }
 
 function renderAuth() {
@@ -1260,11 +1362,7 @@ function showGuestPrompt() {
   var signupBtn = document.getElementById("guest-prompt-signup");
   if(signupBtn) signupBtn.onclick = function(){
     modal.style.display="none";
-    try{ localStorage.removeItem("pp_guest"); }catch(e){}
-    SC.currentUser = null;
-    SC.screen = "auth";
-    SC.authTab = "signup";
-    draw();
+    showAuthModal("signup");
   };
 }
 
@@ -1685,6 +1783,11 @@ function renderAdmin() {
   h += '<button class="save-results-btn" id="save-admin-results-btn" style="margin-top:12px">Save Results</button>';
   h += '</div>';
 
+  h += '<div class="section-label">Guest Users</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Guests found in groups. Deleting removes them from all groups permanently.</div>';
+  h += '<div id="admin-guests-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
+  h += '</div>';
   h += '<div class="section-label">Registered Users</div>';
   h += '<div class="admin-panel">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All users registered on PoolPlay. Delete removes their account permanently.</div>';
@@ -1728,6 +1831,8 @@ function renderAdmin() {
     } else buildResultsForm(allPlayers, {});
   });
 
+  // Load guests
+  loadAdminGuests();
   // Load users
   loadAdminUsers("");
   var us = document.getElementById("user-search");
@@ -1759,6 +1864,82 @@ function renderAdmin() {
 }
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────────────────
+function loadAdminGuests() {
+  var list = document.getElementById("admin-guests-list");
+  if(!list) return;
+  if(!DB){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>'; return; }
+  // Guests are players in groups that don't exist in users/ node
+  DB.ref("users").once("value", function(usnap){
+    var realUsers = {};
+    Object.keys(usnap.val()||{}).forEach(function(k){ realUsers[k]=true; });
+    DB.ref("groups").once("value", function(gsnap){
+      var groups = gsnap.val()||{};
+      var guestMap = {}; // guestName -> [groupIds]
+      Object.values(groups).forEach(function(g){
+        (g.players||[]).forEach(function(p){
+          if(!p) return;
+          var key = userKey(p);
+          if(!realUsers[key]) {
+            if(!guestMap[p]) guestMap[p]=[];
+            guestMap[p].push(g.id);
+          }
+        });
+      });
+      var guests = Object.keys(guestMap);
+      if(!guests.length){
+        list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">No guests in any groups.</div>';
+        return;
+      }
+      guests.sort();
+      var h='<table style="width:100%;border-collapse:collapse;font-size:11px">';
+      h+='<thead><tr>';
+      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Guest Name</th>';
+      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">In Groups</th>';
+      h+='<th></th>';
+      h+='</tr></thead><tbody>';
+      guests.forEach(function(gname){
+        var grpCount = guestMap[gname].length;
+        h+='<tr style="border-top:1px solid #0f1923">';
+        h+='<td style="padding:7px 6px;color:#94a3b8;font-weight:600">🎯 '+x(gname)+'</td>';
+        h+='<td style="padding:7px 6px;color:#475569">'+grpCount+' group'+(grpCount!==1?"s":"")+'</td>';
+        h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-guest="'+x(gname)+'">Delete</button></td>';
+        h+='</tr>';
+      });
+      h+='</tbody></table>';
+      list.innerHTML=h;
+      list.querySelectorAll("[data-del-guest]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          var gname = this.getAttribute("data-del-guest");
+          if(!confirm('Remove guest "'+gname+'" from all groups? This cannot be undone.')) return;
+          deleteGuest(gname, guestMap[gname]);
+        });
+      });
+    });
+  });
+}
+
+function deleteGuest(guestName, groupIds) {
+  if(!DB) return;
+  var updates = {};
+  // We need to fetch each group to get current players, then filter out the guest
+  var remaining = groupIds.length;
+  if(remaining===0){ toast("Guest removed ✓"); loadAdminGuests(); return; }
+  groupIds.forEach(function(gid){
+    DB.ref("groups/"+gid+"/players").once("value", function(sn){
+      var players = (sn.val()||[]).filter(function(p){ return p!==guestName; });
+      updates["groups/"+gid+"/players"] = players;
+      remaining--;
+      if(remaining===0){
+        DB.ref().update(updates, function(err){
+          if(err){ toast("Delete failed"); return; }
+          toast('Guest "'+guestName+'" removed ✓');
+          loadAdminGuests();
+        });
+      }
+    });
+  });
+}
+
 function loadAdminUsers(q) {
   var list = document.getElementById("admin-users-list");
   if(!list) return;
