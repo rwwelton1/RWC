@@ -440,6 +440,36 @@ function addGroupToUser(username, groupId) {
   });
 }
 
+// ── GUEST MIGRATION ──────────────────────────────────────────────────────────
+function migrateGuestToUser(guestName, newUsername, cb) {
+  if(!DB || !guestName) { cb(); return; }
+  var guestKey = guestName.toLowerCase().replace(/[^a-z0-9_]/g,"");
+  // Load all groups and find ones where guest is a player
+  DB.ref("groups").once("value", function(sn) {
+    var groups = sn.val() || {};
+    var migrations = [];
+    Object.keys(groups).forEach(function(gid) {
+      var g = groups[gid];
+      var players = g.players || [];
+      var idx = players.indexOf(guestName);
+      if(idx >= 0) migrations.push({ gid: gid, players: players, idx: idx });
+    });
+    if(migrations.length === 0) { cb(); return; }
+    var done = 0;
+    migrations.forEach(function(m) {
+      // Replace guest name with new username in group players
+      var newPlayers = m.players.slice();
+      newPlayers[m.idx] = newUsername;
+      DB.ref("groups/"+m.gid+"/players").set(newPlayers, function() {
+        // Add group to new user account
+        addGroupToUser(newUsername, m.gid);
+        done++;
+        if(done === migrations.length) cb();
+      });
+    });
+  });
+}
+
 // ── FIREBASE GROUP OPS ────────────────────────────────────────────────────────
 function createGroup(name, adminPw, pools, cb) {
   var id = randCode();
@@ -618,7 +648,17 @@ function renderHome() {
   document.getElementById("btn-home-login").onclick  = function(){ SC.authTab="login";  SC.screen="auth"; draw(); };
   document.getElementById("btn-home-signup").onclick = function(){ SC.authTab="signup"; SC.screen="auth"; draw(); };
   document.getElementById("btn-hero-login").onclick  = function(){ SC.authTab="login";  SC.screen="auth"; draw(); };
-  document.getElementById("btn-go-picks").onclick    = function(){ SC.screen="profile"; draw(); };
+  document.getElementById("btn-go-picks").onclick = function(){
+    if(!SC.currentUser) {
+      var gn = null;
+      try{ gn = localStorage.getItem("pp_guest_name"); }catch(e){}
+      if(!gn){ gn = generateGuestName(); try{ localStorage.setItem("pp_guest_name",gn); }catch(e){} }
+      saveGuest(gn);
+      SC.currentUser = { username: gn, groups: [], emoji: "🎯", guest: true };
+    }
+    SC.screen = "profile";
+    draw();
+  };
 }
 
 function renderAuth() {
@@ -681,11 +721,22 @@ function renderAuth() {
         submitBtn.disabled = false;
         submitBtn.textContent = "Create Account";
         if(err){ errEl.textContent = err; return; }
-        SC.currentUser = user;
-        saveSession(user.username, user.emoji);
-        SC.screen = "profile";
-        toast("Welcome to PoolPlay, "+user.username+"!");
-        draw();
+        // Migrate any guest groups to the new account
+        var guestName = null;
+        try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
+        var finishSignup = function() {
+          try { localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); } catch(e) {}
+          SC.currentUser = user;
+          saveSession(user.username, user.emoji);
+          SC.screen = "profile";
+          toast("Welcome to PoolPlay, "+user.username+"!");
+          draw();
+        };
+        if(guestName) {
+          migrateGuestToUser(guestName, user.username, finishSignup);
+        } else {
+          finishSignup();
+        }
       });
     }
   }
