@@ -371,7 +371,7 @@ function loadSession(){
   try{ return localStorage.getItem("pp_user"); }catch(e){ return null; }
 }
 function clearSession(){
-  try{ localStorage.removeItem("pp_user"); localStorage.removeItem("pp_last_group"); }catch(e){}
+  try{ localStorage.removeItem("pp_user"); localStorage.removeItem("pp_last_group"); localStorage.removeItem("pp_guest"); }catch(e){}
 }
 function saveLastGroup(groupId){
   try{ localStorage.setItem("pp_last_group", groupId); }catch(e){}
@@ -391,7 +391,12 @@ function isGuest(){
   try{ return localStorage.getItem("pp_guest")==="1"; }catch(e){ return false; }
 }
 function saveGuest(name){
-  try{ localStorage.setItem("pp_user",name); localStorage.setItem("pp_guest","1"); localStorage.setItem("pp_emoji","🎯"); }catch(e){}
+  try{
+    localStorage.setItem("pp_user", name);
+    localStorage.setItem("pp_guest", "1");
+    localStorage.setItem("pp_guest_name", name);
+    localStorage.setItem("pp_emoji", "🎯");
+  }catch(e){}
 }
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
@@ -1928,13 +1933,19 @@ function subscribeGlobalStatuses() {
 (function(){
   if(DB) subscribeGlobalStatuses();
 
-  // Check for saved session — if none, create a guest
+  // Check for saved session
   var savedUser = loadSession();
+
+  // No pp_user — could be first visit or cleared session
   if(!savedUser) {
-    var guestName = generateGuestName();
-    saveGuest(guestName);
+    // Always check for a persistent guest name first
+    var persistedGuest = null;
+    try { persistedGuest = localStorage.getItem("pp_guest_name"); } catch(e) {}
+    var guestName = persistedGuest || generateGuestName();
+    saveGuest(guestName); // writes pp_user, pp_guest, pp_guest_name
     SC.currentUser = { username: guestName, groups: [], emoji: "🎯", guest: true };
-    SC.screen = "home";
+    // First ever visit (no persisted name) → show home, returning guest → go straight to profile
+    SC.screen = persistedGuest ? "profile" : "home";
     draw();
     return;
   }
@@ -1966,9 +1977,12 @@ function subscribeGlobalStatuses() {
           draw();
         }
       } else {
-        // Not in Firebase — check if they are a guest
-        if(isGuest()) {
-          SC.currentUser = { username: savedUser, groups: [], emoji: "🎯", guest: true };
+        // Not in Firebase — restore as guest using persisted name
+        var persistedName = null;
+        try { persistedName = localStorage.getItem("pp_guest_name"); } catch(e) {}
+        if(persistedName) {
+          saveGuest(persistedName);
+          SC.currentUser = { username: persistedName, groups: [], emoji: "🎯", guest: true };
           SC.screen = "profile";
         } else {
           clearSession();
