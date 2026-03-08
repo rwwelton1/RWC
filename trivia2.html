@@ -56,6 +56,17 @@ a{text-decoration:none;color:inherit}
 <body>
 <div id="root">Loading...</div>
 <script src="trivia-questions.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script>
+var DB = null;
+try {
+  if(!firebase.apps.length) {
+    firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
+  }
+  DB = firebase.database();
+} catch(e) {}
+</script>
 <script>
 function getEasternNow() {
   // Reliable Eastern time: use UTC offset (-5 EST / -4 EDT)
@@ -244,14 +255,33 @@ o += ‘<button class="btn-share" id="bsh">Share Results</button>’;
 o += ‘<button class="btn-hub" id="bhub">Back to Hub</button>’;
 o += ‘</div></div>’;
 document.getElementById(“root”).innerHTML = o;
-document.getElementById(“bsh”).onclick = function(){ window.open(“sms:?&body=”+encodeURIComponent(shareMsg),”_blank”); };
+document.getElementById(“bsh”).onclick = function(){ window.open(“sms:?&body=”+encodeURIComponent(shareMsg),”*blank”); };
 document.getElementById(“bhub”).onclick = function(){ window.location.href=“index.html”; };
 }
 // Safety check: make sure question bank loaded
 if(typeof getAllQ !== ‘function’) {
 document.getElementById(“root”).innerHTML = ‘<div style="padding:60px 24px;text-align:center;color:#94a3b8"><div style="font-size:48px;margin-bottom:16px">⚠️</div><div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-bottom:8px">Questions failed to load</div><div style="font-size:13px;color:#475569;margin-bottom:24px">trivia-questions.js is missing or has a syntax error</div><a href="index.html" style="color:#6366f1;font-size:14px;text-decoration:underline">← Back to Hub</a></div>’;
 } else {
+// Check Firebase for admin reset flag before loading
+(function(){
+var username = “”;
+try { username = (localStorage.getItem(“pp_user”)||””).toLowerCase().replace(/[^a-z0-9*]/g,””); } catch(e){}
+if(!username || !DB) { showHome(); return; }
+var n = new Date();
+var jan = new Date(n.getFullYear(),0,1); var jul = new Date(n.getFullYear(),6,1);
+var isDST = n.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+var utc = n.getTime() + n.getTimezoneOffset()*60000;
+var et = new Date(utc + (isDST ? -4 : -5)*3600000);
+var todayKey = “pp_trivia_” + et.getFullYear() + “*” + (et.getMonth()+1) + “*” + et.getDate();
+DB.ref(“triviaResets/” + username + “/” + todayKey).once(“value”, function(sn){
+if(sn.val()) {
+// Admin reset this user — clear their local trivia entry and the reset flag
+try { localStorage.removeItem(todayKey); } catch(e){}
+DB.ref(“triviaResets/” + username + “/” + todayKey).remove();
+}
 showHome();
+}, function(){ showHome(); }); // on error, just show home
+})();
 }
 </script>
 

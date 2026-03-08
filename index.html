@@ -1579,7 +1579,7 @@ function renderHub() {
   if(SC.isAdmin||SC.isMaster) h += '<span style="font-size:9px;padding:2px 7px;border-radius:10px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24">&#9889; Admin</span>';
   h += '<button class="btn btn-green btn-sm" id="btn-invite">&#128279; Invite</button>';
   if(SC.isMaster) h += '<button class="btn btn-red btn-sm" id="btn-delete-group">Delete</button>';
-  h += '<button class="btn btn-ghost btn-sm" id="btn-leave">Leave</button>';
+  h += '<button class="btn btn-ghost btn-sm" id="btn-leave">&#8962; Home</button>';
   h += '</div>';
 
   h += '<div class="main fade-up">';
@@ -1620,6 +1620,22 @@ function renderHub() {
     });
     h += '</div></div>';
     h += '<button class="save-results-btn" id="save-group-btn" style="background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.3);color:#a5b4fc">Save Group Settings</button>';
+
+    // Members list with remove buttons
+    h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
+    h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">Members ('+( g.players||[]).length+')</div>';
+    (g.players||[]).forEach(function(player){
+      var isMe = SC.currentUser && player === SC.currentUser.username;
+      var pEm = playerEmoji(player);
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #07090f">';
+      h += '<div style="flex:1;font-size:13px;color:'+(isMe?"#a5b4fc":"#e2e8f0")+'">' + pEm + ' ' + x(player) + (isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'') + '</div>';
+      if(!isMe) {
+        h += '<button class="btn btn-ghost btn-sm" data-remove-player="'+x(player)+'" style="font-size:10px;padding:3px 8px;border-color:rgba(239,68,68,.3);color:#fca5a5">Remove</button>';
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+
     h += '</div>';
   }
 
@@ -1745,6 +1761,33 @@ function renderHub() {
     });
   });
 
+  // Remove player buttons
+  document.querySelectorAll("[data-remove-player]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-remove-player");
+      if(!confirm("Remove " + player + " from this group?")) return;
+      if(!DB) { toast("Firebase unavailable"); return; }
+      var gid = SC.group.id;
+      DB.ref("groups/" + gid).once("value", function(sn){
+        var gdata = sn.val();
+        if(!gdata) { toast("Group not found"); return; }
+        var players = (gdata.players || []).filter(function(p){ return p !== player; });
+        DB.ref("groups/" + gid + "/players").set(players, function(err){
+          if(err){ toast("Error removing player"); return; }
+          // Also remove from the user's groups list in Firebase
+          var ukey = player.toLowerCase().replace(/[^a-z0-9_]/g,"");
+          DB.ref("users/" + ukey + "/groups").once("value", function(usn){
+            var ugroups = (usn.val() || []).filter(function(gid2){ return gid2 !== gid; });
+            DB.ref("users/" + ukey + "/groups").set(ugroups);
+          });
+          SC.group.players = players;
+          toast(player + " removed from group");
+          draw();
+        });
+      });
+    });
+  });
+
   // Set result select values
   pools.forEach(function(pool){
     var r=((g.data||{}).results||{})[pool.id]||{};
@@ -1800,6 +1843,16 @@ function renderAdmin() {
   h += '<button class="save-results-btn" id="save-admin-results-btn" style="margin-top:12px">Save Results</button>';
   h += '</div>';
 
+  h += '<div class="section-label">Daily Trivia</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Reset a user\'s trivia entry for today so they can replay. Enter their username below.</div>';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
+  h += '<input class="auth-input" id="trivia-reset-user" placeholder="Username" style="flex:1;min-width:140px;padding:8px 10px;font-size:12px">';
+  h += '<button class="btn btn-ghost" id="btn-trivia-reset" style="padding:8px 14px;font-size:12px;border-color:rgba(239,68,68,.4);color:#fca5a5">Reset Today</button>';
+  h += '</div>';
+  h += '<div id="trivia-reset-msg" style="font-size:11px;min-height:16px;color:#6ee7b7"></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Guest Users</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Guests found in groups. Deleting removes them from all groups permanently.</div>';
@@ -1846,6 +1899,36 @@ function renderAdmin() {
         buildResultsForm(allPlayers, sn.val()||{});
       });
     } else buildResultsForm(allPlayers, {});
+  });
+
+  // Trivia reset
+  var triviaResetBtn = document.getElementById("btn-trivia-reset");
+  if(triviaResetBtn) triviaResetBtn.addEventListener("click", function(){
+    var username = (document.getElementById("trivia-reset-user").value||"").trim();
+    var msgEl = document.getElementById("trivia-reset-msg");
+    if(!username){ msgEl.style.color="#fca5a5"; msgEl.textContent="Enter a username."; return; }
+    // Build today's Eastern date key
+    var n = new Date();
+    var jan = new Date(n.getFullYear(),0,1); var jul = new Date(n.getFullYear(),6,1);
+    var isDST = n.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+    var utc = n.getTime() + n.getTimezoneOffset()*60000;
+    var et = new Date(utc + (isDST ? -4 : -5)*3600000);
+    var todayKey = "pp_trivia_" + et.getFullYear() + "_" + (et.getMonth()+1) + "_" + et.getDate();
+    // The trivia data is stored in localStorage on the user's own device —
+    // we can't wipe another user's localStorage from here.
+    // BUT we can write a reset flag to Firebase that trivia2.html checks on load.
+    if(!DB){ msgEl.style.color="#fca5a5"; msgEl.textContent="Firebase unavailable."; return; }
+    var key = userKey(username);
+    if(!key){ msgEl.style.color="#fca5a5"; msgEl.textContent="Invalid username."; return; }
+    DB.ref("users/"+key).once("value", function(sn){
+      if(!sn.val()){ msgEl.style.color="#fca5a5"; msgEl.textContent="User not found."; return; }
+      DB.ref("triviaResets/"+key+"/"+todayKey).set(Date.now(), function(err){
+        if(err){ msgEl.style.color="#fca5a5"; msgEl.textContent="Error writing reset flag."; return; }
+        msgEl.style.color="#6ee7b7";
+        msgEl.textContent = username + "'s trivia reset for today. They'll be able to replay on next page load.";
+        document.getElementById("trivia-reset-user").value = "";
+      });
+    });
   });
 
   // Load guests
