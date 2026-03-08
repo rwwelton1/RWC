@@ -561,14 +561,10 @@ function topbar(showBack) {
   h += '<div class="topbar-right">';
   if(SC.currentUser) {
     var em = SC.currentUser.emoji || '&#127919;';
+    var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
+    h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
     if(isGuest()) {
-      var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
-      h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
       h += '<button class="btn btn-primary btn-sm" id="btn-home-signup-top" style="font-size:10px">Sign Up</button>';
-    } else {
-      var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
-      h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
-      h += '<button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button>';
     }
   }
   if(SC.isMaster && SC.screen!=="admin") {
@@ -594,14 +590,7 @@ function render(h) {
   if(profbtn) profbtn.addEventListener("click", function(){ SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.screen="profile"; draw(); });
   var topSignup = document.getElementById("btn-home-signup-top");
   if(topSignup) topSignup.addEventListener("click", function(){ SC.authTab="signup"; SC.screen="auth"; draw(); });
-  var lo = document.getElementById("btn-logout");
-  if(lo) lo.addEventListener("click", function(){
-    clearSession();
-    SC.currentUser = null; SC.group = null; SC.isAdmin = false;
-    SC.isMaster = false; SC.groupAdmin = false; SC.screen = "home";
-    try{ localStorage.removeItem("pp_last_screen"); }catch(e){}
-    draw();
-  });
+
   var tlogin = document.getElementById("btn-topbar-admin-login");
   if(tlogin) tlogin.addEventListener("click", function(){
     var pw = prompt("Admin password:");
@@ -1980,55 +1969,43 @@ function subscribeGlobalStatuses() {
 (function(){
   if(DB) subscribeGlobalStatuses();
 
-  // Check for saved session
-  var savedUser = loadSession();
+  // Single source of truth: pp_guest_name for guests, pp_user for real users
+  var guestName = null;
+  try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
 
-  // No pp_user — could be first visit or cleared session
-  if(!savedUser) {
-    // Always check for a persistent guest name first
-    var persistedGuest = null;
-    try { persistedGuest = localStorage.getItem("pp_guest_name"); } catch(e) {}
-    var guestName = persistedGuest || generateGuestName();
-    saveGuest(guestName); // writes pp_user, pp_guest, pp_guest_name
-    SC.currentUser = { username: guestName, groups: [], emoji: "🎯", guest: true };
-    SC.screen = "home";
-    draw();
-    return;
+  // Always ensure a guest name exists
+  if(!guestName) {
+    guestName = generateGuestName();
+    try { localStorage.setItem("pp_guest_name", guestName); } catch(e) {}
   }
 
-  // Render immediately with cached data, decide screen before Firebase
-  var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
-  var _lastScreen = null; try{ _lastScreen = localStorage.getItem("pp_last_screen"); }catch(e){}
-  SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji, guest: isGuest() };
-  SC.screen = (_lastScreen === "profile") ? "profile" : "home";
-  draw();
+  var savedUser = loadSession();
+  var isRealUser = savedUser && !isGuest();
 
-  // Re-load user from Firebase to get full data
-  var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  if(DB) {
-    DB.ref("users/"+key).once("value", function(sn){
-      var u = sn.val();
-      if(u) {
-        SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯", guest: false };
-        try{ localStorage.removeItem("pp_guest"); }catch(e){}
-        // Only redraw if still on profile/home to refresh with full data
-        if(SC.screen === "profile" || SC.screen === "home") draw();
-      } else {
-        // Not in Firebase — restore as guest using persisted name
-        var persistedName = null;
-        try { persistedName = localStorage.getItem("pp_guest_name"); } catch(e) {}
-        if(persistedName) {
-          saveGuest(persistedName);
-          SC.currentUser = { username: persistedName, groups: [], emoji: "🎯", guest: true };
-          SC.screen = "profile";
-        } else {
-          clearSession();
-          SC.screen = "home";
+  if(isRealUser) {
+    // Real logged-in user — render immediately with cached name, then update from Firebase
+    var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
+    var _lastScreen = null; try{ _lastScreen = localStorage.getItem("pp_last_screen"); }catch(e){}
+    SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji, guest: false };
+    SC.screen = (_lastScreen === "profile") ? "profile" : "home";
+    draw();
+
+    var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
+    if(DB) {
+      DB.ref("users/"+key).once("value", function(sn){
+        var u = sn.val();
+        if(u) {
+          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯", guest: false };
+          if(SC.screen === "profile" || SC.screen === "hub") draw();
         }
-        draw();
-      }
-    });
+      });
+    }
   } else {
+    // Guest — always use the persisted guest name
+    saveGuest(guestName);
+    SC.currentUser = { username: guestName, groups: [], emoji: "🎯", guest: true };
+    var _lastScreen = null; try{ _lastScreen = localStorage.getItem("pp_last_screen"); }catch(e){}
+    SC.screen = (_lastScreen === "profile") ? "profile" : "home";
     draw();
   }
 })();
