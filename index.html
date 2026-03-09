@@ -2550,9 +2550,14 @@ function loadAdminUsers(q) {
       h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
       h+='<span style="color:'+(isMissing?'#fbbf24':'#f1f5f9')+';font-weight:600">'+em+' '+x(displayName)+(isMissing?' <span style="font-size:8px;color:#475569">(no username)</span>':'')+'</span>';
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:transparent;color:#64748b;cursor:pointer;font-family:inherit">Rename</button>';
+      h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:transparent;color:#6ee7b7;cursor:pointer;font-family:inherit">Merge</button>';
       h+='</div>';
       h+='<div id="rename-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New username" maxlength="30" id="rename-input-'+safeKey+'" value="'+x(displayName)+'"><button data-confirm-rename="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.15);color:#a5b4fc;cursor:pointer;font-family:inherit;white-space:nowrap">Save</button></div>';
+      h+='</div>';
+      h+='<div id="merge-area-'+safeKey+'" style="display:none;margin-top:5px">';
+      h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Merge this account into a registered user. Guest groups &amp; picks transfer over, guest account is deleted.</div>';
+      h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="Registered username to merge into" maxlength="30" id="merge-input-'+safeKey+'"><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
       h+='</div>';
       h+='</td>';
       h+='<td style="padding:7px 6px;color:#475569">'+grpCount+' group'+(grpCount!==1?"s":"")+'</td>';
@@ -2584,6 +2589,27 @@ function loadAdminUsers(q) {
         var newName = input ? input.value.trim() : "";
         if(!newName){ toast("Enter a username"); return; }
         renameUser(oldName, key, newName);
+      });
+    });
+    list.querySelectorAll("[data-merge-user]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var key = this.getAttribute("data-user-key");
+        // Close rename area if open
+        var ra = document.getElementById("rename-area-"+key);
+        if(ra) ra.style.display = "none";
+        var area = document.getElementById("merge-area-"+key);
+        if(area) { area.style.display = area.style.display==="none" ? "block" : "none"; }
+      });
+    });
+    list.querySelectorAll("[data-confirm-merge]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var guestName = this.getAttribute("data-confirm-merge");
+        var key = this.getAttribute("data-user-key");
+        var input = document.getElementById("merge-input-"+key);
+        var targetName = input ? input.value.trim() : "";
+        if(!targetName){ toast("Enter the registered username"); return; }
+        if(!confirm("Merge \""+guestName+"\" into \""+targetName+"\"?\nGuest groups will be added to "+targetName+". Guest account deleted. This cannot be undone.")) return;
+        mergeGuestIntoUser(guestName, key, targetName);
       });
     });
   });
@@ -2628,13 +2654,19 @@ function renameUser(oldName, fbKey, newName) {
       if(err){ toast("Rename failed"); return; }
       // Delete old key if different
       if(fbKey !== newKey) DB.ref("users/"+fbKey).remove();
-      // Update group player lists
+      // Update group player lists — try matching oldName, fbKey, and userKey(oldName)
+      var namesToMatch = [oldName, fbKey, userKey(oldName)].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
       DB.ref("groups").once("value", function(gsn){
         var groups = gsn.val()||{};
         var updates = {};
         Object.values(groups).forEach(function(g){
           if(!g || !g.players) return;
-          var idx = g.players.indexOf(oldName);
+          // Find first matching player entry
+          var idx = -1;
+          for(var ni=0; ni<namesToMatch.length; ni++){
+            idx = g.players.indexOf(namesToMatch[ni]);
+            if(idx >= 0) break;
+          }
           if(idx >= 0){
             var newPlayers = g.players.slice();
             newPlayers[idx] = newName;
@@ -2642,7 +2674,11 @@ function renameUser(oldName, fbKey, newName) {
           }
           // Update adminUsers if present
           if(g.adminUsers){
-            var ai = g.adminUsers.indexOf(oldName);
+            var ai = -1;
+            for(var ni2=0; ni2<namesToMatch.length; ni2++){
+              ai = g.adminUsers.indexOf(namesToMatch[ni2]);
+              if(ai >= 0) break;
+            }
             if(ai >= 0){
               var newAdmins = g.adminUsers.slice();
               newAdmins[ai] = newName;
@@ -2654,6 +2690,95 @@ function renameUser(oldName, fbKey, newName) {
         if(Object.keys(updates).length > 0){
           DB.ref().update(updates, finish);
         } else { finish(); }
+      });
+    });
+  });
+}
+
+function mergeGuestIntoUser(guestName, guestFbKey, targetUsername) {
+  if(!DB) return;
+  var targetKey = userKey(targetUsername);
+  if(!targetKey){ toast("Invalid username"); return; }
+  var namesToMatch = [guestName, guestFbKey, userKey(guestName)].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
+
+  // Load both users and all groups
+  DB.ref("users/"+targetKey).once("value", function(tSnap){
+    var targetData = tSnap.val();
+    if(!targetData){ toast("User \""+targetUsername+"\" not found"); return; }
+
+    DB.ref("users/"+guestFbKey).once("value", function(gSnap){
+      var guestData = gSnap.val()||{};
+
+      DB.ref("groups").once("value", function(gsn){
+        var groups = gsn.val()||{};
+        var updates = {};
+
+        // Merge guest's groups into target's groups list
+        var targetGroups = (targetData.groups||[]).slice();
+        var guestGroups = guestData.groups||[];
+        guestGroups.forEach(function(gid){
+          if(targetGroups.indexOf(gid) < 0) targetGroups.push(gid);
+        });
+        updates["users/"+targetKey+"/groups"] = targetGroups;
+
+        // In every group, replace guest name with target username in players + adminUsers
+        Object.values(groups).forEach(function(g){
+          if(!g || !g.players) return;
+          var idx = -1;
+          for(var ni=0; ni<namesToMatch.length; ni++){
+            idx = g.players.indexOf(namesToMatch[ni]);
+            if(idx >= 0) break;
+          }
+          if(idx >= 0){
+            var newPlayers = g.players.slice();
+            // Only replace if target not already in group
+            if(newPlayers.indexOf(targetUsername) < 0){
+              newPlayers[idx] = targetUsername;
+            } else {
+              // Target already in group — just remove guest entry
+              newPlayers.splice(idx, 1);
+            }
+            updates["groups/"+g.id+"/players"] = newPlayers;
+          }
+          // adminUsers
+          if(g.adminUsers){
+            var ai = -1;
+            for(var ni2=0; ni2<namesToMatch.length; ni2++){
+              ai = g.adminUsers.indexOf(namesToMatch[ni2]);
+              if(ai >= 0) break;
+            }
+            if(ai >= 0 && g.adminUsers.indexOf(targetUsername) < 0){
+              var newAdmins = g.adminUsers.slice();
+              newAdmins[ai] = targetUsername;
+              updates["groups/"+g.id+"/adminUsers"] = newAdmins;
+            }
+          }
+          // Transfer picks/scores under group data — rename guest key to target key
+          if(g.data) {
+            (g.pools||[]).forEach(function(pid){
+              var poolData = (g.data[pid]||{});
+              namesToMatch.forEach(function(nm){
+                if(poolData.picks && poolData.picks[nm] !== undefined && !poolData.picks[targetUsername]){
+                  updates["groups/"+g.id+"/data/"+pid+"/picks/"+targetUsername] = poolData.picks[nm];
+                  updates["groups/"+g.id+"/data/"+pid+"/picks/"+nm] = null;
+                }
+                if(poolData.scores && poolData.scores[nm] !== undefined && !poolData.scores[targetUsername]){
+                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+targetUsername] = poolData.scores[nm];
+                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+nm] = null;
+                }
+              });
+            });
+          }
+        });
+
+        // Delete guest Firebase user entry
+        updates["users/"+guestFbKey] = null;
+
+        DB.ref().update(updates, function(err){
+          if(err){ toast("Merge failed: "+err.message); return; }
+          toast("Merged \""+guestName+"\" into \""+targetUsername+"\" ✓");
+          loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+        });
       });
     });
   });
