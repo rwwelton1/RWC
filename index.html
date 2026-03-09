@@ -376,6 +376,10 @@ var SC = {
   createForm: { name:"", adminPw:"", pools:[] },
   joinCode: "",
   error: "",
+  triviaView: "home",
+  triviaQIdx: 0,
+  triviaChosen: -1,
+  triviaPrevScreen: "profile"
 };
 
 var DB = null;
@@ -592,11 +596,197 @@ function getEasternDayIndex() {
   var diff = Math.floor((eMidnight-launch)/(1000*60*60*24));
   return ((diff%29)+29)%29;
 }
+function getTriviaQ() {
+  try {
+    if(typeof getAllQ !== "function") return null;
+    var all = getAllQ();
+    if(!all || !all.length) return null;
+    var idx = getEasternDayIndex();
+    return all[idx] || all[0] || null;
+  } catch(e) { return null; }
+}
+function tvPointsFor(d) { if(d==="Easy")return 100; if(d==="Medium")return 200; if(d==="Hard")return 300; if(d==="Expert")return 400; return 100; }
+function tvDstyle(d) { if(d==="Easy")return"background:rgba(16,185,129,.08);border-color:rgba(16,185,129,.3);color:#6ee7b7"; if(d==="Medium")return"background:rgba(251,191,36,.07);border-color:rgba(251,191,36,.3);color:#fbbf24"; if(d==="Hard")return"background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.3);color:#fca5a5"; return"background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.4);color:#c4b5fd"; }
+function tvDiffBlock(q, correct) {
+  if(!correct) return "⬜";
+  var d = q ? q.d : "";
+  if(d==="Easy")   return "🟩";
+  if(d==="Medium") return "🟨";
+  if(d==="Hard")   return "🟥";
+  if(d==="Expert") return "🟪";
+  return "🟩";
+}
+function tvGetScore()   { try { var v=sessionStorage.getItem("tScore");   return v?parseInt(v):0;     } catch(e){ return 0;  } }
+function tvSetScore(n)  { try { sessionStorage.setItem("tScore",n);   } catch(e){} }
+function tvGetPoints()  { try { var v=sessionStorage.getItem("tPoints");  return v?parseInt(v):0;     } catch(e){ return 0;  } }
+function tvSetPoints(n) { try { sessionStorage.setItem("tPoints",n);  } catch(e){} }
+function tvGetResults() { try { var v=sessionStorage.getItem("tResults"); return v?JSON.parse(v):[];  } catch(e){ return []; } }
+function tvSetResults(r){ try { sessionStorage.setItem("tResults",JSON.stringify(r)); } catch(e){} }
 
 function enterTrivia(fromScreen) {
-  window.location.href = "trivia.html";
+  SC.screen = "trivia";
+  SC.triviaView = "home";
+  SC.triviaPrevScreen = fromScreen || "profile";
+  var username = (SC.currentUser && SC.currentUser.username && !SC.currentUser.guest)
+    ? SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"") : "";
+  var todayKey = "pp_trivia_" + getEasternDateKey();
+  if(!username || !DB) { draw(); return; }
+  var didDraw = false;
+  function safeDraw() { if(!didDraw) { didDraw=true; draw(); } }
+  var t = setTimeout(safeDraw, 4000);
+  DB.ref("triviaResets/"+username+"/"+todayKey).once("value", function(sn){
+    clearTimeout(t);
+    if(sn.val()) {
+      try { localStorage.removeItem(todayKey); } catch(e){}
+      DB.ref("triviaResets/"+username+"/"+todayKey).remove();
+    }
+    safeDraw();
+  }, function(){ clearTimeout(t); safeDraw(); });
 }
 
+function renderTrivia() {
+  if(SC.triviaView==="q")      renderTriviaQ(SC.triviaQIdx);
+  else if(SC.triviaView==="result") renderTriviaResult(SC.triviaQIdx, SC.triviaChosen);
+  else if(SC.triviaView==="done")   renderTriviaDone();
+  else                              renderTriviaHome();
+}
+
+function renderTriviaHome() {
+  tvSetScore(0); tvSetPoints(0); tvSetResults([]);
+  var et = getEasternNow();
+  var ds = et.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+  var tKey = "pp_trivia_" + getEasternDateKey();
+  var todayData = null;
+  try { var tv = localStorage.getItem(tKey); if(tv) todayData = JSON.parse(tv); } catch(e) {}
+  var o = topbar(false);
+  o += '<div class="main">';
+  o += '<div class="tv-hero"><div class="tv-hero-eyebrow">Daily Sports Trivia</div><div class="tv-hero-title">TRIVIA</div><div class="tv-hero-date">'+ds+'</div>';
+  if(todayData && todayData.r && todayData.r.length === 10) {
+    var todayScore = todayData.r.filter(function(v){return v;}).length;
+    var Q2=[]; try { Q2=getTriviaQ()||[]; } catch(e){ Q2=[]; }
+    var row1="",row2="";
+    for(var i=0;i<5;i++)  row1+=tvDiffBlock(Q2[i],todayData.r[i]);
+    for(var i=5;i<10;i++) row2+=tvDiffBlock(Q2[i],todayData.r[i]);
+    var todayPts = todayData.pts || 0;
+    o += '<div class="tv-res-score" style="font-size:40px;margin:8px 0">'+todayScore+'/10</div>';
+    o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+todayPts+' pts</div>';
+    o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:8px">'+row1+'</div>';
+    o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:16px">'+row2+'</div>';
+    o += '<div style="font-size:12px;color:#475569;margin-top:8px;letter-spacing:.05em">Come back tomorrow for a new quiz &#128522;</div>';
+  } else {
+    o += '<button class="tv-hero-btn" id="tv-bst">Start Quiz</button>';
+  }
+  o += '</div>';
+  o += '<div class="tv-diff-row">';
+  o += '<div class="pill" style="color:#6ee7b7;border-color:rgba(16,185,129,.3);background:rgba(16,185,129,.07)">Easy</div>';
+  o += '<div class="pill" style="color:#fbbf24;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.06)">Medium</div>';
+  o += '<div class="pill" style="color:#fca5a5;border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.06)">Hard</div>';
+  o += '<div class="pill" style="color:#c4b5fd;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.08)">Expert</div>';
+  o += '</div>';
+  o += '<p style="font-size:11px;color:#334155;text-align:center">10 questions &middot; escalating difficulty &middot; NFL &middot; NBA &middot; MLB &middot; NHL</p>';
+  o += '</div>';
+  render(o);
+  var bst = document.getElementById("tv-bst");
+  if(bst) bst.onclick = function(){ SC.triviaView="q"; SC.triviaQIdx=0; draw(); };
+}
+
+function renderTriviaQ(idx) {
+  var Q = getTriviaQ();
+  if(!Q || !Q[idx]) {
+    var o2 = topbar(false);
+    o2 += '<div class="main"><div class="tv-hero"><div class="tv-hero-title">&#9888;</div>';
+    o2 += '<div style="color:#fca5a5;font-size:14px;margin:12px 0">Questions failed to load.</div>';
+    o2 += '<div style="font-size:12px;color:#475569;margin-bottom:20px">Please refresh the page and try again.</div>';
+    o2 += '<button class="tv-hero-btn" id="tv-back-err">Back</button>';
+    o2 += '</div></div>';
+    render(o2);
+    document.getElementById("tv-back-err").onclick = function(){ SC.triviaView="home"; draw(); };
+    return;
+  }
+  var q = Q[idx];
+  var o = topbar(true);
+  o += '<div class="main">';
+  o += '<div class="tv-prog-hdr"><span class="tv-prog-lbl">Q'+(idx+1)+' of '+Q.length+'</span><span class="tv-prog-pts">'+tvGetPoints()+' pts</span></div>';
+  o += '<div class="tv-pbar"><div class="tv-pfill" style="width:'+Math.round(idx/Q.length*100)+'%"></div></div>';
+  o += '<div class="tv-diff-badge" style="'+tvDstyle(q.d)+'">'+q.d+' &middot; '+tvPointsFor(q.d)+' pts</div>';
+  o += '<div class="tv-card"><div class="tv-qtext">'+q.q+'</div>';
+  o += '<button id="tv-c0" class="tv-choice">'+q.c[0]+'</button>';
+  o += '<button id="tv-c1" class="tv-choice">'+q.c[1]+'</button>';
+  o += '<button id="tv-c2" class="tv-choice">'+q.c[2]+'</button>';
+  o += '<button id="tv-c3" class="tv-choice">'+q.c[3]+'</button>';
+  o += '</div></div>';
+  render(o);
+  function answerQ(chosen) {
+    var correct = chosen === q.a;
+    tvSetScore(tvGetScore()+(correct?1:0));
+    tvSetPoints(tvGetPoints()+(correct?tvPointsFor(q.d):0));
+    var r=tvGetResults(); r.push(correct); tvSetResults(r);
+    SC.triviaView="result"; SC.triviaQIdx=idx; SC.triviaChosen=chosen; draw();
+  }
+  document.getElementById("tv-c0").onclick = function(){ answerQ(0); };
+  document.getElementById("tv-c1").onclick = function(){ answerQ(1); };
+  document.getElementById("tv-c2").onclick = function(){ answerQ(2); };
+  document.getElementById("tv-c3").onclick = function(){ answerQ(3); };
+}
+
+function renderTriviaResult(idx, chosen) {
+  var Q = getTriviaQ();
+  if(!Q || !Q[idx]) { SC.triviaView="home"; draw(); return; }
+  var q = Q[idx];
+  var correct = chosen === q.a;
+  var pts = tvGetPoints();
+  var next = idx + 1;
+  var nextLabel = next < Q.length ? "Next &#8594;" : "See Results";
+  var o = topbar(false);
+  o += '<div class="main">';
+  o += '<div class="tv-prog-hdr"><span class="tv-prog-lbl">Q'+(idx+1)+' of '+Q.length+'</span><span class="tv-prog-pts">'+pts+' pts</span></div>';
+  o += '<div class="tv-pbar"><div class="tv-pfill" style="width:'+Math.round(next/Q.length*100)+'%"></div></div>';
+  o += '<div class="tv-diff-badge" style="'+tvDstyle(q.d)+'">'+q.d+' &middot; '+(correct?"+"+tvPointsFor(q.d)+" pts":"0 pts")+'</div>';
+  o += '<div class="tv-card"><div class="tv-qtext">'+q.q+'</div>';
+  o += '<div class="tv-fb-card '+(correct?'tv-fb-ok':'tv-fb-no')+'">'+(correct?'&#9989; Correct!':'&#10060; Wrong &mdash; '+q.c[q.a])+'<div class="tv-fb-fact">'+q.f+'</div></div>';
+  o += '<button class="tv-btn-next" id="tv-bnxt">'+nextLabel+'</button>';
+  o += '</div></div>';
+  render(o);
+  document.getElementById("tv-bnxt").onclick = function(){
+    if(next < Q.length){ SC.triviaView="q"; SC.triviaQIdx=next; draw(); }
+    else { SC.triviaView="done"; draw(); }
+  };
+}
+
+function renderTriviaDone() {
+  var score = tvGetScore();
+  var results = tvGetResults();
+  var username = (SC.currentUser && SC.currentUser.username) || "Player";
+  var emoji = (SC.currentUser && SC.currentUser.emoji) || "&#127919;";
+  try {
+    var tKey = "pp_trivia_" + getEasternDateKey();
+    var totalPts = tvGetPoints();
+    localStorage.setItem(tKey, JSON.stringify({s:score,r:results,u:username,ts:Date.now(),pts:totalPts}));
+  } catch(e) {}
+  var Q = getTriviaQ();
+  var row1="", row2="";
+  for(var i=0;i<5;i++)  row1+=tvDiffBlock(Q[i],results[i]);
+  for(var i=5;i<10;i++) row2+=tvDiffBlock(Q[i],results[i]);
+  var d = new Date();
+  var ds = d.toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
+  var shareMsg = "PoolPlay Trivia \uD83C\uDFC6\n"+ds+"\n"+score+"/10\n\n"+row1+"\n"+row2+"\n\nhttps://pool-play.vercel.app/";
+  var o = topbar(false);
+  o += '<div class="main">';
+  o += '<div class="tv-res-card">';
+  o += '<div class="tv-res-avatar">'+emoji+'</div>';
+  o += '<div class="tv-res-name">'+x(username)+'</div>';
+  o += '<div class="tv-res-date">'+ds+'</div>';
+  o += '<div class="tv-res-score">'+score+'/10</div>';
+  o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+tvGetPoints()+' pts</div>';
+  o += '<div class="tv-res-grid">'+row1+'</div>';
+  o += '<div class="tv-res-grid">'+row2+'</div>';
+  o += '<button class="tv-btn-share" id="tv-bsh">Share Results</button>';
+  o += '<button class="tv-btn-hub" id="tv-bhub">Back to Profile</button>';
+  o += '</div></div>';
+  render(o);
+  document.getElementById("tv-bsh").onclick = function(){ window.open("sms:?&body="+encodeURIComponent(shareMsg),"_blank"); };
+  document.getElementById("tv-bhub").onclick = function(){ SC.screen="profile"; draw(); };
+}
 
 function draw() {
   var s = SC.screen;
@@ -611,6 +801,7 @@ function draw() {
   else if(s==="created") renderCreated();
   else if(s==="hub")     renderHub();
   else if(s==="admin")   renderAdmin();
+  else if(s==="trivia")  renderTrivia();
 }
 
 // ── TOPBAR ────────────────────────────────────────────────────────────────────
@@ -643,6 +834,7 @@ function render(h) {
   if(bb) bb.addEventListener("click", function(){
     if(SC.screen==="join"||SC.screen==="create"){ SC.screen="profile"; SC.error=""; draw(); }
     else if(SC.screen==="created"){ SC.screen="hub"; subscribeGroup(SC.group.id); draw(); }
+    else if(SC.screen==="trivia"){ SC.triviaView="home"; draw(); }
   });
   var plogo = document.getElementById("btn-logo");
   if(plogo) plogo.addEventListener("click", function(){ if(SC.currentUser){ SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.screen="profile"; draw(); } });
@@ -900,11 +1092,11 @@ function saveUserEmoji(emoji) {
 
 // ── TIER SYSTEM ──────────────────────────────────────────────────────────────
 var TIERS = [
-  {name:"Bronze",   pts:10000,  color:"#cd7f32", gradient:"linear-gradient(90deg,#7c4a1e,#cd7f32)", icon:"🥉"},
-  {name:"Silver",   pts:30000,  color:"#94a3b8", gradient:"linear-gradient(90deg,#475569,#94a3b8)", icon:"🥈"},
-  {name:"Gold",     pts:50000,  color:"#fbbf24", gradient:"linear-gradient(90deg,#b45309,#fbbf24)", icon:"🥇"},
-  {name:"Platinum", pts:100000, color:"#67e8f9", gradient:"linear-gradient(90deg,#0e7490,#67e8f9)", icon:"💎"},
-  {name:"Diamond",  pts:200000, color:"#a5b4fc", gradient:"linear-gradient(90deg,#4f46e5,#c4b5fd)", icon:"👑"}
+  {name:"Bronze",   pts:1,  color:"#cd7f32", gradient:"linear-gradient(90deg,#7c4a1e,#cd7f32)", icon:"🥉"},
+  {name:"Silver",   pts:3,  color:"#94a3b8", gradient:"linear-gradient(90deg,#475569,#94a3b8)", icon:"🥈"},
+  {name:"Gold",     pts:5,  color:"#fbbf24", gradient:"linear-gradient(90deg,#b45309,#fbbf24)", icon:"🥇"},
+  {name:"Platinum", pts:10, color:"#67e8f9", gradient:"linear-gradient(90deg,#0e7490,#67e8f9)", icon:"💎"},
+  {name:"Diamond",  pts:20, color:"#a5b4fc", gradient:"linear-gradient(90deg,#4f46e5,#c4b5fd)", icon:"👑"}
 ];
 function getTier(pts) {
   var tier = null;
@@ -926,7 +1118,7 @@ function renderTierBar(pts) {
   var h = '<div class="tier-inline">';
   h += '<span class="tier-inline-name" style="color:'+cur.color+'">'+cur.icon+' '+cur.name+'</span>';
   h += '<div class="tier-inline-bar"><div class="tier-inline-fill" style="width:'+pct+'%;background:'+cur.gradient+'"></div></div>';
-  if(next) h += '<span class="tier-inline-next">'+next.name+' in '+(next.pts-pts).toLocaleString()+' pts</span>';
+  if(next) h += '<span class="tier-inline-next">'+next.name+' in '+(next.pts-pts)+' pts</span>';
   h += '</div>';
   return h;
 }
@@ -1056,17 +1248,11 @@ function renderProfile() {
   h += '<div class="section-label" style="margin-top:8px">Daily Trivia</div>';
 
   // Today
-  var _tPts = (_tp && _tp.pts) ? _tp.pts : null;
   h += '<div class="trivia-slim" id="btn-trivia">';
-  h += '<div class="trivia-slim-icon">' + (_tPlayed ? '&#9989;' : '&#127944;') + '</div>';
+  h += '<div class="trivia-slim-icon">' + (_tPlayed ? '&#10003;' : '&#127944;') + '</div>';
   h += '<div style="flex:1"><div class="trivia-slim-lbl">Today</div>';
-  if(_tPlayed) {
-    h += '<div class="trivia-slim-title">' + (_tScore !== null ? _tScore + '/10' + (_tPts ? ' &middot; ' + _tPts + ' pts' : '') : 'Completed') + '</div>';
-    h += '<div style="font-size:10px;color:#475569;margin-top:2px">Come back tomorrow for a new quiz</div>';
-  } else {
-    h += '<div class="trivia-slim-title">Today&#39;s quiz is ready</div>';
-  }
-  h += '</div>';
+  var _tPts = (_tp && _tp.pts) ? _tp.pts : null;
+  h += '<div class="trivia-slim-title">' + (_tPlayed ? (_tScore !== null ? _tScore + '/10' + (_tPts ? ' &middot; ' + _tPts + ' pts' : '') : 'Completed') : "Today&#39;s quiz is ready") + '</div></div>';
   h += '<span style="font-size:16px;color:#6366f1">&#8250;</span>';
   h += '</div>';
 
@@ -1249,30 +1435,19 @@ function renderProfile() {
           var r = results[pool.id];
           if(r && (r.first || r.second || r.third) && (g.players||[]).indexOf(u.username) >= 0) {
             entered++;
-            if(r.first === u.username)       { wins++; totalPts += 40000; }
-            else if(r.second === u.username) { totalPts += 20000; }
-            else if(r.third === u.username)  { totalPts += 10000; }
+            if(r.first === u.username)       { wins++; totalPts += 4; }
+            else if(r.second === u.username) { totalPts += 2; }
+            else if(r.third === u.username)  { totalPts += 1; }
           }
         });
       });
-
-      // Add trivia pts from localStorage
-      try {
-        for(var _tki=0; _tki<localStorage.length; _tki++){
-          var _tkk = localStorage.key(_tki);
-          if(_tkk && _tkk.indexOf("pp_trivia_") === 0){
-            var _tkv = JSON.parse(localStorage.getItem(_tkk));
-            if(_tkv && _tkv.pts) totalPts += _tkv.pts;
-          }
-        }
-      } catch(e) {}
 
       var se = document.getElementById("pstat-entered");
       var sw = document.getElementById("pstat-wins");
       var sp = document.getElementById("pstat-pts");
       if(se) se.textContent = entered;
       if(sw) sw.textContent = wins;
-      if(sp) sp.textContent = totalPts.toLocaleString();
+      if(sp) sp.textContent = totalPts;
 
       // Render tier bar
       var tierEl = document.getElementById("profile-tier");
@@ -1281,19 +1456,9 @@ function renderProfile() {
       renderGroupCards(groups, container);
     });
   } else {
-    // No groups — still count trivia pts for tier
-    var _trivPts = 0;
-    try {
-      for(var _tki2=0; _tki2<localStorage.length; _tki2++){
-        var _tkk2 = localStorage.key(_tki2);
-        if(_tkk2 && _tkk2.indexOf("pp_trivia_") === 0){
-          var _tkv2 = JSON.parse(localStorage.getItem(_tkk2));
-          if(_tkv2 && _tkv2.pts) _trivPts += _tkv2.pts;
-        }
-      }
-    } catch(e) {}
+    // No groups — still render tier at 0
     var tierEl = document.getElementById("profile-tier");
-    if(tierEl) tierEl.innerHTML = renderTierBar(_trivPts);
+    if(tierEl) tierEl.innerHTML = renderTierBar(0);
   }
 }
 
@@ -1958,7 +2123,10 @@ function renderAdmin() {
 
   h += '<div class="section-label">Guest Users</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Guests found in groups. Deleting removes them from all groups permanently.</div>';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All guests found across groups and picks data. Deleting removes them permanently.</div>';
+  h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
+  h += '<input class="search-input" id="guest-search" placeholder="Search guests..." autocomplete="off">';
+  h += '</div>';
   h += '<div id="admin-guests-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
   h += '</div>';
   h += '<div class="section-label">Registered Users</div>';
@@ -2035,7 +2203,9 @@ function renderAdmin() {
   });
 
   // Load guests
-  loadAdminGuests();
+  loadAdminGuests("");
+  var gs = document.getElementById("guest-search");
+  if(gs) gs.addEventListener("input", function(){ loadAdminGuests(this.value.trim()); });
   // Load users
   loadAdminUsers("");
   var us = document.getElementById("user-search");
@@ -2067,44 +2237,54 @@ function renderAdmin() {
 }
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────────────────
-function loadAdminGuests() {
+function loadAdminGuests(q) {
   var list = document.getElementById("admin-guests-list");
   if(!list) return;
   if(!DB){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>'; return; }
-  // Guests are players in groups that don't exist in users/ node
+
   DB.ref("users").once("value", function(usnap){
     var realUsers = {};
     Object.keys(usnap.val()||{}).forEach(function(k){ realUsers[k]=true; });
-    DB.ref("groups").once("value", function(gsnap){
-      var groups = gsnap.val()||{};
-      var guestMap = {}; // guestName -> [groupIds]
-      Object.values(groups).forEach(function(g){
-        (g.players||[]).forEach(function(p){
-          if(!p) return;
-          var key = userKey(p);
-          if(!realUsers[key]) {
-            if(!guestMap[p]) guestMap[p]=[];
-            guestMap[p].push(g.id);
-          }
-        });
-      });
+
+    // guestMap: name -> { groups: [groupIds or "root"], hasPicks: bool }
+    var guestMap = {};
+
+    function addGuest(name, location, hasPicks) {
+      if(!name) return;
+      var key = userKey(name);
+      if(realUsers[key]) return; // registered user, skip
+      if(!guestMap[name]) guestMap[name] = { groups:[], hasPicks:false };
+      if(guestMap[name].groups.indexOf(location) < 0) guestMap[name].groups.push(location);
+      if(hasPicks) guestMap[name].hasPicks = true;
+    }
+
+    function renderGuests() {
       var guests = Object.keys(guestMap);
+      // Apply search filter
+      if(q) guests = guests.filter(function(g){ return g.toLowerCase().indexOf(q.toLowerCase()) >= 0; });
       if(!guests.length){
-        list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">No guests in any groups.</div>';
+        list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">'+(q?'No guests match your search.':'No guests found.')+'</div>';
         return;
       }
       guests.sort();
       var h='<table style="width:100%;border-collapse:collapse;font-size:11px">';
       h+='<thead><tr>';
-      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Guest Name</th>';
-      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">In Groups</th>';
+      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Guest</th>';
+      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>';
+      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Picks</th>';
       h+='<th></th>';
       h+='</tr></thead><tbody>';
       guests.forEach(function(gname){
-        var grpCount = guestMap[gname].length;
+        var info = guestMap[gname];
+        var hasRoot = info.groups.indexOf("root") >= 0;
+        var groupCount = info.groups.filter(function(g){ return g !== "root"; }).length;
+        var grpLabel = hasRoot
+          ? (groupCount ? '<span style="color:#fbbf24">No group</span>, '+groupCount+' group'+(groupCount!==1?'s':'') : '<span style="color:#fbbf24">No group</span>')
+          : groupCount+' group'+(groupCount!==1?'s':'');
         h+='<tr style="border-top:1px solid #0f1923">';
-        h+='<td style="padding:7px 6px;color:#94a3b8;font-weight:600">🎯 '+x(gname)+'</td>';
-        h+='<td style="padding:7px 6px;color:#475569">'+grpCount+' group'+(grpCount!==1?"s":"")+'</td>';
+        h+='<td style="padding:7px 6px;color:#f1f5f9;font-weight:600">🎯 '+x(gname)+'</td>';
+        h+='<td style="padding:7px 6px;color:#475569">'+grpLabel+'</td>';
+        h+='<td style="padding:7px 6px">'+(info.hasPicks?'<span style="color:#6ee7b7;font-size:10px">✓ Yes</span>':'<span style="color:#334155;font-size:10px">—</span>')+'</td>';
         h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-guest="'+x(gname)+'">Delete</button></td>';
         h+='</tr>';
       });
@@ -2113,32 +2293,72 @@ function loadAdminGuests() {
       list.querySelectorAll("[data-del-guest]").forEach(function(btn){
         btn.addEventListener("click", function(){
           var gname = this.getAttribute("data-del-guest");
-          if(!confirm('Remove guest "'+gname+'" from all groups? This cannot be undone.')) return;
-          deleteGuest(gname, guestMap[gname]);
+          if(!confirm('Remove guest "'+gname+'" from all groups and delete their picks? This cannot be undone.')) return;
+          var groupIds = guestMap[gname].groups.filter(function(g){ return g !== "root"; });
+          var hasRoot = guestMap[gname].groups.indexOf("root") >= 0;
+          deleteGuest(gname, groupIds, hasRoot);
         });
       });
+    }
+
+    var pending = 2;
+    function done() { pending--; if(pending===0) renderGuests(); }
+
+    // 1. Scan root rwc2026/picks (ungrouped guests)
+    DB.ref("rwc2026/picks").once("value", function(psn){
+      Object.keys(psn.val()||{}).forEach(function(pname){
+        addGuest(pname, "root", true);
+      });
+      done();
+    });
+
+    // 2. Scan all groups — players array + picks data
+    DB.ref("groups").once("value", function(gsnap){
+      Object.values(gsnap.val()||{}).forEach(function(g){
+        // Players array
+        (g.players||[]).forEach(function(p){ addGuest(p, g.id, false); });
+        // Picks data for all pools
+        var data = g.data || {};
+        Object.keys(data).forEach(function(poolId){
+          Object.keys((data[poolId]||{}).picks||{}).forEach(function(pname){
+            addGuest(pname, g.id, true);
+          });
+        });
+      });
+      done();
     });
   });
 }
 
-function deleteGuest(guestName, groupIds) {
+function deleteGuest(guestName, groupIds, hasRoot) {
   if(!DB) return;
   var updates = {};
-  // We need to fetch each group to get current players, then filter out the guest
-  var remaining = groupIds.length;
-  if(remaining===0){ toast("Guest removed ✓"); loadAdminGuests(); return; }
+  var tasks = groupIds.length + (hasRoot ? 1 : 0);
+  if(tasks===0){ toast("Guest removed ✓"); loadAdminGuests(); return; }
+
+  function finish() {
+    tasks--;
+    if(tasks===0){
+      DB.ref().update(updates, function(err){
+        if(err){ toast("Delete failed"); return; }
+        toast('Guest "'+guestName+'" removed ✓');
+        loadAdminGuests();
+      });
+    }
+  }
+
+  // Remove from root rwc2026/picks
+  if(hasRoot){
+    updates["rwc2026/picks/"+guestName] = null;
+    finish();
+  }
+
+  // Remove from each group's players array
   groupIds.forEach(function(gid){
     DB.ref("groups/"+gid+"/players").once("value", function(sn){
       var players = (sn.val()||[]).filter(function(p){ return p!==guestName; });
       updates["groups/"+gid+"/players"] = players;
-      remaining--;
-      if(remaining===0){
-        DB.ref().update(updates, function(err){
-          if(err){ toast("Delete failed"); return; }
-          toast('Guest "'+guestName+'" removed ✓');
-          loadAdminGuests();
-        });
-      }
+      finish();
     });
   });
 }
