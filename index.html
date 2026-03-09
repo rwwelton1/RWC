@@ -307,12 +307,6 @@ button,input,select{font-family:'DM Sans',sans-serif}
 .copy-action-btn{flex:1;padding:11px;border-radius:8px;background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer}
 .copy-back-btn{padding:11px 14px;border-radius:8px;background:#07090f;border:1px solid #1e2a3a;color:#64748b;font-size:13px;font-family:inherit;cursor:pointer}
 .copy-cancel-btn{width:100%;padding:10px;border-radius:8px;background:none;border:none;color:#334155;font-size:12px;font-family:inherit;cursor:pointer;margin-top:4px}
-/* TRIVIA SCREEN */
-.tv-hero{background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(168,85,247,.07));border:1px solid rgba(99,102,241,.28);border-radius:14px;padding:28px 20px 24px;text-align:center;margin-bottom:14px}
-.tv-hero-eyebrow{font-size:9px;color:#818cf8;letter-spacing:.15em;text-transform:uppercase;margin-bottom:6px}
-.tv-hero-title{font-family:‘Bebas Neue’,cursive;font-size:52px;letter-spacing:.08em;background:linear-gradient(135deg,#fff 30%,#fbbf24 70%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;margin-bottom:4px}
-.tv-hero-date{font-size:11px;color:#475569;margin-bottom:20px}
-.tv-hero-btn{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:15px;font-weight:700;padding:13px 44px;border-radius:11px;border:none;font-family:‘DM Sans’,sans-serif;cursor:pointer}
 .tv-diff-row{display:flex;gap:6px;justify-content:center;margin-bottom:14px}
 .tv-card{background:#0d1117;border:1px solid #1a2535;border-radius:12px;padding:16px;margin-bottom:10px}
 .tv-prog-hdr{display:flex;justify-content:space-between;margin-bottom:6px}
@@ -577,232 +571,6 @@ function saveGroupData() {
 }
 
 // ── SCREENS ───────────────────────────────────────────────────────────────────
-// ── TRIVIA ────────────────────────────────────────────────────────────────────
-function getEasternNow() {
-  var now = new Date();
-  var jan = new Date(now.getFullYear(),0,1); var jul = new Date(now.getFullYear(),6,1);
-  var isDST = now.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
-  var utc = now.getTime() + now.getTimezoneOffset()*60000;
-  return new Date(utc + (isDST ? -4 : -5)*3600000);
-}
-function getEasternDateKey() {
-  var e = getEasternNow();
-  return e.getFullYear()+"_"+(e.getMonth()+1)+"_"+e.getDate();
-}
-function getEasternDayIndex() {
-  var e = getEasternNow();
-  var launch = Date.UTC(2026,2,8);
-  var eMidnight = Date.UTC(e.getFullYear(),e.getMonth(),e.getDate());
-  var diff = Math.floor((eMidnight-launch)/(1000*60*60*24));
-  return ((diff%29)+29)%29;
-}
-function getTriviaQ() {
-  try {
-    if(typeof getAllQ !== "function") return null;
-    var all = getAllQ();
-    if(!all || !all.length) return null;
-    var idx = getEasternDayIndex();
-    return all[idx] || all[0] || null;
-  } catch(e) { return null; }
-}
-function tvPointsFor(d) { if(d==="Easy")return 100; if(d==="Medium")return 200; if(d==="Hard")return 300; if(d==="Expert")return 400; return 100; }
-function tvDstyle(d) { if(d==="Easy")return"background:rgba(16,185,129,.08);border-color:rgba(16,185,129,.3);color:#6ee7b7"; if(d==="Medium")return"background:rgba(251,191,36,.07);border-color:rgba(251,191,36,.3);color:#fbbf24"; if(d==="Hard")return"background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.3);color:#fca5a5"; return"background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.4);color:#c4b5fd"; }
-function tvDiffBlock(q, correct) {
-  if(!correct) return "⬜";
-  var d = q ? q.d : "";
-  if(d==="Easy")   return "🟩";
-  if(d==="Medium") return "🟨";
-  if(d==="Hard")   return "🟥";
-  if(d==="Expert") return "🟪";
-  return "🟩";
-}
-function tvGetScore()   { try { var v=sessionStorage.getItem("tScore");   return v?parseInt(v):0;     } catch(e){ return 0;  } }
-function tvSetScore(n)  { try { sessionStorage.setItem("tScore",n);   } catch(e){} }
-function tvGetPoints()  { try { var v=sessionStorage.getItem("tPoints");  return v?parseInt(v):0;     } catch(e){ return 0;  } }
-function tvSetPoints(n) { try { sessionStorage.setItem("tPoints",n);  } catch(e){} }
-function tvGetResults() { try { var v=sessionStorage.getItem("tResults"); return v?JSON.parse(v):[];  } catch(e){ return []; } }
-function tvSetResults(r){ try { sessionStorage.setItem("tResults",JSON.stringify(r)); } catch(e){} }
-
-function enterTrivia(fromScreen) {
-  SC.screen = "trivia";
-  SC.triviaView = "home";
-  SC.triviaPrevScreen = fromScreen || "profile";
-  var username = (SC.currentUser && SC.currentUser.username && !SC.currentUser.guest)
-    ? SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"") : "";
-  var todayKey = "pp_trivia_" + getEasternDateKey();
-  if(!username || !DB) { draw(); return; }
-  var didDraw = false;
-  function safeDraw() { if(!didDraw) { didDraw=true; draw(); } }
-  var t = setTimeout(safeDraw, 4000);
-  DB.ref("triviaResets/"+username+"/"+todayKey).once("value", function(sn){
-    clearTimeout(t);
-    if(sn.val()) {
-      try { localStorage.removeItem(todayKey); } catch(e){}
-      DB.ref("triviaResets/"+username+"/"+todayKey).remove();
-    }
-    safeDraw();
-  }, function(){ clearTimeout(t); safeDraw(); });
-}
-
-function renderTrivia() {
-  if(SC.triviaView==="q")      renderTriviaQ(SC.triviaQIdx);
-  else if(SC.triviaView==="result") renderTriviaResult(SC.triviaQIdx, SC.triviaChosen);
-  else if(SC.triviaView==="done")   renderTriviaDone();
-  else                              renderTriviaHome();
-}
-
-function renderTriviaHome() {
-  tvSetScore(0); tvSetPoints(0); tvSetResults([]);
-  var et = getEasternNow();
-  var ds = et.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
-  var tKey = "pp_trivia_" + getEasternDateKey();
-  var todayData = null;
-  try { var tv = localStorage.getItem(tKey); if(tv) todayData = JSON.parse(tv); } catch(e) {}
-  var o = topbar(false);
-  o += '<div class="main">';
-  o += '<div class="tv-hero"><div class="tv-hero-eyebrow">Daily Sports Trivia</div><div class="tv-hero-title">TRIVIA</div><div class="tv-hero-date">'+ds+'</div>';
-  if(todayData && todayData.r && todayData.r.length === 10) {
-    var todayScore = todayData.r.filter(function(v){return v;}).length;
-    var Q2=[]; try { Q2=getTriviaQ()||[]; } catch(e){ Q2=[]; }
-    var row1="",row2="";
-    for(var i=0;i<5;i++)  row1+=tvDiffBlock(Q2[i],todayData.r[i]);
-    for(var i=5;i<10;i++) row2+=tvDiffBlock(Q2[i],todayData.r[i]);
-    var todayPts = todayData.pts || 0;
-    o += '<div class="tv-res-score" style="font-size:40px;margin:8px 0">'+todayScore+'/10</div>';
-    o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+todayPts+' pts</div>';
-    o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:8px">'+row1+'</div>';
-    o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:16px">'+row2+'</div>';
-    o += '<div style="font-size:12px;color:#475569;margin-top:8px;letter-spacing:.05em">Come back tomorrow for a new quiz &#128522;</div>';
-  } else {
-    o += '<button class="tv-hero-btn" id="tv-bst">Start Quiz</button>';
-  }
-  o += '</div>';
-  o += '<div class="tv-diff-row">';
-  o += '<div class="pill" style="color:#6ee7b7;border-color:rgba(16,185,129,.3);background:rgba(16,185,129,.07)">Easy</div>';
-  o += '<div class="pill" style="color:#fbbf24;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.06)">Medium</div>';
-  o += '<div class="pill" style="color:#fca5a5;border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.06)">Hard</div>';
-  o += '<div class="pill" style="color:#c4b5fd;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.08)">Expert</div>';
-  o += '</div>';
-  o += '<p style="font-size:11px;color:#334155;text-align:center">10 questions &middot; escalating difficulty &middot; NFL &middot; NBA &middot; MLB &middot; NHL</p>';
-  o += '</div>';
-  render(o);
-  var bst = document.getElementById("tv-bst");
-  if(bst) bst.onclick = function(){ SC.triviaView="q"; SC.triviaQIdx=0; draw(); };
-}
-
-function renderTriviaQ(idx) {
-  var Q = getTriviaQ();
-  if(!Q || !Q[idx]) {
-    var o2 = topbar(false);
-    o2 += '<div class="main"><div class="tv-hero"><div class="tv-hero-title">&#9888;</div>';
-    o2 += '<div style="color:#fca5a5;font-size:14px;margin:12px 0">Questions failed to load.</div>';
-    o2 += '<div style="font-size:12px;color:#475569;margin-bottom:20px">Please refresh the page and try again.</div>';
-    o2 += '<button class="tv-hero-btn" id="tv-back-err">Back</button>';
-    o2 += '</div></div>';
-    render(o2);
-    document.getElementById("tv-back-err").onclick = function(){ SC.triviaView="home"; draw(); };
-    return;
-  }
-  var q = Q[idx];
-  var o = topbar(true);
-  o += '<div class="main">';
-  o += '<div class="tv-prog-hdr"><span class="tv-prog-lbl">Q'+(idx+1)+' of '+Q.length+'</span><span class="tv-prog-pts">'+tvGetPoints()+' pts</span></div>';
-  o += '<div class="tv-pbar"><div class="tv-pfill" style="width:'+Math.round(idx/Q.length*100)+'%"></div></div>';
-  o += '<div class="tv-diff-badge" style="'+tvDstyle(q.d)+'">'+q.d+' &middot; '+tvPointsFor(q.d)+' pts</div>';
-  o += '<div class="tv-card"><div class="tv-qtext">'+q.q+'</div>';
-  o += '<button id="tv-c0" class="tv-choice">'+q.c[0]+'</button>';
-  o += '<button id="tv-c1" class="tv-choice">'+q.c[1]+'</button>';
-  o += '<button id="tv-c2" class="tv-choice">'+q.c[2]+'</button>';
-  o += '<button id="tv-c3" class="tv-choice">'+q.c[3]+'</button>';
-  o += '</div></div>';
-  render(o);
-  function answerQ(chosen) {
-    var correct = chosen === q.a;
-    tvSetScore(tvGetScore()+(correct?1:0));
-    tvSetPoints(tvGetPoints()+(correct?tvPointsFor(q.d):0));
-    var r=tvGetResults(); r.push(correct); tvSetResults(r);
-    SC.triviaView="result"; SC.triviaQIdx=idx; SC.triviaChosen=chosen; draw();
-  }
-  document.getElementById("tv-c0").onclick = function(){ answerQ(0); };
-  document.getElementById("tv-c1").onclick = function(){ answerQ(1); };
-  document.getElementById("tv-c2").onclick = function(){ answerQ(2); };
-  document.getElementById("tv-c3").onclick = function(){ answerQ(3); };
-}
-
-function renderTriviaResult(idx, chosen) {
-  var Q = getTriviaQ();
-  if(!Q || !Q[idx]) { SC.triviaView="home"; draw(); return; }
-  var q = Q[idx];
-  var correct = chosen === q.a;
-  var pts = tvGetPoints();
-  var next = idx + 1;
-  var nextLabel = next < Q.length ? "Next &#8594;" : "See Results";
-  var o = topbar(false);
-  o += '<div class="main">';
-  o += '<div class="tv-prog-hdr"><span class="tv-prog-lbl">Q'+(idx+1)+' of '+Q.length+'</span><span class="tv-prog-pts">'+pts+' pts</span></div>';
-  o += '<div class="tv-pbar"><div class="tv-pfill" style="width:'+Math.round(next/Q.length*100)+'%"></div></div>';
-  o += '<div class="tv-diff-badge" style="'+tvDstyle(q.d)+'">'+q.d+' &middot; '+(correct?"+"+tvPointsFor(q.d)+" pts":"0 pts")+'</div>';
-  o += '<div class="tv-card"><div class="tv-qtext">'+q.q+'</div>';
-  o += '<div class="tv-fb-card '+(correct?'tv-fb-ok':'tv-fb-no')+'">'+(correct?'&#9989; Correct!':'&#10060; Wrong &mdash; '+q.c[q.a])+'<div class="tv-fb-fact">'+q.f+'</div></div>';
-  o += '<button class="tv-btn-next" id="tv-bnxt">'+nextLabel+'</button>';
-  o += '</div></div>';
-  render(o);
-  document.getElementById("tv-bnxt").onclick = function(){
-    if(next < Q.length){ SC.triviaView="q"; SC.triviaQIdx=next; draw(); }
-    else { SC.triviaView="done"; draw(); }
-  };
-}
-
-function renderTriviaDone() {
-  var score = tvGetScore();
-  var results = tvGetResults();
-  var username = (SC.currentUser && SC.currentUser.username) || "Player";
-  var emoji = (SC.currentUser && SC.currentUser.emoji) || "&#127919;";
-  try {
-    var tKey = "pp_trivia_" + getEasternDateKey();
-    var totalPts = tvGetPoints();
-    localStorage.setItem(tKey, JSON.stringify({s:score,r:results,u:username,ts:Date.now(),pts:totalPts}));
-  } catch(e) {}
-  var Q = getTriviaQ();
-  var row1="", row2="";
-  for(var i=0;i<5;i++)  row1+=tvDiffBlock(Q[i],results[i]);
-  for(var i=5;i<10;i++) row2+=tvDiffBlock(Q[i],results[i]);
-  var d = new Date();
-  var ds = d.toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
-  var shareMsg = "PoolPlay Trivia \uD83C\uDFC6\n"+ds+"\n"+score+"/10\n\n"+row1+"\n"+row2+"\n\nhttps://pool-play.vercel.app/";
-  var o = topbar(false);
-  o += '<div class="main">';
-  o += '<div class="tv-res-card">';
-  o += '<div class="tv-res-avatar">'+emoji+'</div>';
-  o += '<div class="tv-res-name">'+x(username)+'</div>';
-  o += '<div class="tv-res-date">'+ds+'</div>';
-  o += '<div class="tv-res-score">'+score+'/10</div>';
-  o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+tvGetPoints()+' pts</div>';
-  o += '<div class="tv-res-grid">'+row1+'</div>';
-  o += '<div class="tv-res-grid">'+row2+'</div>';
-  o += '<button class="tv-btn-share" id="tv-bsh">Share Results</button>';
-  o += '<button class="tv-btn-hub" id="tv-bhub">Back to Profile</button>';
-  o += '</div></div>';
-  render(o);
-  document.getElementById("tv-bsh").onclick = function(){ window.open("sms:?&body="+encodeURIComponent(shareMsg),"_blank"); };
-  document.getElementById("tv-bhub").onclick = function(){ SC.screen="profile"; draw(); };
-}
-
-function draw() {
-  var s = SC.screen;
-  try{ if(s==="hub"||s==="profile") localStorage.setItem("pp_last_screen", s); }catch(e){}
-  if(s !== "profile" && s !== "landing") SC._triviaResetChecked = false;
-  if(s==="auth")    renderAuth();
-  else if(s==="home")    renderHome();
-  else if(s==="profile") renderProfile();
-  else if(s==="landing") renderProfile();
-  else if(s==="join")    renderJoin();
-  else if(s==="create")  renderCreate();
-  else if(s==="created") renderCreated();
-  else if(s==="hub")     renderHub();
-  else if(s==="admin")   renderAdmin();
-  else if(s==="trivia")  renderTrivia();
-}
 
 // ── TOPBAR ────────────────────────────────────────────────────────────────────
 function topbar(showBack) {
@@ -854,6 +622,22 @@ function render(h) {
   if(tadmin) tadmin.addEventListener("click", function(){ SC.screen="admin"; draw(); });
 }
 
+// ── SCREENS ───────────────────────────────────────────────────────────────────
+function draw() {
+  var s = SC.screen;
+  try{ if(s==="hub"||s==="profile") localStorage.setItem("pp_last_screen", s); }catch(e){}
+  if(s==="auth")     renderAuth();
+  else if(s==="home")     renderHome();
+  else if(s==="profile")  renderProfile();
+  else if(s==="landing")  renderProfile();
+  else if(s==="join")     renderJoin();
+  else if(s==="create")   renderCreate();
+  else if(s==="created")  renderCreated();
+  else if(s==="hub")      renderHub();
+  else if(s==="admin")    renderAdmin();
+  else if(s==="trivia")   { window.location.href="trivia.html"; }
+}
+
 // ── AUTH SCREEN ───────────────────────────────────────────────────────────────
 function renderHome() {
   var h = topbar(false);
@@ -891,7 +675,7 @@ function renderHome() {
   document.getElementById("root").innerHTML = h;
 
   document.getElementById("btn-home-groups").onclick = function(){ SC.screen="profile"; draw(); };
-  document.getElementById("btn-home-trivia").onclick = function(){ enterTrivia("home"); };
+  document.getElementById("btn-home-trivia").onclick = function(){ window.location.href="trivia.html"; };
   document.getElementById("btn-home-login").onclick  = function(){ showAuthModal("login"); };
   var topSignup = document.getElementById("btn-home-signup");
   if(topSignup) topSignup.onclick = function(){ SC.authTab="signup"; SC.screen="auth"; draw(); };
@@ -1299,7 +1083,7 @@ function renderProfile() {
   render(h);
 
   document.getElementById("btn-edit-emoji").addEventListener("click", openEmojiPicker);
-  document.getElementById("btn-trivia").addEventListener("click", function(){ enterTrivia("profile"); });
+  document.getElementById("btn-trivia").addEventListener("click", function(){ window.location.href="trivia.html"; });
   document.getElementById("btn-create-profile").addEventListener("click", function(){
     if(isGuest()){ showGuestPrompt(); return; }
     SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
@@ -2825,6 +2609,5 @@ function executeCopy(targetUser){
     <button id="guest-prompt-close" style="width:100%;padding:13px;border-radius:11px;font-size:14px;font-weight:600;background:none;border:1px solid #1e2a3a;color:#475569;font-family:inherit;cursor:pointer">Maybe Later</button>
   </div>
 </div>
-<script src="trivia-questions.js"></script>
 </body>
 </html>
