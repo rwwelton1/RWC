@@ -2185,6 +2185,7 @@ function drawHome() {
   var username = (user && user.username && !user.guest)
     ? user.username.toLowerCase().replace(/[^a-z0-9_]/g,"") : "";
 
+  var _fbMonthScores = null;
   function renderHome() {
     var Q = getTodaysQ() || [];
     var o = topbar(false);
@@ -2205,7 +2206,7 @@ function drawHome() {
       o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:8px">'+row1+'</div>';
       o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:16px">'+row2+'</div>';
       o += '<div style="font-size:12px;color:#475569;margin-top:8px;letter-spacing:.05em">Come back tomorrow for a new quiz</div>';
-      o += buildCalendarHTML();
+      o += buildCalendarHTML(_fbMonthScores);
       _homeshareMsg = "PoolPlay Trivia \uD83C\uDFC6\n"+ds+"\n"+todayScore+"/10\n\n"+row1+"\n"+row2+"\n\nhttps://pool-play.vercel.app/";
       o += '<button class="tv-btn-share" id="tv-home-share" style="margin-top:14px;width:100%">Share Today\'s Results</button>';
     } else {
@@ -2228,20 +2229,39 @@ function drawHome() {
     if (shareBtn) shareBtn.onclick = function(){ window.open("sms:?&body="+encodeURIComponent(_homeshareMsg),"_blank"); };
   }
 
-  // Check Firebase reset flag before rendering
+  // Check Firebase: reset flag + sync today's result if missing from localStorage
   if (username && DB) {
     var tKey2 = "pp_trivia_" + getDateKey();
     var done = false;
     var t = setTimeout(function(){ if(!done){ done=true; renderHome(); } }, 3000);
+    // Check reset flag first
     DB.ref("triviaResets/"+username+"/"+tKey2).once("value", function(sn){
-      clearTimeout(t);
-      if (!done) {
-        done = true;
-        if (sn.val()) {
-          try { localStorage.removeItem(tKey2); todayData = null; } catch(e){}
-          DB.ref("triviaResets/"+username+"/"+tKey2).remove();
+      if (sn.val()) {
+        try { localStorage.removeItem(tKey2); todayData = null; } catch(e){}
+        DB.ref("triviaResets/"+username+"/"+tKey2).remove();
+      }
+      // If still no local result, check Firebase for a saved score from another browser
+      if (!todayData) {
+        DB.ref("triviaScores/"+username+"/"+getDateKey()).once("value", function(sn2){
+          clearTimeout(t);
+          if (!done) {
+            done = true;
+            if (sn2.val()) {
+              todayData = sn2.val();
+              try { localStorage.setItem(tKey2, JSON.stringify(todayData)); } catch(e) {}
+            }
+            // Also grab full month for calendar
+            DB.ref("triviaScores/"+username).once("value", function(sn3){
+              if(sn3.val()) _fbMonthScores = sn3.val();
+              renderHome();
+            }, function(){ renderHome(); });
+          }
+        }, function(){ clearTimeout(t); if(!done){ done=true; renderHome(); } });
+      } else {
+        clearTimeout(t);
+        if (!done) { done=true;
+          DB.ref("triviaScores/"+username).once("value",function(sn3){if(sn3.val())_fbMonthScores=sn3.val();renderHome();},function(){renderHome();});
         }
-        renderHome();
       }
     }, function(){ clearTimeout(t); if(!done){ done=true; renderHome(); } });
   } else {
@@ -2329,10 +2349,14 @@ function drawDone() {
   var emoji    = (user && user.emoji)    ? user.emoji    : "🎯";
 
   // Save to localStorage so index.html can read it
-  try {
-    var tKey = "pp_trivia_" + getDateKey();
-    localStorage.setItem(tKey, JSON.stringify({s:score, r:results, u:username, ts:Date.now(), pts:totalPts}));
-  } catch(e) {}
+  var tKey = "pp_trivia_" + getDateKey();
+  var _saveData = {s:score, r:results, u:username, ts:Date.now(), pts:totalPts};
+  try { localStorage.setItem(tKey, JSON.stringify(_saveData)); } catch(e) {}
+  // Also save to Firebase so results sync across browsers
+  var _saveUser = (user && user.username && !user.guest) ? user.username.toLowerCase().replace(/[^a-z0-9_]/g,"") : "";
+  if (_saveUser && DB) {
+    DB.ref("triviaScores/" + _saveUser + "/" + getDateKey()).set(_saveData);
+  }
 
   var Q = getTodaysQ() || [];
   var row1="", row2="";
@@ -2352,7 +2376,7 @@ function drawDone() {
   o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+totalPts+' pts</div>';
   o += '<div class="tv-res-grid">'+row1+'</div>';
   o += '<div class="tv-res-grid">'+row2+'</div>';
-  o += buildCalendarHTML();
+  o += buildCalendarHTML(null);
   o += '<button class="tv-btn-share" id="tv-share">Share Results</button>';
   o += '<button class="tv-btn-hub" id="tv-back">Back to PoolPlay</button>';
   o += '</div></div>';
@@ -2365,12 +2389,24 @@ function drawDone() {
 }
 
 
-function buildCalendarHTML() {
+function buildCalendarHTML(fbScores) {
   var now = getEasternNow();
   var tKey = "pp_trivia_" + getDateKey();
   var scoreMap = {};
 
-  // Scan localStorage for all trivia scores this month
+  // Merge in Firebase scores first (localStorage takes precedence)
+  if (fbScores) {
+    Object.keys(fbScores).forEach(function(dk){
+      var parts = dk.split("_");
+      var yr = parseInt(parts[0]), mo = parseInt(parts[1]), dy = parseInt(parts[2]);
+      if(yr === now.getFullYear() && mo === now.getMonth()+1){
+        var d = fbScores[dk];
+        if(d && d.r) scoreMap[dy] = d.r.filter(function(v){return v;}).length;
+      }
+    });
+  }
+
+  // Scan localStorage for all trivia scores this month (overwrites fb if present)
   try {
     for(var ki=0; ki<localStorage.length; ki++){
       var k = localStorage.key(ki);
