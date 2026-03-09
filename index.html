@@ -2515,17 +2515,33 @@ function loadAdminUsers(q) {
   var list = document.getElementById("admin-users-list");
   if(!list) return;
   if(!DB){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>'; return; }
+  // Load both users node AND all group players to catch orphans
   DB.ref("users").once("value", function(sn){
     var all = sn.val()||{};
-    // Include entries with no username — attach the Firebase key
     var users = [];
+    var knownKeys = {};
     Object.keys(all).forEach(function(k){
       var u = all[k];
       if(!u) return;
       u._key = k;
+      knownKeys[k] = true;
+      // Also index by username key
+      if(u.username) knownKeys[userKey(u.username)] = true;
       users.push(u);
     });
-    if(q) users = users.filter(function(u){ return (u.username||u._key||"").toLowerCase().indexOf(q.toLowerCase())>=0; });
+    // Scan all groups for players not in users node
+    DB.ref("groups").once("value", function(gsn){
+      var groups = gsn.val()||{};
+      Object.values(groups).forEach(function(g){
+        (g.players||[]).forEach(function(pname){
+          var pkey = userKey(pname);
+          if(!knownKeys[pkey] && pname) {
+            knownKeys[pkey] = true;
+            users.push({ username: pname, password: "", groups: [], emoji: "🎯", _key: pkey, _orphan: true });
+          }
+        });
+      });
+      if(q) users = users.filter(function(u){ return (u.username||u._key||"").toLowerCase().indexOf(q.toLowerCase())>=0; });
     // Sort: guests (no password) first, then alphabetical
     users.sort(function(a,b){
       var ag = !a.password, bg = !b.password;
@@ -2542,11 +2558,12 @@ function loadAdminUsers(q) {
     h+='</tr></thead><tbody>';
     users.forEach(function(u){
       var em = u.emoji||"🍺";
-      var grpCount = (u.groups||[]).length;
+      var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
       // Use username if set, otherwise fall back to the Firebase key (which IS the username for guests)
       var displayName = u.username || u._key;
       var isMissing = !u.username;
-      var isGuestAcct = !u.password;
+      var isGuestAcct = !u.password || u._orphan;
+      var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
       var safeKey = x(u._key);
       h+='<tr style="border-top:1px solid #0f1923">';
       h+='<td style="padding:7px 6px">';
@@ -2615,7 +2632,8 @@ function loadAdminUsers(q) {
         mergeGuestIntoUser(guestName, key, targetName);
       });
     });
-  });
+    }); // end groups scan
+  }); // end users load
 }
 
 function deleteUser(username) {
