@@ -876,11 +876,11 @@ function saveUserEmoji(emoji) {
 
 // ── TIER SYSTEM ──────────────────────────────────────────────────────────────
 var TIERS = [
-  {name:"Bronze",   pts:1,  color:"#cd7f32", gradient:"linear-gradient(90deg,#7c4a1e,#cd7f32)", icon:"🥉"},
-  {name:"Silver",   pts:3,  color:"#94a3b8", gradient:"linear-gradient(90deg,#475569,#94a3b8)", icon:"🥈"},
-  {name:"Gold",     pts:5,  color:"#fbbf24", gradient:"linear-gradient(90deg,#b45309,#fbbf24)", icon:"🥇"},
-  {name:"Platinum", pts:10, color:"#67e8f9", gradient:"linear-gradient(90deg,#0e7490,#67e8f9)", icon:"💎"},
-  {name:"Diamond",  pts:20, color:"#a5b4fc", gradient:"linear-gradient(90deg,#4f46e5,#c4b5fd)", icon:"👑"}
+  {name:"Bronze",   pts:10000,  color:"#cd7f32", gradient:"linear-gradient(90deg,#7c4a1e,#cd7f32)", icon:"🥉"},
+  {name:"Silver",   pts:30000,  color:"#94a3b8", gradient:"linear-gradient(90deg,#475569,#94a3b8)", icon:"🥈"},
+  {name:"Gold",     pts:50000,  color:"#fbbf24", gradient:"linear-gradient(90deg,#b45309,#fbbf24)", icon:"🥇"},
+  {name:"Platinum", pts:100000, color:"#67e8f9", gradient:"linear-gradient(90deg,#0e7490,#67e8f9)", icon:"💎"},
+  {name:"Diamond",  pts:200000, color:"#a5b4fc", gradient:"linear-gradient(90deg,#4f46e5,#c4b5fd)", icon:"👑"}
 ];
 function getTier(pts) {
   var tier = null;
@@ -902,7 +902,7 @@ function renderTierBar(pts) {
   var h = '<div class="tier-inline">';
   h += '<span class="tier-inline-name" style="color:'+cur.color+'">'+cur.icon+' '+cur.name+'</span>';
   h += '<div class="tier-inline-bar"><div class="tier-inline-fill" style="width:'+pct+'%;background:'+cur.gradient+'"></div></div>';
-  if(next) h += '<span class="tier-inline-next">'+next.name+' in '+(next.pts-pts)+' pts</span>';
+  if(next) h += '<span class="tier-inline-next">'+next.name+' in '+(next.pts-pts).toLocaleString()+' pts</span>';
   h += '</div>';
   return h;
 }
@@ -1215,39 +1215,76 @@ function renderProfile() {
       var container = document.getElementById("profile-groups");
       if(!container) return;
 
-      // Compute stats + pts for tier
-      var entered = 0, wins = 0, totalPts = 0;
-      groups.forEach(function(g){
-        var pools = groupPools(g);
-        var results = (g.data || {}).results || {};
-        pools.forEach(function(pool){
-          var r = results[pool.id];
-          if(r && (r.first || r.second || r.third) && (g.players||[]).indexOf(u.username) >= 0) {
-            entered++;
-            if(r.first === u.username)       { wins++; totalPts += 4; }
-            else if(r.second === u.username) { totalPts += 2; }
-            else if(r.third === u.username)  { totalPts += 1; }
+      // Compute stats — use globalSettings/results for placement pts
+      var entered = 0, wins = 0, placementPts = 0;
+
+      // Trivia pts from localStorage
+      var triviaPts = 0;
+      try {
+        for(var _k in localStorage) {
+          if(_k && _k.indexOf('pp_trivia_') === 0) {
+            try {
+              var _td = JSON.parse(localStorage.getItem(_k));
+              if(_td && _td.pts) triviaPts += _td.pts;
+            } catch(e){}
           }
+        }
+      } catch(e){}
+
+      if(DB) {
+        DB.ref("globalSettings/results").once("value", function(globalSnap){
+          var globalResults = globalSnap.val() || {};
+          groups.forEach(function(g){
+            var pools = groupPools(g);
+            pools.forEach(function(pool){
+              var r = globalResults[pool.id];
+              if(r && (r.first || r.second || r.third) && (g.players||[]).indexOf(u.username) >= 0) {
+                entered++;
+                if(r.first === u.username)       { wins++; placementPts += 40000; }
+                else if(r.second === u.username) { placementPts += 20000; }
+                else if(r.third === u.username)  { placementPts += 10000; }
+              }
+            });
+          });
+          var totalPts = placementPts + triviaPts;
+          var se = document.getElementById("pstat-entered");
+          var sw = document.getElementById("pstat-wins");
+          var sp = document.getElementById("pstat-pts");
+          if(se) se.textContent = entered;
+          if(sw) sw.textContent = wins;
+          if(sp) sp.textContent = totalPts.toLocaleString();
+          var tierEl = document.getElementById("profile-tier");
+          if(tierEl) tierEl.innerHTML = renderTierBar(totalPts);
+          renderGroupCards(groups, container);
         });
-      });
-
-      var se = document.getElementById("pstat-entered");
-      var sw = document.getElementById("pstat-wins");
-      var sp = document.getElementById("pstat-pts");
-      if(se) se.textContent = entered;
-      if(sw) sw.textContent = wins;
-      if(sp) sp.textContent = totalPts;
-
-      // Render tier bar
-      var tierEl = document.getElementById("profile-tier");
-      if(tierEl) tierEl.innerHTML = renderTierBar(totalPts);
-
-      renderGroupCards(groups, container);
+      } else {
+        var totalPts = triviaPts;
+        var se = document.getElementById("pstat-entered");
+        var sw = document.getElementById("pstat-wins");
+        var sp = document.getElementById("pstat-pts");
+        if(se) se.textContent = entered;
+        if(sw) sw.textContent = wins;
+        if(sp) sp.textContent = totalPts.toLocaleString();
+        var tierEl = document.getElementById("profile-tier");
+        if(tierEl) tierEl.innerHTML = renderTierBar(totalPts);
+        renderGroupCards(groups, container);
+      }
     });
   } else {
-    // No groups — still render tier at 0
+    // No groups — still count trivia pts for tier
+    var _triviaPtsNoGroup = 0;
+    try {
+      for(var _k in localStorage) {
+        if(_k && _k.indexOf('pp_trivia_') === 0) {
+          try { var _td = JSON.parse(localStorage.getItem(_k)); if(_td && _td.pts) _triviaPtsNoGroup += _td.pts; } catch(e){}
+        }
+      }
+    } catch(e){}
+    var se2 = document.getElementById("pstat-entered"); if(se2) se2.textContent = 0;
+    var sw2 = document.getElementById("pstat-wins");    if(sw2) sw2.textContent = 0;
+    var sp2 = document.getElementById("pstat-pts");     if(sp2) sp2.textContent = _triviaPtsNoGroup.toLocaleString();
     var tierEl = document.getElementById("profile-tier");
-    if(tierEl) tierEl.innerHTML = renderTierBar(0);
+    if(tierEl) tierEl.innerHTML = renderTierBar(_triviaPtsNoGroup);
   }
 }
 
