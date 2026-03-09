@@ -1164,17 +1164,33 @@ function renderProfile() {
       });
       if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">Coming soon</span>';
 
-      var iconEmoji = "&#127942;";
+      var activePool = null;
       for(var i=0;i<pools.length;i++){
         var st2 = statuses[pools[i].id]||"coming-soon";
-        if(st2==="open"||st2==="locked"){ iconEmoji = pools[i].icon; break; }
+        if(st2==="open"||st2==="locked"){ activePool=pools[i]; break; }
+      }
+      var iconEmoji = activePool ? activePool.icon : "&#127942;";
+
+      // Live pool rank from scores
+      var liveRankHtml = "";
+      if(activePool && u && u.username) {
+        var poolScoresG = ((data[activePool.id]||{}).scores)||{};
+        if(Object.keys(poolScoresG).length > 0) {
+          var rankedG = (g.players||[]).slice().sort(function(a,b){ return (poolScoresG[b]||0)-(poolScoresG[a]||0); });
+          var myPoolRankG = rankedG.indexOf(u.username);
+          var myPoolPtsG = poolScoresG[u.username] !== undefined ? poolScoresG[u.username] : null;
+          if(myPoolRankG >= 0) {
+            var rc = myPoolRankG===0?'#fbbf24':myPoolRankG===1?'#94a3b8':myPoolRankG===2?'#b45309':'#475569';
+            liveRankHtml = '<div style="font-size:10px;color:#475569">'+activePool.icon+' <span style="color:'+rc+';font-weight:700">#'+(myPoolRankG+1)+'</span> of '+(g.players||[]).length+(myPoolPtsG!==null?' &middot; <span style="color:#94a3b8">'+myPoolPtsG+' pts</span>':'')+'</div>';
+          }
+        }
       }
 
       gh += '<div class="gcard" data-gid="'+x(g.id)+'">';
       gh += '<div class="gcard-head">';
       gh += '<div class="gcard-icon">'+iconEmoji+'</div>';
       gh += '<div style="flex:1"><div class="gcard-name">'+x(g.name||"Unnamed")+'</div>';
-      if(myRank>=0) gh += '<div style="font-size:10px;color:#475569">Your rank: <span style="color:'+(myRank===0?'#fbbf24':myRank===1?'#94a3b8':'#a5b4fc')+';font-weight:700">#'+(myRank+1)+'</span> of '+standings.length+'</div>';
+      if(liveRankHtml) gh += liveRankHtml;
       gh += '</div>';
       gh += '<div class="gcard-arrow">&#8250;</div>';
       gh += '</div>';
@@ -1907,7 +1923,7 @@ function renderHub() {
   // Group search
   h += '<div class="section-label">Find a Group</div>';
   h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search" placeholder="Search by group name or code..." autocomplete="off"></div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Players</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
+  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th style="white-space:nowrap">Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
 
   h += '</div>';
   render(h);
@@ -2052,10 +2068,54 @@ function renderHub() {
     });
   });
 
-  loadAllGroups(function(groups){ renderGroupsTable(groups, ""); });
+  function renderHubGroupsTable(groups, query) {
+    var tbody = document.getElementById("groups-tbody");
+    if(!tbody) return;
+    var q = (query||"").toLowerCase().trim();
+    var myName = SC.currentUser ? SC.currentUser.username : null;
+    var filtered = groups.filter(function(g){
+      return !q || (g.name||"").toLowerCase().indexOf(q)>=0 || (g.id||"").toLowerCase().indexOf(q)>=0;
+    });
+    if(!filtered.length){
+      tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+(q?"No groups match":"No groups yet")+'</td></tr>';
+      return;
+    }
+    var h = "";
+    filtered.forEach(function(g){
+      var playerCount = (g.players||[]).length;
+      // Find open pool for this group
+      var openPool = null, compHtml = '<span style="color:#334155;font-size:10px">—</span>';
+      (g.pools||[]).forEach(function(pid){
+        var status = (SC.globalStatuses||{})[pid]||"coming-soon";
+        if((status==="open"||status==="locked") && !openPool) openPool = pid;
+      });
+      if(openPool) {
+        var poolDef = null;
+        for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
+        var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Locked" : "Open";
+        var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
+        // Find user's rank in this pool from scores
+        var scores = ((g.data||{})[openPool]||{}).scores || {};
+        var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
+        var myRank = myName ? ranked.indexOf(myName)+1 : 0;
+        var icon = poolDef ? poolDef.icon : "🏆";
+        compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span>'+(myRank>0?' · #'+myRank+' of '+playerCount:'')+'</span>';
+      }
+      h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
+      h += '<td class="group-name-cell" style="font-size:12px">'+x(g.name||"Unnamed")+'</td>';
+      h += '<td style="color:#64748b;font-size:11px;white-space:nowrap">'+playerCount+'</td>';
+      h += '<td>'+compHtml+'</td>';
+      h += '<td><span class="join-link">Join &#8250;</span></td></tr>';
+    });
+    tbody.innerHTML = h;
+    tbody.querySelectorAll("tr.clickable-row").forEach(function(el){
+      el.addEventListener("click", function(){ joinGroup(this.getAttribute("data-gid")); });
+    });
+  }
+  loadAllGroups(function(groups){ renderHubGroupsTable(groups, ""); });
   var si = document.getElementById("group-search");
   if(si) si.addEventListener("input", function(){
-    loadAllGroups(function(groups){ renderGroupsTable(groups, this.value); }.bind(this));
+    loadAllGroups(function(groups){ renderHubGroupsTable(groups, this.value); }.bind(this));
   });
 
   document.querySelectorAll("[data-copy-pool]").forEach(function(btn){
