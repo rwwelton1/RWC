@@ -2247,6 +2247,13 @@ function renderAdmin() {
   h += '<div id="group-admin-members"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Select a group above</div></div>';
   h += '</div>';
 
+  h += '<div class="section-label">Maintenance</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Guest accounts (no password) inactive for 30+ days are automatically purged. You can also run it manually.</div>';
+  h += '<button class="btn btn-ghost" id="btn-purge-guests" style="padding:8px 14px;font-size:12px;border-color:rgba(239,68,68,.3);color:#fca5a5">&#128465; Purge Inactive Guests</button>';
+  h += '<div id="purge-msg" style="font-size:11px;min-height:16px;margin-top:8px;color:#6ee7b7"></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Master Password</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Change the master password used across PoolPlay and picks.html. Enter current password to confirm.</div>';
@@ -2300,6 +2307,52 @@ function renderAdmin() {
         buildResultsForm(allPlayers, sn.val()||{});
       });
     } else buildResultsForm(allPlayers, {});
+  });
+
+  // Purge inactive guests
+  var purgeBtn = document.getElementById("btn-purge-guests");
+  if(purgeBtn) purgeBtn.addEventListener("click", function(){
+    var msgEl = document.getElementById("purge-msg");
+    msgEl.style.color="#94a3b8";
+    msgEl.textContent="Scanning...";
+    purgeBtn.disabled = true;
+    if(!DB){ msgEl.style.color="#fca5a5"; msgEl.textContent="Firebase unavailable."; purgeBtn.disabled=false; return; }
+    var cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    DB.ref("users").once("value", function(sn){
+      var all = sn.val()||{};
+      var toDelete = [];
+      Object.keys(all).forEach(function(k){
+        var u = all[k];
+        if(!u || u.password) return;
+        var lastActive = u.lastActive || u.createdAt || 0;
+        if(lastActive < cutoff) toDelete.push({ key: k, username: u.username||k });
+      });
+      if(!toDelete.length){ msgEl.style.color="#6ee7b7"; msgEl.textContent="No inactive guests found."; purgeBtn.disabled=false; return; }
+      var done = 0;
+      toDelete.forEach(function(entry){
+        DB.ref("groups").once("value", function(gsn){
+          var groups = gsn.val()||{};
+          var updates = {};
+          Object.values(groups).forEach(function(g){
+            if(!g||!g.players) return;
+            var filtered = g.players.filter(function(p){ return p!==entry.username; });
+            if(filtered.length !== g.players.length) updates["groups/"+g.id+"/players"] = filtered;
+          });
+          var finish = function(){
+            DB.ref("users/"+entry.key).remove(function(){
+              done++;
+              if(done===toDelete.length){
+                msgEl.style.color="#6ee7b7";
+                msgEl.textContent="Deleted "+toDelete.length+" inactive guest"+(toDelete.length!==1?"s":"")+" ✓";
+                purgeBtn.disabled=false;
+                loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+              }
+            });
+          };
+          if(Object.keys(updates).length) DB.ref().update(updates, finish); else finish();
+        });
+      });
+    });
   });
 
   // Change master password
@@ -2650,6 +2703,11 @@ function loadAdminUsers(q) {
       h+='<span style="color:'+(isMissing?'#fbbf24':'#f1f5f9')+';font-weight:600">'+em+' '+x(displayName)+'</span>'+(isGuestAcct?'<span style="font-size:8px;font-weight:700;color:#475569;background:#0d1117;border:1px solid #1e2a3a;border-radius:4px;padding:1px 5px">GUEST</span>':'');
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:transparent;color:#64748b;cursor:pointer;font-family:inherit">Rename</button>';
       h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:transparent;color:#6ee7b7;cursor:pointer;font-family:inherit">Merge</button>';
+      if(isGuestAcct) h+='<button data-setpw-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit">Set PW</button>';
+      h+='</div>';
+      h+='<div id="setpw-area-'+safeKey+'" style="display:none;margin-top:5px">';
+      h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Set a password for this account so they can log in from any device.</div>';
+      h+='<div style="display:flex;gap:4px"><input class="form-input" type="password" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New password" maxlength="50" id="setpw-input-'+safeKey+'"><button data-confirm-setpw="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(251,191,36,.4);background:rgba(251,191,36,.1);color:#fbbf24;cursor:pointer;font-family:inherit;white-space:nowrap">Save ✓</button></div>';
       h+='</div>';
       h+='<div id="rename-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New username" maxlength="30" id="rename-input-'+safeKey+'" value="'+x(displayName)+'"><button data-confirm-rename="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.15);color:#a5b4fc;cursor:pointer;font-family:inherit;white-space:nowrap">Save</button></div>';
@@ -2709,6 +2767,36 @@ function loadAdminUsers(q) {
         if(!targetName){ toast("Enter the registered username"); return; }
         if(!confirm("Merge \""+guestName+"\" into \""+targetName+"\"?\nGuest groups will be added to "+targetName+". Guest account deleted. This cannot be undone.")) return;
         mergeGuestIntoUser(guestName, key, targetName);
+      });
+    });
+    list.querySelectorAll("[data-setpw-user]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var key = this.getAttribute("data-user-key");
+        // Close other areas
+        var ra = document.getElementById("rename-area-"+key);
+        if(ra) ra.style.display = "none";
+        var ma = document.getElementById("merge-area-"+key);
+        if(ma) ma.style.display = "none";
+        var area = document.getElementById("setpw-area-"+key);
+        if(area) { area.style.display = area.style.display==="none" ? "block" : "none"; }
+      });
+    });
+    list.querySelectorAll("[data-confirm-setpw]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var uname = this.getAttribute("data-confirm-setpw");
+        var key = this.getAttribute("data-user-key");
+        var input = document.getElementById("setpw-input-"+key);
+        var pw = input ? input.value.trim() : "";
+        if(!pw || pw.length < 4){ toast("Password must be at least 4 characters"); return; }
+        if(!DB){ toast("Firebase unavailable"); return; }
+        var fbKey = uname.toLowerCase().replace(/[^a-z0-9_]/g,"");
+        DB.ref("users/"+fbKey+"/password").set(pw, function(err){
+          if(err){ toast("Failed to save password"); return; }
+          toast("Password set for "+uname+" ✓");
+          var area = document.getElementById("setpw-area-"+key);
+          if(area) area.style.display = "none";
+          loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+        });
       });
     });
     }); // end groups scan
@@ -3082,6 +3170,35 @@ function subscribeGlobalStatuses() {
   });
 }
 
+// ── GUEST CLEANUP ─────────────────────────────────────────────────────────────
+function purgeInactiveGuests() {
+  if(!DB) return;
+  var cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000); // 30 days ago
+  DB.ref("users").once("value", function(sn){
+    var all = sn.val() || {};
+    Object.keys(all).forEach(function(k){
+      var u = all[k];
+      if(!u || u.password) return; // skip registered users
+      var lastActive = u.lastActive || u.createdAt || 0;
+      if(lastActive < cutoff) {
+        // Remove from all groups first
+        var uname = u.username || k;
+        DB.ref("groups").once("value", function(gsn){
+          var groups = gsn.val() || {};
+          var updates = {};
+          Object.values(groups).forEach(function(g){
+            if(!g || !g.players) return;
+            var filtered = g.players.filter(function(p){ return p !== uname; });
+            if(filtered.length !== g.players.length) updates["groups/"+g.id+"/players"] = filtered;
+          });
+          if(Object.keys(updates).length) DB.ref().update(updates);
+        });
+        DB.ref("users/"+k).remove();
+      }
+    });
+  });
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────────────────
 (function(){
   if(DB) subscribeGlobalStatuses();
@@ -3098,10 +3215,19 @@ function subscribeGlobalStatuses() {
     if(DB) {
       DB.ref("users/"+key).once("value", function(sn){
         var u = sn.val();
-        if(u) SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
+        if(u) {
+          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
+          // Update lastActive for guest accounts
+          if(!u.password) DB.ref("users/"+key+"/lastActive").set(Date.now());
+        } else if(isGuest()) {
+          // User record missing — refresh it
+          DB.ref("users/"+key).set({ username: savedUser, password: "", groups: [], emoji: _cachedEmoji, lastActive: Date.now(), createdAt: Date.now() });
+        }
         draw();
       });
     } else { draw(); }
+    // Run guest cleanup once per session (1% chance to avoid running every load)
+    if(DB && Math.random() < 0.01) purgeInactiveGuests();
   } else {
     // New visitor — auto-create a Guest#### account in Firebase
     var newGuest = generateGuestName();
@@ -3110,7 +3236,7 @@ function subscribeGlobalStatuses() {
     try { localStorage.setItem("pp_guest","1"); } catch(e) {}
     if(DB) {
       var gkey = userKey(newGuest);
-      DB.ref("users/"+gkey).set({ username: newGuest, password: "", groups: [], emoji: "🎯" });
+      DB.ref("users/"+gkey).set({ username: newGuest, password: "", groups: [], emoji: "🎯", lastActive: Date.now(), createdAt: Date.now() });
     }
     SC.screen = "home";
     draw();
