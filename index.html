@@ -1817,8 +1817,63 @@ function renderHub() {
     if(clickable) h += ' onclick="window.location.href=\''+destUrl+'\'"';
     h += '><div class="pool-card-inner">';
     h += '<div class="pool-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
+    var myName = SC.currentUser ? SC.currentUser.username : null;
+    // Compute per-pool ranking from picks scores stored in data
+    var poolPicksData = (data[pool.id]||{}).picks || {};
+    var poolScoresData = (data[pool.id]||{}).scores || {};
+    var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
+    // Rank players by their stored score for this pool
+    var poolScores = [];
+    (g.players||[]).forEach(function(p){
+      var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
+      poolScores.push({name:p, pts:pts});
+    });
+    poolScores.sort(function(a,b){
+      if(a.pts===null && b.pts===null) return 0;
+      if(a.pts===null) return 1;
+      if(b.pts===null) return -1;
+      return b.pts - a.pts;
+    });
+    var myPoolRank = null, myPoolPts = null;
+    for(var _pi=0;_pi<poolScores.length;_pi++){
+      if(poolScores[_pi].name===myName){
+        myPoolRank = _pi+1;
+        myPoolPts = poolScores[_pi].pts;
+        break;
+      }
+    }
+    // Fall back to season finish if pool scores not available
+    var myFinish = null;
+    for(var _si=0;_si<standings.length;_si++){
+      if(standings[_si].name===myName){ myFinish=standings[_si].finishes[pool.id]||null; break; }
+    }
     h += '<div class="pool-info"><div class="pool-name">'+x(pool.name)+'</div>';
-    h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div></div>';
+    h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div>';
+    if(myName) {
+      if(status==="complete" && myFinish) {
+        var fc=myFinish===1?'#fbbf24':myFinish===2?'#94a3b8':'#b45309';
+        var fPts=myFinish===1?4:myFinish===2?2:1;
+        h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
+        h += '<span style="font-size:9px;font-weight:700;color:'+fc+'">'+_plOrd(myFinish)+'</span>';
+        h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
+        h += '<span style="font-size:9px;color:#94a3b8">+'+fPts+' pts</span>';
+        h += '</div>';
+      } else if((status==="open"||status==="locked") && myPoolRank!==null && myPoolPts!==null) {
+        var rc2=myPoolRank===1?'#fbbf24':myPoolRank===2?'#94a3b8':myPoolRank===3?'#b45309':'#475569';
+        h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
+        h += '<span style="font-size:9px;font-weight:700;color:'+rc2+'">'+_plOrd(myPoolRank)+'</span>';
+        h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
+        h += '<span style="font-size:9px;color:#94a3b8">'+myPoolPts+' pts</span>';
+        h += '</div>';
+      } else if(status==="open"||status==="locked") {
+        var poolPicks2 = poolPicksData[myName];
+        var hasPicks = poolPicks2 !== undefined && poolPicks2 !== null;
+        h += '<div style="margin-top:3px">';
+        h += hasPicks ? '<span style="font-size:9px;color:#6ee7b7">✓ Picks in</span>' : '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
+        h += '</div>';
+      }
+    }
+    h += '</div>';
     h += '<div class="pool-right">';
     if(status==="open")         h+='<span class="status-pill pill-open">Open</span>';
     else if(status==="locked")  h+='<span class="status-pill pill-locked">Locked</span>';
@@ -1852,7 +1907,7 @@ function renderHub() {
   // Group search
   h += '<div class="section-label">Find a Group</div>';
   h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search" placeholder="Search by group name or code..." autocomplete="off"></div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Code</th><th>Players</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
+  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Players</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
 
   h += '</div>';
   render(h);
@@ -2581,11 +2636,10 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   }
   var h = "";
   filtered.forEach(function(g){
-    var playerList = (g.players||[]).slice(0,3).join(", ")+(g.players&&g.players.length>3?" +":"");
+    var playerCount = (g.players||[]).length;
     h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
     h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
-    h += '<td class="group-code-cell">'+x(g.id)+'</td>';
-    h += '<td>'+x(playerList)+'</td>';
+    h += '<td style="color:#64748b;font-size:11px">'+playerCount+' player'+(playerCount===1?'':'s')+'</td>';
     h += '<td><span class="join-link">Join &#8250;</span></td></tr>';
   });
   tbody.innerHTML = h;
