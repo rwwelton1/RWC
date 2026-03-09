@@ -2058,6 +2058,15 @@ function renderAdmin() {
   h += '<div id="trivia-reset-msg" style="font-size:11px;min-height:16px;color:#6ee7b7"></div>';
   h += '</div>';
 
+  h += '<div class="section-label">Group Admins</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Select a group to manage who has admin access.</div>';
+  h += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+  h += '<select id="group-admin-select" class="form-input" style="flex:1;padding:8px 10px;font-size:12px"><option value="">— Select a group —</option></select>';
+  h += '</div>';
+  h += '<div id="group-admin-members"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Select a group above</div></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Guest Users</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All guests found across groups and picks data. Deleting removes them permanently.</div>';
@@ -2139,6 +2148,27 @@ function renderAdmin() {
     });
   });
 
+  // Load Group Admins selector
+  loadAllGroups(function(groups){
+    var sel = document.getElementById("group-admin-select");
+    if(!sel) return;
+    groups.sort(function(a,b){ return (a.name||"").localeCompare(b.name||""); });
+    groups.forEach(function(g){
+      var opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = (g.name||g.id) + " (" + g.id + ")";
+      sel.appendChild(opt);
+    });
+    sel.addEventListener("change", function(){
+      var gid = this.value;
+      var container = document.getElementById("group-admin-members");
+      if(!gid){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:8px">Select a group above</div>'; return; }
+      var group = groups.find(function(g){ return g.id===gid; });
+      if(!group){ container.innerHTML='<div style="color:#334155;font-size:11px">Group not found</div>'; return; }
+      renderGroupAdminMembers(group, container);
+    });
+  });
+
   // Load guests
   loadAdminGuests("");
   var gs = document.getElementById("guest-search");
@@ -2174,6 +2204,62 @@ function renderAdmin() {
 }
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────────────────
+function renderGroupAdminMembers(group, container) {
+  var players = group.players || [];
+  if(!players.length){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:8px">No members in this group</div>'; return; }
+  var h = '';
+  players.forEach(function(player){
+    var isCreator = player === group.createdBy;
+    var hasAdmin = (group.adminUsers||[]).indexOf(player) >= 0 || isCreator;
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #0f1923">';
+    h += '<div style="flex:1;font-size:12px;color:#e2e8f0">🎯 '+x(player)+(isCreator?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+'</div>';
+    if(hasAdmin){
+      h += '<button data-ga-revoke="'+x(player)+'" data-ga-gid="'+x(group.id)+'" style="font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.18);color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">⚡ Admin</button>';
+    } else {
+      h += '<button data-ga-grant="'+x(player)+'" data-ga-gid="'+x(group.id)+'" style="font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">⚡</button>';
+    }
+    h += '</div>';
+  });
+  container.innerHTML = h;
+
+  container.querySelectorAll("[data-ga-grant]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-ga-grant");
+      var gid = this.getAttribute("data-ga-gid");
+      if(!DB) return;
+      DB.ref("groups/"+gid+"/adminUsers").once("value", function(sn){
+        var adminUsers = (sn.val()||[]).slice();
+        if(adminUsers.indexOf(player)<0) adminUsers.push(player);
+        DB.ref("groups/"+gid+"/adminUsers").set(adminUsers, function(err){
+          if(err){ toast("Error"); return; }
+          group.adminUsers = adminUsers;
+          toast(player+" is now admin of "+group.name+" ✓");
+          renderGroupAdminMembers(group, container);
+        });
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-ga-revoke]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-ga-revoke");
+      var gid = this.getAttribute("data-ga-gid");
+      if(player===group.createdBy){ toast("Can't revoke the group creator"); return; }
+      if(!confirm("Revoke admin for "+player+" in "+group.name+"?")) return;
+      if(!DB) return;
+      DB.ref("groups/"+gid+"/adminUsers").once("value", function(sn){
+        var adminUsers = (sn.val()||[]).filter(function(u){ return u!==player; });
+        DB.ref("groups/"+gid+"/adminUsers").set(adminUsers, function(err){
+          if(err){ toast("Error"); return; }
+          group.adminUsers = adminUsers;
+          toast(player+" admin access revoked");
+          renderGroupAdminMembers(group, container);
+        });
+      });
+    });
+  });
+}
+
 function loadAdminGuests(q) {
   var list = document.getElementById("admin-guests-list");
   if(!list) return;
