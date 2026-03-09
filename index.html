@@ -518,6 +518,8 @@ function createGroup(name, adminPw, pools, cb) {
     id: id,
     name: name,
     adminPw: adminPw,
+    createdBy: SC.currentUser ? SC.currentUser.username : null,
+    adminUsers: SC.currentUser ? [SC.currentUser.username] : [],
     players: SC.currentUser ? [SC.currentUser.username] : [],
     pools: pools,
     data: { statuses:{}, results:{} }
@@ -529,6 +531,21 @@ function createGroup(name, adminPw, pools, cb) {
     });
   } else {
     cb(null, "No database connection.");
+  }
+}
+
+function isGroupAdmin(group) {
+  if(!SC.currentUser) return false;
+  var u = SC.currentUser.username;
+  var adminUsers = group.adminUsers || [];
+  return adminUsers.indexOf(u) >= 0 || group.createdBy === u;
+}
+
+function checkGroupAdmin(group) {
+  if(isGroupAdmin(group)) {
+    SC.groupAdmin = true;
+    SC.isAdmin = true;
+    SC.showGroupSettings = true;
   }
 }
 
@@ -1298,6 +1315,7 @@ function joinGroupSilent(groupId) {
     SC.group.data = group.data || {statuses:{},results:{}};
     SC.isAdmin = false; SC.isMaster = false;
     SC.groupAdmin = false; SC.showGroupSettings = false;
+    checkGroupAdmin(group);
     SC.screen = "hub";
     saveLastGroup(group.id);
     subscribeGroup(group.id);
@@ -1529,6 +1547,7 @@ function joinGroup(code) {
     SC.group = group;
     SC.group.data = group.data || {statuses:{},results:{}};
     SC.groupAdmin = false; SC.showGroupSettings = false;
+    if(!SC.isMaster) checkGroupAdmin(group);
     SC.screen = "hub";
     SC.error = "";
     saveLastGroup(group.id);
@@ -1603,6 +1622,7 @@ function submitCreate() {
     }
     SC.group = group;
     SC.isAdmin = true;
+    SC.groupAdmin = true; SC.showGroupSettings = true;
     SC.screen = "created";
     saveLastGroup(group.id);
     subscribeGroup(group.id);
@@ -1730,6 +1750,31 @@ function renderHub() {
     });
     h += '</div>';
 
+    // Manage Admins section
+    var isCreator = SC.currentUser && (g.createdBy === SC.currentUser.username || (g.adminUsers||[]).indexOf(SC.currentUser.username) >= 0);
+    if(isCreator) {
+      h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
+      h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">&#9889; Admin Access</div>';
+      h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Grant or revoke admin access for group members.</div>';
+      (g.players||[]).forEach(function(player){
+        var isMe = SC.currentUser && player === SC.currentUser.username;
+        var isCreatorPlayer = player === g.createdBy;
+        var hasAdmin = (g.adminUsers||[]).indexOf(player) >= 0 || isCreatorPlayer;
+        var pEm = playerEmoji(player);
+        h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #07090f">';
+        h += '<div style="flex:1;font-size:12px;color:#e2e8f0">'+pEm+' '+x(player)+(isCreatorPlayer?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</div>';
+        if(!isCreatorPlayer) {
+          if(hasAdmin) {
+            h += '<button class="btn btn-ghost btn-sm" data-revoke-admin="'+x(player)+'" style="font-size:10px;padding:3px 8px;border-color:rgba(239,68,68,.3);color:#fca5a5">Revoke</button>';
+          } else {
+            h += '<button class="btn btn-green btn-sm" data-grant-admin="'+x(player)+'" style="font-size:10px;padding:3px 8px">Grant</button>';
+          }
+        }
+        h += '</div>';
+      });
+      h += '</div>';
+    }
+
     h += '</div>';
   }
 
@@ -1852,6 +1897,39 @@ function renderHub() {
       var idx=SC.group.pools.indexOf(pid);
       if(idx>=0) SC.group.pools.splice(idx,1); else SC.group.pools.push(pid);
       draw();
+    });
+  });
+
+  // Grant/Revoke admin buttons
+  document.querySelectorAll("[data-grant-admin]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-grant-admin");
+      if(!DB) { toast("Firebase unavailable"); return; }
+      var gid = SC.group.id;
+      var adminUsers = (SC.group.adminUsers || []).slice();
+      if(adminUsers.indexOf(player) < 0) adminUsers.push(player);
+      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+        if(err){ toast("Error granting admin"); return; }
+        SC.group.adminUsers = adminUsers;
+        toast(player + " is now an admin ✓");
+        draw();
+      });
+    });
+  });
+
+  document.querySelectorAll("[data-revoke-admin]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-revoke-admin");
+      if(!confirm("Revoke admin access for " + player + "?")) return;
+      if(!DB) { toast("Firebase unavailable"); return; }
+      var gid = SC.group.id;
+      var adminUsers = (SC.group.adminUsers || []).filter(function(u){ return u !== player; });
+      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+        if(err){ toast("Error revoking admin"); return; }
+        SC.group.adminUsers = adminUsers;
+        toast(player + " admin access revoked");
+        draw();
+      });
     });
   });
 
