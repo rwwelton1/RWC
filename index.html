@@ -441,14 +441,43 @@ function saveGuest(name){
 function authSignup(username, password, cb) {
   if(!username || username.length < 2) { cb("Username must be at least 2 characters"); return; }
   if(!password || password.length < 4) { cb("Password must be at least 4 characters"); return; }
-  var key = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  if(key !== username.toLowerCase()) { cb("Username can only contain letters, numbers and underscores"); return; }
+  var newKey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+  if(newKey !== username.toLowerCase()) { cb("Username can only contain letters, numbers and underscores"); return; }
   if(!DB) { cb("No database connection"); return; }
-  DB.ref("users/"+key).once("value", function(sn){
-    if(sn.val()) { cb("Username already taken — choose another"); return; }
-    DB.ref("users/"+key).set({ username: username, password: password, groups: [], emoji: "🎯" }, function(err){
-      if(err) cb("Failed to create account — check connection");
-      else cb(null, { username: username, groups: [], emoji: "🎯" });
+  // Check new username isn't taken by someone else
+  DB.ref("users/"+newKey).once("value", function(sn){
+    var existing = sn.val();
+    var currentKey = SC.currentUser ? userKey(SC.currentUser.username) : null;
+    // Allow if slot is empty OR it's the same user's own slot
+    if(existing && newKey !== currentKey) { cb("Username already taken — choose another"); return; }
+    if(!SC.currentUser){ cb("No current session"); return; }
+    var oldKey = userKey(SC.currentUser.username);
+    // Read current user data to carry over groups etc
+    DB.ref("users/"+oldKey).once("value", function(oldSn){
+      var oldData = oldSn.val()||{};
+      var newData = { username: username, password: password, groups: oldData.groups||[], emoji: oldData.emoji||"🎯" };
+      DB.ref("users/"+newKey).set(newData, function(err){
+        if(err){ cb("Failed to save — check connection"); return; }
+        // Delete old key if username changed
+        if(oldKey !== newKey) DB.ref("users/"+oldKey).remove();
+        // Update group player lists
+        var namesToMatch = [SC.currentUser.username, oldKey].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
+        DB.ref("groups").once("value", function(gsn){
+          var groups = gsn.val()||{};
+          var updates = {};
+          Object.values(groups).forEach(function(g){
+            if(!g||!g.players) return;
+            var idx = -1;
+            for(var i=0;i<namesToMatch.length;i++){ idx=g.players.indexOf(namesToMatch[i]); if(idx>=0) break; }
+            if(idx>=0){ var np=g.players.slice(); np[idx]=username; updates["groups/"+g.id+"/players"]=np; }
+          });
+          var finish = function(){
+            try{ localStorage.removeItem("pp_guest"); }catch(e){}
+            cb(null, { username: username, groups: newData.groups, emoji: newData.emoji });
+          };
+          if(Object.keys(updates).length>0) DB.ref().update(updates, finish); else finish();
+        });
+      });
     });
   });
 }
@@ -596,9 +625,10 @@ function topbar(showBack) {
     var em = SC.currentUser.emoji || '&#127919;';
     var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
     h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
-    if(isGuest()) {
-      h += '<button class="btn-topbar-login" id="btn-topbar-login">Log In</button>';
-      h += '<button class="btn-topbar-signup" id="btn-topbar-signup">Sign Up</button>';
+    var _hasPassword = true;
+    try{ _hasPassword = !localStorage.getItem("pp_guest"); }catch(e){}
+    if(!_hasPassword) {
+      h += '<button class="btn-topbar-signup" id="btn-topbar-signup" style="font-size:10px;padding:4px 10px;border-radius:8px;background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.3);color:#a5b4fc;cursor:pointer;font-family:inherit;font-weight:600">Set Up Account</button>';
     }
   }
   if(SC.isMaster && SC.screen!=="admin") {
@@ -716,11 +746,11 @@ function showAuthModal(tab) {
       '</div>' +
       '<div class="auth-card">' +
         '<div class="auth-field"><label class="auth-label">Username</label>' +
-        '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false"></div>' +
+        '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>' +
         '<div class="auth-field"><label class="auth-label">Password</label>' +
-        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="your password" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
+        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="'+(isLogin?"your password":"choose a password")+'" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
         '<div class="auth-err" id="modal-auth-err"></div>' +
-        '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Create Account")+'</button>' +
+        '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Save Account")+'</button>' +
       '</div></div>';
     document.body.appendChild(el);
 
@@ -762,24 +792,14 @@ function showAuthModal(tab) {
       } else {
         authSignup(uname, pw, function(err, user){
           submitBtn.disabled = false;
-          submitBtn.textContent = "Create Account";
+          submitBtn.textContent = "Save";
           if(err){ errEl.textContent = err; return; }
-          var guestName = null;
-          try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
-          var finishSignup = function() {
-            try { localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); } catch(e) {}
-            SC.currentUser = user;
-            saveSession(user.username, user.emoji);
-            el.remove();
-            SC.screen = "profile";
-            toast("Welcome to PoolPlay, "+user.username+"!");
-            draw();
-          };
-          if(guestName) {
-            migrateGuestToUser(guestName, user.username, finishSignup);
-          } else {
-            finishSignup();
-          }
+          SC.currentUser = user;
+          saveSession(user.username, user.emoji);
+          el.remove();
+          SC.screen = "profile";
+          toast("Account set up as "+user.username+" ✓");
+          draw();
         });
       }
     }
@@ -803,12 +823,12 @@ function renderAuth() {
   h += '<button class="auth-tab'+(!isLogin?" active":"")+'" id="tab-signup">Sign Up</button>';
   h += '</div>';
   h += '<div class="auth-card">';
-  h += '<div class="auth-field"><label class="auth-label">Username</label>';
-  h += '<input class="auth-input" id="auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false"></div>';
+  h += '<div class="auth-field"><label class="auth-label">'+(isLogin?"Username":"Choose a username")+'</label>';
+  h += '<input class="auth-input" id="auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>';
   h += '<div class="auth-field"><label class="auth-label">Password</label>';
   h += '<input class="auth-input" id="auth-password" type="password" placeholder="your password" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>';
   h += '<div class="auth-err" id="auth-err"></div>';
-  h += '<button class="auth-btn" id="auth-submit">'+(isLogin?"Log In":"Create Account")+'</button>';
+  h += '<button class="auth-btn" id="auth-submit">'+(isLogin?"Log In":"Save Account")+'</button>';
   h += '</div></div></div>';
 
   document.getElementById("root").innerHTML = h;
@@ -850,24 +870,13 @@ function renderAuth() {
     } else {
       authSignup(uname, pw, function(err, user){
         submitBtn.disabled = false;
-        submitBtn.textContent = "Create Account";
+        submitBtn.textContent = "Save";
         if(err){ errEl.textContent = err; return; }
-        // Migrate any guest groups to the new account
-        var guestName = null;
-        try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
-        var finishSignup = function() {
-          try { localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); } catch(e) {}
-          SC.currentUser = user;
-          saveSession(user.username, user.emoji);
-          SC.screen = "profile";
-          toast("Welcome to PoolPlay, "+user.username+"!");
-          draw();
-        };
-        if(guestName) {
-          migrateGuestToUser(guestName, user.username, finishSignup);
-        } else {
-          finishSignup();
-        }
+        SC.currentUser = user;
+        saveSession(user.username, user.emoji);
+        SC.screen = "profile";
+        toast("Account set up as "+user.username+" ✓");
+        draw();
       });
     }
   }
@@ -2981,47 +2990,33 @@ function subscribeGlobalStatuses() {
 (function(){
   if(DB) subscribeGlobalStatuses();
 
-  // Single source of truth: pp_guest_name for guests, pp_user for real users
-  var guestName = null;
-  try { guestName = localStorage.getItem("pp_guest_name"); } catch(e) {}
-
-  // Always ensure a guest name exists
-  if(!guestName) {
-    guestName = generateGuestName();
-    try { localStorage.setItem("pp_guest_name", guestName); } catch(e) {}
-  }
-
   var savedUser = loadSession();
-  // Real user = has a saved session AND is not flagged as guest
-  // Extra safety: if pp_user === pp_guest_name they haven't upgraded yet
-  var _guestNameCheck = null; try{ _guestNameCheck = localStorage.getItem("pp_guest_name"); }catch(e){}
-  var isRealUser = savedUser && !isGuest() && (savedUser !== _guestNameCheck);
+  var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
 
-  if(isRealUser) {
-    // Show a plain splash while Firebase loads — no flash to home screen
-    var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
-    SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji, guest: false };
+  if(savedUser) {
+    // Returning user — load from Firebase
+    SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji };
     SC.screen = "profile";
     document.getElementById("root").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:80vh"><div style="font-size:13px;color:#334155">Loading...</div></div>';
-
     var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
     if(DB) {
       DB.ref("users/"+key).once("value", function(sn){
         var u = sn.val();
-        if(u) {
-          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯", guest: false };
-        }
+        if(u) SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
         draw();
       });
-    } else {
-      draw();
-    }
+    } else { draw(); }
   } else {
-    // Guest — always use the persisted guest name
-    saveGuest(guestName);
-    SC.currentUser = { username: guestName, groups: [], emoji: "🎯", guest: true };
-    var _lastScreen = null; try{ _lastScreen = localStorage.getItem("pp_last_screen"); }catch(e){}
-    SC.screen = (_lastScreen === "profile") ? "profile" : "home";
+    // New visitor — auto-create a Guest#### account in Firebase
+    var newGuest = generateGuestName();
+    SC.currentUser = { username: newGuest, groups: [], emoji: "🎯" };
+    saveSession(newGuest, "🎯");
+    try { localStorage.setItem("pp_guest","1"); } catch(e) {}
+    if(DB) {
+      var gkey = userKey(newGuest);
+      DB.ref("users/"+gkey).set({ username: newGuest, password: "", groups: [], emoji: "🎯" });
+    }
+    SC.screen = "home";
     draw();
   }
 })();
@@ -3205,9 +3200,9 @@ function executeCopy(targetUser){
   <div style="background:#0d1117;border:1px solid #1e2a3a;border-radius:14px 14px 0 0;width:100%;max-width:480px;padding:24px 20px 40px">
     <div style="width:36px;height:4px;background:#1e2a3a;border-radius:2px;margin:0 auto 20px"></div>
     <div style="font-size:28px;text-align:center;margin-bottom:10px">🏆</div>
-    <div style="font-size:17px;font-weight:700;color:#f1f5f9;text-align:center;margin-bottom:6px">Create an account</div>
-    <div style="font-size:13px;color:#475569;text-align:center;margin-bottom:24px">You need an account to join groups, submit picks, and compete on the leaderboard.</div>
-    <button id="guest-prompt-signup" style="width:100%;padding:13px;border-radius:11px;font-size:14px;font-weight:700;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;border:none;font-family:inherit;cursor:pointer;margin-bottom:10px">Sign Up</button>
+    <div style="font-size:17px;font-weight:700;color:#f1f5f9;text-align:center;margin-bottom:6px">Set up your account</div>
+    <div style="font-size:13px;color:#475569;text-align:center;margin-bottom:24px">Choose a username and password so you can log back in on any device.</div>
+    <button id="guest-prompt-signup" style="width:100%;padding:13px;border-radius:11px;font-size:14px;font-weight:700;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;border:none;font-family:inherit;cursor:pointer;margin-bottom:10px">Set Up Account</button>
     <button id="guest-prompt-close" style="width:100%;padding:13px;border-radius:11px;font-size:14px;font-weight:600;background:none;border:1px solid #1e2a3a;color:#475569;font-family:inherit;cursor:pointer">Maybe Later</button>
   </div>
 </div>
