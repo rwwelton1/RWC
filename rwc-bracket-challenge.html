@@ -487,73 +487,77 @@ function fetchScores(){
 }
 function parseESPN(data){
   var events=data.events||[];
-  // Build a flat team name lookup for our conferences
-  var teamLookup={};
+  // Build exact lookup: normalized team name -> {cid, seed, name}
+  var exactLookup={};
   CORD.forEach(function(cid){
     C[cid].teams.forEach(function(t){
-      var key=t.n.toLowerCase().replace(/[^a-z0-9]/g,"");
-      teamLookup[key]=cid;
-      // Also index abbreviation-style
-      var words=t.n.split(" ");
-      if(words.length>1)teamLookup[words[words.length-1].toLowerCase()+"_"+cid]=cid;
+      // Index every meaningful variation of the team name
+      var variations=[t.n];
+      // e.g. "N. Carolina" -> also try "north carolina", "unc"
+      var specials={"N. Carolina":["North Carolina","UNC","Tar Heels"],"Mich. State":["Michigan State","Spartans"],"Miss. State":["Mississippi State","Bulldogs","Mississippi St"],"S. Carolina":["South Carolina","Gamecocks"],"Ole Miss":["Mississippi","Rebels"],"Va. Tech":["Virginia Tech","Hokies"],"W. Virginia":["West Virginia","Mountaineers"],"Arizona St":["Arizona State","Sun Devils"],"Oklahoma St":["Oklahoma State","Cowboys"],"Kansas State":["Kansas St","Wildcats"],"Iowa State":["Iowa St","Cyclones"],"Florida St":["Florida State","Seminoles"],"NC State":["NC State","Wolfpack"],"Wake Forest":["Demon Deacons"],"Texas A&M":["Aggies"],"St. John's":["St. John's","Red Storm","Saint John"]};
+      if(specials[t.n])variations=variations.concat(specials[t.n]);
+      variations.forEach(function(v){
+        var key=v.toLowerCase().replace(/[^a-z0-9]/g,"");
+        if(!exactLookup[key])exactLookup[key]={cid:cid,seed:t.s,name:t.n};
+      });
     });
   });
-  function matchTeamConf(displayName,shortName){
-    var names=[displayName,shortName].filter(Boolean);
-    for(var ni=0;ni<names.length;ni++){
-      var s=names[ni].toLowerCase().replace(/[^a-z0-9]/g,"");
-      if(teamLookup[s])return teamLookup[s];
-      // Partial match
-      for(var cid in {acc:1,b10:1,b12:1,sec:1,be:1}){
-        for(var ti=0;ti<C[cid].teams.length;ti++){
-          var tn=C[cid].teams[ti].n.toLowerCase();
-          if(s.indexOf(tn.replace(/[^a-z0-9]/g,""))>=0||tn.replace(/[^a-z0-9]/g,"").indexOf(s)>=0)return cid;
-        }
+  function lookupTeam(espnName){
+    if(!espnName)return null;
+    var key=espnName.toLowerCase().replace(/[^a-z0-9]/g,"");
+    if(exactLookup[key])return exactLookup[key];
+    // Try matching last word (e.g. "Cardinal" for Stanford won't work, but "Hurricanes" for Miami might not either)
+    // Try each of our teams: does our name appear inside espnName or vice versa?
+    for(var cid in {acc:1,b10:1,b12:1,sec:1,be:1}){
+      for(var i=0;i<C[cid].teams.length;i++){
+        var t=C[cid].teams[i];
+        var tk=t.n.toLowerCase().replace(/[^a-z0-9]/g,"");
+        // Only match if our name fully appears in ESPN name (not partial substring accidents)
+        if(key===tk)return{cid:cid,seed:t.s,name:t.n};
+        if(key.length>=4&&tk.length>=4&&(key.indexOf(tk)===0||tk.indexOf(key)===0))return{cid:cid,seed:t.s,name:t.n};
       }
     }
     return null;
   }
-  function findSeed(cid,name){
-    var s=name.toLowerCase().replace(/[^a-z0-9]/g,"");
-    for(var i=0;i<C[cid].teams.length;i++){
-      var tn=C[cid].teams[i].n.toLowerCase().replace(/[^a-z0-9]/g,"");
-      if(s===tn||s.indexOf(tn)>=0||tn.indexOf(s)>=0)return C[cid].teams[i].s;
-    }
-    return "";
-  }
   var confGames={acc:[],b10:[],b12:[],sec:[],be:[]};
   events.forEach(function(ev){
     var comp=ev.competitions&&ev.competitions[0];if(!comp)return;
-    var competitors=comp.competitors||[];
-    if(competitors.length<2)return;
+    var competitors=comp.competitors||[];if(competitors.length<2)return;
     var homeC=competitors.find(function(c){return c.homeAway==="home";})||competitors[0];
     var awayC=competitors.find(function(c){return c.homeAway==="away";})||competitors[1];
     var homeTeam=homeC.team||{};var awayTeam=awayC.team||{};
-    // Try to match either team to our conferences
-    var cid=matchTeamConf(homeTeam.displayName,homeTeam.shortDisplayName)||matchTeamConf(awayTeam.displayName,awayTeam.shortDisplayName);
-    if(!cid)return;
-    var status=ev.status&&ev.status.type&&ev.status.type.name||"";
+    // Try multiple ESPN name fields for matching
+    var homeNames=[homeTeam.shortDisplayName,homeTeam.displayName,homeTeam.name,homeTeam.nickname].filter(Boolean);
+    var awayNames=[awayTeam.shortDisplayName,awayTeam.displayName,awayTeam.name,awayTeam.nickname].filter(Boolean);
+    var homeMatch=null,awayMatch=null;
+    for(var hi=0;hi<homeNames.length&&!homeMatch;hi++)homeMatch=lookupTeam(homeNames[hi]);
+    for(var ai=0;ai<awayNames.length&&!awayMatch;ai++)awayMatch=lookupTeam(awayNames[ai]);
+    // BOTH teams must match AND must be in the same conference
+    if(!homeMatch||!awayMatch||homeMatch.cid!==awayMatch.cid)return;
+    var cid=homeMatch.cid;
+    var status=(ev.status&&ev.status.type&&ev.status.type.name)||"";
     var statusDetail=(ev.status&&ev.status.type&&ev.status.type.shortDetail)||"";
     var isLive=status==="STATUS_IN_PROGRESS";
     var isFinal=status==="STATUS_FINAL";
     var gameStatus=isLive?"live":isFinal?"final":"upcoming";
-    var homeScore=isLive||isFinal?parseInt(homeC.score)||null:null;
-    var awayScore=isLive||isFinal?parseInt(awayC.score)||null:null;
+    var homeScore=isLive||isFinal?(homeC.score!=null?parseInt(homeC.score):null):null;
+    var awayScore=isLive||isFinal?(awayC.score!=null?parseInt(awayC.score):null):null;
     var homeWin=isFinal&&homeScore!=null&&awayScore!=null&&homeScore>awayScore;
-    var homeName=homeTeam.shortDisplayName||homeTeam.displayName||"?";
-    var awayName=awayTeam.shortDisplayName||awayTeam.displayName||"?";
     var timeStr="";
     if(gameStatus==="upcoming"&&ev.date){
       var d=new Date(ev.date);var hr=d.getHours(),mn=d.getMinutes();
       var ap=hr>=12?"PM":"AM";hr=hr%12||12;
       timeStr=hr+(mn?":"+("0"+mn).slice(-2):"")+" "+ap+" ET";
     }
-    // Get round from notes or name
-    var roundName=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||"";
+    // Round label: use conf round name if we can derive it, else ESPN note
+    var roundLabel=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||"";
+    // Strip tournament name prefix (e.g. "T. Rowe Price ACC Tournament - 1st Round" -> "1st Round")
+    var dashIdx=roundLabel.lastIndexOf(" - ");
+    if(dashIdx>=0)roundLabel=roundLabel.slice(dashIdx+3);
     confGames[cid].push({
-      round:roundName,time:timeStr,status:gameStatus,period:statusDetail,
-      topSeed:findSeed(cid,homeName),topTeam:homeName,topScore:homeScore,
-      botSeed:findSeed(cid,awayName),botTeam:awayName,botScore:awayScore,
+      round:roundLabel,time:timeStr,status:gameStatus,period:statusDetail,
+      topSeed:homeMatch.seed,topTeam:homeMatch.name,topScore:homeScore,
+      botSeed:awayMatch.seed,botTeam:awayMatch.name,botScore:awayScore,
       topWin:homeWin
     });
   });
