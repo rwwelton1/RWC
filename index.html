@@ -2957,14 +2957,13 @@ function loadAdminUsers(q) {
       return (a.username||a._key||"").localeCompare(b.username||b._key||"");
     });
     if(!users.length){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">No users found.</div>'; return; }
-    var h='<table style="width:100%;border-collapse:collapse;font-size:11px">';
-    h+='<thead><tr>';
-    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">User</th>';
-    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>';
-    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Password</th>';
-    h+='<th></th>';
-    h+='</tr></thead><tbody>';
-    users.forEach(function(u){
+
+    var registeredUsers = users.filter(function(u){ return u.password && !u._orphan; });
+    var guestUsers = users.filter(function(u){ return !u.password || u._orphan; });
+
+    function buildUserRows(arr) {
+      var h = '';
+      arr.forEach(function(u){
       var em = u.emoji||"🍺";
       var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
       // Use username if set, otherwise fall back to the Firebase key (which IS the username for guests)
@@ -2997,9 +2996,45 @@ function loadAdminUsers(q) {
       h+='<td style="padding:7px 6px;color:#334155;font-family:monospace;font-size:10px">'+x(u.password||"")+'</td>';
       h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-user="'+x(u.username||u._key)+'">Delete</button></td>';
       h+='</tr>';
-    });
-    h+='</tbody></table>';
-    list.innerHTML=h;
+      });
+      return h;
+    }
+
+    var theadHtml = '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr>'
+      +'<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">User</th>'
+      +'<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>'
+      +'<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Password</th>'
+      +'<th></th></tr></thead><tbody>';
+
+    var regHtml = registeredUsers.length
+      ? theadHtml + buildUserRows(registeredUsers)
+      : '<div style="color:#334155;font-size:11px;padding:8px">No registered users.</div>';
+
+    var guestTableHtml = guestUsers.length
+      ? theadHtml + buildUserRows(guestUsers)
+      : '<div style="color:#334155;font-size:11px;padding:8px">No guest accounts.</div>';
+
+    var finalHtml = regHtml;
+    finalHtml += '<div style="margin-top:12px;border-top:1px solid #1e2a3a;padding-top:10px">';
+    finalHtml += '<button id="toggle-guests-btn" style="display:flex;align-items:center;gap:6px;width:100%;background:transparent;border:none;cursor:pointer;padding:4px 0;font-family:inherit">';
+    finalHtml += '<span id="toggle-guests-label" style="font-size:9px;color:#475569;font-weight:700;letter-spacing:.08em;text-transform:uppercase">&#9660; Guests ('+guestUsers.length+')</span>';
+    finalHtml += '</button>';
+    finalHtml += '<div id="guests-list" style="display:none;margin-top:8px">'+guestTableHtml+'</div>';
+    finalHtml += '</div>';
+
+    list.innerHTML = finalHtml;
+
+    var toggleBtn = document.getElementById('toggle-guests-btn');
+    var guestsListEl = document.getElementById('guests-list');
+    var toggleLabel = document.getElementById('toggle-guests-label');
+    if(toggleBtn && guestsListEl) {
+      toggleBtn.addEventListener('click', function(){
+        var open = guestsListEl.style.display !== 'none';
+        guestsListEl.style.display = open ? 'none' : 'block';
+        if(toggleLabel) toggleLabel.textContent = (open ? '▼' : '▲') + ' Guests ('+guestUsers.length+')';
+      });
+    }
+
     list.querySelectorAll("[data-del-user]").forEach(function(btn){
       btn.addEventListener("click", function(){
         var uname = this.getAttribute("data-del-user");
