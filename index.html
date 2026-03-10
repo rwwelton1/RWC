@@ -2544,6 +2544,20 @@ function renderAdmin() {
   h += '<div id="group-admin-members"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Select a group above</div></div>';
   h += '</div>';
 
+  h += '<div class="section-label">Merge Groups</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Merge all players from one group into another. Duplicate players (same username) are deduplicated. The source group is deleted after merge.</div>';
+  h += '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
+  h += '<div style="flex:1;min-width:120px"><div style="font-size:9px;color:#475569;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Source (will be deleted)</div>';
+  h += '<select id="merge-group-src" class="form-input" style="width:100%;padding:8px 10px;font-size:12px"><option value="">— Select —</option></select></div>';
+  h += '<div style="flex:1;min-width:120px"><div style="font-size:9px;color:#475569;margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em">Destination (kept)</div>';
+  h += '<select id="merge-group-dst" class="form-input" style="width:100%;padding:8px 10px;font-size:12px"><option value="">— Select —</option></select></div>';
+  h += '</div>';
+  h += '<div id="merge-group-preview" style="font-size:10px;color:#475569;min-height:16px;margin-bottom:8px"></div>';
+  h += '<button class="btn btn-ghost" id="btn-merge-groups" style="padding:8px 14px;font-size:12px;border-color:rgba(251,191,36,.3);color:#fbbf24">&#8680; Merge Groups</button>';
+  h += '<div id="merge-group-msg" style="font-size:11px;min-height:16px;margin-top:8px;color:#6ee7b7"></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Maintenance</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Guest accounts (no password) inactive for 30+ days are automatically purged. You can also run it manually.</div>';
@@ -2604,6 +2618,89 @@ function renderAdmin() {
         buildResultsForm(allPlayers, sn.val()||{});
       });
     } else buildResultsForm(allPlayers, {});
+
+    // Populate merge group dropdowns
+    var srcSel = document.getElementById("merge-group-src");
+    var dstSel = document.getElementById("merge-group-dst");
+    if(srcSel && dstSel) {
+      var sorted = groups.slice().sort(function(a,b){ return (a.name||a.id).localeCompare(b.name||b.id); });
+      sorted.forEach(function(g){
+        var opt = '<option value="'+x(g.id)+'">'+x(g.name||g.id)+' ('+x(g.id)+') — '+(g.players||[]).length+' players</option>';
+        srcSel.innerHTML += opt;
+        dstSel.innerHTML += opt;
+      });
+
+      function updatePreview() {
+        var srcId = srcSel.value, dstId = dstSel.value;
+        var prev = document.getElementById("merge-group-preview");
+        if(!prev) return;
+        if(!srcId || !dstId || srcId===dstId){ prev.textContent = srcId===dstId && srcId ? "⚠ Source and destination must be different" : ""; return; }
+        var src = groups.find(function(g){ return g.id===srcId; });
+        var dst = groups.find(function(g){ return g.id===dstId; });
+        if(!src||!dst){ prev.textContent=""; return; }
+        var srcPlayers = src.players||[];
+        var dstPlayers = dst.players||[];
+        var dupes = srcPlayers.filter(function(p){ return dstPlayers.indexOf(p)>=0; });
+        var newPlayers = srcPlayers.filter(function(p){ return dstPlayers.indexOf(p)<0; });
+        prev.innerHTML = '➕ '+newPlayers.length+' players will be added to <b style="color:#f1f5f9">'+x(dst.name||dst.id)+'</b>'
+          + (dupes.length ? ' &nbsp;·&nbsp; <span style="color:#fbbf24">'+dupes.length+' duplicate'+(dupes.length>1?'s':'')+' skipped ('+dupes.map(x).join(", ")+')</span>' : '')
+          + ' &nbsp;·&nbsp; <span style="color:#fca5a5">'+x(src.name||src.id)+' deleted</span>';
+      }
+
+      srcSel.addEventListener("change", updatePreview);
+      dstSel.addEventListener("change", updatePreview);
+
+      document.getElementById("btn-merge-groups").addEventListener("click", function(){
+        var srcId = srcSel.value, dstId = dstSel.value;
+        var msgEl = document.getElementById("merge-group-msg");
+        if(!srcId||!dstId){ msgEl.style.color="#fca5a5"; msgEl.textContent="Select both groups."; return; }
+        if(srcId===dstId){ msgEl.style.color="#fca5a5"; msgEl.textContent="Source and destination must be different."; return; }
+        var src = groups.find(function(g){ return g.id===srcId; });
+        var dst = groups.find(function(g){ return g.id===dstId; });
+        if(!src||!dst){ msgEl.style.color="#fca5a5"; msgEl.textContent="Could not find groups."; return; }
+        if(!confirm('Merge "'+( src.name||src.id)+'" into "'+(dst.name||dst.id)+'"?\n\nDuplicate players will be skipped. "'+( src.name||src.id)+'" will be permanently deleted.\n\nThis cannot be undone.')) return;
+        msgEl.style.color="#94a3b8"; msgEl.textContent="Merging...";
+        var srcPlayers = src.players||[];
+        var dstPlayers = (dst.players||[]).slice();
+        // Deduplicate — only add players not already in destination
+        srcPlayers.forEach(function(p){ if(dstPlayers.indexOf(p)<0) dstPlayers.push(p); });
+        if(!DB){ msgEl.style.color="#fca5a5"; msgEl.textContent="Firebase unavailable."; return; }
+        // Update destination players, then delete source group
+        DB.ref("groups/"+dstId+"/players").set(dstPlayers, function(err){
+          if(err){ msgEl.style.color="#fca5a5"; msgEl.textContent="Error updating destination: "+err.message; return; }
+          // Update each merged player's groups list in users node
+          var userUpdates = {};
+          srcPlayers.forEach(function(pname){
+            if(dstPlayers.indexOf(pname)<0) return; // shouldn't happen
+            var pkey = pname.toLowerCase().replace(/[^a-z0-9_]/g,"");
+            userUpdates[pkey] = pname;
+          });
+          // For each player from src, add dstId to their groups and remove srcId
+          var playerKeys = Object.keys(userUpdates);
+          var done = 0;
+          if(!playerKeys.length) {
+            DB.ref("groups/"+srcId).remove(function(){ msgEl.style.color="#6ee7b7"; msgEl.textContent="✓ Merged successfully. Refreshing..."; setTimeout(function(){ draw(); }, 1200); });
+            return;
+          }
+          playerKeys.forEach(function(pkey){
+            DB.ref("users/"+pkey+"/groups").once("value", function(sn){
+              var ugroups = sn.val()||[];
+              if(ugroups.indexOf(srcId)>=0) ugroups.splice(ugroups.indexOf(srcId),1);
+              if(ugroups.indexOf(dstId)<0) ugroups.push(dstId);
+              DB.ref("users/"+pkey+"/groups").set(ugroups, function(){
+                done++;
+                if(done===playerKeys.length){
+                  DB.ref("groups/"+srcId).remove(function(){
+                    msgEl.style.color="#6ee7b7"; msgEl.textContent="✓ Merged successfully. Refreshing...";
+                    setTimeout(function(){ draw(); }, 1200);
+                  });
+                }
+              });
+            });
+          });
+        });
+      });
+    }
   });
 
   // Purge inactive guests
