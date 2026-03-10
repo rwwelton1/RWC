@@ -153,6 +153,8 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none}
 .qe-btn.set{border-color:rgba(16,185,129,.4);color:#6ee7b7;background:rgba(16,185,129,.08)}
 .qe-btn:active{opacity:.7}
 #copy-modal{position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:300;display:none;align-items:flex-end;justify-content:center}
+#copy-modal.open{display:flex}
+#pool-browser-modal{position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:300;display:none;align-items:flex-end;justify-content:center}
 #pool-browser-modal.open{display:flex}
 .copy-sheet{background:#0d1117;border:1px solid #1e2a3a;border-radius:14px 14px 0 0;width:100%;max-width:480px;padding:20px 16px 32px;max-height:85vh;overflow-y:auto}
 .copy-handle{width:36px;height:4px;background:#1e2a3a;border-radius:2px;margin:0 auto 16px}
@@ -493,7 +495,11 @@ function saveTeams(){if(!DB)return;var snap={};for(var cid in C)snap[cid]=C[cid]
 
 // Pool browser — load another group’s picks in read-only view
 var _viewListeners=[];
+var _step4PicksRef=null, _step4LockedRef=null;
 function switchViewGroup(gid, gname, gplayers){
+// Detach original step4 pick/locked listeners
+if(_step4PicksRef){_step4PicksRef.off();_step4PicksRef=null;}
+if(_step4LockedRef){_step4LockedRef.off();_step4LockedRef=null;}
 // Detach previous view listeners
 _viewListeners.forEach(function(ref){ref.off();});
 _viewListeners=[];
@@ -502,7 +508,7 @@ ST.viewGroupName=gname;
 ST.viewGroupPlayers=gplayers;
 ST.viewUserByConf={};
 var vBase=gid?“groups/”+gid+”/data/rwc”:“rwc2026”;
-// Listen to that group’s picks & locked
+// Listen to that group’s picks & locked (read-only)
 var r1=DB.ref(vBase+”/picks”);
 r1.on(“value”,function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
 _viewListeners.push(r1);
@@ -555,10 +561,10 @@ return row;
 }
 
 function boot(){if(!DB){draw();return;}
-function step1(){if(!GROUP_ID){step2();return;}DB.ref(“groups/”+GROUP_ID).once(“value”,function(sn){var g=sn.val();if(g&&g.players&&g.players.length)PARTS=g.players;if(g&&g.adminPw)GROUP_ADMIN_PW=g.adminPw;step2();},function(){step2();});}
+function step1(){if(!GROUP_ID){step2();return;}DB.ref(“groups/”+GROUP_ID).once(“value”,function(sn){var g=sn.val();if(g&&g.players&&g.players.length)PARTS=g.players;if(g&&g.adminPw)GROUP_ADMIN_PW=g.adminPw;if(g&&g.name)ST.viewGroupName=g.name;step2();},function(){step2();});}
 function step2(){var players=PARTS.slice();if(!players.length){step3();return;}var done=0,total=players.length;players.forEach(function(p){DB.ref(“users/”+ukey(p)+”/emoji”).once(“value”,function(sn){if(sn.val())_EM[p]=sn.val();done++;if(done===total)step3();},function(){done++;if(done===total)step3();});});}
 function step3(){DB.ref(BASE+”/settings/teams”).once(“value”,function(sn){var saved=sn.val();if(saved){for(var cid in saved){if(!C[cid])continue;var arr=saved[cid];for(var i=0;i<arr.length;i++){for(var j=0;j<C[cid].teams.length;j++){if(C[cid].teams[j].n===arr[i].n){C[cid].teams[j].s=arr[i].s;C[cid].teams[j].r=arr[i].r;break;}}}C[cid].teams.sort(function(a,b){return a.s-b.s;});}}step4();},function(){step4();});}
-function step4(){DB.ref(BASE+”/picks”).on(“value”,function(sn){ST.picks=sn.val()||{};var _s={},_m={};PARTS.forEach(function(p){_s[p]=playerScore(p);_m[p]=playerMax(p);});DB.ref(BASE+”/scores”).set(_s);DB.ref(BASE+”/maxScores”).set(_m);DB.ref(BASE+”/grandMax”).set(grandMax());draw();_restoreScroll();});DB.ref(BASE+”/locked”).on(“value”,function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});DB.ref(RESULTS_BASE+”/results”).on(“value”,function(sn){var oldRanks={};PARTS.forEach(function(p){oldRanks[p]=playerScore(p);});ST.results=sn.val()||{};var sorted=PARTS.slice().sort(function(a,b){return playerScore(b)-playerScore(a);});var newRanks={};sorted.forEach(function(p,i){newRanks[p]=i+1;});ST.prevRanks=newRanks;var scoreSnap={},maxSnap={};PARTS.forEach(function(p){scoreSnap[p]=playerScore(p);maxSnap[p]=playerMax(p);});if(DB&&Object.keys(ST.results).length>0){DB.ref(BASE+”/scores”).set(scoreSnap);DB.ref(BASE+”/maxScores”).set(maxSnap);DB.ref(BASE+”/grandMax”).set(grandMax());}draw();_restoreScroll();});
+function step4(){_step4PicksRef=DB.ref(BASE+”/picks”);_step4PicksRef.on(“value”,function(sn){ST.picks=sn.val()||{};var _s={},_m={};PARTS.forEach(function(p){_s[p]=playerScore(p);_m[p]=playerMax(p);});DB.ref(BASE+”/scores”).set(_s);DB.ref(BASE+”/maxScores”).set(_m);DB.ref(BASE+”/grandMax”).set(grandMax());draw();_restoreScroll();});_step4LockedRef=DB.ref(BASE+”/locked”);_step4LockedRef.on(“value”,function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});DB.ref(RESULTS_BASE+”/results”).on(“value”,function(sn){var oldRanks={};PARTS.forEach(function(p){oldRanks[p]=playerScore(p);});ST.results=sn.val()||{};var sorted=PARTS.slice().sort(function(a,b){return playerScore(b)-playerScore(a);});var newRanks={};sorted.forEach(function(p,i){newRanks[p]=i+1;});ST.prevRanks=newRanks;var scoreSnap={},maxSnap={};PARTS.forEach(function(p){scoreSnap[p]=playerScore(p);maxSnap[p]=playerMax(p);});if(DB&&Object.keys(ST.results).length>0){DB.ref(BASE+”/scores”).set(scoreSnap);DB.ref(BASE+”/maxScores”).set(maxSnap);DB.ref(BASE+”/grandMax”).set(grandMax());}draw();_restoreScroll();});
 // Listen for per-conf locks from Firebase (written by whichever client fires first at tipoff)
 DB.ref(RESULTS_BASE+”/confLocked”).on(“value”, function(sn){
 ST.confLocked = sn.val() || {};
