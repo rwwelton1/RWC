@@ -73,16 +73,18 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none}
 .gc{background:#0d1117;border:1px solid #1e2a3a;border-radius:8px;overflow:hidden;width:170px;transition:border-color .15s}
 
 /* ─── Live score overlay ─── */
-.gc-live{display:flex;justify-content:space-between;align-items:center;padding:2px 8px 3px;border-top:1px solid #0f1923;background:#070a10}
-.gc-live-status{font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.gc-live{display:flex;justify-content:space-between;align-items:center;padding:2px 8px 3px;border-top:1px solid #0f1923;background:#070a10;min-height:16px}
+.gc-live-status{font-size:7px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#1e2a3a}
 .gc-live-status.live{color:#ef4444;animation:livepulse 1.4s ease-in-out infinite}
-.gc-live-status.final{color:#334155}
-.gc-live-status.pre{color:#334155}
+.gc-live-status.final{color:#475569}
 @keyframes livepulse{0%,100%{opacity:1}50%{opacity:.4}}
-.gc-live-scores{display:flex;gap:8px}
+.gc-live-scores{display:flex;gap:6px;align-items:center}
 .gc-live-score{font-size:9px;font-weight:700;color:#475569;white-space:nowrap}
 .gc-live-score.winning{color:#f1f5f9}
-.gc-live-score.clock{font-size:7px;color:#475569;font-weight:400}
+.gc-live-score.sep{color:#1e2a3a;font-weight:400}
+.gc-live-score.clock{font-size:7px;color:#334155;font-weight:400}
+.btn-autoconfirm{padding:5px 10px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:.04em;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);color:#10b981;cursor:pointer;display:flex;align-items:center;gap:4px}
+.btn-autoconfirm:active{opacity:.7}
 
 .gc-head{padding:3px 8px;font-size:8px;color:#475569;border-bottom:1px solid #1e2a3a;display:flex;justify-content:space-between}
 .gc-pts-badge{color:#334155;font-size:8px}
@@ -478,132 +480,103 @@ var DB=null;
 var MASTER_PW="Sloop";
 var PREVIEW=(function(){ return /[?&]preview=1/.test(location.search); })();
 
-// ── ESPN Live Scores ──────────────────────────────────────────────────────────
-// ESPN group IDs for each conference tournament
-var ESPN_GROUPS = { acc:“2”, b10:“4”, b12:“8”, sec:“11”, be:“15” };
-var _liveScores = {};   // { “Team Name”: { score, winner, clock, status } }
-var _liveStatus = {};   // { confId: “pre”|“live”|“final”|“off” }
-var _liveTimer  = null;
-var _liveFetching = false;
-
-// Normalize ESPN display names to match our team name format
-var ESPN_NAME_MAP = {
-“North Carolina”:“N. Carolina”,“Virginia Tech”:“Va. Tech”,“Wake Forest”:“Wake Forest”,
-“Florida State”:“Florida St”,“NC State”:“NC State”,“Pittsburgh”:“Pitt”,
-“Michigan State”:“Mich. State”,“Penn State”:“Penn State”,“Ohio State”:“Ohio State”,
-“Northwestern”:“Northwestern”,“Maryland”:“Maryland”,
+// ── ESPN Live Scores ─────────────────────────────────────────────────────────
+var ESPN_GROUPS={acc:“2”,b10:“4”,b12:“8”,sec:“11”,be:“15”};
+var _liveScores={};
+var _liveTimer=null;
+// Normalize ESPN short names → our team names
+var _nmap={“North Carolina”:“N. Carolina”,“Virginia Tech”:“Va. Tech”,“Florida State”:“Florida St”,
 “West Virginia”:“W. Virginia”,“Oklahoma State”:“Oklahoma St”,“Arizona State”:“Arizona St”,
 “Kansas State”:“Kansas State”,“Iowa State”:“Iowa State”,“Texas Tech”:“Texas Tech”,
 “Texas A&M”:“Texas A&M”,“South Carolina”:“S. Carolina”,“Mississippi State”:“Miss. State”,
-“Ole Miss”:“Ole Miss”,“LSU”:“LSU”,“St. John’s”:“St. John’s”,“Connecticut”:“UConn”,
-“Seton Hall”:“Seton Hall”,“DePaul”:“DePaul”
-};
-function normName(n){ return ESPN_NAME_MAP[n] || n; }
+“Ole Miss”:“Ole Miss”,“Michigan State”:“Mich. State”,“Penn State”:“Penn State”,
+“Ohio State”:“Ohio State”,“St. John’s”:“St. John’s”,“Connecticut”:“UConn”};
+function _nn(n){return _nmap[n]||n;}
 
 function fetchLiveScores(){
-if(_liveFetching) return;
-_liveFetching = true;
-var confIds = Object.keys(ESPN_GROUPS);
-var done = 0;
-var newScores = {}, newStatus = {};
-
+var confIds=Object.keys(ESPN_GROUPS),done=0,newScores={};
 confIds.forEach(function(cid){
-var group = ESPN_GROUPS[cid];
-var url = “https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=”+group+”&limit=50”;
-fetch(url).then(function(r){ return r.json(); }).then(function(data){
-var events = data.events || [];
-var hasLive = false, hasFinal = false, hasPre = false;
-events.forEach(function(ev){
-var comp = (ev.competitions||[])[0]; if(!comp) return;
-var status = (comp.status||{}).type||{};
-var clock  = comp.status ? comp.status.displayClock : “”;
-var period = comp.status ? comp.status.period : 0;
-var state  = status.state; // “pre”,“in”,“post”
-if(state===“in”)   hasLive = true;
-if(state===“post”) hasFinal = true;
-if(state===“pre”)  hasPre  = true;
-var competitors = comp.competitors||[];
-var scores = {};
-competitors.forEach(function(c){
-var name = normName((c.team||{}).shortDisplayName||(c.team||{}).displayName||””);
-scores[name] = { score: parseInt(c.score||0), winner: c.winner||false };
-});
-// Store per-matchup by team names
-competitors.forEach(function(c){
-var name = normName((c.team||{}).shortDisplayName||(c.team||{}).displayName||””);
-if(!name) return;
-newScores[name] = {
-score:   parseInt(c.score||0),
-winner:  c.winner||false,
-clock:   state===“in”  ? (period>2?“OT “:(“H”+period+” “))+clock : “”,
-status:  state  // “pre”,“in”,“post”
-};
+var url=“https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=”+ESPN_GROUPS[cid]+”&limit=50”;
+fetch(url,{cache:“no-store”}).then(function(r){return r.json();}).then(function(data){
+(data.events||[]).forEach(function(ev){
+var comp=(ev.competitions||[])[0];if(!comp)return;
+var state=(comp.status||{}).type?(comp.status.type.state||””):””;
+var clock=comp.status?comp.status.displayClock:””;
+var period=comp.status?comp.status.period:0;
+var periodStr=period>2?“OT”:(“H”+period);
+(comp.competitors||[]).forEach(function(c){
+var name=_nn((c.team||{}).shortDisplayName||(c.team||{}).displayName||””);
+if(!name)return;
+newScores[name]={score:parseInt(c.score)||0,winner:!!c.winner,state:state,clock:clock,period:periodStr};
 });
 });
-newStatus[cid] = hasLive?“live”:hasFinal?“final”:hasPre?“pre”:“off”;
 done++;
-if(done===confIds.length){
-_liveFetching = false;
-_liveScores = newScores;
-_liveStatus = newStatus;
-// Soft update: just patch existing score overlays without full redraw
-patchLiveOverlays();
-}
-}).catch(function(){
-done++;
-newStatus[cid] = “off”;
-if(done===confIds.length){ _liveFetching=false; _liveScores=newScores; _liveStatus=newStatus; patchLiveOverlays(); }
-});
+if(done===confIds.length){_liveScores=newScores;_patchOverlays();}
+}).catch(function(){done++;if(done===confIds.length){_liveScores=newScores;_patchOverlays();}});
 });
 }
 
-function patchLiveOverlays(){
-// Update .gc-live divs in place without triggering a full draw()
-document.querySelectorAll(”[data-live-top]”).forEach(function(el){
-var topName = el.getAttribute(“data-live-top”);
-var botName = el.getAttribute(“data-live-bot”);
-var liveDiv = el.nextElementSibling && el.nextElementSibling.classList.contains(“gc-live”) ? el.nextElementSibling : null;
-// Find .gc-live sibling after last gc-row
-var gc = el.closest(”.gc”);
-if(!gc) return;
-var ld = gc.querySelector(”.gc-live”);
-if(!ld) return;
-var ts = _liveScores[topName], bs = _liveScores[botName];
-ld.innerHTML = buildLiveHTML(topName, botName, ts, bs);
+function _patchOverlays(){
+document.querySelectorAll(”.gc-live”).forEach(function(el){
+var tn=el.getAttribute(“data-live-top”)||””;
+var bn=el.getAttribute(“data-live-bot”)||””;
+el.innerHTML=_liveLine(tn,bn);
 });
 }
 
-function buildLiveHTML(topName, botName, ts, bs){
-if(!ts && !bs) return ‘<span class="gc-live-status pre">–</span><span class="gc-live-score clock"></span>’;
-var st = (ts||bs||{}).status;
-var statusLabel = st===“in”?“LIVE”:st===“post”?“FINAL”:st===“pre”?“UPCOMING”:”–”;
-var statusCls   = st===“in”?“live”:st===“post”?“final”:“pre”;
-var clock = (ts||{}).clock||(bs||{}).clock||””;
-var topScore = ts ? ts.score : “–”;
-var botScore = bs ? bs.score : “–”;
-var topWin = ts && ts.winner;
-var botWin = bs && bs.winner;
-var h = ‘<span class="gc-live-status '+statusCls+'">’+statusLabel+’</span>’;
-h += ‘<span class="gc-live-scores">’;
-if(st!==“pre”){
-h += ‘<span class=“gc-live-score’+(topWin?” winning”:””)+’”>’;
-h += (topName.split(” “).pop())+” “+topScore+”</span>”;
-h += ‘<span class="gc-live-score clock">’+(st===“in”?clock:””)+’</span>’;
-h += ‘<span class=“gc-live-score’+(botWin?” winning”:””)+’”>’;
-h += botScore+” “+(botName.split(” “).pop())+”</span>”;
-}
-h += ‘</span>’;
-return h;
-}
-
-function liveOverlayHTML(topName, botName){
-var ts = _liveScores[topName], bs = _liveScores[botName];
-return ‘<div class="gc-live" data-live-top="'+topName+'" data-live-bot="'+botName+'">’+buildLiveHTML(topName,botName,ts,bs)+’</div>’;
+function _liveLine(tn,bn){
+if(!tn&&!bn)return””;
+var td=_liveScores[tn],bd=_liveScores[bn];
+if(!td&&!bd)return””;
+var state=(td||bd).state||””;
+if(state===“pre”)return’<span class="gc-live-status">·</span>’;
+var lbl=state===“in”?“LIVE”:“FINAL”;
+var cls=state===“in”?“live”:“final”;
+var clk=state===“in”?((td||bd).period+” “+(td||bd).clock):””;
+var ts=td?td.score:”–”,bs=bd?bd.score:”–”;
+var twCls=td&&td.winner?” winning”:””,bwCls=bd&&bd.winner?” winning”:””;
+var shortT=tn?tn.split(” “).pop():””;
+var shortB=bn?bn.split(” “).pop():””;
+return ‘<span class="gc-live-status '+cls+'">’+lbl+’</span>’
++’<span class="gc-live-scores">’
++’<span class="gc-live-score'+twCls+'">’+shortT+’ ‘+ts+’</span>’
++(clk?’<span class="gc-live-score clock">’+clk+’</span>’:’<span class="gc-live-score sep">·</span>’)
++’<span class="gc-live-score'+bwCls+'">’+bs+’ ‘+shortB+’</span>’
++’</span>’;
 }
 
 function startLivePoll(){
+// Delay first fetch 1s so boot/draw fully complete first
+setTimeout(function(){
 fetchLiveScores();
-_liveTimer = setInterval(fetchLiveScores, 30000);
+_liveTimer=setInterval(fetchLiveScores,30000);
+},1000);
+}
+
+// Auto-confirm finals from ESPN feed
+function autoConfirmFromESPN(){
+if(!ST.admin||!DB||PREVIEW)return;
+var updates=[],found=0;
+CORD.forEach(function(cid){
+var conf=C[cid];
+conf.games.forEach(function(g){
+if((ST.results[cid]||{})[g.id])return; // already set
+var topN=slot(conf,ST.results[cid]||{},g.id,true);
+var botN=slot(conf,ST.results[cid]||{},g.id,false);
+if(!topN||topN===“TBD”||topN===”?”||!botN||botN===“TBD”||botN===”?”)return;
+var td=_liveScores[topN],bd=_liveScores[botN];
+if(!td||!bd)return;
+if(td.state!==“post”&&bd.state!==“post”)return;
+var winner=td.winner?topN:bd.winner?botN:null;
+if(!winner)return;
+updates.push({cid:cid,gid:g.id,winner:winner});
+found++;
+});
+});
+if(!found){toast(“No new finals found in ESPN feed”);return;}
+if(!confirm(“Auto-set “+found+” result”+(found>1?“s”:””)+” from ESPN finals?”))return;
+updates.forEach(function(u){saveResult(u.cid,u.gid,u.winner);});
+toast(“Set “+found+” result”+(found>1?“s”:””)+” from ESPN ✓”);
 }
 
 try{firebase.initializeApp({apiKey:“AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y”,authDomain:“rwc-picks.firebaseapp.com”,databaseURL:“https://rwc-picks-default-rtdb.firebaseio.com”,projectId:“rwc-picks”,appId:“1:965978379243:web:35f9db9a664f9170e27fae”});DB=firebase.database();DB.ref(“globalSettings/masterPw”).on(“value”,function(sn){var fw=sn.val();if(fw)MASTER_PW=fw;});}catch(e){console.error(“Firebase init error:”,e);}
@@ -624,7 +597,7 @@ var _tt;
 function toast(m){var el=document.getElementById(“toast”);el.innerHTML=m;el.classList.add(“show”);clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove(“show”);},2400);}
 var _confettiRunning=false;
 function launchConfetti(){if(_confettiRunning)return;_confettiRunning=true;var canvas=document.getElementById(“confetti-canvas”);canvas.style.display=“block”;canvas.width=window.innerWidth;canvas.height=window.innerHeight;var ctx=canvas.getContext(“2d”);var pieces=[];var colors=[”#6366f1”,”#10b981”,”#fbbf24”,”#f87171”,”#a5b4fc”,”#6ee7b7”,”#fcd34d”];for(var i=0;i<120;i++)pieces.push({x:Math.random()*canvas.width,y:-10-Math.random()*200,w:6+Math.random()*6,h:8+Math.random()*8,color:colors[Math.floor(Math.random()*colors.length)],vx:(Math.random()-.5)*4,vy:2+Math.random()*4,angle:Math.random()*Math.PI*2,va:(Math.random()-.5)*.2});var frames=0;function tick(){ctx.clearRect(0,0,canvas.width,canvas.height);var alive=false;for(var i=0;i<pieces.length;i++){var p=pieces[i];p.x+=p.vx;p.y+=p.vy;p.angle+=p.va;p.vy+=.08;if(p.y<canvas.height+20)alive=true;ctx.save();ctx.translate(p.x+p.w/2,p.y+p.h/2);ctx.rotate(p.angle);ctx.fillStyle=p.color;ctx.globalAlpha=Math.max(0,1-(frames/180));ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);ctx.restore();}frames++;if(alive&&frames<200)requestAnimationFrame(tick);else{canvas.style.display=“none”;ctx.clearRect(0,0,canvas.width,canvas.height);_confettiRunning=false;}}requestAnimationFrame(tick);}
-function cardHTML(conf,gid,pm,isAdmin){var g=null;for(var i=0;i<conf.games.length;i++)if(conf.games[i].id===gid){g=conf.games[i];break;}if(!g)return””;var res=ST.results[conf.id]||{},topN=slot(conf,pm,gid,true),botN=slot(conf,pm,gid,false);var picked=pm[gid],actual=res[gid],earned=actual&&picked===actual;var ptsBadgeCls=earned?“gc-pts-badge earned”:“gc-pts-badge”;var ptsLabel=(earned?”+”:””)+pts(g.rd)+“pt”;function rowH(name){var isV=name&&name!==“TBD”&&name!==”?”;var isPk=picked===name,isOk=actual&&isPk&&actual===name,isBd=actual&&isPk&&actual!==name,isAct=actual===name&&!isPk;var t=isV?tByName(conf,name):null;var canClick=isV&&(isAdmin||(ST.user&&!ST.locked[ST.user]));var cls=“gc-row”+(canClick?” clickable”:””);if(isPk)cls+=isOk?” correct”:isBd?” wrong”:” picked”;else if(isAct&&!isAdmin)cls+=” actual”;var badge=’<div class=“seed” style=“background:’+(t?t.c:”#1a2535”)+’”>’+(t?t.s:””)+’</div>’;var nm=’<div class=“team-name’+(isPk?” bold”:””)+(!isV?” dim”:””)+’”>’+(isV?x(name):“TBD”)+’</div>’;var icon=isOk?’<span class="gc-icon" style="color:#10b981">✓</span>’:isBd?’<span class="gc-icon" style="color:#ef4444">✗</span>’:””;var da=canClick?’ data-cid=”’+conf.id+’” data-gid=”’+x(gid)+’” data-name=”’+x(name)+’” data-adm=”’+(isAdmin?1:0)+’”’:””;return’<div class=”’+cls+’”’+da+’>’+badge+nm+icon+’</div>’;}var _top=topN&&topN!==“TBD”&&topN!==”?”?topN:””,_bot=botN&&botN!==“TBD”&&botN!==”?”?botN:””;return’<div class="gc"><div class="gc-head"><span>’+x(g.lbl)+’</span><span class="'+ptsBadgeCls+'">’+ptsLabel+’</span></div>’+rowH(topN)+rowH(botN)+(_top||_bot?liveOverlayHTML(_top,_bot):””)+’</div>’;}
+function cardHTML(conf,gid,pm,isAdmin){var g=null;for(var i=0;i<conf.games.length;i++)if(conf.games[i].id===gid){g=conf.games[i];break;}if(!g)return””;var res=ST.results[conf.id]||{},topN=slot(conf,pm,gid,true),botN=slot(conf,pm,gid,false);var picked=pm[gid],actual=res[gid],earned=actual&&picked===actual;var ptsBadgeCls=earned?“gc-pts-badge earned”:“gc-pts-badge”;var ptsLabel=(earned?”+”:””)+pts(g.rd)+“pt”;function rowH(name){var isV=name&&name!==“TBD”&&name!==”?”;var isPk=picked===name,isOk=actual&&isPk&&actual===name,isBd=actual&&isPk&&actual!==name,isAct=actual===name&&!isPk;var t=isV?tByName(conf,name):null;var canClick=isV&&(isAdmin||(ST.user&&!ST.locked[ST.user]));var cls=“gc-row”+(canClick?” clickable”:””);if(isPk)cls+=isOk?” correct”:isBd?” wrong”:” picked”;else if(isAct&&!isAdmin)cls+=” actual”;var badge=’<div class=“seed” style=“background:’+(t?t.c:”#1a2535”)+’”>’+(t?t.s:””)+’</div>’;var nm=’<div class=“team-name’+(isPk?” bold”:””)+(!isV?” dim”:””)+’”>’+(isV?x(name):“TBD”)+’</div>’;var icon=isOk?’<span class="gc-icon" style="color:#10b981">✓</span>’:isBd?’<span class="gc-icon" style="color:#ef4444">✗</span>’:””;var da=canClick?’ data-cid=”’+conf.id+’” data-gid=”’+x(gid)+’” data-name=”’+x(name)+’” data-adm=”’+(isAdmin?1:0)+’”’:””;return’<div class=”’+cls+’”’+da+’>’+badge+nm+icon+’</div>’;}return’<div class="gc" data-game-id="'+x(gid)+'" data-conf-id="'+x(conf.id)+'">’+’<div class="gc-head"><span>’+x(g.lbl)+’</span><span class="'+ptsBadgeCls+'">’+ptsLabel+’</span></div>’+rowH(topN)+rowH(botN)+’<div class=“gc-live” data-live-top=”’+(topN&&topN!==“TBD”&&topN!==”?”?x(topN):””)+(’” data-live-bot=”’)+(botN&&botN!==“TBD”&&botN!==”?”?x(botN):””)+’”></div></div>’;}
 var _prevLeader=null;
 function draw(){var conf=C[ST.conf],cRes=ST.results[ST.conf]||{};var myPicks=ST.user?((ST.picks[ST.user]||{})[ST.conf]||{}):{};var isLocked=ST.user&&ST.locked[ST.user];var locked=allLocked(),GMAX=grandMax();var h=””;if(PREVIEW)h+=’<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:rgba(99,102,241,.08);border-bottom:1px solid rgba(99,102,241,.2);font-size:10px;color:#a5b4fc">👁 Preview — picks are disabled</div>’;
 h+=’<div class="topbar">’;
@@ -634,6 +607,7 @@ h+=’<div class="topbar-right">’;
 if(ST.user)h+=’<span class=“tag’+(isLocked?” green”:””)+’”>’+pem(ST.user)+x(ST.user)+(isLocked?” 🔒”:””)+’</span>’+(URL_USER?’’:’<button class="btn btn-ghost" id="b-switch">Switch</button>’);
 h+=’<button class=“btn ‘+(ST.admin?“btn-gold”:“btn-ghost”)+’” id=“b-admin”>’+(ST.admin?”⚡ Admin”:“Admin”)+’</button>’;
 if(ST.admin)h+=’<button class="btn btn-red" id="b-reset">Reset</button>’;
+if(ST.admin)h+=’<button class="btn-autoconfirm" id="b-autoconfirm">⚡ ESPN Auto</button>’;
 h+=’</div></div>’;
 h+=’<div class="sticky-nav"><div class="conf-bar">’;
 for(var ci=0;ci<CORD.length;ci++){var cc=C[CORD[ci]],userPicks=ST.user?confPicks(CORD[ci],ST.user):0,totalG=C[CORD[ci]].games.length;var allDone=ST.user&&userPicks===totalG;h+=’<button class=“ctab’+(ST.conf===CORD[ci]?” active”:””)+’” data-conf=”’+CORD[ci]+’”><span class="cdot" style="background:'+cc.dot+'"></span>’+cc.label;if(ST.user)h+=’<span class="cprog">’+(allDone?’<span style="color:#10b981">’+userPicks+’/’+totalG+’ ✓</span>’:userPicks+’/’+totalG)+’</span>’;h+=’</button>’;}
@@ -673,6 +647,7 @@ els=document.querySelectorAll(”.user-btn”);for(i=0;i<els.length;i++)els[i].a
 el=document.getElementById(“b-switch”);if(el)el.addEventListener(“click”,function(){ST.user=null;draw();});
 el=document.getElementById(“b-admin”);if(el)el.addEventListener(“click”,function(){if(ST.admin){ST.admin=false;draw();return;}var pw=prompt(“Admin password:”);if(pw===null)return;if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){ST.admin=true;draw();}else toast(“Wrong password”);});
 el=document.getElementById(“b-reset”);if(el)el.addEventListener(“click”,doReset);
+el=document.getElementById(“b-autoconfirm”);if(el)el.addEventListener(“click”,autoConfirmFromESPN);
 el=document.getElementById(“b-lock”);if(el)el.addEventListener(“click”,function(){if(confirm(“Lock all picks for “+ST.user+”? Can’t change after.”)){doLock(ST.user);toast(“Picks locked! \uD83D\uDD12”);}});
 el=document.getElementById(“b-unlock”);if(el)el.addEventListener(“click”,function(){if(confirm(“Unlock your picks?”)){doUnlock(ST.user);toast(“Picks unlocked”);}});
 el=document.getElementById(“b-copy-group”);if(el)el.addEventListener(“click”,openCopyModal);
