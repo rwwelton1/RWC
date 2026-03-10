@@ -88,7 +88,7 @@ var TV = {
   qIdx: 0,
   chosen: null
 };
-var _distCache = null; // cached score distribution for today
+var _distCache = null; // cached score distribution {dist, total, sum, dk}
 
 // ── DATE HELPERS ──────────────────────────────────────────────────────────────
 function getEasternNow() {
@@ -2235,26 +2235,7 @@ function drawHome() {
 
     // Render score distribution below calendar on home screen
     var _homeScore = todayData ? todayData.r.filter(function(v){return v;}).length : 0;
-    if(_distCache) {
-      renderDistChart(_distCache.dist, _distCache.total, _distCache.sum, _homeScore);
-    } else if(DB) {
-      DB.ref("triviaScores").once("value", function(sn){
-        var all = sn.val() || {};
-        var dk = getDateKey();
-        var dist = [0,0,0,0,0,0,0,0,0,0,0];
-        var total = 0, sum = 0;
-        Object.values(all).forEach(function(userScores){
-          if(!userScores || !userScores[dk]) return;
-          var entry = userScores[dk];
-          var s = typeof entry.s === 'number' ? entry.s : (entry.r ? entry.r.filter(function(v){return v;}).length : null);
-          if(s === null || s === undefined) return;
-          s = Math.max(0, Math.min(10, s));
-          dist[s]++; total++; sum += s;
-        });
-        _distCache = {dist:dist, total:total, sum:sum};
-        renderDistChart(dist, total, sum, _homeScore);
-      });
-    }
+    fetchAndRenderDist(_homeScore);
   }
 
   // Check Firebase: reset flag + sync today's result if missing from localStorage
@@ -2417,30 +2398,28 @@ function drawDone() {
   };
   document.getElementById("tv-back").onclick = goBack;
 
-  // Fetch score distribution for today
-  if(_distCache) {
-    renderDistChart(_distCache.dist, _distCache.total, _distCache.sum, score);
-  } else if(DB) {
-    DB.ref("triviaScores").once("value", function(sn){
-      var all = sn.val() || {};
-      var dk = getDateKey();
-      var dist = [0,0,0,0,0,0,0,0,0,0,0];
-      var total = 0, sum = 0;
-      Object.values(all).forEach(function(userScores){
-        if(!userScores || !userScores[dk]) return;
-        var entry = userScores[dk];
-        var s = typeof entry.s === 'number' ? entry.s : (entry.r ? entry.r.filter(function(v){return v;}).length : null);
-        if(s === null || s === undefined) return;
-        s = Math.max(0, Math.min(10, s));
-        dist[s]++; total++; sum += s;
-      });
-      _distCache = {dist:dist, total:total, sum:sum};
-      renderDistChart(dist, total, sum, score);
+  // Fetch score distribution for today - always fresh
+  fetchAndRenderDist(score);
+}
+
+function fetchAndRenderDist(myScore) {
+  if(!DB) return;
+  DB.ref("triviaScores").once("value", function(sn){
+    var all = sn.val() || {};
+    var dk = getDateKey();
+    var dist = [0,0,0,0,0,0,0,0,0,0,0];
+    var total = 0, sum = 0;
+    Object.keys(all).forEach(function(ukey){
+      var userScores = all[ukey];
+      if(!userScores || !userScores[dk]) return;
+      var entry = userScores[dk];
+      var s = typeof entry.s === 'number' ? entry.s : (entry.r ? entry.r.filter(function(v){return v;}).length : null);
+      if(s === null || s === undefined) return;
+      s = Math.max(0, Math.min(10, s));
+      dist[s]++; total++; sum += s;
     });
-  } else {
-    var chartEl = document.getElementById("tv-dist-chart");
-    if(chartEl) chartEl.textContent = "";
-  }
+    renderDistChart(dist, total, sum, myScore);
+  });
 }
 
 function renderDistChart(dist, total, sum, score) {
