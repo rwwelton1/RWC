@@ -645,30 +645,39 @@ function fetchScores(){
   ST.scoresLoading=true;ST.scoresError=null;draw();
   var results=[];var pending=ESPN_CONFS.length;var hasError=false;
   ESPN_CONFS.forEach(function(cf){
-    var url="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups="+cf.espnId+"&limit=50";
+    var url="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups="+cf.espnId+"&limit=50&conferenceId="+cf.espnId;
     fetch(url).then(function(r){return r.json();}).then(function(data){
       var games=[];
       (data.events||[]).forEach(function(ev){
         var comp=ev.competitions&&ev.competitions[0];if(!comp)return;
+        // Filter: only include games where both teams are in this conference
+        var confName=cf.label.toLowerCase();
+        var notes=(comp.notes||[]).map(function(n){return(n.headline||"").toLowerCase();}).join(" ");
+        var evName=(ev.name||"").toLowerCase();
+        // Skip if the event name mentions a different conference tournament
+        var otherConfs=["big sky","sun belt","mountain west","mac ","wac ","cusa","america east","atlantic sun","big south","big west","colonial","horizon","ivy","maac","meac","missouri valley","nec","ovc","patriot","southern","southland","swac"];
+        var isOther=otherConfs.some(function(o){return evName.indexOf(o)>=0||notes.indexOf(o)>=0;});
+        if(isOther)return;
         var status=comp.status&&comp.status.type;
         var stateKey="scheduled";
         if(status){if(status.completed)stateKey="final";else if(status.state==="in")stateKey="live";}
         var clock=comp.status&&comp.status.displayClock;
         var period=comp.status&&comp.status.period;
-        var periodTxt=period?(period<=2?"Half "+(period===1?"1":"2"):"OT"):"";
+        var periodTxt=period?(period===1?"1st Half":period===2?"2nd Half":"OT"):"";
         var teams=(comp.competitors||[]).slice().sort(function(a,b){return a.homeAway==="home"?1:-1;});
         function mapTeam(t){
-          var seed=parseInt((t.curatedRank&&t.curatedRank.current)||t.seed||0)||null;
+          // seed comes from the competitor's seed field directly
+          var seed=parseInt(t.seed)||null;
           var color="#"+((t.team&&t.team.color)||"1a2535");
-          if(color==="#")color="#1a2535";
+          if(color==="#1a2535"||color==="#")color="#1a2535";
           return{seed:seed,name:(t.team&&(t.team.shortDisplayName||t.team.displayName))||"TBD",score:stateKey!=="scheduled"?parseInt(t.score)||0:null,color:color};
         }
         var top=teams[0]?mapTeam(teams[0]):null;
         var bot=teams[1]?mapTeam(teams[1]):null;
-        var note=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||"";
+        var note=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||"";
         var timeStr="";
         if(stateKey==="scheduled"&&comp.status&&comp.status.type&&comp.status.type.shortDetail)timeStr=comp.status.type.shortDetail;
-        games.push({round:note||ev.shortName||"",time:timeStr,status:stateKey,clock:stateKey==="live"?clock:null,period:stateKey==="live"?periodTxt:null,top:top,bot:bot});
+        games.push({round:note,time:timeStr,status:stateKey,clock:stateKey==="live"?clock:null,period:stateKey==="live"?periodTxt:null,top:top,bot:bot});
       });
       results.push({conf:cf.label,games:games});
     }).catch(function(){
@@ -678,7 +687,6 @@ function fetchScores(){
       pending--;
       if(pending===0){
         ST.scoresLoading=false;
-        // Sort results in CORD order
         var order=["ACC","Big Ten","Big 12","SEC","Big East"];
         results.sort(function(a,b){return order.indexOf(a.conf)-order.indexOf(b.conf);});
         ST.scoresData=results;
