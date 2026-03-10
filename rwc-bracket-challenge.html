@@ -206,6 +206,22 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 .scores-error{background:#0d1117;border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:14px;text-align:center;color:#fca5a5;font-size:12px;margin:14px 0}
 .scores-last-updated{font-size:8px;color:#334155;text-align:center;margin-top:12px;padding-bottom:8px}
+#pools-modal{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:400;display:none;align-items:flex-end;justify-content:center}
+#pools-modal.open{display:flex}
+.pools-sheet{background:#0d1117;border:1px solid #1e2a3a;border-radius:14px 14px 0 0;width:100%;max-width:480px;padding:20px 16px 32px;max-height:88vh;overflow-y:auto}
+.pools-handle{width:36px;height:4px;background:#1e2a3a;border-radius:2px;margin:0 auto 16px}
+.pools-title{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:4px}
+.pools-sub{font-size:10px;color:#475569;margin-bottom:14px}
+.pools-list{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.pools-group-row{background:#07090f;border:1px solid #1e2a3a;border-radius:8px;padding:10px 12px;cursor:pointer;transition:border-color .12s}
+.pools-group-row:hover,.pools-group-row.active{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.04)}
+.pools-group-name{font-size:12px;font-weight:600;color:#f1f5f9}
+.pools-group-meta{font-size:10px;color:#475569;margin-top:2px}
+.pools-group-players{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.pools-player-chip{font-size:9px;padding:2px 7px;border-radius:10px;background:#1e2a3a;color:#64748b;cursor:pointer;border:1px solid transparent;transition:all .12s}
+.pools-player-chip:hover{border-color:rgba(99,102,241,.4);color:#a5b4fc}
+.pools-cancel-btn{width:100%;padding:9px;border-radius:8px;background:none;border:none;color:#334155;font-size:11px;font-family:inherit;cursor:pointer}
+.pools-viewing-bar{display:flex;align-items:center;gap:8px;padding:6px 14px;background:rgba(251,191,36,.06);border-bottom:1px solid rgba(251,191,36,.2);font-size:10px;color:#fbbf24;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -265,6 +281,15 @@ button{font-family:inherit;cursor:pointer;border:none;outline:none}
       <div class="copy-btn-row"><button class="copy-back-btn" id="copy-back-3">&#8592; Back</button></div>
       <button class="copy-cancel-btn" id="copy-cancel-3">Cancel</button>
     </div>
+  </div>
+</div>
+<div id="pools-modal">
+  <div class="pools-sheet">
+    <div class="pools-handle"></div>
+    <div class="pools-title">&#128101; All Pools</div>
+    <div class="pools-sub" id="pools-sub">Select a group to view their brackets</div>
+    <div class="pools-list" id="pools-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading groups...</div></div>
+    <button class="pools-cancel-btn" id="pools-cancel">Close</button>
   </div>
 </div>
 <script>
@@ -465,7 +490,7 @@ var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return 
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/rwc":"rwc2026";
 var RESULTS_BASE="rwc2026"; // results are always global, shared across all pools
-var ST={user:URL_USER||null,conf:"acc",page:"bracket",vrd:null,admin:false,picks:{},locked:{},results:{},prevRanks:{},confLocked:{},globalLocked:false,viewUserByConf:{},scoresData:null,scoresLoading:false,scoresError:null,scoresUpdated:null,editPlayer:null};
+var ST={user:URL_USER||null,conf:"acc",page:"bracket",vrd:null,admin:false,picks:{},locked:{},results:{},prevRanks:{},confLocked:{},globalLocked:false,viewUserByConf:{},scoresData:null,scoresLoading:false,scoresError:null,scoresUpdated:null,editPlayer:null,viewingGroup:null};
 var _savedScroll=null;
 function _restoreScroll(){
   if(!_savedScroll)return;
@@ -497,7 +522,7 @@ function anyResults(){for(var ci=0;ci<CORD.length;ci++)if(Object.keys(ST.results
 var DB=null;
 var MASTER_PW="Sloop";
 try{firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});DB=firebase.database();DB.ref("globalSettings/masterPw").on("value",function(sn){var fw=sn.val();if(fw)MASTER_PW=fw;});DB.ref("globalSettings/statuses/rwc").on("value",function(sn){var s=sn.val();ST.globalLocked=(s==="live"||s==="complete");if(ST.globalLocked&&DB&&!PREVIEW){PARTS.forEach(function(p){if(!ST.locked[p])doLock(p);});}draw();});}catch(e){console.error("Firebase init error:",e);}
-function savePick(u,cid,gid,winner){var cur=((ST.picks[u]||{})[cid]||{});var next={};for(var k in cur)next[k]=cur[k];next[gid]=winner;if(!ST.picks[u])ST.picks[u]={};if(!ST.picks[u][cid])ST.picks[u][cid]={};ST.picks[u][cid][gid]=winner;var bs=document.querySelector(".bracket-scroll");var sx=bs?bs.scrollLeft:0;var sy=window.pageYOffset||window.scrollY||0;_savedScroll={sx:sx,sy:sy};draw();_restoreScroll();if(DB&&!PREVIEW){DB.ref(BASE+"/picks/"+u+"/"+cid).set(next);var scoreSnap2={};PARTS.forEach(function(p){scoreSnap2[p]=playerScore(p);});DB.ref(BASE+"/scores").set(scoreSnap2);}}
+function savePick(u,cid,gid,winner){var cur=((ST.picks[u]||{})[cid]||{});var next={};for(var k in cur)next[k]=cur[k];next[gid]=winner;if(!ST.picks[u])ST.picks[u]={};if(!ST.picks[u][cid])ST.picks[u][cid]={};ST.picks[u][cid][gid]=winner;var bs=document.querySelector(".bracket-scroll");var sx=bs?bs.scrollLeft:0;var sy=window.pageYOffset||window.scrollY||0;_savedScroll={sx:sx,sy:sy};draw();_restoreScroll();if(DB&&!PREVIEW){var writeBase=ST.viewingGroup?"groups/"+ST.viewingGroup.id+"/data/rwc":BASE;DB.ref(writeBase+"/picks/"+u+"/"+cid).set(next);var scoreSnap2={};PARTS.forEach(function(p){scoreSnap2[p]=playerScore(p);});DB.ref(writeBase+"/scores").set(scoreSnap2);}}
 function saveResult(cid,gid,winner){if(DB&&!PREVIEW)DB.ref(RESULTS_BASE+"/results/"+cid+"/"+gid).set(winner);}
 function clearResult(cid,gid){if(DB&&!PREVIEW)DB.ref(RESULTS_BASE+"/results/"+cid+"/"+gid).remove();}
 function doLock(u){if(DB&&!PREVIEW)DB.ref(BASE+"/locked/"+u).set(true);}
@@ -560,7 +585,9 @@ h+='<div class="topbar-right">';
 if(ST.user)h+='<span class="tag'+(isLocked?" green":"")+'">'+pem(ST.user)+x(ST.user)+(isLocked?" &#128274;":"")+'</span>'+(URL_USER?'':'<button class="btn btn-ghost" id="b-switch">Switch</button>');
 h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889; Admin":"Admin")+'</button>';
 if(ST.admin)h+='<button class="btn btn-red" id="b-reset">Reset</button>';
+if(ST.admin)h+='<button class="btn btn-gold" id="b-all-pools" style="font-size:9px">&#128101; Pools</button>';
 h+='</div></div>';
+if(ST.admin&&ST.viewingGroup){h+='<div class="pools-viewing-bar">&#128101; Viewing: <strong>'+x(ST.viewingGroup.name||ST.viewingGroup.id)+'</strong>'+(ST.viewingGroup.id?' &middot; <span style="color:#fbbf24;font-size:9px">'+x(ST.viewingGroup.id)+'</span>':'')+'<button id="b-pools-exit" style="margin-left:auto;padding:2px 8px;border-radius:5px;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24;font-size:9px;cursor:pointer">&#10005; Exit</button></div>';}
 h+='<div class="sticky-nav"><div class="conf-bar">';
 for(var ci=0;ci<CORD.length;ci++){var cc=C[CORD[ci]],userPicks=ST.user?confPicks(CORD[ci],ST.user):0,totalG=C[CORD[ci]].games.length;var allDone=ST.user&&userPicks===totalG;var cTabLocked=ST.confLocked[CORD[ci]];h+='<button class="ctab'+(ST.conf===CORD[ci]?" active":"")+'" data-conf="'+CORD[ci]+'"><span class="cdot" style="background:'+cc.dot+'"></span>'+cc.label+(cTabLocked?' &#128274;':'');if(ST.user)h+='<span class="cprog">'+(allDone?'<span style="color:#10b981">'+userPicks+'/'+totalG+' &#10003;</span>':userPicks+'/'+totalG)+'</span>';h+='</button>';}
 h+='</div><div class="page-bar">';
@@ -627,7 +654,8 @@ el=document.getElementById("b-edit-stop");if(el)el.addEventListener("click",func
 els=document.querySelectorAll("[data-qe-clear-gid]");for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){clearResult(this.getAttribute("data-qe-clear-cid"),this.getAttribute("data-qe-clear-gid"));toast("Result cleared");});
 var cards=document.querySelectorAll("[data-tn]");for(var ci=0;ci<cards.length;ci++){(function(card){card.addEventListener("click",function(){showTM(card.getAttribute("data-tn"),card.getAttribute("data-tc"),card.getAttribute("data-tcol"),card.getAttribute("data-ts"),card.getAttribute("data-tr"));});})(cards[ci]);}
 el=document.getElementById("tm-close");if(el)el.addEventListener("click",hideTM);
-el=document.getElementById("b-scores-refresh");if(el)el.addEventListener("click",function(){ST.scoresData=null;_scoresAutoFetched=false;fetchScores();});
+el=document.getElementById("b-all-pools");if(el)el.addEventListener("click",openPoolsModal);
+el=document.getElementById("b-pools-exit");if(el)el.addEventListener("click",exitPoolView);
 el=document.getElementById("b-scores-refresh2");if(el)el.addEventListener("click",function(){ST.scoresData=null;_scoresAutoFetched=false;fetchScores();});
 el=document.getElementById("tm");if(el)el.addEventListener("click",function(e){if(e.target===this)hideTM();});}
 function showTM(name,conf,color,seed,rec){if(ST.admin){showEditTM(name,conf,color,seed,rec);return;}var m=document.getElementById("tm");var st=TEAM_STATS[name]||{ap:null,kenpom:"N/A",net:"N/A",scorer:"N/A",ppg:"",rec:"N/A"};document.getElementById("tm-name").textContent=name;document.getElementById("tm-conf").textContent=conf+" | #"+seed+" seed | "+(st.rec||rec)+" overall";document.getElementById("tm-badge").textContent=seed;document.getElementById("tm-badge").style.background=color;document.getElementById("tm-ap").textContent=st.ap?"#"+st.ap:"NR";document.getElementById("tm-kenpom").textContent="#"+st.kenpom;document.getElementById("tm-net").textContent="#"+st.net;document.getElementById("tm-scorer").textContent=(st.scorer||"N/A")+(st.ppg?" "+st.ppg+"ppg":"");document.getElementById("tm-src").textContent="Stats as of Mar 8, 2026";m.style.display="flex";}
@@ -706,6 +734,70 @@ function fetchScores(){
   });
 }
 bindCopyModal();
+function openPoolsModal(){
+  document.getElementById("pools-modal").classList.add("open");
+  var list=document.getElementById("pools-list");
+  list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div>';
+  if(!DB){list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>';return;}
+  DB.ref("groups").once("value",function(sn){
+    var all=sn.val()||{};
+    var groups=Object.values(all).filter(function(g){return(g.pools||[]).indexOf("rwc")>=0;});
+    if(!groups.length){list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No groups found.</div>';return;}
+    list.innerHTML="";
+    groups.forEach(function(g){
+      var isActive=ST.viewingGroup&&ST.viewingGroup.id===g.id;
+      var row=document.createElement("div");
+      row.className="pools-group-row"+(isActive?" active":"");
+      var playersHtml=(g.players||[]).map(function(p){return'<span class="pools-player-chip" data-gid="'+x(g.id)+'" data-pname="'+x(p)+'">'+x(p)+'</span>';}).join("");
+      row.innerHTML='<div class="pools-group-name">'+x(g.name||"Unnamed")+'</div><div class="pools-group-meta">'+x(g.id)+(g.players?' &middot; '+(g.players.length)+' players':'')+'</div><div class="pools-group-players">'+playersHtml+'</div>';
+      row.addEventListener("click",function(e){
+        // if they clicked a player chip, switch to that group+player
+        var chip=e.target.closest(".pools-player-chip");
+        if(chip){switchPoolGroup(g,chip.getAttribute("data-pname"));closePoolsModal();return;}
+        // otherwise switch group and view as admin
+        switchPoolGroup(g,null);closePoolsModal();
+      });
+      list.appendChild(row);
+    });
+  });
+}
+function switchPoolGroup(g,playerName){
+  if(!DB)return;
+  // Detach old listeners
+  if(ST.viewingGroup){
+    var oldBase="groups/"+ST.viewingGroup.id+"/data/rwc";
+    DB.ref(oldBase+"/picks").off();
+    DB.ref(oldBase+"/locked").off();
+  }
+  ST.viewingGroup=g;
+  ST.editPlayer=null;
+  ST.user=playerName;
+  PARTS=(g.players||[]).slice();
+  var newBase="groups/"+g.id+"/data/rwc";
+  // Re-attach listeners for new group
+  DB.ref(newBase+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+  DB.ref(newBase+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
+  toast("Viewing: "+(g.name||g.id)+(playerName?" as "+playerName:""));
+  draw();
+}
+function exitPoolView(){
+  if(!DB||!ST.viewingGroup)return;
+  var oldBase="groups/"+ST.viewingGroup.id+"/data/rwc";
+  DB.ref(oldBase+"/picks").off();
+  DB.ref(oldBase+"/locked").off();
+  ST.viewingGroup=null;
+  ST.editPlayer=null;
+  ST.user=URL_USER||null;
+  // Re-attach original group listeners
+  DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+  DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
+  if(GROUP_ID){DB.ref("groups/"+GROUP_ID).once("value",function(sn){var g=sn.val();if(g&&g.players&&g.players.length)PARTS=g.players;draw();});}
+  toast("Returned to home pool");
+  draw();
+}
+function closePoolsModal(){document.getElementById("pools-modal").classList.remove("open");}
+document.getElementById("pools-cancel").addEventListener("click",closePoolsModal);
+document.getElementById("pools-modal").addEventListener("click",function(e){if(e.target===this)closePoolsModal();});
 // Auto-fetch scores when page loads, and when switching to scores tab
 var _scoresAutoFetched=false;
 function maybeAutoFetchScores(){if(ST.page==="scores"&&!_scoresAutoFetched&&!ST.scoresLoading&&!ST.scoresData){_scoresAutoFetched=true;fetchScores();}}
