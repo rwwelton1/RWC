@@ -2040,6 +2040,19 @@ function renderHub() {
 
     h += '<button class="save-results-btn" id="save-group-btn" style="background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.3);color:#a5b4fc">Save Group Settings</button>';
 
+    // Season mode toggle
+    h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
+    h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">&#127942; Season Mode</div>';
+    h += '<div style="display:flex;align-items:center;gap:10px;padding:8px 0">';
+    var _seasonOn = g.seasonMode !== false;
+    h += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">';
+    h += '<input type="checkbox" id="season-mode-toggle" style="cursor:pointer;accent-color:#6366f1;width:15px;height:15px" '+(_seasonOn?'checked':'')+' >';
+    h += '<span style="font-size:11px;color:#cbd5e1">Show season standings &amp; award points across events</span>';
+    h += '</label>';
+    h += '</div>';
+    h += '<div style="font-size:9px;color:#475569">When off, the hub shows only the active competition without season standings.</div>';
+    h += '</div>';
+
     // Members list with remove + admin buttons
     h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
     h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">Members ('+( g.players||[]).length+')</div>';
@@ -2075,180 +2088,89 @@ function renderHub() {
   var _prPp3 = _pr.p3 !== undefined ? _pr.p3 : 0;
   var _prP2back = _pr.p2back || false;
   var _prPlayers = (g.players||[]).length;
-
-  // Standings
-  h += '<div class="section-label">Season Standings</div>';
-  h += '<div class="standings-card"><div class="standings-head"><div class="standings-title">'+x(g.name)+'</div><div class="standings-sub">4 pts &middot; 1st &nbsp;|&nbsp; 2 pts &middot; 2nd &nbsp;|&nbsp; 1 pt &middot; 3rd</div></div>';
+  var seasonMode = g.seasonMode !== false; // default true
   var standings = calcStandings(g, data);
-  var rc=["rank-1","rank-2","rank-3","rank-other"];
-  standings.forEach(function(p,i){
-    var isMe = SC.currentUser && p.name === SC.currentUser.username;
-    var pEm = playerEmoji(p.name);
-    h += '<div class="player-row"><div class="player-rank '+rc[Math.min(i,3)]+'">'+(i+1)+'</div>';
-    h += '<div class="player-name"'+( isMe?' style="color:#a5b4fc"':'')+'>'+pEm+' '+x(p.name)+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</div>';
-    h += '<div class="finish-dots">';
-    pools.forEach(function(pool){
-      var f=p.finishes[pool.id];
-      if(f===1)      h+='<div class="fdot fdot-1" title="'+x(pool.name)+': 1st">1</div>';
-      else if(f===2) h+='<div class="fdot fdot-2" title="'+x(pool.name)+': 2nd">2</div>';
-      else if(f===3) h+='<div class="fdot fdot-3" title="'+x(pool.name)+': 3rd">3</div>';
-      else if((data.results||{})[pool.id]) h+='<div class="fdot fdot-x">-</div>';
-    });
-    h += '</div><div><div class="player-pts">'+p.pts+'</div><div class="player-pts-label">pts</div></div></div>';
-  });
-  h += '</div>';
 
-  // Pools
-  h += '<div class="section-label">Competitions</div>';
-  h += '<div class="pools-grid">';
+  // Split pools into live/active vs others
+  var livePools = [], otherPools = [];
   pools.forEach(function(pool){
-    var status=(SC.globalStatuses||{})[pool.id]||"coming-soon";
-    var clickable=(status==="open"||status==="live");
-    var dimmed=(status==="coming-soon");
-    var result=(data.results||{})[pool.id];
-    var destUrl = pool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(SC.currentUser?SC.currentUser.username:"");
-    h += '<div class="pool-card'+(clickable?" clickable":"")+(dimmed?" dimmed":"")+'"';
-    if(clickable) h += ' onclick="'+(poolIsLive(pool.id)?'window.location.href=\''+destUrl+'\'':'openComingSoon(poolById(\''+pool.id+'\'))')+'"';
-    h += '><div class="pool-card-inner">';
-    h += '<div class="pool-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
-    var myName = SC.currentUser ? SC.currentUser.username : null;
-    // Compute per-pool ranking from picks scores stored in data
-    var poolPicksData = (data[pool.id]||{}).picks || {};
-    var poolScoresData = (data[pool.id]||{}).scores || {};
-    var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
-    // Rank players by their stored score for this pool
-    var poolScores = [];
-    (g.players||[]).forEach(function(p){
-      var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
-      poolScores.push({name:p, pts:pts});
-    });
-    poolScores.sort(function(a,b){
-      if(a.pts===null && b.pts===null) return 0;
-      if(a.pts===null) return 1;
-      if(b.pts===null) return -1;
-      return b.pts - a.pts;
-    });
-    var myPoolRank = null, myPoolPts = null;
-    for(var _pi=0;_pi<poolScores.length;_pi++){
-      if(poolScores[_pi].name===myName){
-        myPoolRank = _pi+1;
-        myPoolPts = poolScores[_pi].pts;
-        break;
-      }
-    }
-    // Fall back to season finish if pool scores not available
-    var myFinish = null;
-    for(var _si=0;_si<standings.length;_si++){
-      if(standings[_si].name===myName){ myFinish=standings[_si].finishes[pool.id]||null; break; }
-    }
-    h += '<div class="pool-info"><div class="pool-name">'+x(pool.name)+'</div>';
-    h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div>';
-    // Prize strip — inline, tiny
-    var _cardBuyin = _prPools[pool.id];
-    if(_cardBuyin && parseFloat(_cardBuyin) > 0) {
-      var _cardBuyinF = parseFloat(_cardBuyin);
-      var _cardPot = _cardBuyinF * _prPlayers;
-      var _cardSplitPot = _prP2back ? (_cardPot - _cardBuyinF) : _cardPot;
-      var _cardA1 = (_cardSplitPot * _prPp1 / 100).toFixed(2).replace(/\.00$/,'');
-      var _cardA2 = _prP2back ? _cardBuyinF.toFixed(2).replace(/\.00$/,'') : (_cardPot * _prPp2 / 100).toFixed(2).replace(/\.00$/,'');
-      var _cardA3 = (_cardSplitPot * _prPp3 / 100).toFixed(2).replace(/\.00$/,'');
-      h += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">';
-      h += '<span style="font-size:9px;color:#fbbf24;font-weight:700">&#128176; $'+_cardPot.toFixed(2).replace(/\.00$/,'')+'</span>';
-      h += '<span style="font-size:9px;color:#1e2a3a">|</span>';
-      h += '<span style="font-size:9px;color:#475569">🥇<b style="color:#cbd5e1">$'+_cardA1+'</b></span>';
-      if(_prPp2 > 0 || _prP2back) h += '<span style="font-size:9px;color:#475569">🥈<b style="color:#cbd5e1">$'+_cardA2+'</b></span>';
-      if(_prPp3 > 0) h += '<span style="font-size:9px;color:#475569">🥉<b style="color:#cbd5e1">$'+_cardA3+'</b></span>';
-      h += '</div>';
-    }
-    if(myName) {
-      if(status==="complete" && myFinish) {
-        var fc=myFinish===1?'#fbbf24':myFinish===2?'#94a3b8':'#b45309';
-        var fPts=myFinish===1?4:myFinish===2?2:1;
-        h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
-        h += '<span style="font-size:9px;font-weight:700;color:'+fc+'">'+_plOrd(myFinish)+'</span>';
-        h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
-        h += '<span style="font-size:9px;color:#94a3b8">+'+fPts+' pts</span>';
-        h += '</div>';
-      } else if((status==="open"||status==="live") && myPoolRank!==null && myPoolPts!==null) {
-        var rc2=myPoolRank===1?'#fbbf24':myPoolRank===2?'#94a3b8':myPoolRank===3?'#b45309':'#475569';
-        var grandMaxVal2 = (data[pool.id]||{}).grandMax || null;
-        var totalPlayers2 = poolScores.filter(function(s){ return s.pts !== null; }).length || (g.players||[]).length;
-        h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
-        h += '<span style="font-size:9px;font-weight:700;color:'+rc2+'">#'+myPoolRank+' of '+totalPlayers2+'</span>';
-        h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
-        h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myPoolPts+'</b>'+(grandMaxVal2!==null?' / '+grandMaxVal2:'')+'  pts</span>';
-        h += '</div>';
-      } else if(status==="open"||status==="live") {
-        var poolPicks2 = poolPicksData[myName];
-        var hasPicks = poolPicks2 !== undefined && poolPicks2 !== null;
-        var grandMaxVal = (data[pool.id]||{}).grandMax || null;
-        var myMaxScore = ((data[pool.id]||{}).maxScores||{})[myName] !== undefined ? ((data[pool.id]||{}).maxScores||{})[myName] : null;
-        h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
-        if(hasPicks && grandMaxVal !== null && myPoolPts === null) {
-          // Has picks but no results yet — show score/max
-          var myRawScore = poolScoresData[myName] !== undefined ? poolScoresData[myName] : 0;
-          h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myRawScore+'</b> / '+grandMaxVal+' pts</span>';
-        } else if(!hasPicks) {
-          h += '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
-        }
-        h += '</div>';
-      }
-    }
-    h += '</div>';
-    h += '<div class="pool-right">';
-    if(status==="open")         h+='<span class="status-pill pill-open">Open</span>';
-    else if(status==="live")  h+='<span class="status-pill pill-locked">Live</span>';
-    else if(status==="complete")h+='<span class="status-pill pill-complete">'+(result&&result.first?'&#127942; '+x(result.first):'Final')+'</span>';
-    else                        h+='<span class="status-pill pill-soon">Coming Soon</span>';
-    if(clickable) h+='<span class="pool-arrow">&#8250;</span>';
-    if(clickable) h+='<button class="pool-copy-btn" data-copy-pool="'+pool.id+'" data-copy-pool-name="'+x(pool.name)+'">&#8645; Copy</button>';
-    h += '</div></div>';
+    var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+    if(st==="live"||st==="open") livePools.push(pool);
+    else otherPools.push(pool);
+  });
+  var hasLive = livePools.length > 0;
 
-    // Mini leaderboard for open/locked pools
-    if((status==="open"||status==="live") && poolScores.length > 0) {
-      var hasAnyPts = poolScores.some(function(s){ return s.pts !== null && s.pts > 0; });
-      var grandMaxLb = (data[pool.id]||{}).grandMax || null;
-      var maxScoresLb = (data[pool.id]||{}).maxScores || {};
-      h += '<div style="border-top:1px solid #0f1923;padding:8px 12px 10px">';
-      h += '<div style="font-size:8px;color:#334155;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;font-weight:700">Leaderboard</div>';
-      poolScores.forEach(function(p, i){
-        if(p.pts === null && !hasAnyPts && i >= 3) return; // cap at 3 if no scores yet
-        var isMe = p.name === myName;
+  // ── LIVE / ACTIVE COMPETITIONS (prominent, at top) ──
+  if(hasLive) {
+    h += '<div class="section-label">&#128308; Live Now</div>';
+    h += '<div class="pools-grid">';
+    livePools.forEach(function(pool){ h += renderPoolCard(pool, data, g, standings, _pr, _prPools, _prPp1, _prPp2, _prPp3, _prP2back, _prPlayers); });
+    h += '</div>';
+  }
+
+  // ── SEASON STANDINGS — compact scoreboard if live events exist, full if not ──
+  if(seasonMode) {
+    if(hasLive) {
+      // Compact inline scoreboard
+      h += '<div class="section-label">Season Standings</div>';
+      h += '<div class="standings-card" style="padding:8px 12px">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">';
+      h += '<div style="font-size:11px;font-weight:700;color:#e2e8f0">'+x(g.name)+'</div>';
+      h += '<div style="font-size:9px;color:#475569">4·1st | 2·2nd | 1·3rd</div>';
+      h += '</div>';
+      var standings2 = standings;
+      standings2.forEach(function(p,i){
+        var isMe = SC.currentUser && p.name === SC.currentUser.username;
         var pEm = playerEmoji(p.name);
-        var rankColors = ['#fbbf24','#94a3b8','#b45309'];
-        var rc3 = rankColors[i] || '#334155';
-        var maxPts = maxScoresLb[p.name] !== undefined ? maxScoresLb[p.name] : null;
-        var score = p.pts !== null ? p.pts : 0;
-        var maxVal = grandMaxLb || 1;
-        var pct = Math.round(score / maxVal * 100);
-        var maxPct = maxPts !== null ? Math.min(100, Math.round(maxPts / maxVal * 100)) : 100;
-        h += '<div style="display:flex;align-items:center;gap:6px;padding:2px 0'+(isMe?';background:rgba(99,102,241,.05);border-radius:6px;margin:0 -4px;padding:3px 4px':'')+'">';
-        h += '<div style="font-size:9px;font-weight:700;color:'+rc3+';width:14px;text-align:center;flex-shrink:0">'+(i+1)+'</div>';
-        h += '<div style="font-size:11px;flex-shrink:0">'+pEm+'</div>';
-        h += '<div style="flex:1;min-width:0">';
-        h += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
-        h += '<span style="font-size:10px;font-weight:'+(isMe?'700':'500')+';color:'+(isMe?'#a5b4fc':'#cbd5e1')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px">'+x(p.name)+'</span>';
-        h += '<span style="font-size:9px;color:#475569;flex-shrink:0;margin-left:4px"><b style="color:'+(isMe?'#a5b4fc':'#94a3b8')+'">'+score+'</b>'+(grandMaxLb?' / '+grandMaxLb:'')+'</span>';
+        var rc2=i===0?'#fbbf24':i===1?'#94a3b8':i===2?'#b45309':'#475569';
+        h += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #07090f">';
+        h += '<div style="font-size:9px;font-weight:700;color:'+rc2+';width:12px;text-align:center">'+(i+1)+'</div>';
+        h += '<div style="font-size:11px">'+pEm+'</div>';
+        h += '<div style="flex:1;font-size:11px;color:'+(isMe?'#a5b4fc':'#cbd5e1')+'">'+x(p.name)+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</div>';
+        // finish dots
+        pools.forEach(function(pool){
+          var f=p.finishes[pool.id];
+          if(f===1)      h+='<div class="fdot fdot-1">1</div>';
+          else if(f===2) h+='<div class="fdot fdot-2">2</div>';
+          else if(f===3) h+='<div class="fdot fdot-3">3</div>';
+          else if((data.results||{})[pool.id]) h+='<div class="fdot fdot-x">-</div>';
+        });
+        h += '<div style="font-size:11px;font-weight:700;color:'+(isMe?'#a5b4fc':'#e2e8f0')+';min-width:24px;text-align:right">'+p.pts+'<span style="font-size:8px;color:#475569;font-weight:400">pt</span></div>';
         h += '</div>';
-        h += '<div style="height:3px;background:#0f1923;border-radius:2px;overflow:hidden">';
-        h += '<div style="height:100%;border-radius:2px;background:'+(i===0?'linear-gradient(90deg,#d97706,#fbbf24)':'linear-gradient(90deg,#4f46e5,#818cf8)')+';width:'+pct+'%;transition:width .3s"></div>';
-        if(maxPts !== null && maxPct > pct) h += '<div style="height:100%;border-radius:2px;background:rgba(99,102,241,.15);width:'+(maxPct-pct)+'%;margin-top:-3px"></div>';
-        h += '</div>';
-        h += '</div></div>';
+      });
+      h += '</div>';
+    } else {
+      // Full standings when no live event
+      h += '<div class="section-label">Season Standings</div>';
+      h += '<div class="standings-card"><div class="standings-head"><div class="standings-title">'+x(g.name)+'</div><div class="standings-sub">4 pts &middot; 1st &nbsp;|&nbsp; 2 pts &middot; 2nd &nbsp;|&nbsp; 1 pt &middot; 3rd</div></div>';
+      var standings3 = standings;
+      var rc=["rank-1","rank-2","rank-3","rank-other"];
+      standings3.forEach(function(p,i){
+        var isMe = SC.currentUser && p.name === SC.currentUser.username;
+        var pEm = playerEmoji(p.name);
+        h += '<div class="player-row"><div class="player-rank '+rc[Math.min(i,3)]+'">'+(i+1)+'</div>';
+        h += '<div class="player-name"'+( isMe?' style="color:#a5b4fc"':'')+'>'+pEm+' '+x(p.name)+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</div>';
+        h += '<div class="finish-dots">';
+        pools.forEach(function(pool){
+          var f=p.finishes[pool.id];
+          if(f===1)      h+='<div class="fdot fdot-1" title="'+x(pool.name)+': 1st">1</div>';
+          else if(f===2) h+='<div class="fdot fdot-2" title="'+x(pool.name)+': 2nd">2</div>';
+          else if(f===3) h+='<div class="fdot fdot-3" title="'+x(pool.name)+': 3rd">3</div>';
+          else if((data.results||{})[pool.id]) h+='<div class="fdot fdot-x">-</div>';
+        });
+        h += '</div><div><div class="player-pts">'+p.pts+'</div><div class="player-pts-label">pts</div></div></div>';
       });
       h += '</div>';
     }
+  }
 
-    if(result&&(result.first||result.second||result.third)){
-      h += '<div class="pool-winner"><div class="podium">';
-      if(result.first)  h+='<div class="podium-item p1">1st <b>'+x(result.first)+'</b></div>';
-      if(result.second) h+='<div class="podium-item p2">2nd <b>'+x(result.second)+'</b></div>';
-      if(result.third)  h+='<div class="podium-item p3">3rd <b>'+x(result.third)+'</b></div>';
-      h += '</div></div>';
-    }
+  // ── OTHER COMPETITIONS (coming soon, complete) ──
+  if(otherPools.length > 0) {
+    h += '<div class="section-label">Competitions</div>';
+    h += '<div class="pools-grid">';
+    otherPools.forEach(function(pool){ h += renderPoolCard(pool, data, g, standings, _pr, _prPools, _prPp1, _prPp2, _prPp3, _prP2back, _prPlayers); });
     h += '</div>';
-  });
-  h += '</div>';
+  }
 
 
 
@@ -3509,11 +3431,151 @@ function saveGroupSettings() {
   }
   var prizeData = {pools:_poolBuyinsNew, p1:_p1v, p2:_p2v, p3:_p3v, p2back:_p2backV};
   SC.group.prize = prizeData;
+  var _seasonModeEl = document.getElementById('season-mode-toggle');
+  var _seasonModeV = _seasonModeEl ? _seasonModeEl.checked : (SC.group.seasonMode !== false);
+  SC.group.seasonMode = _seasonModeV;
   if(DB) {
-    DB.ref("groups/"+SC.group.id).update({pools: SC.group.pools, name: newName, adminPw: newPw, prize: prizeData}, function(){ toast("Settings saved &#10003;"); });
+    DB.ref("groups/"+SC.group.id).update({pools: SC.group.pools, name: newName, adminPw: newPw, prize: prizeData, seasonMode: _seasonModeV}, function(){ toast("Settings saved &#10003;"); });
   }
   SC.showGroupSettings = false;
   draw();
+}
+
+function renderPoolCard(pool, data, g, standings, _pr, _prPools, _prPp1, _prPp2, _prPp3, _prP2back, _prPlayers) {
+  var h = '';
+  var status=(SC.globalStatuses||{})[pool.id]||"coming-soon";
+  var clickable=(status==="open"||status==="live");
+  var dimmed=(status==="coming-soon");
+  var result=(data.results||{})[pool.id];
+  var destUrl = pool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(SC.currentUser?SC.currentUser.username:"");
+  h += '<div class="pool-card'+(clickable?" clickable":"")+(dimmed?" dimmed":"")+'"';
+  if(clickable) h += ' onclick="'+(poolIsLive(pool.id)?'window.location.href=\''+destUrl+'\'':'openComingSoon(poolById(\''+pool.id+'\'))')+'"';
+  h += '><div class="pool-card-inner">';
+  h += '<div class="pool-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
+  var myName = SC.currentUser ? SC.currentUser.username : null;
+  var poolPicksData = (data[pool.id]||{}).picks || {};
+  var poolScoresData = (data[pool.id]||{}).scores || {};
+  var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
+  var poolScores = [];
+  (g.players||[]).forEach(function(p){
+    var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
+    poolScores.push({name:p, pts:pts});
+  });
+  poolScores.sort(function(a,b){
+    if(a.pts===null && b.pts===null) return 0;
+    if(a.pts===null) return 1;
+    if(b.pts===null) return -1;
+    return b.pts - a.pts;
+  });
+  var myPoolRank = null, myPoolPts = null;
+  for(var _pi=0;_pi<poolScores.length;_pi++){
+    if(poolScores[_pi].name===myName){ myPoolRank=_pi+1; myPoolPts=poolScores[_pi].pts; break; }
+  }
+  var myFinish = null;
+  if(standings) for(var _si=0;_si<standings.length;_si++){
+    if(standings[_si].name===myName){ myFinish=standings[_si].finishes[pool.id]||null; break; }
+  }
+  h += '<div class="pool-info"><div class="pool-name">'+x(pool.name)+'</div>';
+  h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div>';
+  var _cardBuyin = _prPools[pool.id];
+  if(_cardBuyin && parseFloat(_cardBuyin) > 0) {
+    var _cardBuyinF = parseFloat(_cardBuyin);
+    var _cardPot = _cardBuyinF * _prPlayers;
+    var _cardSplitPot = _prP2back ? (_cardPot - _cardBuyinF) : _cardPot;
+    var _cardA1 = (_cardSplitPot * _prPp1 / 100).toFixed(2).replace(/\.00$/,'');
+    var _cardA2 = _prP2back ? _cardBuyinF.toFixed(2).replace(/\.00$/,'') : (_cardPot * _prPp2 / 100).toFixed(2).replace(/\.00$/,'');
+    var _cardA3 = (_cardSplitPot * _prPp3 / 100).toFixed(2).replace(/\.00$/,'');
+    h += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">';
+    h += '<span style="font-size:9px;color:#fbbf24;font-weight:700">&#128176; $'+_cardPot.toFixed(2).replace(/\.00$/,'')+'</span>';
+    h += '<span style="font-size:9px;color:#1e2a3a">|</span>';
+    h += '<span style="font-size:9px;color:#475569">🥇<b style="color:#cbd5e1">$'+_cardA1+'</b></span>';
+    if(_prPp2 > 0 || _prP2back) h += '<span style="font-size:9px;color:#475569">🥈<b style="color:#cbd5e1">$'+_cardA2+'</b></span>';
+    if(_prPp3 > 0) h += '<span style="font-size:9px;color:#475569">🥉<b style="color:#cbd5e1">$'+_cardA3+'</b></span>';
+    h += '</div>';
+  }
+  if(myName) {
+    if(status==="complete" && myFinish) {
+      var fc=myFinish===1?'#fbbf24':myFinish===2?'#94a3b8':'#b45309';
+      var fPts=myFinish===1?4:myFinish===2?2:1;
+      h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
+      h += '<span style="font-size:9px;font-weight:700;color:'+fc+'">'+_plOrd(myFinish)+'</span>';
+      h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
+      h += '<span style="font-size:9px;color:#94a3b8">+'+fPts+' pts</span>';
+      h += '</div>';
+    } else if((status==="open"||status==="live") && myPoolRank!==null && myPoolPts!==null) {
+      var rc2=myPoolRank===1?'#fbbf24':myPoolRank===2?'#94a3b8':myPoolRank===3?'#b45309':'#475569';
+      var grandMaxVal2 = (data[pool.id]||{}).grandMax || null;
+      var totalPlayers2 = poolScores.filter(function(s){ return s.pts !== null; }).length || (g.players||[]).length;
+      h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
+      h += '<span style="font-size:9px;font-weight:700;color:'+rc2+'">#'+myPoolRank+' of '+totalPlayers2+'</span>';
+      h += '<span style="color:#1e2a3a;font-size:9px">·</span>';
+      h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myPoolPts+'</b>'+(grandMaxVal2!==null?' / '+grandMaxVal2:'')+'  pts</span>';
+      h += '</div>';
+    } else if(status==="open"||status==="live") {
+      var poolPicks2 = poolPicksData[myName];
+      var hasPicks = poolPicks2 !== undefined && poolPicks2 !== null;
+      var grandMaxVal = (data[pool.id]||{}).grandMax || null;
+      h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
+      if(hasPicks && grandMaxVal !== null && myPoolPts === null) {
+        var myRawScore = poolScoresData[myName] !== undefined ? poolScoresData[myName] : 0;
+        h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myRawScore+'</b> / '+grandMaxVal+' pts</span>';
+      } else if(!hasPicks) {
+        h += '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
+      }
+      h += '</div>';
+    }
+  }
+  h += '</div>';
+  h += '<div class="pool-right">';
+  if(status==="open")        h+='<span class="status-pill pill-open">Open</span>';
+  else if(status==="live")   h+='<span class="status-pill pill-locked">Live</span>';
+  else if(status==="complete")h+='<span class="status-pill pill-complete">'+(result&&result.first?'&#127942; '+x(result.first):'Final')+'</span>';
+  else                        h+='<span class="status-pill pill-soon">Coming Soon</span>';
+  if(clickable) h+='<span class="pool-arrow">&#8250;</span>';
+  if(clickable) h+='<button class="pool-copy-btn" data-copy-pool="'+pool.id+'" data-copy-pool-name="'+x(pool.name)+'">&#8645; Copy</button>';
+  h += '</div></div>';
+  if((status==="open"||status==="live") && poolScores.length > 0) {
+    var hasAnyPts = poolScores.some(function(s){ return s.pts !== null && s.pts > 0; });
+    var grandMaxLb = (data[pool.id]||{}).grandMax || null;
+    var maxScoresLb = (data[pool.id]||{}).maxScores || {};
+    h += '<div style="border-top:1px solid #0f1923;padding:8px 12px 10px">';
+    h += '<div style="font-size:8px;color:#334155;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;font-weight:700">Leaderboard</div>';
+    poolScores.forEach(function(p, i){
+      if(p.pts === null && !hasAnyPts && i >= 3) return;
+      var isMe = p.name === myName;
+      var pEm = playerEmoji(p.name);
+      var rankColors = ['#fbbf24','#94a3b8','#b45309'];
+      var rc3 = rankColors[i] || '#334155';
+      var maxPts = maxScoresLb[p.name] !== undefined ? maxScoresLb[p.name] : null;
+      var score = p.pts !== null ? p.pts : 0;
+      var maxVal = grandMaxLb || 1;
+      var pct = Math.round(score / maxVal * 100);
+      var maxPct = maxPts !== null ? Math.min(100, Math.round(maxPts / maxVal * 100)) : 100;
+      h += '<div style="display:flex;align-items:center;gap:6px;padding:2px 0'+(isMe?';background:rgba(99,102,241,.05);border-radius:6px;margin:0 -4px;padding:3px 4px':'')+'">';
+      h += '<div style="font-size:9px;font-weight:700;color:'+rc3+';width:14px;text-align:center;flex-shrink:0">'+(i+1)+'</div>';
+      h += '<div style="font-size:11px;flex-shrink:0">'+pEm+'</div>';
+      h += '<div style="flex:1;min-width:0">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
+      h += '<span style="font-size:10px;font-weight:'+(isMe?'700':'500')+';color:'+(isMe?'#a5b4fc':'#cbd5e1')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px">'+x(p.name)+'</span>';
+      h += '<span style="font-size:9px;color:#475569;flex-shrink:0;margin-left:4px"><b style="color:'+(isMe?'#a5b4fc':'#94a3b8')+'">'+score+'</b>'+(grandMaxLb?' / '+grandMaxLb:'')+'</span>';
+      h += '</div>';
+      h += '<div style="height:3px;background:#0f1923;border-radius:2px;overflow:hidden">';
+      h += '<div style="height:100%;border-radius:2px;background:'+(i===0?'linear-gradient(90deg,#d97706,#fbbf24)':'linear-gradient(90deg,#4f46e5,#818cf8)')+';width:'+pct+'%;transition:width .3s"></div>';
+      if(maxPts !== null && maxPct > pct) h += '<div style="height:100%;border-radius:2px;background:rgba(99,102,241,.15);width:'+(maxPct-pct)+'%;margin-top:-3px"></div>';
+      h += '</div>';
+      h += '</div></div>';
+    });
+    h += '</div>';
+  }
+  if(result&&(result.first||result.second||result.third)){
+    h += '<div class="pool-winner"><div class="podium">';
+    if(result.first)  h+='<div class="podium-item p1">1st <b>'+x(result.first)+'</b></div>';
+    if(result.second) h+='<div class="podium-item p2">2nd <b>'+x(result.second)+'</b></div>';
+    if(result.third)  h+='<div class="podium-item p3">3rd <b>'+x(result.third)+'</b></div>';
+    h += '</div></div>';
+  }
+  h += '</div>';
+  return h;
 }
 
 function calcStandings(g, data) {
