@@ -437,7 +437,7 @@ var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/rwc":"rwc2026";
-var ST={user:URL_USER||null,conf:"acc",page:"bracket",vrd:null,admin:false,picks:{},locked:{},results:{},prevRanks:{}};
+var ST={user:URL_USER||null,conf:"acc",page:"bracket",vrd:null,admin:false,picks:{},locked:{},results:{},prevRanks:{},confLocked:{}};
 var _savedScroll=null;
 function _restoreScroll(){
   if(!_savedScroll)return;
@@ -484,26 +484,26 @@ function step4(){DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()
   scheduleAutoLocks();
 }
 function scheduleAutoLocks(){
-  if(PREVIEW || ST.admin) return;
+  if(PREVIEW) return;
   var now = Date.now();
-  // Find the earliest lockAt across all confs
-  var earliest = null;
   for(var ci=0;ci<CORD.length;ci++){
-    var la = C[CORD[ci]].lockAt;
-    if(la && (earliest === null || la < earliest)) earliest = la;
-  }
-  if(!earliest) return;
-  if(now >= earliest){
-    // Already past tipoff — lock everyone now
-    autoLockAll();
-  } else {
-    // Schedule lock to fire exactly at tipoff
-    var delay = earliest - now;
-    setTimeout(function(){ autoLockAll(); }, delay);
+    (function(cid){
+      var la = C[cid].lockAt;
+      if(!la) return;
+      if(now >= la){
+        ST.confLocked[cid] = true;
+      } else {
+        var delay = la - now;
+        setTimeout(function(){
+          ST.confLocked[cid] = true;
+          draw();
+        }, delay);
+      }
+    })(CORD[ci]);
   }
 }
 function autoLockAll(){
-  if(!DB || PREVIEW || ST.admin) return;
+  if(!DB || PREVIEW) return;
   PARTS.forEach(function(p){
     if(!ST.locked[p]) doLock(p);
   });
@@ -513,7 +513,7 @@ var _tt;
 function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2400);}
 var _confettiRunning=false;
 function launchConfetti(){if(_confettiRunning)return;_confettiRunning=true;var canvas=document.getElementById("confetti-canvas");canvas.style.display="block";canvas.width=window.innerWidth;canvas.height=window.innerHeight;var ctx=canvas.getContext("2d");var pieces=[];var colors=["#6366f1","#10b981","#fbbf24","#f87171","#a5b4fc","#6ee7b7","#fcd34d"];for(var i=0;i<120;i++)pieces.push({x:Math.random()*canvas.width,y:-10-Math.random()*200,w:6+Math.random()*6,h:8+Math.random()*8,color:colors[Math.floor(Math.random()*colors.length)],vx:(Math.random()-.5)*4,vy:2+Math.random()*4,angle:Math.random()*Math.PI*2,va:(Math.random()-.5)*.2});var frames=0;function tick(){ctx.clearRect(0,0,canvas.width,canvas.height);var alive=false;for(var i=0;i<pieces.length;i++){var p=pieces[i];p.x+=p.vx;p.y+=p.vy;p.angle+=p.va;p.vy+=.08;if(p.y<canvas.height+20)alive=true;ctx.save();ctx.translate(p.x+p.w/2,p.y+p.h/2);ctx.rotate(p.angle);ctx.fillStyle=p.color;ctx.globalAlpha=Math.max(0,1-(frames/180));ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);ctx.restore();}frames++;if(alive&&frames<200)requestAnimationFrame(tick);else{canvas.style.display="none";ctx.clearRect(0,0,canvas.width,canvas.height);_confettiRunning=false;}}requestAnimationFrame(tick);}
-function cardHTML(conf,gid,pm,isAdmin){var g=null;for(var i=0;i<conf.games.length;i++)if(conf.games[i].id===gid){g=conf.games[i];break;}if(!g)return"";var res=ST.results[conf.id]||{},topN=slot(conf,pm,gid,true),botN=slot(conf,pm,gid,false);var picked=pm[gid],actual=res[gid],earned=actual&&picked===actual;var ptsBadgeCls=earned?"gc-pts-badge earned":"gc-pts-badge";var ptsLabel=(earned?"+":"")+pts(g.rd)+"pt";function rowH(name){var isV=name&&name!=="TBD"&&name!=="?";var isPk=picked===name,isOk=actual&&isPk&&actual===name,isBd=actual&&isPk&&actual!==name,isAct=actual===name&&!isPk;var t=isV?tByName(conf,name):null;var canClick=isV&&(isAdmin||(ST.user&&!ST.locked[ST.user]));var cls="gc-row"+(canClick?" clickable":"");if(isPk)cls+=isOk?" correct":isBd?" wrong":" picked";else if(isAct&&!isAdmin)cls+=" actual";var badge='<div class="seed" style="background:'+(t?t.c:"#1a2535")+'">'+(t?t.s:"")+'</div>';var nm='<div class="team-name'+(isPk?" bold":"")+(!isV?" dim":"")+'">'+(isV?x(name):"TBD")+'</div>';var icon=isOk?'<span class="gc-icon" style="color:#10b981">&#10003;</span>':isBd?'<span class="gc-icon" style="color:#ef4444">&#10007;</span>':"";var da=canClick?' data-cid="'+conf.id+'" data-gid="'+x(gid)+'" data-name="'+x(name)+'" data-adm="'+(isAdmin?1:0)+'"':"";return'<div class="'+cls+'"'+da+'>'+badge+nm+icon+'</div>';}return'<div class="gc"><div class="gc-head"><span>'+x(g.lbl)+'</span><span class="'+ptsBadgeCls+'">'+ptsLabel+'</span></div>'+rowH(topN)+rowH(botN)+'</div>';}
+function cardHTML(conf,gid,pm,isAdmin){var g=null;for(var i=0;i<conf.games.length;i++)if(conf.games[i].id===gid){g=conf.games[i];break;}if(!g)return"";var res=ST.results[conf.id]||{},topN=slot(conf,pm,gid,true),botN=slot(conf,pm,gid,false);var picked=pm[gid],actual=res[gid],earned=actual&&picked===actual;var ptsBadgeCls=earned?"gc-pts-badge earned":"gc-pts-badge";var ptsLabel=(earned?"+":"")+pts(g.rd)+"pt";function rowH(name){var isV=name&&name!=="TBD"&&name!=="?";var isPk=picked===name,isOk=actual&&isPk&&actual===name,isBd=actual&&isPk&&actual!==name,isAct=actual===name&&!isPk;var t=isV?tByName(conf,name):null;var canClick=isV&&(isAdmin||(ST.user&&!ST.locked[ST.user]&&!ST.confLocked[conf.id]));var cls="gc-row"+(canClick?" clickable":"");if(isPk)cls+=isOk?" correct":isBd?" wrong":" picked";else if(isAct&&!isAdmin)cls+=" actual";var badge='<div class="seed" style="background:'+(t?t.c:"#1a2535")+'">'+(t?t.s:"")+'</div>';var nm='<div class="team-name'+(isPk?" bold":"")+(!isV?" dim":"")+'">'+(isV?x(name):"TBD")+'</div>';var icon=isOk?'<span class="gc-icon" style="color:#10b981">&#10003;</span>':isBd?'<span class="gc-icon" style="color:#ef4444">&#10007;</span>':"";var da=canClick?' data-cid="'+conf.id+'" data-gid="'+x(gid)+'" data-name="'+x(name)+'" data-adm="'+(isAdmin?1:0)+'"':"";return'<div class="'+cls+'"'+da+'>'+badge+nm+icon+'</div>';}return'<div class="gc"><div class="gc-head"><span>'+x(g.lbl)+'</span><span class="'+ptsBadgeCls+'">'+ptsLabel+'</span></div>'+rowH(topN)+rowH(botN)+'</div>';}
 var _prevLeader=null;
 function draw(){var conf=C[ST.conf],cRes=ST.results[ST.conf]||{};var myPicks=ST.user?((ST.picks[ST.user]||{})[ST.conf]||{}):{};var isLocked=ST.user&&ST.locked[ST.user];var locked=allLocked(),GMAX=grandMax();var h="";if(PREVIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:rgba(99,102,241,.08);border-bottom:1px solid rgba(99,102,241,.2);font-size:10px;color:#a5b4fc">👁 Preview — picks are disabled</div>';
 h+='<div class="topbar">';
@@ -533,9 +533,9 @@ if(!ST.user&&!ST.admin&&ST.page==="bracket"){h+='<div class="user-screen"><h2>Wh
 if(ST.page==="bracket"){
 if(ST.user&&anyResults()){h+='<div class="conf-score-bar">';var confTotal=0;CORD.forEach(function(cid){var pp=(ST.picks[ST.user]||{})[cid]||{},sc=confScore(C[cid],pp,ST.results[cid]||{});confTotal+=sc;h+='<div class="cscore'+(cid===ST.conf?" active-conf":"")+'"><div class="csl">'+C[cid].label+'</div><div class="csv">'+sc+'pt</div></div>';});h+='<div class="cscore" style="border-color:rgba(99,102,241,.3);background:rgba(99,102,241,.06)"><div class="csl">Total</div><div class="csv" style="color:#a5b4fc">'+confTotal+'pt</div></div></div>';}
 h+='<div class="lock-bar">';
-if(!ST.admin&&ST.user){var totPk=CORD.reduce(function(a,cid){return a+confPicks(cid,ST.user);},0),totGm=totalGameCount();if(!isLocked){h+='<span class="lock-info">'+totPk+"/"+totGm+" picks</span>";h+='<button class="btn btn-green" id="b-lock">Lock My Picks</button>';}else{h+='<span class="lock-info" style="color:#6ee7b7">Picks locked &#128274;</span>';h+='<button class="btn btn-ghost" id="b-unlock" style="font-size:9px">Unlock</button>';}if(totPk>0)h+='<button class="btn btn-purple" id="b-copy-group" style="font-size:9px">&#8645; Copy to Group</button>';}
+if(!ST.admin&&ST.user){var totPk=CORD.reduce(function(a,cid){return a+confPicks(cid,ST.user);},0),totGm=totalGameCount();var confIsLocked=ST.confLocked[ST.conf];if(!isLocked&&!confIsLocked){h+='<span class="lock-info">'+totPk+"/"+totGm+" picks</span>";h+='<button class="btn btn-green" id="b-lock">Lock My Picks</button>';}else if(confIsLocked&&!isLocked){h+='<span class="lock-info" style="color:#fbbf24">'+C[ST.conf].label+' locked &#128274;</span>';h+='<button class="btn btn-green" id="b-lock">Lock All Picks</button>';}else{h+='<span class="lock-info" style="color:#6ee7b7">Picks locked &#128274;</span>';h+='<button class="btn btn-ghost" id="b-unlock" style="font-size:9px">Unlock</button>';}if(totPk>0)h+='<button class="btn btn-purple" id="b-copy-group" style="font-size:9px">&#8645; Copy to Group</button>';}
 if(ST.admin)h+='<span class="lock-info" style="color:#fbbf24">&#9889; Tap teams to enter results</span>';
-h+='<div class="lock-chips">';PARTS.forEach(function(p){h+='<span class="chip '+(ST.locked[p]?"done":"pend")+'">'+pem(p)+x(p)+" "+(ST.locked[p]?"&#128274;":"&#8987;")+'</span>';});h+='</div></div>';
+h+='<div class="lock-chips">';PARTS.forEach(function(p){var effLocked=ST.locked[p]||ST.confLocked[ST.conf];h+='<span class="chip '+(effLocked?"done":"pend")+'">'+pem(p)+x(p)+" "+(effLocked?"&#128274;":"&#8987;")+'</span>';});h+='</div></div>';
 if(ST.admin){var rds=[],qeRd=null;conf.games.forEach(function(g){if(rds.indexOf(g.rd)<0)rds.push(g.rd);});for(var ri=0;ri<rds.length;ri++){var hasUnset=conf.games.some(function(g){return g.rd===rds[ri]&&!cRes[g.id];});if(hasUnset){qeRd=rds[ri];break;}}if(qeRd!==null){h+='<div class="quick-entry"><div class="qe-title"><span>Quick Entry: '+conf.rounds[qeRd]+'</span><span style="font-size:9px;color:#475569">'+conf.label+'</span></div><div class="qe-games">';conf.games.forEach(function(g){if(g.rd!==qeRd)return;var topN=slot(conf,cRes,g.id,true),botN=slot(conf,cRes,g.id,false),setResult=cRes[g.id];if(topN==="?"||botN==="?")return;h+='<div class="qe-game"><div class="qe-game-lbl">'+x(g.lbl)+'</div><div class="qe-btns">';if(topN!=="TBD")h+='<button class="qe-btn'+(setResult===topN?" set":"")+'" data-qe-cid="'+conf.id+'" data-qe-gid="'+x(g.id)+'" data-qe-name="'+x(topN)+'">'+x(topN)+'</button>';if(botN!=="TBD")h+='<button class="qe-btn'+(setResult===botN?" set":"")+'" data-qe-cid="'+conf.id+'" data-qe-gid="'+x(g.id)+'" data-qe-name="'+x(botN)+'">'+x(botN)+'</button>';if(setResult)h+='<button class="qe-btn" style="color:#ef4444;border-color:rgba(239,68,68,.3)" data-qe-clear-cid="'+conf.id+'" data-qe-clear-gid="'+x(g.id)+'">&#10005;</button>';h+='</div></div>';});h+='</div></div>';}}
 var rds2=[];conf.games.forEach(function(g){if(rds2.indexOf(g.rd)<0)rds2.push(g.rd);});
 h+='<div class="round-bar"><button class="rbtn '+(ST.vrd===null?"active":"inactive")+'" data-rd="-1">All</button>';
@@ -566,7 +566,7 @@ el=document.getElementById("b-lock");if(el)el.addEventListener("click",function(
 el=document.getElementById("b-unlock");if(el)el.addEventListener("click",function(){if(confirm("Unlock your picks?")){doUnlock(ST.user);toast("Picks unlocked");}});
 el=document.getElementById("b-copy-group");if(el)el.addEventListener("click",openCopyModal);
 els=document.querySelectorAll(".rbtn");for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){var r=parseInt(this.getAttribute("data-rd"));ST.vrd=r===-1?null:r;draw();});
-els=document.querySelectorAll(".gc-row.clickable");for(i=0;i<els.length;i++){els[i].addEventListener("click",function(){var cid=this.getAttribute("data-cid"),gid=this.getAttribute("data-gid"),name=this.getAttribute("data-name"),isAdm=this.getAttribute("data-adm")==="1";if(!cid||!gid||!name)return;if(isAdm){saveResult(cid,gid,name);toast("Result: "+name);}else if(ST.user&&!ST.locked[ST.user]){var _cur=((ST.picks[ST.user]||{})[cid]||{})[gid];if(_cur===name){savePick(ST.user,cid,gid,null);toast("Removed: "+name);}else{savePick(ST.user,cid,gid,name);toast(ST.user+": "+name);}}});}
+els=document.querySelectorAll(".gc-row.clickable");for(i=0;i<els.length;i++){els[i].addEventListener("click",function(){var cid=this.getAttribute("data-cid"),gid=this.getAttribute("data-gid"),name=this.getAttribute("data-name"),isAdm=this.getAttribute("data-adm")==="1";if(!cid||!gid||!name)return;if(isAdm){saveResult(cid,gid,name);toast("Result: "+name);}else if(ST.user&&!ST.locked[ST.user]&&!ST.confLocked[cid]){var _cur=((ST.picks[ST.user]||{})[cid]||{})[gid];if(_cur===name){savePick(ST.user,cid,gid,null);toast("Removed: "+name);}else{savePick(ST.user,cid,gid,name);toast(ST.user+": "+name);}}});}
 els=document.querySelectorAll("[data-qe-gid]");for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){saveResult(this.getAttribute("data-qe-cid"),this.getAttribute("data-qe-gid"),this.getAttribute("data-qe-name"));toast("Result set: "+this.getAttribute("data-qe-name"));});
 els=document.querySelectorAll("[data-qe-clear-gid]");for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){clearResult(this.getAttribute("data-qe-clear-cid"),this.getAttribute("data-qe-clear-gid"));toast("Result cleared");});
 var cards=document.querySelectorAll("[data-tn]");for(var ci=0;ci<cards.length;ci++){(function(card){card.addEventListener("click",function(){showTM(card.getAttribute("data-tn"),card.getAttribute("data-tc"),card.getAttribute("data-tcol"),card.getAttribute("data-ts"),card.getAttribute("data-tr"));});})(cards[ci]);}
