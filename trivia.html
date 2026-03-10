@@ -88,6 +88,7 @@ var TV = {
   qIdx: 0,
   chosen: null
 };
+var _distCache = null; // cached score distribution for today
 
 // ── DATE HELPERS ──────────────────────────────────────────────────────────────
 function getEasternNow() {
@@ -2191,8 +2192,7 @@ function drawHome() {
     var o = topbar(false);
     o += '<div class="main">';
     o += '<div class="tv-hero">';
-    o += '<div class="tv-hero-eyebrow">Daily Sports Trivia</div>';
-    o += '<div class="tv-hero-title">TRIVIA</div>';
+    o += '<div class="tv-hero-title" style="font-size:38px;letter-spacing:.08em">DAILY SPORTS TRIVIA</div>';
     o += '<div class="tv-hero-date">'+ds+'</div>';
 
     var _homeshareMsg = "";
@@ -2206,9 +2206,10 @@ function drawHome() {
       o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:8px">'+row1+'</div>';
       o += '<div style="font-size:18px;letter-spacing:3px;margin-bottom:16px">'+row2+'</div>';
       o += '<div style="font-size:12px;color:#475569;margin-top:8px;letter-spacing:.05em">Come back tomorrow for a new quiz</div>';
-      o += buildCalendarHTML(_fbMonthScores);
       _homeshareMsg = "PoolPlay Trivia \uD83C\uDFC6\n"+ds+"\n"+todayScore+"/10\n\n"+row1+"\n"+row2;
       o += '<button class="tv-btn-share" id="tv-home-share" style="margin-top:14px;width:100%">Share Today\'s Results</button>';
+      o += buildCalendarHTML(_fbMonthScores);
+      o += '<div id="tv-dist-chart" style="margin-top:16px;font-size:11px;color:#334155"></div>';
     } else {
       o += '<button class="tv-hero-btn" id="tv-start">Start Quiz</button>';
     }
@@ -2227,10 +2228,33 @@ function drawHome() {
     if (btn) btn.onclick = function(){ TV.view="q"; TV.qIdx=0; draw(); };
     var shareBtn = document.getElementById("tv-home-share");
     if (shareBtn) shareBtn.onclick = function(){
-      var _full = "https://pool-play.vercel.app\n"+_homeshareMsg;
+      var _full = "https://pool-play.vercel.app "+_homeshareMsg;
       if(navigator.share){ navigator.share({text:_full}).catch(function(){}); }
       else { window.open("sms:?&body="+encodeURIComponent(_full),"_blank"); }
     };
+
+    // Render score distribution below calendar on home screen
+    var _homeScore = todayData ? todayData.r.filter(function(v){return v;}).length : 0;
+    if(_distCache) {
+      renderDistChart(_distCache.dist, _distCache.total, _distCache.sum, _homeScore);
+    } else if(DB) {
+      DB.ref("triviaScores").once("value", function(sn){
+        var all = sn.val() || {};
+        var dk = getDateKey();
+        var dist = [0,0,0,0,0,0,0,0,0,0,0];
+        var total = 0, sum = 0;
+        Object.values(all).forEach(function(userScores){
+          if(!userScores || !userScores[dk]) return;
+          var entry = userScores[dk];
+          var s = typeof entry.s === 'number' ? entry.s : (entry.r ? entry.r.filter(function(v){return v;}).length : null);
+          if(s === null || s === undefined) return;
+          s = Math.max(0, Math.min(10, s));
+          dist[s]++; total++; sum += s;
+        });
+        _distCache = {dist:dist, total:total, sum:sum};
+        renderDistChart(dist, total, sum, _homeScore);
+      });
+    }
   }
 
   // Check Firebase: reset flag + sync today's result if missing from localStorage
@@ -2380,18 +2404,74 @@ function drawDone() {
   o += '<div style="font-size:13px;font-weight:700;color:#fbbf24;letter-spacing:.05em;margin-bottom:4px">'+totalPts+' pts</div>';
   o += '<div class="tv-res-grid">'+row1+'</div>';
   o += '<div class="tv-res-grid">'+row2+'</div>';
-  o += buildCalendarHTML(null);
+  o += '<div id="tv-dist-chart" style="margin-top:16px;font-size:11px;color:#334155"></div>';
   o += '<button class="tv-btn-share" id="tv-share">Share Results</button>';
   o += '<button class="tv-btn-hub" id="tv-back">Back to PoolPlay</button>';
   o += '</div></div>';
   render(o);
   bindTopbar();
   document.getElementById("tv-share").onclick = function(){
-    var _full = "https://pool-play.vercel.app\n"+shareMsg;
+    var _full = "https://pool-play.vercel.app "+shareMsg;
     if(navigator.share){ navigator.share({text:_full}).catch(function(){}); }
     else { window.open("sms:?&body="+encodeURIComponent(_full),"_blank"); }
   };
   document.getElementById("tv-back").onclick = goBack;
+
+  // Fetch score distribution for today
+  if(_distCache) {
+    renderDistChart(_distCache.dist, _distCache.total, _distCache.sum, score);
+  } else if(DB) {
+    DB.ref("triviaScores").once("value", function(sn){
+      var all = sn.val() || {};
+      var dk = getDateKey();
+      var dist = [0,0,0,0,0,0,0,0,0,0,0];
+      var total = 0, sum = 0;
+      Object.values(all).forEach(function(userScores){
+        if(!userScores || !userScores[dk]) return;
+        var entry = userScores[dk];
+        var s = typeof entry.s === 'number' ? entry.s : (entry.r ? entry.r.filter(function(v){return v;}).length : null);
+        if(s === null || s === undefined) return;
+        s = Math.max(0, Math.min(10, s));
+        dist[s]++; total++; sum += s;
+      });
+      _distCache = {dist:dist, total:total, sum:sum};
+      renderDistChart(dist, total, sum, score);
+    });
+  } else {
+    var chartEl = document.getElementById("tv-dist-chart");
+    if(chartEl) chartEl.textContent = "";
+  }
+}
+
+function renderDistChart(dist, total, sum, score) {
+  var chartEl = document.getElementById("tv-dist-chart");
+  if(!chartEl) return;
+  if(total === 0) { chartEl.textContent = "No data yet."; return; }
+  var avg = (sum / total).toFixed(1);
+  var maxCount = Math.max.apply(null, dist);
+  var html = '<div style="margin-bottom:8px;font-size:10px;color:#94a3b8">avg <b style="color:#f1f5f9">'+avg+'</b>/10 &nbsp;·&nbsp; '+total+' player'+(total!==1?'s':'')+' today</div>';
+  html += '<div style="display:flex;align-items:flex-end;gap:4px;height:80px">';
+  for(var i=0;i<=10;i++){
+    var count = dist[i];
+    var barH = maxCount > 0 ? Math.max(4, Math.round(count / maxCount * 72)) : 0;
+    var isMe = (i === score);
+    var barColor = isMe ? '#6ee7b7' : (i >= 8 ? '#10b981' : i >= 5 ? '#6366f1' : '#334155');
+    html += '<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:2px">';
+    var pct = total > 0 ? Math.round(count / total * 100) : 0;
+    if(count > 0) html += '<div style="font-size:7px;color:'+(isMe?'#6ee7b7':'#475569')+';font-weight:'+(isMe?'700':'400')+'">'+pct+'%</div>';
+    else html += '<div style="font-size:7px">&nbsp;</div>';
+    html += '<div style="width:100%;border-radius:3px 3px 0 0;background:'+barColor+';height:'+barH+'px;min-height:'+(count>0?'4':'0')+'px;transition:height .3s"></div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '<div style="display:flex;gap:4px;margin-top:3px">';
+  for(var i=0;i<=10;i++){
+    var isMe2 = (i === score);
+    html += '<div style="flex:1;text-align:center;font-size:7px;color:'+(isMe2?'#6ee7b7':'#334155')+';font-weight:'+(isMe2?'700':'400')+'">'+i+'</div>';
+  }
+  html += '</div>';
+  html += '<div style="font-size:8px;color:#334155;margin-top:4px;text-align:center">score</div>';
+  chartEl.innerHTML = html;
 }
 
 
