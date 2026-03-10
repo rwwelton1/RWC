@@ -465,32 +465,101 @@ function fetchScores(){
   if(_scoresLoading)return;
   _scoresLoading=true;_scoresError=null;
   if(ST.page==="scores")draw();
-  var confList=CORD.map(function(cid){return C[cid].label+" ("+C[cid].venue+", "+C[cid].dates+")";}).join("; ");
-  var prompt="You are a live sports score fetcher. Search the web right now for today's NCAA men's college basketball conference tournament scores (March 10, 2026). The conferences are: "+confList+". Return ONLY valid JSON, no markdown, no explanation. Format: {\"updated\":\"HH:MM AM/PM ET\",\"conferences\":[{\"id\":\"acc\",\"label\":\"ACC\",\"games\":[{\"id\":\"g1\",\"round\":\"Round Name\",\"time\":\"2:30 PM ET\",\"status\":\"final|live|upcoming\",\"period\":\"FINAL or 2nd Half 14:22 etc\",\"topSeed\":2,\"topTeam\":\"Duke\",\"topScore\":74,\"botSeed\":10,\"botTeam\":\"Stanford\",\"botScore\":61,\"topWin\":true}]}]}. Include all games played today. For upcoming games use null for scores. Status must be final, live, or upcoming. Conferences in order: acc, b10, b12, sec, be. Only include conferences with games today. Return ONLY the JSON object.";
-  fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",
-      max_tokens:1500,
-      tools:[{type:"web_search_20250305",name:"web_search"}],
-      messages:[{role:"user",content:prompt}]
-    })
-  }).then(function(r){return r.json();}).then(function(data){
-    try{
-      var text=(data.content||[]).filter(function(b){return b.type==="text";}).map(function(b){return b.text;}).join("");
-      var clean=text.replace(/```json|```/g,"").trim();
-      var parsed=JSON.parse(clean);
-      _scoresData=renderScoresHTML(parsed);
-      _scoresLastFetch=Date.now();
-    }catch(e){
-      _scoresError="Could not parse scores data. "+e.message;
-    }
+  fetch("https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?limit=100&groups=50")
+  .then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();})
+  .then(function(data){
+    try{_scoresData=parseESPN(data);_scoresLastFetch=Date.now();}
+    catch(e){_scoresError="Parse error: "+e.message;}
     _scoresLoading=false;if(ST.page==="scores")draw();
-  }).catch(function(e){
-    _scoresError="Network error: "+e.message;
-    _scoresLoading=false;if(ST.page==="scores")draw();
+  }).catch(function(){
+    // Fallback: try without groups filter
+    fetch("https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?limit=150")
+    .then(function(r2){return r2.json();})
+    .then(function(data2){
+      try{_scoresData=parseESPN(data2);_scoresLastFetch=Date.now();}
+      catch(e2){_scoresError="Could not load scores: "+e2.message;}
+      _scoresLoading=false;if(ST.page==="scores")draw();
+    }).catch(function(e3){
+      _scoresError="Network error. Check your connection.";
+      _scoresLoading=false;if(ST.page==="scores")draw();
+    });
   });
+}
+function parseESPN(data){
+  var events=data.events||[];
+  // Build a flat team name lookup for our conferences
+  var teamLookup={};
+  CORD.forEach(function(cid){
+    C[cid].teams.forEach(function(t){
+      var key=t.n.toLowerCase().replace(/[^a-z0-9]/g,"");
+      teamLookup[key]=cid;
+      // Also index abbreviation-style
+      var words=t.n.split(" ");
+      if(words.length>1)teamLookup[words[words.length-1].toLowerCase()+"_"+cid]=cid;
+    });
+  });
+  function matchTeamConf(displayName,shortName){
+    var names=[displayName,shortName].filter(Boolean);
+    for(var ni=0;ni<names.length;ni++){
+      var s=names[ni].toLowerCase().replace(/[^a-z0-9]/g,"");
+      if(teamLookup[s])return teamLookup[s];
+      // Partial match
+      for(var cid in {acc:1,b10:1,b12:1,sec:1,be:1}){
+        for(var ti=0;ti<C[cid].teams.length;ti++){
+          var tn=C[cid].teams[ti].n.toLowerCase();
+          if(s.indexOf(tn.replace(/[^a-z0-9]/g,""))>=0||tn.replace(/[^a-z0-9]/g,"").indexOf(s)>=0)return cid;
+        }
+      }
+    }
+    return null;
+  }
+  function findSeed(cid,name){
+    var s=name.toLowerCase().replace(/[^a-z0-9]/g,"");
+    for(var i=0;i<C[cid].teams.length;i++){
+      var tn=C[cid].teams[i].n.toLowerCase().replace(/[^a-z0-9]/g,"");
+      if(s===tn||s.indexOf(tn)>=0||tn.indexOf(s)>=0)return C[cid].teams[i].s;
+    }
+    return "";
+  }
+  var confGames={acc:[],b10:[],b12:[],sec:[],be:[]};
+  events.forEach(function(ev){
+    var comp=ev.competitions&&ev.competitions[0];if(!comp)return;
+    var competitors=comp.competitors||[];
+    if(competitors.length<2)return;
+    var homeC=competitors.find(function(c){return c.homeAway==="home";})||competitors[0];
+    var awayC=competitors.find(function(c){return c.homeAway==="away";})||competitors[1];
+    var homeTeam=homeC.team||{};var awayTeam=awayC.team||{};
+    // Try to match either team to our conferences
+    var cid=matchTeamConf(homeTeam.displayName,homeTeam.shortDisplayName)||matchTeamConf(awayTeam.displayName,awayTeam.shortDisplayName);
+    if(!cid)return;
+    var status=ev.status&&ev.status.type&&ev.status.type.name||"";
+    var statusDetail=(ev.status&&ev.status.type&&ev.status.type.shortDetail)||"";
+    var isLive=status==="STATUS_IN_PROGRESS";
+    var isFinal=status==="STATUS_FINAL";
+    var gameStatus=isLive?"live":isFinal?"final":"upcoming";
+    var homeScore=isLive||isFinal?parseInt(homeC.score)||null:null;
+    var awayScore=isLive||isFinal?parseInt(awayC.score)||null:null;
+    var homeWin=isFinal&&homeScore!=null&&awayScore!=null&&homeScore>awayScore;
+    var homeName=homeTeam.shortDisplayName||homeTeam.displayName||"?";
+    var awayName=awayTeam.shortDisplayName||awayTeam.displayName||"?";
+    var timeStr="";
+    if(gameStatus==="upcoming"&&ev.date){
+      var d=new Date(ev.date);var hr=d.getHours(),mn=d.getMinutes();
+      var ap=hr>=12?"PM":"AM";hr=hr%12||12;
+      timeStr=hr+(mn?":"+("0"+mn).slice(-2):"")+" "+ap+" ET";
+    }
+    // Get round from notes or name
+    var roundName=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||"";
+    confGames[cid].push({
+      round:roundName,time:timeStr,status:gameStatus,period:statusDetail,
+      topSeed:findSeed(cid,homeName),topTeam:homeName,topScore:homeScore,
+      botSeed:findSeed(cid,awayName),botTeam:awayName,botScore:awayScore,
+      topWin:homeWin
+    });
+  });
+  var confsWithGames=CORD.filter(function(cid){return confGames[cid].length>0;});
+  if(!confsWithGames.length)return'<div class="scores-empty">No conference tournament games found for today.<br><br><span style="font-size:10px;color:#334155">Games may not have started yet or the season may have ended.</span></div>';
+  return renderScoresHTML({conferences:confsWithGames.map(function(cid){return{id:cid,label:C[cid].label,games:confGames[cid]};})});
 }
 function renderScoresHTML(d){
   var h="";
