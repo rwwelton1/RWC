@@ -582,7 +582,7 @@ var picked=pm[gid],actual=res[gid],earned=actual&&picked===actual;var ptsBadgeCl
 // Build score lookup from ESPN data — validates opponent to avoid showing wrong-game scores
 var _sl=ST._scoreLookup||{};
 var _aliasRev=ST._espnAliasRev||{};
-function _normName(name){if(!name||name==="TBD"||name==="?")return null;var k=name.toLowerCase();if(_aliasRev[k])return _aliasRev[k];return k;}
+function _normName(name){if(!name||name==="TBD"||name==="?")return null;return name.toLowerCase().trim();}
 function _getScore(name,opponent){
   if(!name||name==="TBD"||name==="?")return null;
   var k=_normName(name);if(!k)return null;
@@ -617,9 +617,11 @@ var scTeam=name;var scOpp=(name===topN||name===topA)?(botA||botN):(topA||topN);
 var sc=showScoreOnThisRow?_getScore(scTeam,scOpp):null;
 var scoreHtml="";if(sc&&sc.score!=null){scoreHtml='<span style="font-size:12px;font-weight:700;color:'+(sc.isLive?"#ef4444":"#94a3b8")+';min-width:22px;text-align:right;flex-shrink:0;margin-left:4px">'+sc.score+'</span>';}
 var nm='<div class="team-name'+(isPk?" bold":"")+(!isV?" dim":"")+'">'+nameHtml+'</div>';var icon=isOk?'<span class="gc-icon" style="color:#10b981">&#10003;</span>':isBd?'<span class="gc-icon" style="color:#ef4444">&#10007;</span>':"";
-// Show actual advancer sub-row with their score
+// Show actual advancer sub-row with their score — but only if this card's game has a result OR advancer is live
 var actualAdvRow="";if(isV&&actualName&&actualName!==name&&actualName!=="TBD"&&actualName!=="?"){var at=tByName(conf,actualName);
 var asc=null;var _games=ST._scoreGames||[];for(var _ai=0;_ai<_games.length;_ai++){var _ag=_games[_ai];var _ak=_normName(actualName);if(!_ak)break;var _mA=_ag.a===_ak||_ag.a.indexOf(_ak)===0||_ak.indexOf(_ag.a)===0;var _mB=_ag.b===_ak||_ag.b.indexOf(_ak)===0||_ak.indexOf(_ag.b)===0;if(_mA||_mB){asc={score:_mA?_ag.sa:_ag.sb,isLive:_ag.isLive};break;}}
+// Only show score on advancer sub-row if this card has a result already, OR advancer is currently live
+if(asc&&!actual&&!asc.isLive)asc=null;
 var aBadge='<div class="seed" style="background:'+(at?at.c:"#1a2535")+';opacity:.8;width:14px;height:14px;font-size:7px;flex-shrink:0">'+(at?at.s:"")+'</div>';var aScore=asc&&asc.score!=null?'<span style="font-size:12px;font-weight:700;color:'+(asc.isLive?"#ef4444":"#6ee7b7")+';min-width:22px;text-align:right;flex-shrink:0;margin-left:4px">'+asc.score+'</span>':"";actualAdvRow='<div style="display:flex;align-items:center;gap:6px;padding:3px 8px 5px;border-top:1px solid rgba(16,185,129,.12)">'+aBadge+'<div style="font-size:9px;color:#6ee7b7;flex:1">'+x(actualName)+'</div>'+aScore+'</div>';}
 var adm=isEditingPlayer?"ep":isAdmin?"1":"0";var da=canClick?' data-cid="'+conf.id+'" data-gid="'+x(gid)+'" data-name="'+x(name)+'" data-adm="'+adm+'"':"";return'<div class="'+cls+'"'+da+'>'+badge+nm+icon+scoreHtml+'</div>'+actualAdvRow;}
 // Card header: show live badge if game is in progress — pass opponents to validate correct game
@@ -769,277 +771,320 @@ function closeCopyModal(){document.getElementById("copy-modal").classList.remove
 function copyPicksToUser(targetUser){if(!_copyTarget||!ST.user||!DB)return;var myAllPicks=ST.picks[ST.user]||{},targetBase="groups/"+_copyTarget.id+"/data/rwc",updates={};CORD.forEach(function(cid){if(myAllPicks[cid]&&Object.keys(myAllPicks[cid]).length)updates[targetBase+"/picks/"+targetUser+"/"+cid]=myAllPicks[cid];});if(!Object.keys(updates).length){toast("No picks to copy");closeCopyModal();return;}DB.ref().update(updates,function(err){if(err)toast("Copy failed");else{toast("Picks copied to "+_copyTarget.name+" &#10003;");closeCopyModal();}});}
 function bindCopyModal(){document.getElementById("copy-cancel-1").addEventListener("click",closeCopyModal);document.getElementById("copy-cancel-2").addEventListener("click",closeCopyModal);document.getElementById("copy-cancel-3").addEventListener("click",closeCopyModal);document.getElementById("copy-back-2").addEventListener("click",function(){showCopyStep(1);});document.getElementById("copy-back-3").addEventListener("click",function(){showCopyStep(2);});document.getElementById("copy-pw-confirm").addEventListener("click",function(){if(!_copyTarget)return;var pw=document.getElementById("copy-pw").value.trim();var errEl=document.getElementById("copy-pw-error");if(pw!==_copyTarget.adminPw&&pw!==MASTER_PW){errEl.textContent="Wrong password";return;}errEl.textContent="";var grid=document.getElementById("copy-user-grid");grid.innerHTML="";(_copyTarget.players||[]).forEach(function(p){var btn=document.createElement("button");btn.className="copy-user-btn";btn.textContent=p;btn.addEventListener("click",function(){copyPicksToUser(p);});grid.appendChild(btn);});showCopyStep(3);});}
 var ESPN_CONFS=[
-  {key:"acc",label:"ACC",espnId:"2"},
-  {key:"b10",label:"Big Ten",espnId:"5"},
-  {key:"b12",label:"Big 12",espnId:"8"},
-  {key:"sec",label:"SEC",espnId:"23"},
-  {key:"be", label:"Big East",espnId:"4"}
+  {key:"acc",  label:"ACC"},
+  {key:"b10",  label:"Big Ten"},
+  {key:"b12",  label:"Big 12"},
+  {key:"sec",  label:"SEC"},
+  {key:"be",   label:"Big East"}
 ];
 function fetchScores(){
   if(ST.scoresLoading)return;
   ST.scoresLoading=true;ST.scoresError=null;draw();
-  // Tournament date ranges per conference key (2026)
-  var CONF_DATES={
-    acc: ["20260310","20260311","20260312","20260313","20260314"],
-    b10: ["20260310","20260311","20260312","20260313","20260314","20260315"],
-    b12: ["20260310","20260311","20260312","20260313","20260314"],
-    sec: ["20260311","20260312","20260313","20260314","20260315"],
-    be:  ["20260311","20260312","20260313","20260314"]
-  };
-  // Only fetch dates up to today to avoid empty future fetches
+  // All tournament dates across all conferences (union)
+  var ALL_DATES=["20260310","20260311","20260312","20260313","20260314","20260315"];
   function todayStr(){var d=new Date();return d.getFullYear()+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");}
   var today=todayStr();
-  var results=[];var rawByConf={};ESPN_CONFS.forEach(function(cf){rawByConf[cf.key]=[];});
-  var pending=0;var hasError=false;
-  ESPN_CONFS.forEach(function(cf){
-    var datesForConf=(CONF_DATES[cf.key]||[]).filter(function(d){return d<=today;});
-    if(!datesForConf.length)datesForConf=[today]; // fallback to today
-    pending+=datesForConf.length;
-    datesForConf.forEach(function(dt){
-    var url="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups="+cf.espnId+"&limit=50&conferenceId="+cf.espnId+"&dates="+dt;
-    fetch(url).then(function(r){return r.json();}).then(function(data){
-      var games=[];
-      (data.events||[]).forEach(function(ev){
-        var comp=ev.competitions&&ev.competitions[0];if(!comp)return;
-        // Filter: only include games where both teams are in this conference
-        var confName=cf.label.toLowerCase();
-        var notes=(comp.notes||[]).map(function(n){return(n.headline||"").toLowerCase();}).join(" ");
-        var evName=(ev.name||"").toLowerCase();
-        // Skip if the event name mentions a different conference tournament
-        var otherConfs=["big sky","sun belt","mountain west","mac ","wac ","cusa","america east","atlantic sun","big south","big west","colonial","horizon","ivy","maac","meac","missouri valley","nec","ovc","patriot","southern","southland","swac"];
-        var isOther=otherConfs.some(function(o){return evName.indexOf(o)>=0||notes.indexOf(o)>=0;});
-        if(isOther)return;
-        var status=comp.status&&comp.status.type;
-        var stateKey="scheduled";
-        if(status){if(status.completed)stateKey="final";else if(status.state==="in")stateKey="live";}
-        var clock=comp.status&&comp.status.displayClock;
-        var period=comp.status&&comp.status.period;
-        var periodTxt=period?(period===1?"1st Half":period===2?"2nd Half":"OT"):"";
-        var teams=(comp.competitors||[]).slice().sort(function(a,b){return a.homeAway==="home"?1:-1;});
-        function mapTeam(t){
-          // seed comes from the competitor's seed field directly
-          var seed=parseInt(t.seed)||null;
-          var color="#"+((t.team&&t.team.color)||"1a2535");
-          if(color==="#1a2535"||color==="#")color="#1a2535";
-          return{seed:seed,name:(t.team&&(t.team.shortDisplayName||t.team.displayName))||"TBD",score:stateKey!=="scheduled"?parseInt(t.score)||0:null,color:color};
-        }
-        var top=teams[0]?mapTeam(teams[0]):null;
-        var bot=teams[1]?mapTeam(teams[1]):null;
-        var note=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||"";
-        var timeStr="";
-        if(stateKey==="scheduled"&&comp.status&&comp.status.type&&comp.status.type.shortDetail)timeStr=comp.status.type.shortDetail;
-        games.push({round:note,time:timeStr,status:stateKey,clock:stateKey==="live"?clock:null,period:stateKey==="live"?periodTxt:null,top:top,bot:bot,date:dt});
-      });
-      // Accumulate into rawByConf — merge both date fetches
-      rawByConf[cf.key]=rawByConf[cf.key].concat(games);
-    }).catch(function(){
-      hasError=true;
-    }).finally(function(){
-      pending--;
-      if(pending===0){
-        ST.scoresLoading=false;
-        // Build merged results, deduplicating by team pair (keep live over final)
-        var order=["ACC","Big Ten","Big 12","SEC","Big East"];
-        results=[];
-        ESPN_CONFS.forEach(function(cf){
-          var seen={};var merged=[];
-          rawByConf[cf.key].forEach(function(g){
-            if(!g.top||!g.bot)return;
-            var key=[g.top.name.toLowerCase(),g.bot.name.toLowerCase()].sort().join("|");
-            if(!seen[key]||g.status==="live"){seen[key]=true;
-              // Remove old entry for this pair if we have a live update
-              merged=merged.filter(function(m){return[m.top.name.toLowerCase(),m.bot.name.toLowerCase()].sort().join("|")!==key;});
-              merged.push(g);
-            }
-          });
-          results.push({conf:cf.label,games:merged});
-        });
-        results.sort(function(a,b){return order.indexOf(a.conf)-order.indexOf(b.conf);});
-        ST.scoresData=results;
-        // Build score lookup keyed by PAIR of team names (sorted) so we only show scores when both teams match
-        ST._scoreLookup={};
-        ST._scoreGames=[];  // array of {teamA, teamB, scoreA, scoreB, isLive, clock, period}
-        results.forEach(function(grp){
-          grp.games.forEach(function(g){
-            if(g.status==="scheduled"||!g.top||!g.bot)return;
-            var a=g.top.name.toLowerCase(),b=g.bot.name.toLowerCase();
-            ST._scoreGames.push({a:a,b:b,sa:g.top.score,sb:g.bot.score,isLive:g.status==="live",clock:g.clock,period:g.period,date:g.date||""});
-            // Also keep single-team lookup but ONLY overwrite if this is a newer/live game
-            if(!(ST._scoreLookup[a]&&ST._scoreLookup[a].isLive))
-              ST._scoreLookup[a]={score:g.top.score,isLive:g.status==="live",clock:g.clock,period:g.period,opp:b};
-            if(!(ST._scoreLookup[b]&&ST._scoreLookup[b].isLive))
-              ST._scoreLookup[b]={score:g.bot.score,isLive:g.status==="live",clock:g.clock,period:g.period,opp:a};
-          });
-        });
-        // Sort: live first, then by date descending — ensures _getScore finds the right/most-recent game
-        ST._scoreGames.sort(function(a,b){
-          if(a.isLive&&!b.isLive)return -1;
-          if(!a.isLive&&b.isLive)return 1;
-          return b.date.localeCompare(a.date);
-        });
-        ST._espnAliasRev={};
-        var _aliases={
-          // ACC
-          "north carolina":"n. carolina","unc":"n. carolina","unc tar heels":"n. carolina",
-          "nc state":"nc state","nc st":"nc state","n.c. state":"nc state","nc state wolfpack":"nc state",
-          "florida state":"florida st","fla. st.":"florida st","fsu":"florida st","florida st seminoles":"florida st",
-          "virginia tech":"va. tech","va tech":"va. tech",
-          "pittsburgh":"pitt","pitt panthers":"pitt",
-          "wake forest demon deacons":"wake forest",
-          "louisville cardinals":"louisville",
-          "cal bears":"cal","california":"cal","uc berkeley":"cal",
-          "smu mustangs":"smu",
-          "syracuse orange":"syracuse",
-          "clemson tigers":"clemson",
-          "miami hurricanes":"miami (fl)","miami fl":"miami","miami (fl)":"miami",
-          "stanford cardinal":"stanford",
-          "duke blue devils":"duke",
-          "virginia cavaliers":"virginia",
-          // Big Ten
-          "michigan state":"mich. state","michigan st":"mich. state","mich st":"mich. state","michigan state spartans":"mich. state",
-          "ohio state":"ohio state","ohio st":"ohio state","ohio state buckeyes":"ohio state",
-          "penn state":"penn state","penn st":"penn state","penn state nittany lions":"penn state",
-          "michigan wolverines":"michigan",
-          "nebraska cornhuskers":"nebraska",
-          "illinois fighting illini":"illinois",
-          "wisconsin badgers":"wisconsin",
-          "ucla bruins":"ucla",
-          "purdue boilermakers":"purdue",
-          "iowa hawkeyes":"iowa",
-          "indiana hoosiers":"indiana",
-          "minnesota golden gophers":"minnesota",
-          "washington huskies":"washington",
-          "usc trojans":"usc",
-          "rutgers scarlet knights":"rutgers",
-          "northwestern wildcats":"northwestern",
-          "oregon ducks":"oregon",
-          "maryland terrapins":"maryland","maryland terps":"maryland",
-          // Big 12
-          "west virginia":"w. virginia","wvu":"w. virginia","west virginia mountaineers":"w. virginia",
-          "iowa state":"iowa state","iowa st":"iowa state","iowa state cyclones":"iowa state",
-          "arizona state":"arizona st","asu":"arizona st","arizona state sun devils":"arizona st",
-          "oklahoma state":"oklahoma st","okla. st.":"oklahoma st","oklahoma state cowboys":"oklahoma st",
-          "kansas state":"kansas state","k-state":"kansas state","kansas state wildcats":"kansas state",
-          "texas tech red raiders":"texas tech",
-          "tcu horned frogs":"tcu",
-          "byu cougars":"byu","brigham young":"byu",
-          "ucf knights":"ucf",
-          "cincinnati bearcats":"cincinnati",
-          "colorado buffaloes":"colorado",
-          "baylor bears":"baylor",
-          "utah utes":"utah",
-          "arizona wildcats":"arizona",
-          "houston cougars":"houston",
-          "kansas jayhawks":"kansas",
-          // SEC
-          "texas a&m":"texas a&m","texas am":"texas a&m","texas a&m aggies":"texas a&m",
-          "mississippi state":"miss. state","miss st":"miss. state","mississippi state bulldogs":"miss. state",
-          "south carolina":"s. carolina","s carolina":"s. carolina","south carolina gamecocks":"s. carolina",
-          "ole miss":"ole miss","mississippi rebels":"ole miss","mississippi":"ole miss",
-          "florida gators":"florida",
-          "alabama crimson tide":"alabama",
-          "arkansas razorbacks":"arkansas",
-          "vanderbilt commodores":"vanderbilt",
-          "tennessee volunteers":"tennessee",
-          "georgia bulldogs":"georgia",
-          "missouri tigers":"missouri",
-          "kentucky wildcats":"kentucky",
-          "texas longhorns":"texas",
-          "oklahoma sooners":"oklahoma",
-          "auburn tigers":"auburn",
-          "lsu tigers":"lsu",
-          // Big East
-          "st. john's":"st. john's","st johns":"st. john's","saint john's":"st. john's","st. john's red storm":"st. john's",
-          "connecticut":"uconn","conn":"uconn","uconn huskies":"uconn",
-          "villanova wildcats":"villanova",
-          "seton hall pirates":"seton hall",
-          "creighton bluejays":"creighton",
-          "depaul":"depaul","de paul":"depaul","depaul blue demons":"depaul",
-          "marquette golden eagles":"marquette",
-          "butler bulldogs":"butler",
-          "providence friars":"providence",
-          "xavier musketeers":"xavier",
-          "georgetown hoyas":"georgetown"
-        };
-        for(var _ak in _aliases){ST._espnAliasRev[_ak]=_aliases[_ak].toLowerCase();}
-        ST.scoresUpdated=Date.now();
-        if(hasError&&results.every(function(r){return r.games.length===0;}))ST.scoresError="Could not load scores from ESPN. Try again.";
-        draw();
-      }
-    });
-    }); // end dates.forEach
-  }); // end ESPN_CONFS.forEach
+  var datesToFetch=ALL_DATES.filter(function(d){return d<=today;});
+  if(!datesToFetch.length)datesToFetch=[today];
+
+// Build known-team sets per conference (using both our names and common ESPN aliases)
+var STATIC_ALIASES={
+“virginia tech”:“va. tech”,“va tech”:“va. tech”,“north carolina”:“n. carolina”,“unc”:“n. carolina”,
+“michigan state”:“mich. state”,“michigan st”:“mich. state”,“ohio state”:“ohio state”,“ohio st”:“ohio state”,
+“penn state”:“penn state”,“penn st”:“penn state”,“florida state”:“florida st”,“fsu”:“florida st”,
+“west virginia”:“w. virginia”,“wvu”:“w. virginia”,“iowa state”:“iowa state”,“iowa st”:“iowa state”,
+“arizona state”:“arizona st”,“oklahoma state”:“oklahoma st”,“kansas state”:“kansas state”,
+“texas a&m”:“texas a&m”,“texas am”:“texas a&m”,“mississippi state”:“miss. state”,“miss st”:“miss. state”,
+“south carolina”:“s. carolina”,“ole miss”:“ole miss”,“mississippi”:“ole miss”,
+“connecticut”:“uconn”,“uconn huskies”:“uconn”,“st. john’s”:“st. john’s”,“st johns”:“st. john’s”,
+“saint john’s”:“st. john’s”,“pittsburgh”:“pitt”,“pitt panthers”:“pitt”,
+“california”:“cal”,“cal bears”:“cal”,“uc berkeley”:“cal”,
+“wake forest demon deacons”:“wake forest”,“louisville cardinals”:“louisville”,
+“nc state”:“nc state”,“nc st”:“nc state”,“n.c. state”:“nc state”,“nc state wolfpack”:“nc state”,
+“byu cougars”:“byu”,“brigham young”:“byu”,“ucf knights”:“ucf”,“tcu horned frogs”:“tcu”,
+“depaul”:“depaul”,“de paul”:“depaul”,“depaul blue demons”:“depaul”,
+“seton hall pirates”:“seton hall”,“marquette golden eagles”:“marquette”,
+“creighton bluejays”:“creighton”,“villanova wildcats”:“villanova”,
+“butler bulldogs”:“butler”,“providence friars”:“providence”,
+“xavier musketeers”:“xavier”,“georgetown hoyas”:“georgetown”,
+“michigan wolverines”:“michigan”,“nebraska cornhuskers”:“nebraska”,
+“illinois fighting illini”:“illinois”,“wisconsin badgers”:“wisconsin”,
+“ucla bruins”:“ucla”,“purdue boilermakers”:“purdue”,“iowa hawkeyes”:“iowa”,
+“indiana hoosiers”:“indiana”,“minnesota golden gophers”:“minnesota”,
+“washington huskies”:“washington”,“usc trojans”:“usc”,“rutgers scarlet knights”:“rutgers”,
+“northwestern wildcats”:“northwestern”,“oregon ducks”:“oregon”,
+“maryland terrapins”:“maryland”,“maryland terps”:“maryland”,
+“smu mustangs”:“smu”,“syracuse orange”:“syracuse”,“clemson tigers”:“clemson”,
+“miami hurricanes”:“miami”,“miami (fl)”:“miami”,“stanford cardinal”:“stanford”,
+“duke blue devils”:“duke”,“virginia cavaliers”:“virginia”,
+“florida gators”:“florida”,“alabama crimson tide”:“alabama”,“arkansas razorbacks”:“arkansas”,
+“vanderbilt commodores”:“vanderbilt”,“tennessee volunteers”:“tennessee”,
+“georgia bulldogs”:“georgia”,“missouri tigers”:“missouri”,“kentucky wildcats”:“kentucky”,
+“texas longhorns”:“texas”,“oklahoma sooners”:“oklahoma”,“auburn tigers”:“auburn”,“lsu tigers”:“lsu”,
+“texas tech red raiders”:“texas tech”,“colorado buffaloes”:“colorado”,“baylor bears”:“baylor”,
+“utah utes”:“utah”,“arizona wildcats”:“arizona”,“houston cougars”:“houston”,“kansas jayhawks”:“kansas”,
+“cincinnati bearcats”:“cincinnati”,“west virginia mountaineers”:“w. virginia”,
+“iowa state cyclones”:“iowa state”,“arizona state sun devils”:“arizona st”,
+“oklahoma state cowboys”:“oklahoma st”,“kansas state wildcats”:“kansas state”,“k-state”:“kansas state”
+};
+var confTeamSets={};
+ESPN_CONFS.forEach(function(cf){
+confTeamSets[cf.key]={};
+(C[cf.key]&&C[cf.key].teams||[]).forEach(function(t){confTeamSets[cf.key][t.n.toLowerCase()]=true;});
+});
+function resolveTeamName(espnName){
+var k=(espnName||””).toLowerCase().trim();
+return STATIC_ALIASES[k]||k;
+}
+function getConfForTeams(nameA,nameB){
+var a=resolveTeamName(nameA),b=resolveTeamName(nameB);
+for(var i=0;i<ESPN_CONFS.length;i++){
+var ts=confTeamSets[ESPN_CONFS[i].key];
+if(ts[a]||ts[b])return ESPN_CONFS[i].key;
+}
+return null;
+}
+
+var results=[];var rawByConf={};ESPN_CONFS.forEach(function(cf){rawByConf[cf.key]=[];});
+var pending=datesToFetch.length;var hasError=false;
+
+datesToFetch.forEach(function(dt){
+var url=“https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?limit=100&dates=”+dt;
+fetch(url).then(function(r){return r.json();}).then(function(data){
+(data.events||[]).forEach(function(ev){
+var comp=ev.competitions&&ev.competitions[0];if(!comp)return;
+var competitors=comp.competitors||[];
+if(competitors.length<2)return;
+var nameA=(competitors[0].team&&(competitors[0].team.shortDisplayName||competitors[0].team.displayName))||””;
+var nameB=(competitors[1].team&&(competitors[1].team.shortDisplayName||competitors[1].team.displayName))||””;
+var confKey=getConfForTeams(nameA,nameB);
+if(!confKey)return;
+var status=comp.status&&comp.status.type;
+var stateKey=“scheduled”;
+if(status){if(status.completed)stateKey=“final”;else if(status.state===“in”)stateKey=“live”;}
+var clock=comp.status&&comp.status.displayClock;
+var period=comp.status&&comp.status.period;
+var periodTxt=period?(period===1?“1st Half”:period===2?“2nd Half”:“OT”):””;
+var teams=competitors.slice().sort(function(a,b){return a.homeAway===“home”?1:-1;});
+function mapTeam(t){
+var seed=parseInt(t.seed)||null;
+var color=”#”+((t.team&&t.team.color)||“1a2535”);
+if(color===”#1a2535”||color===”#”)color=”#1a2535”;
+return{seed:seed,name:(t.team&&(t.team.shortDisplayName||t.team.displayName))||“TBD”,score:stateKey!==“scheduled”?parseInt(t.score)||0:null,color:color};
+}
+var top=mapTeam(teams[0]),bot=mapTeam(teams[1]);
+var note=(comp.notes&&comp.notes[0]&&comp.notes[0].headline)||ev.shortName||””;
+var timeStr=””;
+if(stateKey===“scheduled”&&comp.status&&comp.status.type&&comp.status.type.shortDetail)timeStr=comp.status.type.shortDetail;
+rawByConf[confKey].push({round:note,time:timeStr,status:stateKey,clock:stateKey===“live”?clock:null,period:stateKey===“live”?periodTxt:null,top:top,bot:bot,date:dt});
+});
+}).catch(function(){hasError=true;
+}).finally(function(){
+pending–;
+if(pending===0){
+ST.scoresLoading=false;
+// Build merged results, deduplicating by team pair — prefer live, then most recent date
+var order=[“ACC”,“Big Ten”,“Big 12”,“SEC”,“Big East”];
+results=[];
+ESPN_CONFS.forEach(function(cf){
+var byKey={};
+rawByConf[cf.key].forEach(function(g){
+if(!g.top||!g.bot)return;
+var key=[resolveTeamName(g.top.name),resolveTeamName(g.bot.name)].sort().join(”|”);
+var existing=byKey[key];
+if(!existing)                                  {byKey[key]=g;return;}
+if(g.status===“live”&&existing.status!==“live”){byKey[key]=g;return;}
+if(existing.status===“live”&&g.status!==“live”){return;}
+if(g.date>existing.date)                       {byKey[key]=g;}
+});
+results.push({conf:cf.label,games:Object.values(byKey)});
+});
+results.sort(function(a,b){return order.indexOf(a.conf)-order.indexOf(b.conf);});
+ST.scoresData=results;
+// Build score lookup keyed by PAIR of team names (sorted) so we only show scores when both teams match
+ST._scoreLookup={};
+ST._scoreGames=[];  // array of {teamA, teamB, scoreA, scoreB, isLive, clock, period}
+results.forEach(function(grp){
+grp.games.forEach(function(g){
+if(g.status===“scheduled”||!g.top||!g.bot)return;
+// Normalize ESPN shortDisplayName → our bracket name using STATIC_ALIASES
+var a=resolveTeamName(g.top.name),b=resolveTeamName(g.bot.name);
+ST._scoreGames.push({a:a,b:b,sa:g.top.score,sb:g.bot.score,isLive:g.status===“live”,clock:g.clock,period:g.period,date:g.date||””});
+if(!(ST._scoreLookup[a]&&ST._scoreLookup[a].isLive))
+ST._scoreLookup[a]={score:g.top.score,isLive:g.status===“live”,clock:g.clock,period:g.period,opp:b};
+if(!(ST._scoreLookup[b]&&ST._scoreLookup[b].isLive))
+ST._scoreLookup[b]={score:g.bot.score,isLive:g.status===“live”,clock:g.clock,period:g.period,opp:a};
+});
+});
+// Sort: live first, then by date descending — ensures _getScore finds the right/most-recent game
+ST._scoreGames.sort(function(a,b){
+if(a.isLive&&!b.isLive)return -1;
+if(!a.isLive&&b.isLive)return 1;
+return b.date.localeCompare(a.date);
+});
+ST._espnAliasRev={};
+var _aliases={
+// ACC
+“north carolina”:“n. carolina”,“unc”:“n. carolina”,“unc tar heels”:“n. carolina”,
+“nc state”:“nc state”,“nc st”:“nc state”,“n.c. state”:“nc state”,“nc state wolfpack”:“nc state”,
+“florida state”:“florida st”,“fla. st.”:“florida st”,“fsu”:“florida st”,“florida st seminoles”:“florida st”,
+“virginia tech”:“va. tech”,“va tech”:“va. tech”,
+“pittsburgh”:“pitt”,“pitt panthers”:“pitt”,
+“wake forest demon deacons”:“wake forest”,
+“louisville cardinals”:“louisville”,
+“cal bears”:“cal”,“california”:“cal”,“uc berkeley”:“cal”,
+“smu mustangs”:“smu”,
+“syracuse orange”:“syracuse”,
+“clemson tigers”:“clemson”,
+“miami hurricanes”:“miami (fl)”,“miami fl”:“miami”,“miami (fl)”:“miami”,
+“stanford cardinal”:“stanford”,
+“duke blue devils”:“duke”,
+“virginia cavaliers”:“virginia”,
+// Big Ten
+“michigan state”:“mich. state”,“michigan st”:“mich. state”,“mich st”:“mich. state”,“michigan state spartans”:“mich. state”,
+“ohio state”:“ohio state”,“ohio st”:“ohio state”,“ohio state buckeyes”:“ohio state”,
+“penn state”:“penn state”,“penn st”:“penn state”,“penn state nittany lions”:“penn state”,
+“michigan wolverines”:“michigan”,
+“nebraska cornhuskers”:“nebraska”,
+“illinois fighting illini”:“illinois”,
+“wisconsin badgers”:“wisconsin”,
+“ucla bruins”:“ucla”,
+“purdue boilermakers”:“purdue”,
+“iowa hawkeyes”:“iowa”,
+“indiana hoosiers”:“indiana”,
+“minnesota golden gophers”:“minnesota”,
+“washington huskies”:“washington”,
+“usc trojans”:“usc”,
+“rutgers scarlet knights”:“rutgers”,
+“northwestern wildcats”:“northwestern”,
+“oregon ducks”:“oregon”,
+“maryland terrapins”:“maryland”,“maryland terps”:“maryland”,
+// Big 12
+“west virginia”:“w. virginia”,“wvu”:“w. virginia”,“west virginia mountaineers”:“w. virginia”,
+“iowa state”:“iowa state”,“iowa st”:“iowa state”,“iowa state cyclones”:“iowa state”,
+“arizona state”:“arizona st”,“asu”:“arizona st”,“arizona state sun devils”:“arizona st”,
+“oklahoma state”:“oklahoma st”,“okla. st.”:“oklahoma st”,“oklahoma state cowboys”:“oklahoma st”,
+“kansas state”:“kansas state”,“k-state”:“kansas state”,“kansas state wildcats”:“kansas state”,
+“texas tech red raiders”:“texas tech”,
+“tcu horned frogs”:“tcu”,
+“byu cougars”:“byu”,“brigham young”:“byu”,
+“ucf knights”:“ucf”,
+“cincinnati bearcats”:“cincinnati”,
+“colorado buffaloes”:“colorado”,
+“baylor bears”:“baylor”,
+“utah utes”:“utah”,
+“arizona wildcats”:“arizona”,
+“houston cougars”:“houston”,
+“kansas jayhawks”:“kansas”,
+// SEC
+“texas a&m”:“texas a&m”,“texas am”:“texas a&m”,“texas a&m aggies”:“texas a&m”,
+“mississippi state”:“miss. state”,“miss st”:“miss. state”,“mississippi state bulldogs”:“miss. state”,
+“south carolina”:“s. carolina”,“s carolina”:“s. carolina”,“south carolina gamecocks”:“s. carolina”,
+“ole miss”:“ole miss”,“mississippi rebels”:“ole miss”,“mississippi”:“ole miss”,
+“florida gators”:“florida”,
+“alabama crimson tide”:“alabama”,
+“arkansas razorbacks”:“arkansas”,
+“vanderbilt commodores”:“vanderbilt”,
+“tennessee volunteers”:“tennessee”,
+“georgia bulldogs”:“georgia”,
+“missouri tigers”:“missouri”,
+“kentucky wildcats”:“kentucky”,
+“texas longhorns”:“texas”,
+“oklahoma sooners”:“oklahoma”,
+“auburn tigers”:“auburn”,
+“lsu tigers”:“lsu”,
+// Big East
+“st. john’s”:“st. john’s”,“st johns”:“st. john’s”,“saint john’s”:“st. john’s”,“st. john’s red storm”:“st. john’s”,
+“connecticut”:“uconn”,“conn”:“uconn”,“uconn huskies”:“uconn”,
+“villanova wildcats”:“villanova”,
+“seton hall pirates”:“seton hall”,
+“creighton bluejays”:“creighton”,
+“depaul”:“depaul”,“de paul”:“depaul”,“depaul blue demons”:“depaul”,
+“marquette golden eagles”:“marquette”,
+“butler bulldogs”:“butler”,
+“providence friars”:“providence”,
+“xavier musketeers”:“xavier”,
+“georgetown hoyas”:“georgetown”
+};
+for(var _ak in _aliases){ST._espnAliasRev[_ak]=_aliases[_ak].toLowerCase();}
+ST.scoresUpdated=Date.now();
+if(hasError&&results.every(function(r){return r.games.length===0;}))ST.scoresError=“Could not load scores from ESPN. Try again.”;
+draw();
+}
+});
+}); // end datesToFetch.forEach
 }
 bindCopyModal();
 function openPoolsModal(){
-  document.getElementById("pools-modal").classList.add("open");
-  var list=document.getElementById("pools-list");
-  list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div>';
-  if(!DB){list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>';return;}
-  DB.ref("groups").once("value",function(sn){
-    var all=sn.val()||{};
-    var groups=Object.values(all).filter(function(g){return(g.pools||[]).indexOf("rwc")>=0;});
-    if(!groups.length){list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No groups found.</div>';return;}
-    list.innerHTML="";
-    groups.forEach(function(g){
-      var isActive=ST.viewingGroup&&ST.viewingGroup.id===g.id;
-      var row=document.createElement("div");
-      row.className="pools-group-row"+(isActive?" active":"");
-      var playersHtml=(g.players||[]).map(function(p){return'<span class="pools-player-chip" data-gid="'+x(g.id)+'" data-pname="'+x(p)+'">'+x(p)+'</span>';}).join("");
-      row.innerHTML='<div class="pools-group-name">'+x(g.name||"Unnamed")+'</div><div class="pools-group-meta">'+x(g.id)+(g.players?' &middot; '+(g.players.length)+' players':'')+'</div><div class="pools-group-players">'+playersHtml+'</div>';
-      row.addEventListener("click",function(e){
-        // if they clicked a player chip, switch to that group+player
-        var chip=e.target.closest(".pools-player-chip");
-        if(chip){switchPoolGroup(g,chip.getAttribute("data-pname"));closePoolsModal();return;}
-        // otherwise switch group and view as admin
-        switchPoolGroup(g,null);closePoolsModal();
-      });
-      list.appendChild(row);
-    });
-  });
+document.getElementById(“pools-modal”).classList.add(“open”);
+var list=document.getElementById(“pools-list”);
+list.innerHTML=’<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading…</div>’;
+if(!DB){list.innerHTML=’<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>’;return;}
+DB.ref(“groups”).once(“value”,function(sn){
+var all=sn.val()||{};
+var groups=Object.values(all).filter(function(g){return(g.pools||[]).indexOf(“rwc”)>=0;});
+if(!groups.length){list.innerHTML=’<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No groups found.</div>’;return;}
+list.innerHTML=””;
+groups.forEach(function(g){
+var isActive=ST.viewingGroup&&ST.viewingGroup.id===g.id;
+var row=document.createElement(“div”);
+row.className=“pools-group-row”+(isActive?” active”:””);
+var playersHtml=(g.players||[]).map(function(p){return’<span class="pools-player-chip" data-gid="'+x(g.id)+'" data-pname="'+x(p)+'">’+x(p)+’</span>’;}).join(””);
+row.innerHTML=’<div class="pools-group-name">’+x(g.name||“Unnamed”)+’</div><div class="pools-group-meta">’+x(g.id)+(g.players?’ · ‘+(g.players.length)+’ players’:’’)+’</div><div class="pools-group-players">’+playersHtml+’</div>’;
+row.addEventListener(“click”,function(e){
+// if they clicked a player chip, switch to that group+player
+var chip=e.target.closest(”.pools-player-chip”);
+if(chip){switchPoolGroup(g,chip.getAttribute(“data-pname”));closePoolsModal();return;}
+// otherwise switch group and view as admin
+switchPoolGroup(g,null);closePoolsModal();
+});
+list.appendChild(row);
+});
+});
 }
 function switchPoolGroup(g,playerName){
-  if(!DB)return;
-  // Detach old listeners
-  if(ST.viewingGroup){
-    var oldBase="groups/"+ST.viewingGroup.id+"/data/rwc";
-    DB.ref(oldBase+"/picks").off();
-    DB.ref(oldBase+"/locked").off();
-  }
-  ST.viewingGroup=g;
-  ST.editPlayer=null;
-  ST.user=playerName;
-  PARTS=(g.players||[]).slice();
-  var newBase="groups/"+g.id+"/data/rwc";
-  // Re-attach listeners for new group
-  DB.ref(newBase+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
-  DB.ref(newBase+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
-  toast("Viewing: "+(g.name||g.id)+(playerName?" as "+playerName:""));
-  draw();
+if(!DB)return;
+// Detach old listeners
+if(ST.viewingGroup){
+var oldBase=“groups/”+ST.viewingGroup.id+”/data/rwc”;
+DB.ref(oldBase+”/picks”).off();
+DB.ref(oldBase+”/locked”).off();
+}
+ST.viewingGroup=g;
+ST.editPlayer=null;
+ST.user=playerName;
+PARTS=(g.players||[]).slice();
+var newBase=“groups/”+g.id+”/data/rwc”;
+// Re-attach listeners for new group
+DB.ref(newBase+”/picks”).on(“value”,function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+DB.ref(newBase+”/locked”).on(“value”,function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
+toast(“Viewing: “+(g.name||g.id)+(playerName?” as “+playerName:””));
+draw();
 }
 function exitPoolView(){
-  if(!DB||!ST.viewingGroup)return;
-  var oldBase="groups/"+ST.viewingGroup.id+"/data/rwc";
-  DB.ref(oldBase+"/picks").off();
-  DB.ref(oldBase+"/locked").off();
-  ST.viewingGroup=null;
-  ST.editPlayer=null;
-  ST.user=URL_USER||null;
-  // Re-attach original group listeners
-  DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
-  DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
-  if(GROUP_ID){DB.ref("groups/"+GROUP_ID).once("value",function(sn){var g=sn.val();if(g&&g.players&&g.players.length)PARTS=g.players;draw();});}
-  toast("Returned to home pool");
-  draw();
+if(!DB||!ST.viewingGroup)return;
+var oldBase=“groups/”+ST.viewingGroup.id+”/data/rwc”;
+DB.ref(oldBase+”/picks”).off();
+DB.ref(oldBase+”/locked”).off();
+ST.viewingGroup=null;
+ST.editPlayer=null;
+ST.user=URL_USER||null;
+// Re-attach original group listeners
+DB.ref(BASE+”/picks”).on(“value”,function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+DB.ref(BASE+”/locked”).on(“value”,function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
+if(GROUP_ID){DB.ref(“groups/”+GROUP_ID).once(“value”,function(sn){var g=sn.val();if(g&&g.players&&g.players.length)PARTS=g.players;draw();});}
+toast(“Returned to home pool”);
+draw();
 }
-function closePoolsModal(){document.getElementById("pools-modal").classList.remove("open");}
-document.getElementById("pools-cancel").addEventListener("click",closePoolsModal);
-document.getElementById("pools-modal").addEventListener("click",function(e){if(e.target===this)closePoolsModal();});
+function closePoolsModal(){document.getElementById(“pools-modal”).classList.remove(“open”);}
+document.getElementById(“pools-cancel”).addEventListener(“click”,closePoolsModal);
+document.getElementById(“pools-modal”).addEventListener(“click”,function(e){if(e.target===this)closePoolsModal();});
 // Auto-fetch scores when page loads, and when switching to scores tab
 var _scoresAutoFetched=false;
-function maybeAutoFetchScores(){if((ST.page==="scores"||ST.page==="bracket")&&!_scoresAutoFetched&&!ST.scoresLoading&&!ST.scoresData){_scoresAutoFetched=true;fetchScores();}}
+function maybeAutoFetchScores(){if((ST.page===“scores”||ST.page===“bracket”)&&!_scoresAutoFetched&&!ST.scoresLoading&&!ST.scoresData){_scoresAutoFetched=true;fetchScores();}}
 setTimeout(maybeAutoFetchScores,800);
 boot();
 </script>
+
 </body>
 </html>
