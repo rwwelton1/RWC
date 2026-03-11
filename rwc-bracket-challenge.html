@@ -587,30 +587,25 @@ function _getScore(name,opponent){
   if(!name||name==="TBD"||name==="?")return null;
   var k=_normName(name);if(!k)return null;
   var games=ST._scoreGames||[];
-  var fallback=null;
   for(var _gi=0;_gi<games.length;_gi++){
     var _g=games[_gi];
     var matchA=_g.a===k||_g.a.indexOf(k)===0||k.indexOf(_g.a)===0;
     var matchB=_g.b===k||_g.b.indexOf(k)===0||k.indexOf(_g.b)===0;
     if(!matchA&&!matchB)continue;
     var score=matchA?_g.sa:_g.sb;
-    // If we know the opponent, verify it matches
     if(opponent&&opponent!=="TBD"&&opponent!=="?"){
       var ok=_normName(opponent);
       if(ok){
         var oppMatchA=_g.a===ok||_g.a.indexOf(ok)===0||ok.indexOf(_g.a)===0;
         var oppMatchB=_g.b===ok||_g.b.indexOf(ok)===0||ok.indexOf(_g.b)===0;
         if(oppMatchA||oppMatchB)return{score:score,isLive:_g.isLive,clock:_g.clock,period:_g.period};
-        // Opponent didn't match — save as fallback for finals only (no live games to avoid wrong scores)
-        if(!_g.isLive&&fallback===null)fallback={score:score,isLive:false,clock:null,period:null};
-        continue;
+        continue; // opponent didn't match this game — keep looking, never fall back
       }
     }
     // No opponent specified — return first match
     return{score:score,isLive:_g.isLive,clock:_g.clock,period:_g.period};
   }
-  // Use fallback (final score, opponent couldn't be verified) only when not live
-  return fallback;
+  return null;
 }
 // Build set of eliminated teams
 var eliminated={};conf.games.forEach(function(cg){var r=res[cg.id];if(!r)return;var top=slot(conf,pm,cg.id,true),bot=slot(conf,pm,cg.id,false);if(top&&top!=="TBD"&&top!=="?"&&top!==r)eliminated[top]=true;if(bot&&bot!=="TBD"&&bot!=="?"&&bot!==r)eliminated[bot]=true;});
@@ -619,13 +614,18 @@ function rowH(name,actualName){var isV=name&&name!=="TBD"&&name!=="?";var isPk=p
 // If actualName differs from name, the score belongs to actualName shown in the sub-row below
 var showScoreOnThisRow=!actualName||actualName===name||actualName==="TBD"||actualName==="?";
 var scTeam=name;var scOpp=(name===topN||name===topA)?(botA||botN):(topA||topN);
-var sc=showScoreOnThisRow?_getScore(scTeam,scOpp):null;
+// Only show scores if: this game has a result already, OR the ESPN lookup confirms it's live right now
+// This prevents future-round cards from showing a team's previous-round score
+var gameHasResult=!!actual;
+var sc=showScoreOnThisRow&&gameHasResult?_getScore(scTeam,scOpp):null;
+// For live games with no result yet, still show if ESPN confirms both teams are playing right now
+if(!sc&&showScoreOnThisRow&&!gameHasResult){var liveCheck=_getScore(scTeam,scOpp);if(liveCheck&&liveCheck.isLive)sc=liveCheck;}
 var scoreHtml="";if(sc&&sc.score!=null){scoreHtml='<span style="font-size:12px;font-weight:700;color:'+(sc.isLive?"#ef4444":"#94a3b8")+';min-width:22px;text-align:right;flex-shrink:0;margin-left:4px">'+sc.score+'</span>';}
 var nm='<div class="team-name'+(isPk?" bold":"")+(!isV?" dim":"")+'">'+nameHtml+'</div>';var icon=isOk?'<span class="gc-icon" style="color:#10b981">&#10003;</span>':isBd?'<span class="gc-icon" style="color:#ef4444">&#10007;</span>':"";
 // Show actual advancer sub-row with their score from the game they just won
 var actualAdvRow="";if(isV&&actualName&&actualName!==name&&actualName!=="TBD"&&actualName!=="?"){var at=tByName(conf,actualName);
 // For the score, find what game actualName played — search _scoreGames for a game containing actualName
-var asc=null;var _games=ST._scoreGames||[];for(var _ai=0;_ai<_games.length;_ai++){var _ag=_games[_ai];var _ak=_normName(actualName);if(!_ak)break;var _mA=_ag.a===_ak||_ag.a.indexOf(_ak)===0||_ak.indexOf(_ag.a)===0;var _mB=_ag.b===_ak||_ag.b.indexOf(_ak)===0||_ak.indexOf(_ag.b)===0;if(_mA||_mB){asc={score:_mA?_ag.sa:_ag.sb,isLive:_ag.isLive};break;}}
+var asc=null;if(gameHasResult){var _games=ST._scoreGames||[];for(var _ai=0;_ai<_games.length;_ai++){var _ag=_games[_ai];var _ak=_normName(actualName);if(!_ak)break;var _mA=_ag.a===_ak||_ag.a.indexOf(_ak)===0||_ak.indexOf(_ag.a)===0;var _mB=_ag.b===_ak||_ag.b.indexOf(_ak)===0||_ak.indexOf(_ag.b)===0;if(_mA||_mB){asc={score:_mA?_ag.sa:_ag.sb,isLive:_ag.isLive};break;}}}
 var aBadge='<div class="seed" style="background:'+(at?at.c:"#1a2535")+';opacity:.8;width:14px;height:14px;font-size:7px;flex-shrink:0">'+(at?at.s:"")+'</div>';var aScore=asc&&asc.score!=null?'<span style="font-size:12px;font-weight:700;color:'+(asc.isLive?"#ef4444":"#6ee7b7")+';min-width:22px;text-align:right;flex-shrink:0;margin-left:4px">'+asc.score+'</span>':"";actualAdvRow='<div style="display:flex;align-items:center;gap:6px;padding:3px 8px 5px;border-top:1px solid rgba(16,185,129,.12)">'+aBadge+'<div style="font-size:9px;color:#6ee7b7;flex:1">'+x(actualName)+'</div>'+aScore+'</div>';}
 var adm=isEditingPlayer?"ep":isAdmin?"1":"0";var da=canClick?' data-cid="'+conf.id+'" data-gid="'+x(gid)+'" data-name="'+x(name)+'" data-adm="'+adm+'"':"";return'<div class="'+cls+'"'+da+'>'+badge+nm+icon+scoreHtml+'</div>'+actualAdvRow;}
 // Card header: show live badge if game is in progress — pass opponents to validate correct game
@@ -834,7 +834,7 @@ function fetchScores(){
         });
         // Build reverse alias map (espn name -> our name) for score lookup
         ST._espnAliasRev={};
-        var _aliases={"virginia tech":"va. tech","va tech":"va. tech","north carolina":"n. carolina","unc":"n. carolina","michigan state":"mich. state","mich st":"mich. state","kansas state":"kansas state","iowa state":"iowa state","arizona state":"arizona st","oklahoma state":"oklahoma st","florida state":"florida st","west virginia":"w. virginia","wvu":"w. virginia","texas a&m":"texas a&m","penn state":"penn state","ohio state":"ohio state","mississippi state":"miss. state","miss st":"miss. state","south carolina":"s. carolina","ole miss":"ole miss","mississippi":"ole miss","st. john's":"st. john's","st johns":"st. john's","connecticut":"uconn","conn":"uconn"};
+        var _aliases={"virginia tech":"va. tech","va tech":"va. tech","north carolina":"n. carolina","unc":"n. carolina","michigan state":"mich. state","mich st":"mich. state","kansas state":"kansas state","iowa state":"iowa state","arizona state":"arizona st","oklahoma state":"oklahoma st","florida state":"florida st","west virginia":"w. virginia","wvu":"w. virginia","texas a&m":"texas a&m","penn state":"penn state","ohio state":"ohio state","mississippi state":"miss. state","miss st":"miss. state","south carolina":"s. carolina","ole miss":"ole miss","mississippi":"ole miss","st. john's":"st. john's","st johns":"st. john's","connecticut":"uconn","conn":"uconn","pittsburgh":"pitt","pitt panthers":"pitt","nc st":"nc state","n.c. state":"nc state","fsu":"florida st","fla st":"florida st","wake":"wake forest","louisville cardinals":"louisville"};
         for(var _ak in _aliases){ST._espnAliasRev[_ak]=_aliases[_ak].toLowerCase();}
         ST.scoresUpdated=Date.now();
         if(hasError&&results.every(function(r){return r.games.length===0;}))ST.scoresError="Could not load scores from ESPN. Try again.";
