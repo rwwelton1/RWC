@@ -770,9 +770,25 @@ var ESPN_CONFS=[
 function fetchScores(){
   if(ST.scoresLoading)return;
   ST.scoresLoading=true;ST.scoresError=null;draw();
-  var results=[];var pending=ESPN_CONFS.length;var hasError=false;
+  // Tournament date ranges per conference key (2026)
+  var CONF_DATES={
+    acc: ["20260310","20260311","20260312","20260313","20260314"],
+    b10: ["20260310","20260311","20260312","20260313","20260314","20260315"],
+    b12: ["20260311","20260312","20260313","20260314"],
+    sec: ["20260311","20260312","20260313","20260314","20260315"],
+    be:  ["20260311","20260312","20260313","20260314"]
+  };
+  // Only fetch dates up to today to avoid empty future fetches
+  function todayStr(){var d=new Date();return d.getFullYear()+String(d.getMonth()+1).padStart(2,"0")+String(d.getDate()).padStart(2,"0");}
+  var today=todayStr();
+  var results=[];var rawByConf={};ESPN_CONFS.forEach(function(cf){rawByConf[cf.key]=[];});
+  var pending=0;var hasError=false;
   ESPN_CONFS.forEach(function(cf){
-    var url="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups="+cf.espnId+"&limit=50&conferenceId="+cf.espnId;
+    var datesForConf=(CONF_DATES[cf.key]||[]).filter(function(d){return d<=today;});
+    if(!datesForConf.length)datesForConf=[today]; // fallback to today
+    pending+=datesForConf.length;
+    datesForConf.forEach(function(dt){
+    var url="https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups="+cf.espnId+"&limit=50&conferenceId="+cf.espnId+"&dates="+dt;
     fetch(url).then(function(r){return r.json();}).then(function(data){
       var games=[];
       (data.events||[]).forEach(function(ev){
@@ -806,15 +822,30 @@ function fetchScores(){
         if(stateKey==="scheduled"&&comp.status&&comp.status.type&&comp.status.type.shortDetail)timeStr=comp.status.type.shortDetail;
         games.push({round:note,time:timeStr,status:stateKey,clock:stateKey==="live"?clock:null,period:stateKey==="live"?periodTxt:null,top:top,bot:bot});
       });
-      results.push({conf:cf.label,games:games});
+      // Accumulate into rawByConf — merge both date fetches
+      rawByConf[cf.key]=rawByConf[cf.key].concat(games);
     }).catch(function(){
       hasError=true;
-      results.push({conf:cf.label,games:[]});
     }).finally(function(){
       pending--;
       if(pending===0){
         ST.scoresLoading=false;
+        // Build merged results, deduplicating by team pair (keep live over final)
         var order=["ACC","Big Ten","Big 12","SEC","Big East"];
+        results=[];
+        ESPN_CONFS.forEach(function(cf){
+          var seen={};var merged=[];
+          rawByConf[cf.key].forEach(function(g){
+            if(!g.top||!g.bot)return;
+            var key=[g.top.name.toLowerCase(),g.bot.name.toLowerCase()].sort().join("|");
+            if(!seen[key]||g.status==="live"){seen[key]=true;
+              // Remove old entry for this pair if we have a live update
+              merged=merged.filter(function(m){return[m.top.name.toLowerCase(),m.bot.name.toLowerCase()].sort().join("|")!==key;});
+              merged.push(g);
+            }
+          });
+          results.push({conf:cf.label,games:merged});
+        });
         results.sort(function(a,b){return order.indexOf(a.conf)-order.indexOf(b.conf);});
         ST.scoresData=results;
         // Build score lookup keyed by PAIR of team names (sorted) so we only show scores when both teams match
@@ -841,7 +872,8 @@ function fetchScores(){
         draw();
       }
     });
-  });
+    }); // end dates.forEach
+  }); // end ESPN_CONFS.forEach
 }
 bindCopyModal();
 function openPoolsModal(){
