@@ -11,7 +11,7 @@
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#07090f;color:#e2e8f0;font-family:'DM Sans',sans-serif;font-size:14px;min-height:100vh;overflow-x:hidden}
+body{background:#07090f;color:#e2e8f0;font-family:'DM Sans',sans-serif;font-size:14px;min-height:100vh}
 button,input,select{font-family:'DM Sans',sans-serif}
 .bg-grid{position:fixed;inset:0;z-index:0;pointer-events:none;background-image:linear-gradient(rgba(99,102,241,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(99,102,241,.04) 1px,transparent 1px);background-size:40px 40px}
 .bg-glow{position:fixed;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:500px;background:radial-gradient(ellipse,rgba(99,102,241,.08) 0%,transparent 70%);pointer-events:none;z-index:0}
@@ -259,7 +259,22 @@ button,input,select{font-family:'DM Sans',sans-serif}
 .emoji-opt{width:46px;height:46px;border-radius:8px;font-size:24px;background:#07090f;border:1px solid #1e2a3a;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color .12s}
 .emoji-opt:hover,.emoji-opt:active{border-color:rgba(99,102,241,.5);background:rgba(99,102,241,.08)}
 
-/* TIER BAR */
+/* EVENTS SCROLLER STRIP */
+.events-strip{display:flex;gap:8px;padding:10px 16px;overflow-x:auto;-webkit-overflow-scrolling:touch;border-bottom:1px solid #1e2a3a;background:#07090f;flex-shrink:0}
+.events-strip::-webkit-scrollbar{display:none}
+.event-pill{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 12px;border-radius:10px;border:1px solid #1e2a3a;background:#0d1117;cursor:pointer;transition:border-color .15s,background .15s;min-width:72px;text-align:center;-webkit-tap-highlight-color:transparent}
+.event-pill:active{background:rgba(255,255,255,.04)}
+.event-pill.ep-open{border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06)}
+.event-pill.ep-locked{border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.05)}
+.event-pill.ep-complete{border-color:rgba(99,102,241,.25);background:rgba(99,102,241,.05);opacity:.7}
+.event-pill.ep-soon{opacity:.45;cursor:default}
+.ep-icon{font-size:20px;line-height:1}
+.ep-name{font-size:8px;font-weight:700;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:68px}
+.ep-status{font-size:7px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.ep-status.s-open{color:#6ee7b7}
+.ep-status.s-locked{color:#fca5a5}
+.ep-status.s-complete{color:#a5b4fc}
+.ep-status.s-soon{color:#334155}
 .tier-bar{background:#0d1117;border:1px solid #1e2a3a;border-radius:12px;padding:14px 16px;margin-bottom:24px}
 .tier-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .tier-label{font-size:13px;font-weight:700}
@@ -440,7 +455,6 @@ function saveGuest(name){
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 function authSignup(username, password, cb) {
   if(!username || username.length < 2) { cb("Username must be at least 2 characters"); return; }
-  if(!password || password.length < 4) { cb("Password must be at least 4 characters"); return; }
   var newKey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
   if(newKey !== username.toLowerCase()) { cb("Username can only contain letters, numbers and underscores"); return; }
   if(!DB) { cb("No database connection"); return; }
@@ -455,7 +469,7 @@ function authSignup(username, password, cb) {
     // Read current user data to carry over groups etc
     DB.ref("users/"+oldKey).once("value", function(oldSn){
       var oldData = oldSn.val()||{};
-      var newData = { username: username, password: password, groups: oldData.groups||[], emoji: oldData.emoji||"🎯" };
+      var newData = { username: username, groups: oldData.groups||[], emoji: oldData.emoji||"🎯" };
       DB.ref("users/"+newKey).set(newData, function(err){
         if(err){ cb("Failed to save — check connection"); return; }
         // Delete old key if username changed
@@ -483,13 +497,12 @@ function authSignup(username, password, cb) {
 }
 
 function authLogin(username, password, cb) {
-  if(!username || !password) { cb("Enter your username and password"); return; }
+  if(!username) { cb("Enter your username"); return; }
   var key = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
   if(!DB) { cb("No database connection"); return; }
   DB.ref("users/"+key).once("value", function(sn){
     var u = sn.val();
     if(!u) { cb("Username not found"); return; }
-    if(u.password !== password) { cb("Wrong password"); return; }
     cb(null, { username: u.username, groups: u.groups || [], emoji: u.emoji || "🎯" });
   });
 }
@@ -752,8 +765,6 @@ function showAuthModal(tab) {
       '<div class="auth-card">' +
         '<div class="auth-field"><label class="auth-label">Username</label>' +
         '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>' +
-        '<div class="auth-field"><label class="auth-label">Password</label>' +
-        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="'+(isLogin?"your password":"choose a password")+'" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
         '<div class="auth-err" id="modal-auth-err"></div>' +
         '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Register")+'</button>' +
       '</div></div>';
@@ -772,18 +783,16 @@ function showAuthModal(tab) {
     });
 
     var unameEl = document.getElementById("modal-auth-username");
-    var pwEl = document.getElementById("modal-auth-password");
     var errEl = document.getElementById("modal-auth-err");
     var submitBtn = document.getElementById("modal-auth-submit");
 
     function doSubmit() {
       var uname = unameEl.value.trim();
-      var pw = pwEl.value;
       errEl.textContent = "";
       submitBtn.disabled = true;
       submitBtn.textContent = "Please wait...";
       if(isLogin) {
-        authLogin(uname, pw, function(err, user){
+        authLogin(uname, "", function(err, user){
           submitBtn.disabled = false;
           submitBtn.textContent = "Log In";
           if(err){ errEl.textContent = err; return; }
@@ -795,7 +804,7 @@ function showAuthModal(tab) {
           draw();
         });
       } else {
-        authSignup(uname, pw, function(err, user){
+        authSignup(uname, "", function(err, user){
           submitBtn.disabled = false;
           submitBtn.textContent = "Save";
           if(err){ errEl.textContent = err; return; }
@@ -810,7 +819,7 @@ function showAuthModal(tab) {
     }
 
     submitBtn.addEventListener("click", doSubmit);
-    pwEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+    unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
     setTimeout(function(){ unameEl.focus(); }, 50);
   }
   buildModal();
@@ -830,8 +839,6 @@ function renderAuth() {
   h += '<div class="auth-card">';
   h += '<div class="auth-field"><label class="auth-label">'+(isLogin?"Username":"Choose a username")+'</label>';
   h += '<input class="auth-input" id="auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>';
-  h += '<div class="auth-field"><label class="auth-label">Password</label>';
-  h += '<input class="auth-input" id="auth-password" type="password" placeholder="your password" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>';
   h += '<div class="auth-err" id="auth-err"></div>';
   h += '<button class="auth-btn" id="auth-submit">'+(isLogin?"Log In":"Register")+'</button>';
   h += '</div></div></div>';
@@ -851,18 +858,16 @@ function renderAuth() {
   document.getElementById("tab-signup").addEventListener("click", function(){ SC.authTab="signup"; draw(); });
 
   var unameEl = document.getElementById("auth-username");
-  var pwEl = document.getElementById("auth-password");
   var errEl = document.getElementById("auth-err");
   var submitBtn = document.getElementById("auth-submit");
 
   function doSubmit() {
     var uname = unameEl.value.trim();
-    var pw = pwEl.value;
     errEl.textContent = "";
     submitBtn.disabled = true;
     submitBtn.textContent = "Please wait...";
     if(isLogin) {
-      authLogin(uname, pw, function(err, user){
+      authLogin(uname, "", function(err, user){
         submitBtn.disabled = false;
         submitBtn.textContent = "Log In";
         if(err){ errEl.textContent = err; return; }
@@ -873,7 +878,7 @@ function renderAuth() {
         draw();
       });
     } else {
-      authSignup(uname, pw, function(err, user){
+      authSignup(uname, "", function(err, user){
         submitBtn.disabled = false;
         submitBtn.textContent = "Save";
         if(err){ errEl.textContent = err; return; }
@@ -887,7 +892,7 @@ function renderAuth() {
   }
 
   submitBtn.addEventListener("click", doSubmit);
-  pwEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+  unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
   unameEl.focus();
 }
 
@@ -1734,6 +1739,23 @@ function renderHub() {
   h += '<button class="btn btn-green btn-sm" id="btn-invite" style="'+_bs+'">&#128279; Invite</button>';
   if(SC.isMaster || SC.groupAdmin) h += '<button class="btn btn-red btn-sm" id="btn-delete-group" style="'+_bs+'">Delete</button>';
   h += '<button class="btn btn-ghost btn-sm" id="btn-leave" style="'+_bs+'">&#8962; Home</button>';
+  h += '</div>';
+
+  // ── EVENTS SCROLLER STRIP ──
+  h += '<div class="events-strip">';
+  pools.forEach(function(pool){
+    var status = (SC.globalStatuses||{})[pool.id] || "coming-soon";
+    var clickable = (status==="open" || status==="locked" || pool.live===true);
+    var destUrl = pool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(SC.currentUser?SC.currentUser.username:"");
+    var epCls = "event-pill"+(status==="open"?" ep-open":status==="locked"?" ep-locked":status==="complete"?" ep-complete":" ep-soon");
+    var statusLabel = status==="open"?"Open":status==="locked"?"Live":status==="complete"?"Final":"Soon";
+    var statusCls = status==="open"?"s-open":status==="locked"?"s-locked":status==="complete"?"s-complete":"s-soon";
+    h += '<div class="'+epCls+'"'+(clickable?' onclick="window.location.href=\''+destUrl+'\'"':'')+' style="'+(clickable?"":"cursor:default")+'">';
+    h += '<div class="ep-icon">'+pool.icon+'</div>';
+    h += '<div class="ep-name">'+x(pool.name.split(" ").slice(0,2).join(" "))+'</div>';
+    h += '<div class="ep-status '+statusCls+'">'+statusLabel+'</div>';
+    h += '</div>';
+  });
   h += '</div>';
 
   h += '<div class="main fade-up">';
