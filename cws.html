@@ -407,9 +407,9 @@ function loadData(){
     });
   }
   function s3(){
-    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};drawFromFirebase();});
-    DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};drawFromFirebase();});
-    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};drawFromFirebase();});
+    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();});
+    DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();});
+    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();});
   }
   s1();
 }
@@ -773,51 +773,27 @@ function draw(){
   }
 
   document.getElementById("root").innerHTML=h;
-  restoreScrollPos();
   bind();
   // Restore scroll position
   var bscroll=document.getElementById("bscroll");
   if(bscroll&&_scrollX) bscroll.scrollLeft=_scrollX;
 }
 
-var _localUpdate=false;
-
-function drawFromFirebase(){
-  if(_localUpdate) return; // suppress echo while local update is in flight
-  draw();
-}
-var _colScrollY={}; // track vertical scroll per column index
-
-function saveScrollPos(){
-  var bs=document.getElementById("bscroll");
-  if(bs) _scrollX=bs.scrollLeft;
-  var cols=document.querySelectorAll(".bcol");
-  cols.forEach(function(c,i){_colScrollY[i]=c.scrollTop;});
-}
-
-function restoreScrollPos(){
-  var bs=document.getElementById("bscroll");
-  if(bs) bs.scrollLeft=_scrollX;
-  var cols=document.querySelectorAll(".bcol");
-  cols.forEach(function(c,i){if(_colScrollY[i]) c.scrollTop=_colScrollY[i];});
-}
+var _scrollX=0;
 
 function bind(){
-  // Save scroll on any scroll event
+  // Save scroll
   var bscroll=document.getElementById("bscroll");
   if(bscroll){
     bscroll.addEventListener("scroll",function(){_scrollX=bscroll.scrollLeft;},{ passive:true });
   }
-  document.querySelectorAll(".bcol").forEach(function(c,i){
-    c.addEventListener("scroll",function(){_colScrollY[i]=c.scrollTop;},{passive:true});
-  });
   // Page tabs
   document.querySelectorAll(".ptab[data-page]").forEach(function(el){
     el.addEventListener("click",function(){ST.page=el.dataset.page;draw();});
   });
   // User select
   document.querySelectorAll(".user-btn[data-user]").forEach(function(el){
-    el.addEventListener("click",function(){ST.user=el.dataset.user;_scrollX=0;_colScrollY={};draw();});
+    el.addEventListener("click",function(){ST.user=el.dataset.user;_scrollX=0;draw();});
   });
   // Switch
   var sw=document.getElementById("b-switch");
@@ -844,52 +820,24 @@ function bind(){
     DB.ref(BASE+"/locked/"+ukey(ST.user)).set(true);
     toast("&#128274; Picks locked!");launchConfetti();
   });
-  // Pick clicks — optimistic update: mutate ST.picks locally, redraw, THEN write to Firebase
+  // Pick clicks
   document.querySelectorAll(".ts[data-gid]").forEach(function(el){
     el.addEventListener("click",function(){
       if(!ST.user){toast("Select your name first");return;}
       if(isLocked()){toast("&#128274; Picks are locked");return;}
       var gid=el.dataset.gid,tid=el.dataset.tid;
       if(!gid||!tid)return;
-      var uk=ukey(ST.user);
-      if(!ST.picks[uk]) ST.picks[uk]={};
-      if(ST.picks[uk][gid]===tid){
-        // Remove pick
-        delete ST.picks[uk][gid];
-        saveScrollPos();
-        _localUpdate=true; setTimeout(function(){_localUpdate=false;},800);
-        draw();
-        if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).remove();
-        toast("Pick removed");
-      } else {
-        // Set pick
-        ST.picks[uk][gid]=tid;
-        saveScrollPos();
-        _localUpdate=true; setTimeout(function(){_localUpdate=false;},800);
-        draw();
-        if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).set(tid);
-        toast("&#9733; "+tid);
-      }
+      if(getP(gid)===tid){removeP(gid);toast("Pick removed");}
+      else{saveP(gid,tid);toast("&#9733; "+tid);}
     });
   });
-  // Admin buttons — also optimistic for results
+  // Admin buttons
   document.querySelectorAll(".adm-btn[data-gid]").forEach(function(el){
     el.addEventListener("click",function(){
       var gid=el.dataset.gid,tid=el.dataset.tid;
       if(!gid)return;
-      if(tid==="CLEAR"){
-        if(!ST.results) ST.results={};
-        delete ST.results[gid];
-        saveScrollPos();_localUpdate=true;setTimeout(function(){_localUpdate=false;},800);draw();
-        if(DB) DB.ref(BASE+"/results/"+gid).remove();
-        toast("Cleared");
-      } else {
-        if(!ST.results) ST.results={};
-        ST.results[gid]=tid;
-        saveScrollPos();_localUpdate=true;setTimeout(function(){_localUpdate=false;},800);draw();
-        if(DB) DB.ref(BASE+"/results/"+gid).set(tid);
-        toast("&#9989; "+tid+" wins");launchConfetti();
-      }
+      if(tid==="CLEAR"){saveR(gid,null);toast("Cleared");}
+      else{saveR(gid,tid);toast("&#9989; "+tid+" wins");launchConfetti();}
     });
   });
 }
