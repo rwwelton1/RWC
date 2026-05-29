@@ -444,9 +444,9 @@ function loadData(){
     });
   }
   function s3(){
-    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};drawFromFirebase();});
-    DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};drawFromFirebase();});
-    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};drawFromFirebase();});
+    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
   }
   s1();
 }
@@ -586,10 +586,10 @@ function tsHTML(name, seed, rec, gid, canPick){
   if(!name) return '<div class="ts-tbd">TBD</div>';
   var w=getR(gid), myPick=getP(gid);
   var isW=w&&w===name, isL=w&&w!==name, isMP=myPick===name;
-  var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"");
+  var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"")+(canPick?" clickable":"");
   var icon=isW?"✓":isMP&&!w?"★":"";
   var icol=isW?"color:#6ee7b7":"color:var(--gold)";
-  return '<div class="'+cls+'"'+(canPick?' data-gid="'+x(gid)+'" data-tid="'+x(name)+'"':'')+'>'+
+  return '<div class="'+cls+'" data-gid="'+x(gid)+'" data-tid="'+x(name)+'">'+
     '<div class="ts-seed">'+seed+'</div>'+
     '<div class="ts-dot" style="background:'+tc(name)+'"></div>'+
     '<div class="ts-name">'+x(name)+'</div>'+
@@ -660,10 +660,10 @@ function renderBracketCols(canPick){
     if(t1){
       var w=srResult, myPick=srPick;
       var isW=w&&w===t1, isL=w&&w!==t1, isMP=myPick===t1;
-      var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"")+((!t1official&&!isW&&!isL)?" projected":"");
+      var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"")+((!t1official&&!isW&&!isL)?" projected":"")+(canPick&&t1&&t2?" clickable":"");
       var icon=isW?"✓":isMP&&!w?"★":"";
       var icol=isW?"color:#6ee7b7":"color:var(--gold)";
-      h+='<div class="'+cls+'"'+(canPick&&t1&&t2?' data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t1)+'"':'')+'>'+
+      h+='<div class="'+cls+'" data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t1)+'">'+
         '<div class="ts-seed">'+t1s+'</div>'+
         '<div class="ts-dot" style="background:'+tc(t1)+'"></div>'+
         '<div class="ts-name">'+x(t1)+'</div>'+
@@ -677,10 +677,10 @@ function renderBracketCols(canPick){
     if(t2){
       var w2=srResult, myPick2=srPick;
       var isW2=w2&&w2===t2, isL2=w2&&w2!==t2, isMP2=myPick2===t2;
-      var cls2="ts"+(isW2?" winner":isL2?" loser":isMP2?" mypick":"")+((!t2official&&!isW2&&!isL2)?" projected":"");
+      var cls2="ts"+(isW2?" winner":isL2?" loser":isMP2?" mypick":"")+((!t2official&&!isW2&&!isL2)?" projected":"")+(canPick&&t1&&t2?" clickable":"");
       var icon2=isW2?"✓":isMP2&&!w2?"★":"";
       var icol2=isW2?"color:#6ee7b7":"color:var(--gold)";
-      h+='<div class="'+cls2+'"'+(canPick&&t1&&t2?' data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t2)+'"':'')+'>'+
+      h+='<div class="'+cls2+'" data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t2)+'">'+
         '<div class="ts-seed">'+t2s+'</div>'+
         '<div class="ts-dot" style="background:'+tc(t2)+'"></div>'+
         '<div class="ts-name">'+x(t2)+'</div>'+
@@ -937,7 +937,6 @@ function draw(){
   }
 
   document.getElementById("root").innerHTML=h;
-  restoreScrollPos();
   bind();
   if(ST.page==="scores"){
     // If we already have data render it, otherwise fetch
@@ -947,115 +946,92 @@ function draw(){
   }
 }
 
-var _localUpdate=false;
-
-function drawFromFirebase(){
-  if(_localUpdate) return; // suppress echo while local update is in flight
-  draw();
+// ── Scroll save/restore — exact rwc pattern ───────────
+var _savedScroll=null;
+function _restoreScroll(){
+  if(!_savedScroll)return;
+  var saved=_savedScroll;
+  function apply(){
+    var bs=document.getElementById("bscroll");
+    if(bs) bs.scrollLeft=saved.sx;
+    window.scrollTo(0,saved.sy);
+  }
+  requestAnimationFrame(function(){apply();requestAnimationFrame(function(){apply();_savedScroll=null;});});
 }
-var _colScrollY={}; // kept for compat but columns no longer scroll independently
-
-function saveScrollPos(){
+function _saveScroll(){
   var bs=document.getElementById("bscroll");
-  if(bs) _scrollX=bs.scrollLeft;
+  var sx=bs?bs.scrollLeft:0;
+  var sy=window.pageYOffset||window.scrollY||0;
+  _savedScroll={sx:sx,sy:sy};
 }
 
-function restoreScrollPos(){
-  var bs=document.getElementById("bscroll");
-  if(bs) bs.scrollLeft=_scrollX;
+function pickTeam(gid,tid){
+  if(!ST.user){toast("Select your name first");return;}
+  if(isLocked()){toast("&#128274; Picks are locked");return;}
+  var uk=ukey(ST.user);
+  if(!ST.picks[uk]) ST.picks[uk]={};
+  _saveScroll();
+  if(ST.picks[uk][gid]===tid){
+    delete ST.picks[uk][gid];
+    draw();_restoreScroll();
+    if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).remove();
+    toast("Pick removed");
+  } else {
+    ST.picks[uk][gid]=tid;
+    draw();_restoreScroll();
+    if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).set(tid);
+    toast("&#9733; "+tid);
+  }
+}
+
+function setResult(gid,tid){
+  if(!ST.results) ST.results={};
+  _saveScroll();
+  if(tid==="CLEAR"){
+    delete ST.results[gid];
+    draw();_restoreScroll();
+    if(DB) DB.ref(BASE+"/results/"+gid).remove();
+    toast("Cleared");
+  } else {
+    ST.results[gid]=tid;
+    draw();_restoreScroll();
+    if(DB) DB.ref(BASE+"/results/"+gid).set(tid);
+    toast("&#9989; "+tid+" wins");launchConfetti();
+  }
 }
 
 function bind(){
-  // Save horizontal scroll position
-  var bscroll=document.getElementById("bscroll");
-  if(bscroll){
-    bscroll.addEventListener("scroll",function(){_scrollX=bscroll.scrollLeft;},{ passive:true });
-  }
-  // Page tabs
-  document.querySelectorAll(".ptab[data-page]").forEach(function(el){
-    el.addEventListener("click",function(){
-      var pg=el.dataset.page;
-      if(pg===ST.page) return; // no-op if already on this tab
-      ST.page=pg;
-      draw();
-    });
-  });
-  // User select
-  document.querySelectorAll(".user-btn[data-user]").forEach(function(el){
-    el.addEventListener("click",function(){ST.user=el.dataset.user;_scrollX=0;draw();});
-  });
-  // Switch
-  var sw=document.getElementById("b-switch");
-  if(sw)sw.addEventListener("click",function(){ST.user=null;draw();});
-  // Admin
-  var ba=document.getElementById("b-admin");
-  if(ba)ba.addEventListener("click",function(){
+  var els,i,el;
+  els=document.querySelectorAll(".ptab");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.page=this.getAttribute("data-page");draw();});
+  els=document.querySelectorAll(".user-btn");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");draw();});
+  el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;draw();});
+  el=document.getElementById("b-admin");  if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="bracket";draw();return;}
-    var pw=prompt("Admin password:");
-    if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){ST.admin=true;toast("&#9889; Admin on");draw();}
+    var pw=prompt("Admin password:"); if(pw===null)return;
+    if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){ST.admin=true;draw();}
     else toast("Wrong password");
   });
-  // Reset
-  var br=document.getElementById("b-reset");
-  if(br)br.addEventListener("click",function(){
+  el=document.getElementById("b-reset"); if(el) el.addEventListener("click",function(){
     if(!confirm("Reset all CWS picks and results?"))return;
     if(DB){DB.ref(BASE).remove();toast("Reset done");}
   });
-  // Lock
-  var bl=document.getElementById("b-lock");
-  if(bl)bl.addEventListener("click",function(){
+  el=document.getElementById("b-lock");  if(el) el.addEventListener("click",function(){
     if(!ST.user||!DB)return;
-    if(!confirm("Lock in your picks? You won't be able to change them."))return;
+    if(!confirm("Lock in your picks?"))return;
     DB.ref(BASE+"/locked/"+ukey(ST.user)).set(true);
     toast("&#128274; Picks locked!");launchConfetti();
   });
-  // Pick clicks — optimistic update: mutate ST.picks locally, redraw, THEN write to Firebase
-  document.querySelectorAll(".ts[data-gid]").forEach(function(el){
-    el.addEventListener("click",function(){
-      if(!ST.user){toast("Select your name first");return;}
-      if(isLocked()){toast("&#128274; Picks are locked");return;}
-      var gid=el.dataset.gid,tid=el.dataset.tid;
-      if(!gid||!tid)return;
-      var uk=ukey(ST.user);
-      if(!ST.picks[uk]) ST.picks[uk]={};
-      if(ST.picks[uk][gid]===tid){
-        // Remove pick
-        delete ST.picks[uk][gid];
-        saveScrollPos();
-        _localUpdate=true; setTimeout(function(){_localUpdate=false;},800);
-        draw();
-        if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).remove();
-        toast("Pick removed");
-      } else {
-        // Set pick
-        ST.picks[uk][gid]=tid;
-        saveScrollPos();
-        _localUpdate=true; setTimeout(function(){_localUpdate=false;},800);
-        draw();
-        if(DB) DB.ref(BASE+"/picks/"+uk+"/"+gid).set(tid);
-        toast("&#9733; "+tid);
-      }
-    });
+  // Pick clicks — using data attributes, same as rwc
+  els=document.querySelectorAll(".ts.clickable");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    pickTeam(this.getAttribute("data-gid"),this.getAttribute("data-tid"));
   });
-  // Admin buttons — also optimistic for results
-  document.querySelectorAll(".adm-btn[data-gid]").forEach(function(el){
-    el.addEventListener("click",function(){
-      var gid=el.dataset.gid,tid=el.dataset.tid;
-      if(!gid)return;
-      if(tid==="CLEAR"){
-        if(!ST.results) ST.results={};
-        delete ST.results[gid];
-        saveScrollPos();_localUpdate=true;setTimeout(function(){_localUpdate=false;},800);draw();
-        if(DB) DB.ref(BASE+"/results/"+gid).remove();
-        toast("Cleared");
-      } else {
-        if(!ST.results) ST.results={};
-        ST.results[gid]=tid;
-        saveScrollPos();_localUpdate=true;setTimeout(function(){_localUpdate=false;},800);draw();
-        if(DB) DB.ref(BASE+"/results/"+gid).set(tid);
-        toast("&#9989; "+tid+" wins");launchConfetti();
-      }
-    });
+  // Admin result buttons
+  els=document.querySelectorAll(".adm-btn[data-gid]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    setResult(this.getAttribute("data-gid"),this.getAttribute("data-tid"));
   });
 }
 
