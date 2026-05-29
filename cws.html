@@ -305,57 +305,27 @@ var REG_PAIRS = [
   }
 ];
 
-// ── CWS DOUBLE-ELIM BRACKET ──────────────────────────────────────────────────
-// Bracket 1: sr1,sr2,sr3,sr4  Bracket 2: sr5,sr6,sr7,sr8
-// Within each pod, 4 teams play double-elim → 1 pod champion
-// Each pod "final" winner advances to Championship Series
-
-// Pod games: 6 games per pod (7th if needed)
-// CWS game sources: directly from super regional winners
+// ── CWS PODS — pick one winner from each 4-team pod ──────
+// Pod 1: sr1,sr2,sr3,sr4  Pod 2: sr5,sr6,sr7,sr8
 var CWS_PODS = [
-  {
-    id:"b1", label:"Bracket 1", cls:"b1",
-    // teams come from sr1,sr2,sr3,sr4
-    games:[
-      {id:"cg1_1",label:"Game 1 · Jun 12",pts:6,  s1:"sr1",s2:"sr4"},
-      {id:"cg1_2",label:"Game 2 · Jun 12",pts:6,  s1:"sr2",s2:"sr3"},
-      {id:"cg1_3",label:"Game 3 · Jun 14 (L)",pts:7, f1:"cg1_1",lose1:true, f2:"cg1_2",lose2:true},
-      {id:"cg1_4",label:"Game 4 · Jun 14 (W)",pts:8, f1:"cg1_1",f2:"cg1_2"},
-      {id:"cg1_5",label:"Game 5 · Jun 16 (L)",pts:9, f1:"cg1_3",f2:"cg1_4",lose2:true},
-      {id:"cg1_6",label:"Game 6 · Jun 18 (Final)",pts:10,f1:"cg1_5",f2:"cg1_4"},
-      {id:"cg1_7",label:"Game 7 · Jun 19 (if nec.)",pts:10,f1:"cg1_6",lose1:false,f2:"cg1_4",special:true,optional:true}
-    ]
-  },
-  {
-    id:"b2", label:"Bracket 2", cls:"b2",
-    games:[
-      {id:"cg2_1",label:"Game 1 · Jun 13",pts:6,  s1:"sr5",s2:"sr8"},
-      {id:"cg2_2",label:"Game 2 · Jun 13",pts:6,  s1:"sr6",s2:"sr7"},
-      {id:"cg2_3",label:"Game 3 · Jun 15 (L)",pts:7, f1:"cg2_1",lose1:true, f2:"cg2_2",lose2:true},
-      {id:"cg2_4",label:"Game 4 · Jun 15 (W)",pts:8, f1:"cg2_1",f2:"cg2_2"},
-      {id:"cg2_5",label:"Game 5 · Jun 17 (L)",pts:9, f1:"cg2_3",f2:"cg2_4",lose2:true},
-      {id:"cg2_6",label:"Game 6 · Jun 19 (Final)",pts:10,f1:"cg2_5",f2:"cg2_4"},
-      {id:"cg2_7",label:"Game 7 · Jun 20 (if nec.)",pts:10,f1:"cg2_6",lose1:false,f2:"cg2_4",special:true,optional:true}
-    ]
-  }
+  { id:"b1", pick_id:"pod_b1", label:"Bracket 1", cls:"b1", pts:8,  srs:["sr1","sr2","sr3","sr4"] },
+  { id:"b2", pick_id:"pod_b2", label:"Bracket 2", cls:"b2", pts:8,  srs:["sr5","sr6","sr7","sr8"] }
 ];
 
-var CHAMP=[
-  {id:"cc1",label:"Champ Game 1 · Jun 22",pts:12},
-  {id:"cc2",label:"Champ Game 2 · Jun 23",pts:12},
-  {id:"cc3",label:"Champ Game 3 · Jun 24 (if nec.)",pts:15,optional:true}
-];
+// National champion pick — from all 8 CWS teams
+var CHAMP_PICK_ID = "champ";
+var CHAMP_PTS = 15;
 
-// All game IDs
+// All game IDs for scoring
 var ALL_IDS=[];
 REG_PAIRS.forEach(function(p){ALL_IDS.push(p.left.id,p.right.id,p.sr_id);});
-CWS_PODS.forEach(function(pod){pod.games.forEach(function(g){ALL_IDS.push(g.id);});});
-CHAMP.forEach(function(g){ALL_IDS.push(g.id);});
+CWS_PODS.forEach(function(pod){ALL_IDS.push(pod.pick_id);});
+ALL_IDS.push(CHAMP_PICK_ID);
 
 var GAME_PTS={};
 REG_PAIRS.forEach(function(p){GAME_PTS[p.left.id]=2;GAME_PTS[p.right.id]=2;GAME_PTS[p.sr_id]=p.sr_pts;});
-CWS_PODS.forEach(function(pod){pod.games.forEach(function(g){GAME_PTS[g.id]=g.pts;});});
-CHAMP.forEach(function(g){GAME_PTS[g.id]=g.pts;});
+CWS_PODS.forEach(function(pod){GAME_PTS[pod.pick_id]=pod.pts;});
+GAME_PTS[CHAMP_PICK_ID]=CHAMP_PTS;
 
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
@@ -381,37 +351,26 @@ function saveP(gid,v){if(!ST.user||!DB)return;DB.ref(BASE+"/picks/"+ukey(ST.user
 function removeP(gid){if(!ST.user||!DB)return;DB.ref(BASE+"/picks/"+ukey(ST.user)+"/"+gid).remove();}
 function saveR(gid,v){if(!DB)return;v?DB.ref(BASE+"/results/"+gid).set(v):DB.ref(BASE+"/results/"+gid).remove();}
 
-// ── CWS slot resolution ──────────────────────────────────
-function allCwsGames(){
-  var m={};
-  CWS_PODS.forEach(function(pod){pod.games.forEach(function(g){m[g.id]=g;});});
-  CHAMP.forEach(function(g){m[g.id]=g;});
-  return m;
-}
-function cwsTeam(g, isTop){
-  if(isTop){
-    if(g.s1) return getSlot(g.s1);
-    if(g.f1){var w=getSlot(g.f1);if(!w)return null;return g.lose1?cwsLoser(g.f1):w;}
-  } else {
-    if(g.s2) return getSlot(g.s2);
-    if(g.f2){var w2=getSlot(g.f2);if(!w2)return null;return g.lose2?cwsLoser(g.f2):w2;}
-  }
-  return null;
-}
-function cwsLoser(gid){
-  var all=allCwsGames(); var g=all[gid];if(!g)return null;
-  // Use official result only for losers (picks don't determine who "lost")
-  var w=getR(gid);if(!w)return null;
-  var t1=cwsTeam(g,true),t2=cwsTeam(g,false);
-  return w===t1?t2:t1;
+// ── Pod winner helpers ────────────────────────────────────
+function podTeams(pod){
+  // Returns array of team names currently in this pod (from super regional picks/results)
+  return pod.srs.map(function(srid){ return getSlot(srid); }).filter(Boolean);
 }
 function podChamp(podId){
   var pod=CWS_PODS.find(function(p){return p.id===podId;});
-  var g7=pod.games[6],g6=pod.games[5];
-  var w7=getSlot(g7.id);if(w7)return w7;
-  return getSlot(g6.id)||null;
+  return getR(pod.pick_id)||null;
 }
-function champSlot(isTop){return isTop?podChamp("b1"):podChamp("b2");}
+function allCwsTeams(){
+  // All 8 CWS teams from both pods
+  var teams=[];
+  CWS_PODS.forEach(function(pod){
+    pod.srs.forEach(function(srid){
+      var t=getSlot(srid);
+      if(t) teams.push(t);
+    });
+  });
+  return teams;
+}
 
 // ── Scoring ──────────────────────────────────────────────
 function calcScore(user){
@@ -697,61 +656,98 @@ function renderBracketCols(canPick){
   // Divider
   h+='<div class="bcol-divider"></div>';
 
-  // ── COL 3: CWS DOUBLE-ELIM ──
+  // ── COL 3: CWS PODS — pick one winner per pod ──
   h+='<div class="bcol bcol-cws">';
-  h+='<div class="bcol-header">College World Series <span class="pts-hint">Jun 12–20 · 6–10 pts</span></div>';
+  h+='<div class="bcol-header">Omaha Pods <span class="pts-hint">Jun 12–20 · 8 pts</span></div>';
 
   CWS_PODS.forEach(function(pod){
-    h+='<div class="pod-label '+pod.cls+'">'+pod.label+'</div>';
-    pod.games.forEach(function(g){
-      if(g.optional){
-        var t1o=cwsTeam(g,true),t2o=cwsTeam(g,false);
-        if(!t1o&&!t2o&&!getSlot(g.id)) return;
-      }
-      var t1=cwsTeam(g,true), t2=cwsTeam(g,false);
-      h+=gcHTML(g.id, g.label, g.pts, t1,"","", t2,"","", !!(canPick&&t1&&t2));
-    });
-    h+='<div style="height:8px"></div>';
+    var myPick=getP(pod.pick_id);
+    var result=getR(pod.pick_id);
+    var teams=pod.srs.map(function(srid){ return getSlot(srid); });
+    var hasAny=teams.some(Boolean);
+    var earned=myPick&&result&&myPick===result;
+
+    h+='<div class="gc" style="margin-bottom:10px">';
+    h+='<div class="gc-head"><div class="gc-label" style="color:'+(pod.cls==="b1"?"#6aabf7":"#f97316")+'">'+pod.label+' Winner</div><div class="gc-pts'+(earned?" earned":"")+'">'+pod.pts+'pt'+(earned?" ✓":"")+'</div></div>';
+
+    if(!hasAny){
+      h+='<div class="ts-tbd" style="padding:10px 8px">Teams set after Super Regionals</div>';
+    } else {
+      teams.forEach(function(name,i){
+        if(!name){ h+='<div class="ts-tbd">TBD</div>'; return; }
+        var isW=result&&result===name, isL=result&&result!==name, isMP=myPick===name;
+        var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"")+(canPick?" clickable":"");
+        var icon=isW?"✓":isMP&&!isW?"★":"";
+        var icol=isW?"color:#6ee7b7":"color:var(--gold)";
+        // Find seed from super regional pair
+        var srId=pod.srs[i];
+        var pair=REG_PAIRS.find(function(p){return p.sr_id===srId;});
+        var seed=pair?pair.left.teams[0].s:"";
+        h+='<div class="'+cls+'" data-gid="'+x(pod.pick_id)+'" data-tid="'+x(name)+'">'+
+          '<div class="ts-seed">'+seed+'</div>'+
+          '<div class="ts-dot" style="background:'+tc(name)+'"></div>'+
+          '<div class="ts-name">'+x(name)+'</div>'+
+          '<div class="ts-icon" style="'+icol+'">'+icon+'</div>'+
+          '</div>';
+      });
+    }
+    h+='</div>';
   });
   h+='</div>';
 
   // Divider
   h+='<div class="bcol-divider"></div>';
 
-  // ── COL 4: CHAMPIONSHIP ──
+  // ── COL 4: NATIONAL CHAMPION pick ──
   h+='<div class="bcol bcol-champ">';
-  h+='<div class="bcol-header">Championship Series <span class="pts-hint">Jun 22–24 · 12–15 pts</span></div>';
+  h+='<div class="bcol-header">National Champion <span class="pts-hint">Jun 22 · 15 pts</span></div>';
 
-  var c1=podChamp("b1"), c2=podChamp("b2");
+  var champPick=getP(CHAMP_PICK_ID);
+  var champResult=getR(CHAMP_PICK_ID);
+  var cwsTeams=allCwsTeams();
+  var champEarned=champPick&&champResult&&champPick===champResult;
 
-  CHAMP.forEach(function(g){
-    if(g.optional){
-      var cw1=getSlot(CHAMP[0].id),cw2=getSlot(CHAMP[1].id);
-      if(!cw1||!cw2) return;
-    }
-    h+=gcHTML(g.id, g.label, g.pts, c1,"","Bracket 1 Champ", c2,"","Bracket 2 Champ", !!(canPick&&c1&&c2));
-  });
+  h+='<div class="gc">';
+  h+='<div class="gc-head"><div class="gc-label" style="color:var(--gold)">🏆 Pick the Champion</div><div class="gc-pts'+(champEarned?" earned":"")+'">15pt'+(champEarned?" ✓":"")+'</div></div>';
 
-  // National champion display
-  var champ=null;
-  var cw1=getR(CHAMP[0].id),cw2=getR(CHAMP[1].id),cw3=getR(CHAMP[2].id);
-  if(cw1&&cw2&&cw1===cw2) champ=cw1; else if(cw3) champ=cw3;
-
-  if(!c1&&!c2&&!champ){
-    h+='<div style="padding:16px 6px;text-align:center;color:var(--dim);font-size:9px;line-height:1.8">Championship Series teams will appear once bracket finalists are determined</div>';
+  if(!cwsTeams.length){
+    h+='<div class="ts-tbd" style="padding:10px 8px">All 8 teams appear after Super Regionals</div>';
+  } else {
+    // Show all 8 CWS teams grouped by pod
+    CWS_PODS.forEach(function(pod){
+      h+='<div style="font-size:7px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:5px 8px 2px;color:'+(pod.cls==="b1"?"#6aabf7":"#f97316")+';border-top:1px solid var(--border2)">'+pod.label+'</div>';
+      pod.srs.forEach(function(srid){
+        var name=getSlot(srid);
+        if(!name){ h+='<div class="ts-tbd">TBD</div>'; return; }
+        var isW=champResult&&champResult===name;
+        var isL=champResult&&champResult!==name;
+        var isMP=champPick===name;
+        var cls="ts"+(isW?" winner":isL?" loser":isMP?" mypick":"")+(canPick?" clickable":"");
+        var icon=isW?"✓":isMP&&!isW?"★":"";
+        var icol=isW?"color:#6ee7b7":"color:var(--gold)";
+        var pair=REG_PAIRS.find(function(p){return p.sr_id===srid;});
+        var seed=pair?pair.left.teams[0].s:"";
+        h+='<div class="'+cls+'" data-gid="'+x(CHAMP_PICK_ID)+'" data-tid="'+x(name)+'">'+
+          '<div class="ts-seed">'+seed+'</div>'+
+          '<div class="ts-dot" style="background:'+tc(name)+'"></div>'+
+          '<div class="ts-name">'+x(name)+'</div>'+
+          '<div class="ts-icon" style="'+icol+'">'+icon+'</div>'+
+          '</div>';
+      });
+    });
   }
+  h+='</div>';
 
-  if(champ){
+  if(champResult){
     h+='<div style="margin-top:10px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.3);border-radius:9px;padding:12px;text-align:center">';
-    h+='<div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">🏆 2026 National Champions</div>';
+    h+='<div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px">🏆 2026 National Champions</div>';
     h+='<div style="display:flex;align-items:center;justify-content:center;gap:8px">';
-    h+='<div style="width:24px;height:24px;border-radius:50%;background:'+tc(champ)+';flex-shrink:0"></div>';
-    h+='<div style="font-size:14px;font-weight:800;color:var(--gold)">'+x(champ)+'</div>';
+    h+='<div style="width:22px;height:22px;border-radius:50%;background:'+tc(champResult)+';flex-shrink:0"></div>';
+    h+='<div style="font-size:14px;font-weight:800;color:var(--gold)">'+x(champResult)+'</div>';
     h+='</div></div>';
   }
 
   h+='</div>'; // end champ col
-
   h+='</div>'; // end bracket-scroll
   return h;
 }
@@ -762,7 +758,7 @@ function renderLB(){
   var maxScore=calcScore(sorted[0])||1;
   var medals=["🥇","🥈","🥉"];
   var h='<div class="lb-wrap">';
-  h+='<div class="lb-note">Regionals 2 pts · Supers 4 pts · CWS games 6–10 pts · Championship Series 12–15 pts</div>';
+  h+='<div class="lb-note">Regionals 2 pts · Super Regionals 4 pts · Omaha Pod Winner 8 pts · National Champion 15 pts</div>';
   sorted.forEach(function(p,i){
     var score=calcScore(p);
     var picks=(ST.picks||{})[ukey(p)]||{};
@@ -818,33 +814,28 @@ function renderAdmin(){
   });
 
   CWS_PODS.forEach(function(pod){
-    h+='<div class="adm-sec-label">CWS '+pod.label+'</div>';
-    pod.games.forEach(function(g){
-      var t1=cwsTeam(g,true),t2=cwsTeam(g,false),w=getR(g.id);
-      if(g.optional&&!t1&&!t2&&!w)return;
-      h+='<div class="adm-game"><div class="adm-game-title">'+x(g.label)+'</div><div class="adm-btns">';
-      if(!t1)h+='<button class="adm-btn tbd" disabled>TBD</button>';
-      else h+='<button class="adm-btn'+(w===t1?" sel":"")+'" data-gid="'+x(g.id)+'" data-tid="'+x(t1)+'">'+x(t1)+'</button>';
-      if(!t2)h+='<button class="adm-btn tbd" disabled>TBD</button>';
-      else h+='<button class="adm-btn'+(w===t2?" sel":"")+'" data-gid="'+x(g.id)+'" data-tid="'+x(t2)+'">'+x(t2)+'</button>';
-      if(w)h+='<button class="adm-btn clr" data-gid="'+x(g.id)+'" data-tid="CLEAR">✕</button>';
-      h+='</div></div>';
+    h+='<div class="adm-sec-label">CWS '+pod.label+' Winner</div>';
+    var w=getR(pod.pick_id);
+    var teams=pod.srs.map(function(srid){return getSlot(srid);}).filter(Boolean);
+    h+='<div class="adm-game"><div class="adm-game-title">Who wins '+pod.label+'?</div><div class="adm-btns">';
+    if(!teams.length) h+='<button class="adm-btn tbd" disabled>Teams TBD</button>';
+    else teams.forEach(function(t){
+      h+='<button class="adm-btn'+(w===t?" sel":"")+'" data-gid="'+x(pod.pick_id)+'" data-tid="'+x(t)+'">'+x(t)+'</button>';
     });
-  });
-
-  h+='<div class="adm-sec-label">Championship Series</div>';
-  var c1=podChamp("b1"),c2=podChamp("b2");
-  CHAMP.forEach(function(g){
-    var w=getR(g.id);
-    if(g.optional){var cw1=getR(CHAMP[0].id),cw2=getR(CHAMP[1].id);if(!cw1||!cw2)return;}
-    h+='<div class="adm-game"><div class="adm-game-title">'+x(g.label)+'</div><div class="adm-btns">';
-    if(!c1)h+='<button class="adm-btn tbd" disabled>TBD</button>';
-    else h+='<button class="adm-btn'+(w===c1?" sel":"")+'" data-gid="'+x(g.id)+'" data-tid="'+x(c1)+'">'+x(c1)+'</button>';
-    if(!c2)h+='<button class="adm-btn tbd" disabled>TBD</button>';
-    else h+='<button class="adm-btn'+(w===c2?" sel":"")+'" data-gid="'+x(g.id)+'" data-tid="'+x(c2)+'">'+x(c2)+'</button>';
-    if(w)h+='<button class="adm-btn clr" data-gid="'+x(g.id)+'" data-tid="CLEAR">✕</button>';
+    if(w) h+='<button class="adm-btn clr" data-gid="'+x(pod.pick_id)+'" data-tid="CLEAR">✕</button>';
     h+='</div></div>';
   });
+
+  h+='<div class="adm-sec-label">National Champion</div>';
+  var cw=getR(CHAMP_PICK_ID);
+  var allT=allCwsTeams();
+  h+='<div class="adm-game"><div class="adm-game-title">2026 National Champion</div><div class="adm-btns">';
+  if(!allT.length) h+='<button class="adm-btn tbd" disabled>Teams TBD</button>';
+  else allT.forEach(function(t){
+    h+='<button class="adm-btn'+(cw===t?" sel":"")+'" data-gid="'+x(CHAMP_PICK_ID)+'" data-tid="'+x(t)+'">'+x(t)+'</button>';
+  });
+  if(cw) h+='<button class="adm-btn clr" data-gid="'+x(CHAMP_PICK_ID)+'" data-tid="CLEAR">✕</button>';
+  h+='</div></div>';
 
   h+='</div>';
   return h;
