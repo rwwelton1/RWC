@@ -623,15 +623,17 @@ function renderBracketCols(canPick){
     if(t1){
       var w=srResult, myPick=srPick;
       var isW=w&&w===t1, isL=w&&w!==t1, isMP=myPick===t1;
-      var wrongPick=isL&&isMP;
-      var cls="ts"+(isW?" winner":wrongPick?" wrong-pick":isL?" loser":isMP?" mypick":"")+((!t1official&&!isW&&!isL)?" projected":"")+(canPick&&t1&&t2?" clickable":"");
-      var icon=isW?"✓":wrongPick?"✕":isMP&&!w?"★":"";
+      var elim1=!isW&&isTeamEliminated(t1);
+      var wrongPick=( isL&&isMP)||(elim1&&isMP&&!isW);
+      var dead1=isL||elim1;
+      var cls="ts"+(isW?" winner":wrongPick?" wrong-pick":dead1?" loser":isMP?" mypick":"")+((!t1official&&!isW&&!dead1)?" projected":"")+(canPick&&t1&&t2&&!elim1?" clickable":"");
+      var icon=isW?"✓":wrongPick?"✕":isMP&&!w&&!elim1?"★":"";
       var icol=isW?"color:#6ee7b7":wrongPick?"color:#ef4444":"color:var(--gold)";
       h+='<div class="'+cls+'" data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t1)+'">'+
         '<div class="ts-seed">'+t1s+'</div>'+
-        '<div class="ts-dot" style="background:'+tc(t1)+'"></div>'+
+        '<div class="ts-dot" style="background:'+tc(t1)+';opacity:'+(dead1&&!isMP?'.3':'1')+'"></div>'+
         '<div class="ts-name" style="'+(wrongPick?'text-decoration:line-through;color:#ef4444':'')+'">'+x(t1)+'</div>'+
-        '<div class="ts-rec" style="'+(t1official?"":'color:#475569;font-style:italic')+'">'+(t1official?"Reg. winner":"projected")+'</div>'+
+        (!wrongPick?'<div class="ts-rec" style="'+(t1official?"":'color:#475569;font-style:italic')+'">'+(t1official?"Reg. winner":"projected")+'</div>':'')+
         '<div class="ts-icon" style="'+icol+'">'+icon+'</div>'+
         '</div>';
     } else {
@@ -641,15 +643,17 @@ function renderBracketCols(canPick){
     if(t2){
       var w2=srResult, myPick2=srPick;
       var isW2=w2&&w2===t2, isL2=w2&&w2!==t2, isMP2=myPick2===t2;
-      var wrongPick2=isL2&&isMP2;
-      var cls2="ts"+(isW2?" winner":wrongPick2?" wrong-pick":isL2?" loser":isMP2?" mypick":"")+((!t2official&&!isW2&&!isL2)?" projected":"")+(canPick&&t1&&t2?" clickable":"");
-      var icon2=isW2?"✓":wrongPick2?"✕":isMP2&&!w2?"★":"";
+      var elim2=!isW2&&isTeamEliminated(t2);
+      var wrongPick2=(isL2&&isMP2)||(elim2&&isMP2&&!isW2);
+      var dead2=isL2||elim2;
+      var cls2="ts"+(isW2?" winner":wrongPick2?" wrong-pick":dead2?" loser":isMP2?" mypick":"")+((!t2official&&!isW2&&!dead2)?" projected":"")+(canPick&&t1&&t2&&!elim2?" clickable":"");
+      var icon2=isW2?"✓":wrongPick2?"✕":isMP2&&!w2&&!elim2?"★":"";
       var icol2=isW2?"color:#6ee7b7":wrongPick2?"color:#ef4444":"color:var(--gold)";
       h+='<div class="'+cls2+'" data-gid="'+x(pair.sr_id)+'" data-tid="'+x(t2)+'">'+
         '<div class="ts-seed">'+t2s+'</div>'+
-        '<div class="ts-dot" style="background:'+tc(t2)+'"></div>'+
+        '<div class="ts-dot" style="background:'+tc(t2)+';opacity:'+(dead2&&!isMP2?'.3':'1')+'"></div>'+
         '<div class="ts-name" style="'+(wrongPick2?'text-decoration:line-through;color:#ef4444':'')+'">'+x(t2)+'</div>'+
-        '<div class="ts-rec" style="'+(t2official?"":'color:#475569;font-style:italic')+'">'+(t2official?"Reg. winner":"projected")+'</div>'+
+        (!wrongPick2?'<div class="ts-rec" style="'+(t2official?"":'color:#475569;font-style:italic')+'">'+(t2official?"Reg. winner":"projected")+'</div>':'')+
         '<div class="ts-icon" style="'+icol2+'">'+icon2+'</div>'+
         '</div>';
     } else {
@@ -776,76 +780,76 @@ function renderBracketCols(canPick){
   return h;
 }
 
+// Find which regional a team belongs to
+function findRegional(teamName){
+  var found=null;
+  REG_PAIRS.forEach(function(pair){
+    [pair.left,pair.right].forEach(function(r){
+      if(r.teams.some(function(t){return t.n===teamName;})) found=r;
+    });
+  });
+  return found;
+}
+// Find which SR pair a team belongs to (by scanning all 4 teams in both regionals)
+function findSRPair(teamName){
+  var found=null;
+  REG_PAIRS.forEach(function(pair){
+    var inLeft=pair.left.teams.some(function(t){return t.n===teamName;});
+    var inRight=pair.right.teams.some(function(t){return t.n===teamName;});
+    if(inLeft||inRight) found=pair;
+  });
+  return found;
+}
+// Find which CWS pod a team belongs to (by sr result or slot)
+function findPod(teamName){
+  var found=null;
+  CWS_PODS.forEach(function(pod){
+    pod.srs.forEach(function(srid){
+      if(getR(srid)===teamName||getP(srid)===teamName) found=pod;
+    });
+  });
+  return found;
+}
+
 // Returns true if team has been eliminated at any completed round
 function isTeamEliminated(teamName){
   // Lost their regional?
-  var regElim=false;
-  REG_PAIRS.forEach(function(pair){
-    [pair.left,pair.right].forEach(function(r){
-      var inReg=r.teams.some(function(t){return t.n===teamName;});
-      if(inReg){var res=getR(r.id);if(res&&res!==teamName)regElim=true;}
-    });
-  });
-  if(regElim) return true;
-  // Lost their super regional?
-  var srElim=false;
-  REG_PAIRS.forEach(function(pair){
-    var t1=getR(pair.left.id),t2=getR(pair.right.id);
-    if(t1===teamName||t2===teamName){var res=getR(pair.sr_id);if(res&&res!==teamName)srElim=true;}
-  });
-  if(srElim) return true;
-  // Lost their pod?
-  var podElim=false;
-  CWS_PODS.forEach(function(pod){
-    pod.srs.forEach(function(srid){
-      if(getSlot(srid)===teamName){var res=getR(pod.pick_id);if(res&&res!==teamName)podElim=true;}
-    });
-  });
-  if(podElim) return true;
-  return false;
-}
-function isPickStillPossible(gid, teamName){
-  // Returns false if the team has already been eliminated in a prior round
-  // Check regionals
-  var reg=null;
-  REG_PAIRS.forEach(function(pair){
-    [pair.left,pair.right].forEach(function(r){
-      var inReg=r.teams.some(function(t){return t.n===teamName;});
-      if(inReg) reg=r;
-    });
-  });
-  if(reg){
-    var regResult=getR(reg.id);
-    if(regResult&&regResult!==teamName) return false; // lost their regional
-  }
-
-  // Check super regionals
-  var srPair=null;
-  REG_PAIRS.forEach(function(pair){
-    var t1=getR(pair.left.id), t2=getR(pair.right.id);
-    if(t1===teamName||t2===teamName) srPair=pair;
-    // Also if they won their regional
-    if(getR(pair.left.id)===teamName||getR(pair.right.id)===teamName) srPair=pair;
-  });
+  var reg=findRegional(teamName);
+  if(reg){var res=getR(reg.id);if(res&&res!==teamName)return true;}
+  // Lost their super regional? (team must have won their regional first to be in SR)
+  var srPair=findSRPair(teamName);
   if(srPair){
-    var srResult=getR(srPair.sr_id);
-    if(srResult&&srResult!==teamName) return false; // lost super regional
-  }
-
-  // Check pod winner (only matters for champ pick)
-  if(gid===CHAMP_PICK_ID){
-    var inPod=null;
-    CWS_PODS.forEach(function(pod){
-      pod.srs.forEach(function(srid){
-        if(getSlot(srid)===teamName) inPod=pod;
-      });
-    });
-    if(inPod){
-      var podResult=getR(inPod.pick_id);
-      if(podResult&&podResult!==teamName) return false; // lost their pod
+    // Only check SR result if the team actually won their regional
+    var regRes=reg?getR(reg.id):null;
+    if(regRes&&regRes===teamName){
+      var srRes=getR(srPair.sr_id);
+      if(srRes&&srRes!==teamName)return true;
     }
   }
+  // Lost their pod?
+  var pod=findPod(teamName);
+  if(pod){var podRes=getR(pod.pick_id);if(podRes&&podRes!==teamName)return true;}
+  return false;
+}
 
+function isPickStillPossible(gid, teamName){
+  // Lost their regional?
+  var reg=findRegional(teamName);
+  if(reg){var regRes=getR(reg.id);if(regRes&&regRes!==teamName)return false;}
+  // Lost their super regional?
+  var srPair=findSRPair(teamName);
+  if(srPair){
+    var regRes2=reg?getR(reg.id):null;
+    if(regRes2&&regRes2===teamName){
+      var srRes=getR(srPair.sr_id);
+      if(srRes&&srRes!==teamName)return false;
+    }
+  }
+  // Lost their pod? (only relevant for champ pick)
+  if(gid===CHAMP_PICK_ID){
+    var pod=findPod(teamName);
+    if(pod){var podRes=getR(pod.pick_id);if(podRes&&podRes!==teamName)return false;}
+  }
   return true;
 }
 
