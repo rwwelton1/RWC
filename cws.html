@@ -234,7 +234,7 @@ var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cws2026":"cws2026";
-var MASTER_PW="Sloop";
+var MASTER_PW="Sloop"; // default, overwritten by Firebase on load
 
 var COLORS={
   "UCLA":"#2d68c4","Georgia Tech":"#b3a369","Georgia":"#ba0c2f","Auburn":"#0c2340",
@@ -403,6 +403,7 @@ function loadData(){
     });
   }
   function s3(){
+    DB.ref("globalSettings/masterPw").on("value",function(sn){ if(sn.val()) MASTER_PW=sn.val(); });
     DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
@@ -766,20 +767,51 @@ function renderBracketCols(canPick){
   return h;
 }
 
+// ── Max possible score ────────────────────────────────────
+function calcMaxPossible(user){
+  var picks=(ST.picks||{})[ukey(user)]||{};
+  var extra=0;
+  ALL_IDS.forEach(function(gid){
+    var r=getR(gid);
+    if(r) return; // already decided — can't gain more from this game
+    var pick=picks[gid];
+    if(!pick) return; // no pick made — can't earn pts
+    // Pick is still live (result not in yet) — add potential pts
+    extra+=(GAME_PTS[gid]||0);
+  });
+  return calcScore(user)+extra;
+}
+
 // ── LEADERBOARD ──────────────────────────────────────────
 function renderLB(){
   var sorted=PARTS.slice().sort(function(a,b){return calcScore(b)-calcScore(a);});
-  var maxScore=calcScore(sorted[0])||1;
+  var maxPossibles=sorted.map(function(p){return calcMaxPossible(p);});
+  var overallMax=Math.max.apply(null,maxPossibles.concat([1]));
   var medals=["🥇","🥈","🥉"];
   var h='<div class="lb-wrap">';
   h+='<div class="lb-note">Regionals 2 pts · Super Regionals 4 pts · Omaha Pod Winner 8 pts · National Champion 15 pts</div>';
   sorted.forEach(function(p,i){
     var score=calcScore(p);
+    var maxPoss=calcMaxPossible(p);
+    var remaining=maxPoss-score;
     var picks=(ST.picks||{})[ukey(p)]||{};
     var cls="lb-row"+(i===0?" first":i===1?" second":i===2?" third":"");
     h+='<div class="'+cls+'"><div class="lb-medal">'+(medals[i]||'<span style="font-size:12px;color:var(--dim)">'+(i+1)+'</span>')+'</div>';
-    h+='<div class="lb-body"><div class="lb-top"><div class="lb-name">'+pem(p)+x(p)+'</div><div class="lb-pts"><b>'+score+'</b> pts</div></div>';
-    h+='<div class="progress"><div class="progress-fill" style="width:'+Math.round((score/maxScore)*100)+'%"></div></div>';
+    h+='<div class="lb-body">';
+    h+='<div class="lb-top">';
+    h+='<div class="lb-name">'+pem(p)+x(p)+'</div>';
+    h+='<div style="display:flex;align-items:baseline;gap:5px;flex-shrink:0">';
+    h+='<div class="lb-pts"><b>'+score+'</b> pts</div>';
+    if(remaining>0) h+='<div style="font-size:8px;color:var(--muted)">+'+remaining+' possible</div>';
+    h+='</div>';
+    h+='</div>';
+    // Stacked progress bars: earned (red) + remaining (gold)
+    var earnedPct=Math.round((score/overallMax)*100);
+    var remainPct=Math.min(Math.round((remaining/overallMax)*100), 100-earnedPct);
+    h+='<div class="progress">';
+    h+='<div style="position:absolute;left:0;top:0;height:100%;width:'+earnedPct+'%;background:linear-gradient(90deg,var(--red),var(--red2));border-radius:3px;transition:width .6s"></div>';
+    if(remaining>0) h+='<div style="position:absolute;left:'+earnedPct+'%;top:0;height:100%;width:'+remainPct+'%;background:rgba(251,191,36,.35);border-radius:3px;transition:all .6s"></div>';
+    h+='</div>';
     h+='<div class="lb-chips">';
     ALL_IDS.forEach(function(gid){
       var tid=picks[gid];if(!tid)return;
@@ -890,8 +922,8 @@ function draw(){
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
 
-  // User select
-  if(!ST.user&&!ST.admin&&ST.page==="bracket"){
+  // User select — only block bracket page when no user and not admin
+  if(!ST.user&&!ST.admin&&(ST.page==="bracket"||ST.page==="scores"||ST.page==="leaderboard")){
     h+='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
     PARTS.forEach(function(p){
       var lk=ST.locked[ukey(p)],tp=totalPicks(p);
