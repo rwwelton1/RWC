@@ -330,7 +330,7 @@ GAME_PTS[CHAMP_PICK_ID]=CHAMP_PTS;
 
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
-var ST={page:"bracket",user:URL_USER||null,admin:false,picks:{},results:{},locked:{}};
+var ST={page:"bracket",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{}};
 var DB=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
@@ -345,7 +345,9 @@ function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>"
 function isLocked(){return !!(ST.user&&ST.locked[ukey(ST.user)]);}
 
 function getR(gid){return (ST.results||{})[gid]||null;}
-function getP(gid){if(!ST.user)return null;return ((ST.picks||{})[ukey(ST.user)]||{})[gid]||null;}
+function activeViewer(){return ST.viewUser||ST.user||null;}
+function getP(gid){var u=activeViewer();if(!u)return null;return ((ST.picks||{})[ukey(u)]||{})[gid]||null;}
+function getMyOwnP(gid){if(!ST.user)return null;return ((ST.picks||{})[ukey(ST.user)]||{})[gid]||null;}
 // getSlot: official result if set, otherwise user's pick (so picks cascade forward visually)
 function getSlot(gid){return getR(gid)||getP(gid)||null;}
 function saveP(gid,v){if(!ST.user||!DB)return;DB.ref(BASE+"/picks/"+ukey(ST.user)+"/"+gid).set(v);}
@@ -1097,10 +1099,12 @@ function renderResults(){
 // ── MAIN DRAW ────────────────────────────────────────────
 function draw(){
   var locked=isLocked();
-  var userPicks=ST.user?(ST.picks||{})[ukey(ST.user)]||{}:{};
-  var score=ST.user?calcScore(ST.user):0;
-  var myPickCount=Object.keys(userPicks).length;
-  var canPick=!!(ST.user&&!locked);
+  var viewer=activeViewer();
+  var userPicks=viewer?(ST.picks||{})[ukey(viewer)]||{}:{};
+  var score=viewer?calcScore(viewer):0;
+  var myPickCount=Object.keys((ST.user?(ST.picks||{})[ukey(ST.user)]||{}:{})).length;
+  var isViewingOther=!!(ST.viewUser&&ST.user&&ST.viewUser!==ST.user);
+  var canPick=!!(ST.user&&!locked&&!isViewingOther);
   var h='';
 
   // Topbar
@@ -1145,10 +1149,11 @@ function draw(){
   }
 
   // Score banner
-  if(ST.user&&Object.keys(ST.results||{}).length>0){
+  if(viewer&&Object.keys(ST.results||{}).length>0){
     var cor=0,wr=0,pend=0;
     ALL_IDS.forEach(function(gid){var p=userPicks[gid],r=getR(gid);if(p&&r){if(p===r)cor++;else wr++;}else if(p&&!r)pend++;});
     h+='<div class="score-banner">';
+    if(isViewingOther) h+='<div class="sb-item" style="border-color:rgba(99,102,241,.3)"><div class="sl">Viewing</div><div class="sv" style="color:#a5b4fc;font-size:10px">'+x(ST.viewUser)+'</div></div>';
     h+='<div class="sb-item"><div class="sl">Correct</div><div class="sv" style="color:var(--green)">'+cor+'</div></div>';
     h+='<div class="sb-item"><div class="sl">Wrong</div><div class="sv" style="color:var(--red2)">'+wr+'</div></div>';
     h+='<div class="sb-item"><div class="sl">Pending</div><div class="sv">'+pend+'</div></div>';
@@ -1156,14 +1161,24 @@ function draw(){
     h+='</div>';
   }
 
-  // Lock bar (bracket page only)
+  // Lock bar — shows viewer switcher chips on bracket page
   if(ST.user&&ST.page==="bracket"){
     h+='<div class="lock-bar">';
-    h+='<div class="lock-info">'+(locked?"&#128274; Picks locked":"&#9998; Scroll right to advance picks &middot; "+myPickCount+" made")+'</div>';
+    if(isViewingOther){
+      h+='<div class="lock-info" style="color:#a5b4fc">👁 '+x(ST.viewUser)+'\'s picks &mdash; read only</div>';
+    } else {
+      h+='<div class="lock-info">'+(locked?"&#128274; Picks locked":"&#9998; "+myPickCount+"/"+ALL_IDS.length+" made")+'</div>';
+    }
     h+='<div class="lock-chips">';
-    PARTS.forEach(function(p){var lk=ST.locked[ukey(p)];h+='<div class="lchip '+(lk?"done":"pend")+'">'+(lk?"&#128274; ":"")+x(p)+'</div>';});
+    PARTS.forEach(function(p){
+      var isActive=(viewer===p);
+      var lk=ST.locked[ukey(p)];
+      var chipStyle=isActive?"border-color:rgba(99,102,241,.5);color:#a5b4fc;background:rgba(99,102,241,.1)":lk?"":"";
+      h+='<div class="lchip '+(isActive?"":lk?"done":"pend")+'" data-view="'+x(p)+'" style="cursor:pointer;'+chipStyle+'">'+x(p)+'</div>';
+    });
     h+='</div>';
-    if(canPick&&myPickCount>0)h+='<button class="btn btn-gold" id="b-lock" style="margin-left:5px">&#128274; Lock</button>';
+    if(isViewingOther) h+='<button class="btn btn-ghost" id="b-viewself" style="margin-left:5px;font-size:9px">My Picks</button>';
+    if(canPick&&myPickCount>0) h+='<button class="btn btn-gold" id="b-lock" style="margin-left:5px">&#128274; Lock</button>';
     h+='</div>';
   }
 
@@ -1251,8 +1266,16 @@ function bind(){
   els=document.querySelectorAll(".ptab");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.page=this.getAttribute("data-page");draw();});
   els=document.querySelectorAll(".user-btn");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");draw();});
-  el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;draw();});
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");ST.viewUser=null;draw();});
+  els=document.querySelectorAll(".lchip[data-view]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var p=this.getAttribute("data-view");
+    if(ST.user===p){ ST.viewUser=null; }
+    else { ST.viewUser=p; }
+    _saveScroll(); draw(); _restoreScroll();
+  });
+  el=document.getElementById("b-viewself"); if(el) el.addEventListener("click",function(){ ST.viewUser=null; _saveScroll(); draw(); _restoreScroll(); });
+  el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-admin");  if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="bracket";draw();return;}
     var pw=prompt("Admin password:"); if(pw===null)return;
