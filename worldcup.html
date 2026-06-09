@@ -835,6 +835,126 @@ function renderRules(){
   return h;
 }
 
+// ── LIVE RESULTS TABLE ───────────────────────────────────
+var _resTimer=null,_resData=null,_resLoading=false,_resLastFetch=0;
+
+function fetchResults(){
+  if(_resLoading)return;
+  _resLoading=true;
+  // Try ESPN standings endpoint
+  fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+    .then(function(r){return r.json();})
+    .then(function(data){
+      _resLoading=false;_resLastFetch=Date.now();_resData=data;
+      if(ST.page==="results")renderResultsInto();
+    })
+    .catch(function(){
+      // Fallback: try scoreboard to derive standings
+      _resLoading=false;
+      var el=document.getElementById("results-wrap");
+      if(el)el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">Could not load live standings.<br><span style="font-size:9px;color:var(--dim)">Data will be available once the tournament starts Jun 11</span><br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
+    });
+}
+
+function renderResultsInto(){
+  var el=document.getElementById("results-wrap");
+  if(!el)return;
+  var data=_resData;
+
+  // Try to parse ESPN standings format
+  var groups=[];
+  try{
+    // ESPN v2 standings returns children[] with group tables
+    if(data&&data.children&&data.children.length){
+      data.children.forEach(function(group){
+        var name=group.name||group.abbreviation||"";
+        var entries=(group.standings&&group.standings.entries)||[];
+        var rows=[];
+        entries.forEach(function(e){
+          var team=e.team||{};
+          var tname=team.displayName||team.name||"";
+          var stats={};
+          (e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=s.value||s.displayValue||0;});
+          rows.push({
+            name:tname,
+            abbr:team.abbreviation||tname.substring(0,3),
+            p:parseInt(stats.gamesPlayed||stats.GP||0),
+            w:parseInt(stats.wins||stats.W||0),
+            d:parseInt(stats.ties||stats.D||0),
+            l:parseInt(stats.losses||stats.L||0),
+            gf:parseInt(stats.pointsFor||stats.GF||0),
+            ga:parseInt(stats.pointsAgainst||stats.GA||0),
+            gd:parseInt(stats.pointDifferential||stats.GD||0),
+            pts:parseInt(stats.points||stats.PTS||0)
+          });
+        });
+        if(rows.length) groups.push({name:name,rows:rows});
+      });
+    }
+  }catch(e){}
+
+  var ago=_resLastFetch?Math.round((Date.now()-_resLastFetch)/1000):0;
+
+  if(!groups.length){
+    el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">No standings data yet.<br><span style="font-size:9px;color:var(--dim)">Check back once matches begin on Jun 11, 2026</span><br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
+    return;
+  }
+
+  var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
+  h+='<div style="font-size:9px;font-weight:700;color:var(--text)">Group Standings</div>';
+  h+='<div style="display:flex;align-items:center;gap:8px">';
+  h+='<span style="font-size:7px;color:var(--dim)">Updated '+ago+'s ago</span>';
+  h+='<button style="padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:none;color:var(--muted);font-family:inherit;font-size:8px;cursor:pointer" onclick="fetchResults()">&#8635;</button>';
+  h+='</div></div>';
+
+  groups.forEach(function(group){
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px">';
+    // Header
+    h+='<div style="padding:7px 12px;background:linear-gradient(90deg,#0e2fa8,#1248c8);border-bottom:1px solid rgba(245,197,24,.25);display:flex;align-items:center;justify-content:space-between">';
+    h+='<div style="font-size:10px;font-weight:800;color:#fff">'+x(group.name)+'</div>';
+    h+='<div style="display:flex;gap:12px;font-size:7px;font-weight:700;color:rgba(255,255,255,.5)">';
+    h+='<span style="width:14px;text-align:center">P</span><span style="width:14px;text-align:center">W</span><span style="width:14px;text-align:center">D</span><span style="width:14px;text-align:center">L</span><span style="width:22px;text-align:center">GD</span><span style="width:22px;text-align:center;color:var(--wc-gold)">PTS</span>';
+    h+='</div></div>';
+    // Rows
+    group.rows.forEach(function(row,i){
+      var isQual=i<2;
+      var isWC=i===2;
+      var bgStyle=i===0?"rgba(46,201,92,.06)":i===1?"rgba(25,82,217,.05)":i===2?"rgba(245,197,24,.04)":"";
+      var borderLeft=isQual?"3px solid "+(i===0?"var(--wc-green)":"rgba(25,82,217,.6)"):isWC?"3px solid rgba(245,197,24,.5)":"3px solid transparent";
+      h+='<div style="display:flex;align-items:center;padding:7px 10px 7px 9px;border-left:'+borderLeft+';background:'+bgStyle+';'+(i<group.rows.length-1?"border-bottom:1px solid var(--border2);":"")+'">';
+      h+='<div style="font-size:9px;font-weight:700;color:var(--dim);width:16px;flex-shrink:0">'+(i+1)+'</div>';
+      // Find flag from GROUPS
+      var flag="";
+      for(var gid in GROUPS){var tm=GROUPS[gid].teams.find(function(t){return t.n===row.name||t.n===row.abbr;});if(tm){flag=tm.flag;break;}}
+      h+='<div style="font-size:14px;width:22px;text-align:center;flex-shrink:0">'+flag+'</div>';
+      h+='<div style="font-size:10px;font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px">'+x(row.name)+'</div>';
+      h+='<div style="display:flex;gap:12px;font-size:9px;flex-shrink:0">';
+      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.p+'</span>';
+      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.w+'</span>';
+      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.d+'</span>';
+      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.l+'</span>';
+      h+='<span style="width:22px;text-align:center;color:var(--muted)">'+(row.gd>0?"+":"")+row.gd+'</span>';
+      h+='<span style="width:22px;text-align:center;font-weight:800;color:var(--wc-gold)">'+row.pts+'</span>';
+      h+='</div></div>';
+    });
+    // Legend
+    h+='<div style="display:flex;gap:12px;padding:4px 10px;background:rgba(0,0,0,.15);font-size:7px;color:var(--dim)">';
+    h+='<span style="color:var(--wc-green)">&#9646; Qualify</span>';
+    h+='<span style="color:rgba(245,197,24,.7)">&#9646; Wild card</span>';
+    h+='</div></div>';
+  });
+
+  h+='<div style="text-align:center;font-size:7px;color:var(--dim);padding:4px 0 8px">via ESPN &middot; auto-refreshes every 60s</div>';
+  el.innerHTML=h;
+}
+
+function stopResultsRefresh(){clearInterval(_resTimer);_resTimer=null;}
+function startResultsRefresh(){
+  clearInterval(_resTimer);
+  fetchResults();
+  _resTimer=setInterval(function(){if(ST.page==="results")fetchResults();},60000);
+}
+
 function renderAdmin(){
   var phase=ST.results.phase||"groups";
   var h='<div class="adm-wrap">';
@@ -877,7 +997,7 @@ function draw(){
   h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
   if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top">&#8635;</button>';
   h+='</div></div>';
-  var tabs=[{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"leaderboard",lbl:"Standings"},{id:"rules",lbl:"Rules"}];
+  var tabs=[{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"results",lbl:"Results"},{id:"leaderboard",lbl:"Standings"},{id:"rules",lbl:"Rules"}];
   if(ST.admin)tabs.push({id:"admin",lbl:"Admin"});
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
@@ -907,6 +1027,7 @@ function draw(){
   if(ST.page==="groups")h+=renderGroups();
   else if(ST.page==="wildcard")h+=renderWildCards();
   else if(ST.page==="bracket")h+=renderBracket();
+  else if(ST.page==="results")h+='<div id="results-wrap" style="min-height:60vh;padding:10px 12px"><div style="text-align:center;padding:30px;color:var(--muted)">Loading results...</div></div>';
   else if(ST.page==="leaderboard")h+=renderLB();
   else if(ST.page==="rules")h+=renderRules();
   else if(ST.page==="admin"&&ST.admin)h+=renderAdmin();
@@ -914,6 +1035,8 @@ function draw(){
   bind();
   initAllDragLists();
   initGroupSwipe();
+  if(ST.page==="results"){if(_resData)renderResultsInto();else startResultsRefresh();}
+  else stopResultsRefresh();
 }
 
 function initGroupSwipe(){
