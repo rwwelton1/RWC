@@ -191,6 +191,9 @@ a{color:inherit;text-decoration:none}
 .bk-notice{padding:7px 12px;font-size:8px;line-height:1.6;border-bottom:1px solid var(--border)}
 .bk-notice.preview{background:rgba(245,197,24,.06);color:var(--wc-gold);border-color:rgba(245,197,24,.15)}
 .bk-notice.live{background:rgba(46,201,92,.06);color:var(--wc-green);border-color:rgba(46,201,92,.2)}
+.bk-match.bk-locked .bk-team{pointer-events:none;cursor:default}
+.bk-match.bk-locked .bk-team.mypick{background:rgba(255,255,255,.04);opacity:.5}
+.bk-match.bk-locked .bk-team.mypick .bk-name{color:var(--muted)}
 
 /* ADMIN */
 .adm-wrap{padding:10px}
@@ -388,6 +391,16 @@ function pushLiveGroupsToResults(groupsData){
   // Push parsed ESPN standings into liveResults (which then flows into ST.results)
   if(!DB||!groupsData)return;
   DB.ref(RESULTS_BASE+"/liveResults/groups").set(groupsData);
+}
+function wipeBracketPicks(){
+  if(!DB)return;
+  // Remove bracket picks for all users
+  var updates={};
+  PARTS.forEach(function(p){updates[BASE+"/picks/"+ukey(p)+"/bracket"]=null;});
+  DB.ref().update(updates);
+  // Also clear local state
+  for(var uk in ST.picks){if(ST.picks[uk])ST.picks[uk].bracket=null;}
+  draw();
 }
 function loadData(){
   if(!DB){draw();return;}
@@ -644,6 +657,8 @@ function getR32Teams(user,idx){
 
 function saveBracketPick(round,idx,team){
   if(!ST.user||!DB) return;
+  // Block picks if bracket stage not open or locked
+  if(!stageOpenForPicks("bracket")||isLocked()) return;
   var uk=ukey(ST.user);
   if(!ST.picks[uk]) ST.picks[uk]={};
   if(!ST.picks[uk].bracket) ST.picks[uk].bracket={};
@@ -727,12 +742,12 @@ function renderBracket(){
       var official=ST.results.bracket&&ST.results.bracket[rnd]&&ST.results.bracket[rnd][m.idx];
       if(official) winner=official;
 
-      h+='<div class="bk-match'+(winner?"":" projected")+'">';
+      h+='<div class="bk-match'+(winner?"":" projected")+(!canPick?" bk-locked":"")+'">';
 
       // Team A
       var aIsWin=winner&&winner===m.ta, aIsLose=winner&&winner!==m.ta&&m.ta;
       var aIsMy=!official&&m.pick&&m.pick===m.ta;
-      var aCanPick=!!(m.ta&&m.tb&&!winner);
+      var aCanPick=!!(canPick&&m.ta&&m.tb&&!winner);
       var aCls="bk-team"+(m.ta?"":" tbd")+(aIsWin?" winner":aIsLose?" loser":aIsMy?" mypick":"")+(aCanPick?" pickable":"");
       h+='<div class="'+aCls+'"'+(aCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.ta||"")+'"':'')+'>'+
         (m.ta?'<div class="bk-flag">'+getTeamFlag(m.ta)+'</div>':'<div style="width:20px"></div>')+
@@ -743,7 +758,7 @@ function renderBracket(){
       // Team B
       var bIsWin=winner&&winner===m.tb, bIsLose=winner&&winner!==m.tb&&m.tb;
       var bIsMy=!official&&m.pick&&m.pick===m.tb;
-      var bCanPick=!!(m.ta&&m.tb&&!winner);
+      var bCanPick=!!(canPick&&m.ta&&m.tb&&!winner);
       var bCls="bk-team"+(m.tb?"":" tbd")+(bIsWin?" winner":bIsLose?" loser":bIsMy?" mypick":"")+(bCanPick?" pickable":"");
       h+='<div class="'+bCls+'"'+(bCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.tb||"")+'"':'')+'>'+
         (m.tb?'<div class="bk-flag">'+getTeamFlag(m.tb)+'</div>':'<div style="width:20px"></div>')+
@@ -1045,6 +1060,7 @@ function renderAdmin(){
     h+='</div>';
   });
   h+='<div class="adm-sec-label">Reset</div><button class="adm-phase-btn adm-close" id="adm-reset">&#8635; Reset All Data</button>';
+  h+='<button class="adm-phase-btn" id="adm-wipe-bracket" style="background:rgba(155,89,255,.1);border-color:rgba(155,89,255,.4);color:#c084fc;margin-top:6px">&#128465; Wipe All Bracket Picks</button>';
   h+='</div>';
   return h;
 }
@@ -1293,6 +1309,7 @@ function bind(){
   });
   el=document.getElementById("b-reset-top");if(el)el.addEventListener("click",function(){if(!confirm("Reset ALL data?"))return;if(DB){DB.ref(BASE).remove();DB.ref(RESULTS_BASE+"/results").remove();}toast("Reset");});
   el=document.getElementById("adm-reset");if(el)el.addEventListener("click",function(){if(!confirm("Reset ALL data?"))return;if(DB){DB.ref(BASE).remove();DB.ref(RESULTS_BASE+"/results").remove();}toast("Reset");});
+  el=document.getElementById("adm-wipe-bracket");if(el)el.addEventListener("click",function(){if(!confirm("Wipe ALL bracket picks for everyone? Cannot be undone."))return;wipeBracketPicks();toast("&#128465; Bracket picks wiped");});
   el=document.getElementById("b-lock");if(el)el.addEventListener("click",function(){if(!ST.user||!DB)return;if(!confirm("Lock your picks?"))return;DB.ref(BASE+"/locked/"+ukey(ST.user)).set(true);toast("&#128274; Locked!");launchConfetti();});
   el=document.getElementById("go-wc");if(el)el.addEventListener("click",function(){ST.page="wildcard";draw();});
   el=document.getElementById("adm-close");if(el)el.addEventListener("click",function(){if(!confirm("Close group stage?"))return;setPhase("knockout");toast("Group stage closed");});
