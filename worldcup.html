@@ -283,7 +283,7 @@ var WILD_CARD_COUNT=8;
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
-var ST={page:"groups",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{}};
+var ST={page:"groups",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false}};
 var _dragState=null; // active drag state
 
 try{
@@ -296,6 +296,7 @@ var _tt;function toast(m){var el=document.getElementById("toast");el.innerHTML=m
 function ukey(n){return n.toLowerCase().replace(/[^a-z0-9]/g,"_");}
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
 function isLocked(){return !!(ST.user&&(ST.locked[ukey(ST.user)]||(ST.results.phase==="knockout")));}
+function stageOpenForPicks(stage){return !!ST.stageOpen[stage];}
 function activeViewer(){return ST.viewUser||ST.user||null;}
 
 // ── Pick helpers ──────────────────────────────────────────
@@ -378,6 +379,16 @@ function setPhase(phase){
   if(!DB)return;ST.results.phase=phase;
   DB.ref(RESULTS_BASE+"/results/phase").set(phase);draw();
 }
+function toggleStageOpen(stage){
+  if(!DB)return;
+  var nowOpen=!!(ST.stageOpen&&ST.stageOpen[stage]);
+  DB.ref(RESULTS_BASE+"/stageOpen/"+stage).set(nowOpen?null:true);
+}
+function pushLiveGroupsToResults(groupsData){
+  // Push parsed ESPN standings into liveResults (which then flows into ST.results)
+  if(!DB||!groupsData)return;
+  DB.ref(RESULTS_BASE+"/liveResults/groups").set(groupsData);
+}
 function loadData(){
   if(!DB){draw();return;}
   function s1(){if(!GROUP_ID){s2();return;}DB.ref("groups/"+GROUP_ID).once("value",function(sn){var g=sn.val()||{};if(g&&g.players&&g.players.length)PARTS=g.players;if(g&&g.adminPw)GROUP_ADMIN_PW=g.adminPw;s2();},function(){s2();});}
@@ -387,6 +398,15 @@ function loadData(){
     DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
     DB.ref(RESULTS_BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
+    // Stage open flags — admin controls when picks are enabled
+    DB.ref(RESULTS_BASE+"/stageOpen").on("value",function(sn){ST.stageOpen=sn.val()||{};draw();_restoreScroll();});
+    // Live results feed — admin pushes ESPN standings into official results
+    DB.ref(RESULTS_BASE+"/liveResults").on("value",function(sn){
+      var live=sn.val()||{};
+      if(live.groups){if(!ST.results.groups)ST.results.groups={};for(var gid in live.groups)ST.results.groups[gid]=live.groups[gid];}
+      if(live.wildcards)ST.results.wildcards=live.wildcards;
+      draw();_restoreScroll();
+    });
   }
   s1();
 }
@@ -444,7 +464,8 @@ function buildDragList(ranking, gid, rr, viewer, canDrag, isAdmin){
 
 function renderGroups(){
   var viewer=activeViewer();
-  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user);
+  var groupsOpen=stageOpenForPicks("groups");
+  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&groupsOpen);
   var gid=ST.group;
   var ranking=viewer?getGroupRanking(viewer,gid):GROUPS[gid].teams.map(function(t){return t.n;});
   var rr=getResultRanking(gid);
@@ -457,7 +478,8 @@ function renderGroups(){
     h+='<button class="gtab'+(ST.group===g?" active":done?" done":"")+'" data-gtab="'+g+'">'+g+'</button>';
   });
   h+='</div>';
-  if(phase==="knockout")h+='<div class="phase-banner locked">&#128274; Group stage closed</div>';
+  if(phase==="knockout"){h+='<div class="phase-banner locked">&#128274; Group stage closed</div>';}
+  else if(!groupsOpen&&!ST.admin){h+='<div class="phase-banner locked" style="border-color:rgba(245,197,24,.3);color:var(--wc-gold);background:rgba(245,197,24,.05)">&#128274; Picks not open yet — wait for admin to unlock</div>';}
   h+='<div class="group-card" id="group-swipe-target">';
   var gIdx=GROUP_IDS.indexOf(gid);
   var prevG=gIdx>0?GROUP_IDS[gIdx-1]:null;
@@ -486,7 +508,7 @@ function renderGroups(){
 
 function renderWildCards(){
   var viewer=activeViewer();
-  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user);
+  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&stageOpenForPicks("groups"));
   var phase=ST.results.phase||"groups";
   var rWC=getResultWildcards(),uWC=viewer?getUserWildcards(viewer):[];
   var pool=[];
@@ -644,11 +666,15 @@ function saveBracketPick(round,idx,team){
 function renderBracket(){
   var viewer=activeViewer();
   var isOfficial=(ST.results.phase==="knockout");
-  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&isOfficial);
+  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&isOfficial&&stageOpenForPicks("bracket"));
   var h='';
 
   if(isOfficial){
-    h+='<div class="bk-notice live">&#10003; Knockout phase is live — tap a team to pick them to advance</div>';
+    if(stageOpenForPicks("bracket")){
+      h+='<div class="bk-notice live">&#10003; Knockout phase is live — tap a team to pick them to advance</div>';
+    } else {
+      h+='<div class="bk-notice preview" style="border-color:rgba(245,197,24,.3);background:rgba(245,197,24,.05)">&#128274; Knockout picks not open yet — wait for admin to unlock</div>';
+    }
   } else {
     h+='<div class="bk-notice preview">&#9889; Preview based on your group predictions — tap a team to make knockout picks</div>';
   }
@@ -972,7 +998,28 @@ function startResultsRefresh(){
 
 function renderAdmin(){
   var phase=ST.results.phase||"groups";
+  var groupsOpen=!!(ST.stageOpen&&ST.stageOpen.groups);
+  var bracketOpen=!!(ST.stageOpen&&ST.stageOpen.bracket);
   var h='<div class="adm-wrap">';
+
+  h+='<div class="adm-sec-label">⚽ Stage Controls</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border2)">';
+  h+='<div><div style="font-size:11px;font-weight:700;color:var(--text)">Group Stage Picks</div><div style="font-size:8px;color:var(--muted)">Allow users to rank groups &amp; wild cards</div></div>';
+  h+='<button data-adm-stage-toggle="groups" style="padding:5px 14px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid '+(groupsOpen?'rgba(46,201,92,.4)':'rgba(230,29,37,.35)')+';background:'+(groupsOpen?'rgba(46,201,92,.1)':'rgba(230,29,37,.08)')+';color:'+(groupsOpen?'var(--wc-green)':'#ff7070')+';cursor:pointer">'+(groupsOpen?'🔓 OPEN':'🔒 CLOSED')+'</button>';
+  h+='</div>';
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0">';
+  h+='<div><div style="font-size:11px;font-weight:700;color:var(--text)">Bracket Picks</div><div style="font-size:8px;color:var(--muted)">Allow users to pick knockout winners</div></div>';
+  h+='<button data-adm-stage-toggle="bracket" style="padding:5px 14px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid '+(bracketOpen?'rgba(46,201,92,.4)':'rgba(230,29,37,.35)')+';background:'+(bracketOpen?'rgba(46,201,92,.1)':'rgba(230,29,37,.08)')+';color:'+(bracketOpen?'var(--wc-green)':'#ff7070')+';cursor:pointer">'+(bracketOpen?'🔓 OPEN':'🔒 CLOSED')+'</button>';
+  h+='</div></div>';
+
+  h+='<div class="adm-sec-label">📡 Live Results Feed</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the latest ESPN group standings and push them as official results. All sessions update instantly.</div>';
+  h+='<button id="adm-fetch-live" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(46,201,92,.4);background:rgba(46,201,92,.1);color:var(--wc-green);font-family:inherit;cursor:pointer">📡 Fetch &amp; Push Live Standings</button>';
+  h+='<div id="adm-live-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
   h+='<div class="adm-sec-label">Phase Control</div>';
   if(phase==="groups"){h+='<button class="adm-phase-btn adm-close" id="adm-close">&#128274; Close Group Stage → Open Knockout</button>';}
   else{h+='<div style="font-size:9px;color:var(--wc-green);padding:6px 0">&#10003; Knockout phase active</div><button class="adm-phase-btn adm-open" id="adm-reopen" style="margin-top:6px">Reopen Group Stage</button>';}
@@ -1264,6 +1311,59 @@ function bind(){
     if(idx>=0)wc.splice(idx,1);
     else{if(wc.length>=8){toast("Already 8 set");return;}wc.push(name);}
     saveAdminWildcards(wc);toast(idx>=0?"Removed":"&#9989; "+name);
+  });
+  els=document.querySelectorAll("[data-adm-stage-toggle]");
+  for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
+    var stage=this.getAttribute("data-adm-stage-toggle");
+    var opening=!(ST.stageOpen&&ST.stageOpen[stage]);
+    if(!confirm((opening?"Open":"Close")+" "+stage+" picks?"))return;
+    toggleStageOpen(stage);
+    toast((opening?"🔓 Picks OPEN: ":"🔒 Picks CLOSED: ")+stage);
+  });
+  el=document.getElementById("adm-fetch-live");if(el)el.addEventListener("click",function(){
+    var statusEl=document.getElementById("adm-live-status");
+    if(statusEl)statusEl.textContent="Fetching from ESPN...";
+    fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+      .then(function(r){return r.json();})
+      .then(function(data){
+        var pushed={};
+        if(data&&data.children&&data.children.length){
+          data.children.forEach(function(group){
+            // Match ESPN group name to our group ID (e.g. "Group A" → "A")
+            var gname=(group.name||group.abbreviation||"").replace(/^group\s*/i,"").trim().toUpperCase();
+            if(!gname||!GROUPS[gname])return;
+            var entries=(group.standings&&group.standings.entries)||[];
+            // Sort by points desc, then GD desc
+            var rows=[];
+            entries.forEach(function(e){
+              var stats={};(e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=parseFloat(s.value||0);});
+              var tname=(e.team&&(e.team.displayName||e.team.name))||"";
+              // Try to map ESPN name back to our team name
+              var matched=null;
+              GROUPS[gname].teams.forEach(function(t){
+                var ename=tname.toLowerCase(),oname=t.n.toLowerCase();
+                if(ename===oname||ename.indexOf(oname)>=0||oname.indexOf(ename)>=0)matched=t.n;
+              });
+              rows.push({name:matched||tname,pts:stats.points||stats.PTS||0,gd:stats.pointDifferential||stats.GD||0,gf:stats.pointsFor||stats.GF||0});
+            });
+            rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
+            var ranking=rows.map(function(r){return r.name;}).filter(Boolean);
+            if(ranking.length===4)pushed[gname]=ranking;
+          });
+        }
+        if(Object.keys(pushed).length){
+          pushLiveGroupsToResults(pushed);
+          if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Pushed '+Object.keys(pushed).length+' groups</span>';
+          toast("📡 Live standings pushed");
+        } else {
+          if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No standings data yet</span>';
+          toast("No data available yet");
+        }
+      })
+      .catch(function(err){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
+        toast("Fetch failed");
+      });
   });
 }
 
