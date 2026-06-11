@@ -1190,9 +1190,9 @@ function renderProfile() {
       if(activePool && u && u.username) {
         var poolScoresG = ((data[activePool.id]||{}).scores)||{};
         if(Object.keys(poolScoresG).length > 0) {
-          var rankedG = (g.players||[]).slice().sort(function(a,b){ return (poolScoresG[b]||0)-(poolScoresG[a]||0); });
+          var rankedG = (g.players||[]).slice().sort(function(a,b){ return (poolScoresG[ukey(b)]||0)-(poolScoresG[ukey(a)]||0); });
           var myPoolRankG = rankedG.indexOf(u.username);
-          var myPoolPtsG = poolScoresG[u.username] !== undefined ? poolScoresG[u.username] : null;
+          var myPoolPtsG = poolScoresG[ukey(u.username)] !== undefined ? poolScoresG[ukey(u.username)] : null;
           if(myPoolRankG >= 0) {
             var rc = myPoolRankG===0?'#fbbf24':myPoolRankG===1?'#94a3b8':myPoolRankG===2?'#b45309':'#475569';
             liveRankHtml = '<div style="font-size:10px;color:#475569">'+activePool.icon+' <span style="color:'+rc+';font-weight:700">#'+(myPoolRankG+1)+'</span> of '+(g.players||[]).length+(myPoolPtsG!==null?' &middot; <span style="color:#94a3b8">'+myPoolPtsG+' pts</span>':'')+'</div>';
@@ -1880,14 +1880,14 @@ function renderHub() {
     if(!poolScoresData || Object.keys(poolScoresData).length === 0) {
       // If no scores yet, initialize with zeros for all players
       poolScoresData = {};
-      (g.players||[]).forEach(function(p){ poolScoresData[p] = 0; });
+      (g.players||[]).forEach(function(p){ poolScoresData[ukey(p)] = 0; });
     }
     
     var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
     // Rank players by their stored score for this pool
     var poolScores = [];
     (g.players||[]).forEach(function(p){
-      var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
+      var pts = (poolScoresData[ukey(p)] !== undefined) ? poolScoresData[ukey(p)] : null;
       poolScores.push({name:p, pts:pts});
     });
     poolScores.sort(function(a,b){
@@ -1937,7 +1937,7 @@ function renderHub() {
         h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
         if(hasPicks && grandMaxVal !== null && myPoolPts === null) {
           // Has picks but no results yet — show score/max
-          var myRawScore = poolScoresData[myName] !== undefined ? poolScoresData[myName] : 0;
+          var myRawScore = poolScoresData[ukey(myName)] !== undefined ? poolScoresData[ukey(myName)] : 0;
           h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myRawScore+'</b> / '+grandMaxVal+' pts</span>';
         } else if(!hasPicks) {
           h += '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
@@ -3108,10 +3108,21 @@ function calcStandings(g, data) {
   players.forEach(function(p){ scores[p]=0; finishes[p]={}; });
   var pools = groupPools(g);
   pools.forEach(function(pool){
-    var r=(data.results||{})[pool.id]; if(!r) return;
-    if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
-    if(r.second&&scores[r.second]!==undefined){scores[r.second]+=2;finishes[r.second][pool.id]=2;}
-    if(r.third&&scores[r.third]!==undefined){scores[r.third]+=1;finishes[r.third][pool.id]=3;}
+    var poolScores = (data[pool.id]||{}).scores||{};
+    var hasLiveScores = Object.keys(poolScores).length > 0;
+    if(hasLiveScores) {
+      // Use live scores written by the pool file
+      players.forEach(function(p){
+        var pts = poolScores[ukey(p)];
+        if(pts !== undefined && pts > 0) scores[p] += pts;
+      });
+    } else {
+      // Fall back to manual results-based scoring
+      var r=(data.results||{})[pool.id]; if(!r) return;
+      if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
+      if(r.second&&scores[r.second]!==undefined){scores[r.second]+=2;finishes[r.second][pool.id]=2;}
+      if(r.third&&scores[r.third]!==undefined){scores[r.third]+=1;finishes[r.third][pool.id]=3;}
+    }
   });
   return players.slice().sort(function(a,b){return scores[b]-scores[a];})
     .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p]};});
