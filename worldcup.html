@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
-<title>PoolPlay – 2026 World Cup</title>
+<title>Scorecery – 2026 World Cup</title>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
@@ -27,10 +27,14 @@ a{color:inherit;text-decoration:none}
 
 /* TOPBAR */
 .topbar{background:#ffffff;border-bottom:3px solid var(--border);padding:10px 12px;display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:50;box-shadow:0 3px 0 var(--border)}
-.topbar-center{flex:1;min-width:0}
-.app-name{font-size:16px;font-weight:900;color:var(--text);letter-spacing:-.02em}
-.app-sub{font-size:8px;color:var(--muted);margin-top:1px}
+.topbar-center{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px}
+.app-name{font-size:16px;font-weight:900;color:var(--text);letter-spacing:-.02em;line-height:1.1}
+.app-sub{font-size:8px;color:var(--muted);margin-top:0px;line-height:1.1}
 .topbar-right{display:flex;gap:6px;align-items:center;flex-shrink:0}
+
+.header-center{flex:1;text-align:center;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0;overflow:hidden}
+.header-logo{font-size:16px;line-height:1.1}
+.header-sub{font-size:7px;font-weight:700;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-top:2px}
 .tag{background:var(--gold-bg);border:2px solid var(--border);border-radius:20px;padding:4px 10px;font-size:9px;color:var(--text);font-weight:800;box-shadow:3px 3px 0 var(--border)}
 .tag.locked{background:var(--red-bg);border-color:var(--border);color:var(--red)}
 .btn{border-radius:8px;padding:5px 12px;font-size:9px;font-weight:800;border:2px solid var(--border);box-shadow:3px 3px 0 var(--border);transition:transform .1s,box-shadow .1s;font-family:'Nunito',sans-serif}
@@ -262,6 +266,25 @@ a{color:inherit;text-decoration:none}
 .rules-section{background:#ffffff;border:2px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:5px 5px 0 var(--border)}
 .rules-head{padding:10px 14px;font-size:11px;font-weight:900;color:var(--text);background:var(--cream);border-bottom:2px solid var(--border2)}
 .rules-body{padding:12px 14px;font-size:10px;font-weight:700;color:var(--muted);line-height:1.9}
+
+/* ── SCORECERY logo ── */
+.scorecery-logo{
+  font-family:'Nunito',sans-serif;
+  font-weight:900;
+  font-size:inherit;
+  color:#ffffff;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  -webkit-text-stroke:3px #111111;
+  text-shadow:
+    1px 1px 0 #111111,
+    2px 2px 0 #111111,
+    3px 3px 0 #111111,
+    5px 5px 0 #1a4fd6,
+    7px 7px 0 #0a2088,
+    8px 8px 0 #060e44;
+  paint-order:stroke fill;
+}
 </style>
 </head>
 <body>
@@ -408,6 +431,16 @@ function calcMaxPossible(user){
   return total;
 }
 
+function syncScoresToGroup(){
+  if(!GROUP_ID || !PARTS || !DB) return;
+  // Sync each player's current score to the group
+  var groupPath = 'groups/'+GROUP_ID+'/data/wc/scores';
+  PARTS.forEach(function(player){
+    var score = calcScore(player);
+    DB.ref(groupPath+'/'+ukey(player)).set(score);
+  });
+}
+
 // Phase 1 = group stage + wild cards
 function calcPhase1Score(user){
   var total=0,res=ST.results.groups||{};
@@ -552,7 +585,7 @@ function loadData(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
     DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
-    DB.ref(RESULTS_BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(RESULTS_BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};syncScoresToGroup();draw();_restoreScroll();});
     // Stage open flags — admin controls when picks are enabled
     DB.ref(RESULTS_BASE+"/stageOpen").on("value",function(sn){ST.stageOpen=sn.val()||{};draw();_restoreScroll();});
     // Live results feed — admin pushes ESPN standings into official results
@@ -560,6 +593,7 @@ function loadData(){
       var live=sn.val()||{};
       if(live.groups){if(!ST.results.groups)ST.results.groups={};for(var gid in live.groups)ST.results.groups[gid]=live.groups[gid];}
       if(live.wildcards)ST.results.wildcards=live.wildcards;
+      syncScoresToGroup(); // Sync updated scores to group
       draw();_restoreScroll();
       // Flash qualifying rows when live data arrives
       setTimeout(function(){
@@ -1445,14 +1479,24 @@ function renderAdmin(){
 
 function draw(){
   var locked=isLocked(),viewer=activeViewer(),phase=ST.results.phase||"groups",h='';
-  h+='<div class="topbar">';
-  h+='<a href="index.html" style="display:flex;align-items:center;font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;white-space:nowrap;flex-shrink:0;text-decoration:none;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;padding:5px 12px;box-shadow:3px 3px 0 var(--border)">&#8592; Hub</a>';
-  h+='<div class="topbar-center"><div class="app-name">PoolPlay</div><div class="app-sub">2026 FIFA World Cup &middot; USA · Canada · Mexico</div></div>';
-  h+='<div class="topbar-right">';
-  if(ST.user)h+='<span class="tag'+(locked?" locked":"")+'">'+pem(ST.user)+x(ST.user)+(locked?"&nbsp;&#128274;":"")+'</span>';
-  h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
-  if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top">&#8635;</button>';
-  h+='</div></div>';
+  var lockedCls=locked?' locked':'';
+  h+='<div class="topbar" style="padding:8px 12px;gap:8px">';
+  h+='<a href="index.html" style="display:flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:18px;font-weight:900;flex-shrink:0;text-decoration:none;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border)">&#8592;</a>';
+  h+='<div class="header-center">';
+  h+='<div class="header-logo"><span class="scorecery-logo">SCORECERY</span></div>';
+  h+='<div class="header-sub">2026 World Cup</div>';
+  h+='</div>';
+  h+='<div style="display:flex;gap:5px;align-items:center;flex-shrink:0">';
+  if(ST.user){
+    var lockIcon=locked?'&nbsp;&#128274;':'';
+    h+='<span class="tag'+lockedCls+'" style="font-size:9px;padding:3px 8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+pem(ST.user)+x(ST.user)+lockIcon+'</span>';
+  }
+  var adminCls=ST.admin?'btn-gold':'btn-ghost';
+  var adminIcon=ST.admin?'&#9889;':'&#9881;';
+  h+='<button class="btn '+adminCls+'" id="b-admin" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px">'+adminIcon+'</button>';
+  if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center">&#8635;</button>';
+  h+='</div>';
+  h+='</div>';
   var tabs=[{id:"leaderboard",lbl:"Leaderboard"},{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"results",lbl:"Results"},{id:"rules",lbl:"Rules"}];
   if(ST.admin)tabs.push({id:"admin",lbl:"Admin"});
   h+='<div class="page-bar">';
