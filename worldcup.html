@@ -1278,6 +1278,45 @@ function renderRules(){
 // ── LIVE RESULTS TABLE ───────────────────────────────────
 var _resTimer=null,_resData=null,_resLoading=false,_resLastFetch=0;
 
+function syncScoresToGroup(){
+  if(!GROUP_ID||!PARTS||!DB)return;
+  var groupPath='groups/'+GROUP_ID+'/data/wc/scores';
+  PARTS.forEach(function(player){
+    var score=calcScore(player);
+    DB.ref(groupPath+'/'+ukey(player)).set(score);
+  });
+}
+
+function applyLiveStandingsToScores(groups){
+  // Apply ESPN parsed groups to ST.results — only for groups with games played
+  // groups = [{name:"Group A", rows:[{name:"Mexico",p:1,...},...]}]
+  if(!groups||!groups.length)return;
+  var changed=false;
+  groups.forEach(function(group){
+    // Extract group letter e.g. "Group A" -> "A"
+    var gid=(group.name||"").replace(/^group\s*/i,"").trim().toUpperCase();
+    if(!GROUPS[gid])return;
+    // Only apply if at least one team has played a game
+    var totalPlayed=group.rows.reduce(function(s,r){return s+r.p;},0);
+    if(totalPlayed===0)return;
+    // Match ESPN team names to our team names
+    var ranking=group.rows.map(function(row){
+      var matched=null;
+      GROUPS[gid].teams.forEach(function(t){
+        var a=row.name.toLowerCase(),b=t.n.toLowerCase();
+        if(a===b||a.indexOf(b)>=0||b.indexOf(a)>=0)matched=t.n;
+      });
+      return matched||row.name;
+    }).filter(Boolean);
+    if(ranking.length===4){
+      if(!ST.results.groups)ST.results.groups={};
+      ST.results.groups[gid]=ranking;
+      changed=true;
+    }
+  });
+  return changed;
+}
+
 function fetchResults(){
   if(_resLoading)return;
   _resLoading=true;
@@ -1332,6 +1371,11 @@ function renderResultsInto(){
       });
     }
   }catch(e){}
+
+  // Apply live standings to scores for groups with games played
+  if(applyLiveStandingsToScores(groups)){
+    syncScoresToGroup();
+  }
 
   var ago=_resLastFetch?Math.round((Date.now()-_resLastFetch)/1000):0;
 
