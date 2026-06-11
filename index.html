@@ -363,6 +363,7 @@ button,input,select{font-family:'Nunito',sans-serif}
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 
 <script>
 // ── POOL LIBRARY ─────────────────────────────────────────────────────────────
@@ -398,9 +399,11 @@ var SC = {
 };
 
 var DB = null;
+var AUTH = null;
 try {
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB = firebase.database();
+  AUTH = firebase.auth();
 } catch(e) {}
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
@@ -504,6 +507,40 @@ function authLogin(username, cb) {
     var u = sn.val();
     if(!u) { cb("Username not found"); return; }
     cb(null, { username: u.username, groups: u.groups || [], emoji: u.emoji || "🎯" });
+  });
+}
+
+function authGoogleSignIn(cb) {
+  if(!AUTH) { cb("Auth not available"); return; }
+  var provider = new firebase.auth.GoogleAuthProvider();
+  AUTH.signInWithPopup(provider).then(function(result) {
+    var gUser = result.user;
+    var displayName = gUser.displayName || gUser.email.split("@")[0];
+    // Sanitize to a valid key
+    var key = displayName.toLowerCase().replace(/[^a-z0-9_]/g,"") || "user" + Date.now();
+    // Try to load existing user record by google uid first
+    DB.ref("users").orderByChild("googleUid").equalTo(gUser.uid).once("value", function(sn) {
+      var existing = null;
+      sn.forEach(function(child){ existing = child.val(); existing._key = child.key; });
+      if(existing) {
+        // Already registered — load their profile
+        cb(null, { username: existing.username, groups: existing.groups||[], emoji: existing.emoji||"🎯" });
+      } else {
+        // Check if key is taken
+        DB.ref("users/"+key).once("value", function(sn2){
+          var taken = sn2.val();
+          var finalKey = taken ? key + Math.floor(100+Math.random()*900) : key;
+          var username = taken ? displayName + Math.floor(100+Math.random()*900) : displayName;
+          var data = { username: username, groups: [], emoji: "🎯", googleUid: gUser.uid, googleEmail: gUser.email, createdAt: Date.now() };
+          DB.ref("users/"+finalKey).set(data, function(err){
+            if(err){ cb("Failed to create account"); return; }
+            cb(null, { username: username, groups: [], emoji: "🎯" });
+          });
+        });
+      }
+    });
+  }).catch(function(err){
+    cb(err.message || "Google sign-in failed");
   });
 }
 
@@ -764,10 +801,17 @@ function showAuthModal(tab) {
         '<button class="auth-tab'+(isLogin?"":" active")+'" id="modal-tab-signup">Sign Up</button>' +
       '</div>' +
       '<div class="auth-card">' +
+        '<button id="modal-google-btn" style="width:100%;display:flex;align-items:center;justify-content:center;gap:10px;padding:11px 14px;border-radius:10px;border:2px solid var(--border);background:#ffffff;color:var(--text);font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:3px 3px 0 var(--border);margin-bottom:14px">' +
+          '<svg width="18" height="18" viewBox="0 0 48 48"><path fill="#4285F4" d="M44.5 20H24v8.5h11.8C34.7 33.9 29.8 37 24 37c-7.2 0-13-5.8-13-13s5.8-13 13-13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 5.1 29.6 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21c10.5 0 20-7.5 20-21 0-1.4-.2-2.7-.5-4z"/><path fill="#34A853" d="M6.3 14.7l7 5.1C15.1 16.1 19.2 13 24 13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 5.1 29.6 3 24 3 16.3 3 9.7 7.9 6.3 14.7z"/><path fill="#FBBC05" d="M24 45c5.5 0 10.5-1.9 14.3-5l-6.6-5.4C29.8 36.1 27 37 24 37c-5.8 0-10.7-3.1-11.8-7.5l-7 5.4C9.7 42.1 16.3 45 24 45z" /><path fill="#EA4335" d="M44.5 20H24v8.5h11.8c-1 3-3.2 5.4-6.1 7l6.6 5.4C40.4 37.6 45 31.5 45 24c0-1.4-.2-2.7-.5-4z"/></svg>' +
+          'Continue with Google' +
+        '</button>' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">' +
+          '<div style="flex:1;height:1px;background:var(--border2)"></div>' +
+          '<span style="font-size:9px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.08em">or use username</span>' +
+          '<div style="flex:1;height:1px;background:var(--border2)"></div>' +
+        '</div>' +
         '<div class="auth-field"><label class="auth-label">Username</label>' +
         '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>' +
-        '<div class="auth-field"><label class="auth-label">Password</label>' +
-        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="'+(isLogin?"your password":"choose a password")+'" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
         '<div class="auth-err" id="modal-auth-err"></div>' +
         '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Register")+'</button>' +
       '</div></div>';
@@ -786,18 +830,35 @@ function showAuthModal(tab) {
     });
 
     var unameEl = document.getElementById("modal-auth-username");
-    var pwEl = document.getElementById("modal-auth-password");
     var errEl = document.getElementById("modal-auth-err");
     var submitBtn = document.getElementById("modal-auth-submit");
+    var googleBtn = document.getElementById("modal-google-btn");
+
+    // Google sign-in
+    googleBtn.addEventListener("click", function(){
+      googleBtn.disabled = true;
+      googleBtn.textContent = "Signing in...";
+      authGoogleSignIn(function(err, user){
+        googleBtn.disabled = false;
+        googleBtn.textContent = "Continue with Google";
+        if(err){ errEl.textContent = err; return; }
+        try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
+        SC.currentUser = user;
+        saveSession(user.username, user.emoji);
+        el.remove();
+        SC.screen = "profile";
+        draw();
+        toast("Welcome, " + user.username + " ✓");
+      });
+    });
 
     function doSubmit() {
       var uname = unameEl.value.trim();
-      var pw = pwEl.value;
       errEl.textContent = "";
       submitBtn.disabled = true;
       submitBtn.textContent = "Please wait...";
       if(isLogin) {
-        authLogin(uname, pw, function(err, user){
+        authLogin(uname, function(err, user){
           submitBtn.disabled = false;
           submitBtn.textContent = "Log In";
           if(err){ errEl.textContent = err; return; }
@@ -809,7 +870,7 @@ function showAuthModal(tab) {
           draw();
         });
       } else {
-        authSignup(uname, pw, function(err, user){
+        authSignup(uname, function(err, user){
           submitBtn.disabled = false;
           submitBtn.textContent = "Save";
           if(err){ errEl.textContent = err; return; }
@@ -824,7 +885,7 @@ function showAuthModal(tab) {
     }
 
     submitBtn.addEventListener("click", doSubmit);
-    pwEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+    unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
     setTimeout(function(){ unameEl.focus(); }, 50);
   }
   buildModal();
