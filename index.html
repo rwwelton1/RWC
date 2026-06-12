@@ -3244,12 +3244,20 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   if(!tbody) return;
   var q = (query||"").toLowerCase().trim();
   var myName = SC.currentUser ? SC.currentUser.username : null;
+  var myGroupIds = (SC.currentUser && SC.currentUser.groups) || [];
   var filtered = groups.filter(function(g){
+    // Hide groups the current user has already joined
+    if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
+    if(myGroupIds.indexOf(g.id) >= 0) return false;
+    // Only show groups with at least one pool that's currently Open
+    var hasOpenPool = (g.pools||[]).some(function(pid){ return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open"; });
+    if(!hasOpenPool) return false;
     if(!q) return true;
     return (g.name||"").toLowerCase().indexOf(q)>=0;
   });
   if(filtered.length===0){
-    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+(q?"No groups match your search":"No groups yet — be the first!")+'</td></tr>';
+    var emptyMsg = q ? "No groups match your search" : (groups.length>0 ? "No open groups to join right now" : "No groups yet — be the first!");
+    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+emptyMsg+'</td></tr>';
     return;
   }
   var h = "";
@@ -3259,19 +3267,17 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     var openPool = null;
     (g.pools||[]).forEach(function(pid){
       var status = (SC.globalStatuses||{})[pid]||"coming-soon";
-      if((status==="open"||status==="locked") && !openPool) openPool = pid;
+      if(status==="open" && !openPool) openPool = pid;
     });
     var compHtml = '<span style="color:#334155;font-size:10px">—</span>';
     if(openPool) {
       var poolDef = null;
       for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
-      var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Locked" : "Open";
-      var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
       var scores = ((g.data||{})[openPool]||{}).scores || {};
       var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
       var myRank = myName ? ranked.indexOf(myName)+1 : 0;
       var icon = poolDef ? poolDef.icon : "🏆";
-      compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span>'+(myRank>0?' · #'+myRank+' of '+playerCount:'')+'</span>';
+      compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:#6ee7b7">Open</span>'+(myRank>0?' · #'+myRank+' of '+playerCount:'')+'</span>';
     }
     h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
     h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
@@ -3333,6 +3339,29 @@ function purgeInactiveGuests() {
   });
 }
 
+// Delete groups whose competitions have all been marked "complete" for 7+ days.
+function purgeOldCompletedGroups() {
+  if(!DB) return;
+  var cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // 7 days ago
+  DB.ref("globalSettings/statuses").once("value", function(statusSn){
+    var statuses = statusSn.val() || {};
+    DB.ref("globalSettings/completedAt").once("value", function(caSn){
+      var completedAt = caSn.val() || {};
+      DB.ref("groups").once("value", function(gsn){
+        var groups = gsn.val() || {};
+        Object.keys(groups).forEach(function(gid){
+          var g = groups[gid];
+          if(!g || !g.pools || !g.pools.length) return;
+          var allDoneOver7Days = g.pools.every(function(pid){
+            return statuses[pid]==="complete" && completedAt[pid] && completedAt[pid] < cutoff;
+          });
+          if(allDoneOver7Days) DB.ref("groups/"+gid).remove();
+        });
+      });
+    });
+  });
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────────────────
 (function(){
   if(DB) subscribeGlobalStatuses();
@@ -3360,8 +3389,8 @@ function purgeInactiveGuests() {
         draw();
       });
     } else { draw(); }
-    // Run guest cleanup once per session (1% chance to avoid running every load)
-    if(DB && Math.random() < 0.01) purgeInactiveGuests();
+    // Run cleanup tasks once per session (1% chance to avoid running every load)
+    if(DB && Math.random() < 0.01) { purgeInactiveGuests(); purgeOldCompletedGroups(); }
   } else {
     // New visitor — auto-create a Guest#### account in Firebase
     createGuestSession();
