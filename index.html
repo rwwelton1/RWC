@@ -3350,24 +3350,16 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   var myGroupIds = (SC.currentUser && SC.currentUser.groups) || [];
   var guest = isGuest();
   var filtered = groups.filter(function(g){
-    if(guest) {
-      // Guests can only browse groups that have opted into a public leaderboard
-      if(!g.public) return false;
-    } else {
-      // Hide groups the current user has already joined
-      if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
-      if(myGroupIds.indexOf(g.id) >= 0) return false;
-      // Only show groups with at least one pool that's currently Open
-      var hasOpenPool = (g.pools||[]).some(function(pid){ return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open"; });
-      if(!hasOpenPool) return false;
-    }
+    var alreadyJoined = (myName && (g.players||[]).indexOf(myName) >= 0) || myGroupIds.indexOf(g.id) >= 0;
+    if(!guest && alreadyJoined) return false;
+    var hasOpenPool = (g.pools||[]).some(function(pid){ return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open"; });
+    if(!hasOpenPool && !g.public) return false;
     if(!q) return true;
     return (g.name||"").toLowerCase().indexOf(q)>=0;
   });
   if(filtered.length===0){
     var emptyMsg;
     if(q) emptyMsg = "No groups match your search";
-    else if(guest) emptyMsg = "No public leaderboards yet";
     else emptyMsg = groups.length>0 ? "No open groups to join right now" : "No groups yet — be the first!";
     tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+emptyMsg+'</td></tr>';
     return;
@@ -3391,17 +3383,21 @@ function renderGroupsTableTo(tbodyId, groups, query) {
       var icon = poolDef ? poolDef.icon : "🏆";
       compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:#6ee7b7">Open</span>'+(myRank>0?' · #'+myRank+' of '+playerCount:'')+'</span>';
     }
-    h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
+    // For guests: an Open pool prompts sign-up (handled by joinGroup), otherwise
+    // fall back to the read-only public leaderboard view.
+    var actionLabel = (guest && !openPool) ? 'View &#8250;' : 'Join &#8250;';
+    h += '<tr class="clickable-row" data-gid="'+x(g.id)+'" data-has-open="'+(openPool?'1':'0')+'">';
     h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
     h += '<td style="color:#64748b;font-size:11px">'+playerCount+'</td>';
     h += '<td>'+compHtml+'</td>';
-    h += '<td><span class="join-link">'+(guest?'View &#8250;':'Join &#8250;')+'</span></td></tr>';
+    h += '<td><span class="join-link">'+actionLabel+'</span></td></tr>';
   });
   tbody.innerHTML = h;
   tbody.querySelectorAll("tr.clickable-row").forEach(function(el){
     el.addEventListener("click", function(){
       var gid = this.getAttribute("data-gid");
-      if(guest) viewPublicLeaderboard(gid); else joinGroup(gid);
+      var hasOpen = this.getAttribute("data-has-open")==="1";
+      if(guest && !hasOpen) viewPublicLeaderboard(gid); else joinGroup(gid);
     });
   });
 }
