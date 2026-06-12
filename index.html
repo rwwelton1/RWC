@@ -1694,7 +1694,13 @@ function renderCreated() {
     try{ navigator.clipboard.writeText(g.name); toast("Copied: "+g.name); }catch(e){ toast("Name: "+g.name); }
   });
   document.getElementById("btn-go-hub").addEventListener("click", function(){
-    SC.screen="hub"; draw();
+    var pools = groupPools(g);
+    var username = SC.currentUser ? SC.currentUser.username : "";
+    if(pools.length===1 && username){
+      window.location.href = pools[0].url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(username);
+    } else {
+      SC.screen="hub"; draw();
+    }
   });
 }
 
@@ -2232,6 +2238,15 @@ function renderAdmin() {
   h += '<div id="group-admin-members"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Select a group above</div></div>';
   h += '</div>';
 
+  h += '<div class="section-label">All Groups</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Permanently delete a group, its picks, and its results. This cannot be undone.</div>';
+  h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
+  h += '<input class="search-input" id="admin-group-search" placeholder="Search groups..." autocomplete="off">';
+  h += '</div>';
+  h += '<div id="admin-groups-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Maintenance</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Guest accounts (no password) inactive for 30+ days are automatically purged. You can also run it manually.</div>';
@@ -2414,6 +2429,11 @@ function renderAdmin() {
       renderGroupAdminMembers(group, container);
     });
   });
+
+  // All Groups — delete management
+  loadAdminGroupsList("");
+  var gs = document.getElementById("admin-group-search");
+  if(gs) gs.addEventListener("input", function(){ loadAdminGroupsList(this.value.trim()); });
 
   // Load users
   loadAdminUsers("");
@@ -3071,6 +3091,54 @@ function deleteGroup(groupId) {
     SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.showGroupSettings=false; SC.screen="profile";
     try{ localStorage.removeItem("pp_last_group"); }catch(e){}
     draw(); toast("Group deleted");
+  });
+}
+
+// Master-only delete from the Admin Panel — doesn't disturb the admin's own session
+function adminDeleteGroup(groupId, cb) {
+  if(!DB) return;
+  DB.ref("groups/"+groupId).remove(function(err){
+    if(err){ toast("Delete failed"); return; }
+    _groupsCache = null;
+    if(SC.group && SC.group.id===groupId){
+      SC.group=null; SC.groupAdmin=false; SC.showGroupSettings=false;
+      try{ localStorage.removeItem("pp_last_group"); }catch(e){}
+    }
+    toast("Group deleted");
+    if(cb) cb();
+  });
+}
+
+// ── ALL GROUPS (Admin Panel) ───────────────────────────────────────────────────
+function loadAdminGroupsList(query) {
+  var container = document.getElementById("admin-groups-list");
+  if(!container) return;
+  loadAllGroups(function(groups){
+    var q = (query||"").toLowerCase();
+    var filtered = groups.filter(function(g){ return !q || (g.name||"").toLowerCase().indexOf(q)>=0 || (g.id||"").toLowerCase().indexOf(q)>=0; });
+    filtered.sort(function(a,b){ return (a.name||"").localeCompare(b.name||""); });
+    if(!filtered.length){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No groups found</div>'; return; }
+    var h='';
+    filtered.forEach(function(g){
+      var pools = groupPools(g);
+      var poolIcons = pools.map(function(p){return p.icon;}).join(" ") || "—";
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0f1923">';
+      h += '<div style="flex:1;min-width:0">';
+      h += '<div style="font-size:12px;font-weight:700;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(g.name||g.id)+'</div>';
+      h += '<div style="font-size:9px;color:#475569;margin-top:2px">'+poolIcons+' &middot; '+((g.players||[]).length)+' player'+((g.players||[]).length!==1?'s':'')+' &middot; '+x(g.id)+'</div>';
+      h += '</div>';
+      h += '<button data-admin-del-gid="'+x(g.id)+'" data-admin-del-name="'+x(g.name||g.id)+'" class="btn btn-red btn-sm" style="font-size:9px;padding:0 9px;height:24px;line-height:24px;flex-shrink:0">Delete</button>';
+      h += '</div>';
+    });
+    container.innerHTML = h;
+    container.querySelectorAll("[data-admin-del-gid]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var gid = this.getAttribute("data-admin-del-gid");
+        var name = this.getAttribute("data-admin-del-name");
+        if(!confirm('Delete group "'+name+'"? This removes all its picks and results permanently.')) return;
+        adminDeleteGroup(gid, function(){ loadAdminGroupsList((document.getElementById("admin-group-search")||{}).value||""); });
+      });
+    });
   });
 }
 
