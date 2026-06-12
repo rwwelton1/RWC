@@ -536,6 +536,28 @@ function calcCwsScore(picksForUser, results){
   return total;
 }
 
+// ── LIVE POOL SCORE (in-progress, pre-placement) ─────────────────────────────
+// Returns a player's current live score for a pool, or null if they have no
+// picks / there's no live data yet. Used to surface in-progress standings on
+// the hub leaderboard before an admin records final 1st/2nd/3rd placements.
+function getLivePoolScore(poolId, player, data) {
+  data = data || {};
+  if(poolId === "cws") {
+    var cwsData = data[POOL_DATA_KEY.cws] || {};
+    var userPicks = (cwsData.picks||{})[pukey(player)] || {};
+    if(Object.keys(userPicks).length === 0) return null;
+    return calcCwsScore(userPicks, cwsData.results||{});
+  }
+  if(poolId === "wc" || poolId === "rwc") {
+    var scores = (data[poolId]||{}).scores || {};
+    if(scores[player] !== undefined) return scores[player];
+    var pk = pukey(player);
+    if(scores[pk] !== undefined) return scores[pk];
+    return null;
+  }
+  return null;
+}
+
 
 function moveNode(oldPath, newPath){
   if(!DB || oldPath===newPath) return;
@@ -3124,10 +3146,19 @@ function calcStandings(g, data) {
   players.forEach(function(p){ scores[p]=0; finishes[p]={}; });
   var pools = groupPools(g);
   pools.forEach(function(pool){
-    var r=(data.results||{})[pool.id]; if(!r) return;
-    if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
-    if(r.second&&scores[r.second]!==undefined){scores[r.second]+=2;finishes[r.second][pool.id]=2;}
-    if(r.third&&scores[r.third]!==undefined){scores[r.third]+=1;finishes[r.third][pool.id]=3;}
+    var r=(data.results||{})[pool.id];
+    if(r && (r.first||r.second||r.third)) {
+      if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
+      if(r.second&&scores[r.second]!==undefined){scores[r.second]+=2;finishes[r.second][pool.id]=2;}
+      if(r.third&&scores[r.third]!==undefined){scores[r.third]+=1;finishes[r.third][pool.id]=3;}
+    } else {
+      // No final placement recorded yet — show each player's live in-progress
+      // score for this pool so the leaderboard reflects current play.
+      players.forEach(function(p){
+        var live = getLivePoolScore(pool.id, p, data);
+        if(live !== null && scores[p]!==undefined) scores[p] += live;
+      });
+    }
   });
   return players.slice().sort(function(a,b){return scores[b]-scores[a];})
     .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p]};});
