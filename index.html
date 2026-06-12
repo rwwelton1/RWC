@@ -508,6 +508,35 @@ function authLogin(username, cb) {
 function pukey(n){ return String(n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,""); }
 var POOL_DATA_KEY = { cfb:"cfbpool", cws:"cws2026", wc:"wc2026", rwc:"rwc" };
 
+// ── CWS SCORING TABLE ────────────────────────────────────────────────────────
+// cws.html never syncs computed "scores" to the group — it only writes /picks
+// and /results under groups/{id}/data/cws2026. To show CWS standings on the
+// hub we replicate cws.html's GAME_PTS table here and compute scores from the
+// raw picks+results data ourselves.
+var CWS_GAME_PTS = {
+  r_la:2, r_wvu:2, sr1:4,
+  r_atl:2, r_law:2, sr2:4,
+  r_ath:2, r_stk:2, sr3:4,
+  r_aub:2, r_lin:2, sr4:4,
+  r_chh:2, r_cst:2, sr5:4,
+  r_aus:2, r_eug:2, sr6:4,
+  r_tus:2, r_tal:2, sr7:4,
+  r_gvl:2, r_hat:2, sr8:4,
+  pod_b1:8, pod_b2:8,
+  champ:15
+};
+var CWS_GRAND_MAX = Object.keys(CWS_GAME_PTS).reduce(function(sum,k){ return sum + CWS_GAME_PTS[k]; }, 0);
+function calcCwsScore(picksForUser, results){
+  picksForUser = picksForUser || {}; results = results || {};
+  var total = 0;
+  Object.keys(CWS_GAME_PTS).forEach(function(gid){
+    var pick = picksForUser[gid], res = results[gid];
+    if(pick && res && pick===res) total += CWS_GAME_PTS[gid];
+  });
+  return total;
+}
+
+
 function moveNode(oldPath, newPath){
   if(!DB || oldPath===newPath) return;
   DB.ref(oldPath).once("value", function(sn){
@@ -759,7 +788,6 @@ function render(h) {
     else if(SC.screen==="created"){ SC.screen="hub"; subscribeGroup(SC.group.id); draw(); }
   });
   var plogo = document.getElementById("btn-logo");
-  if(plogo) plogo.addEventListener("click", function(){ if(SC.currentUser){ SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.screen="profile"; draw(); } });
   bindLogoMasterTap(plogo);
   var profbtn = document.getElementById("btn-profile");
   if(profbtn) profbtn.addEventListener("click", function(){
@@ -1843,14 +1871,40 @@ function renderHub() {
     h += '><div class="pool-card-inner">';
     h += '<div class="pool-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
     var myName = SC.currentUser ? SC.currentUser.username : null;
-    // Compute per-pool ranking from picks scores stored in data
-    var poolPicksData = (data[pool.id]||{}).picks || {};
-    var poolScoresData = (data[pool.id]||{}).scores || {};
+    // Compute per-pool ranking from picks scores stored in data.
+    // Note: each pool page syncs scores under its pool id (e.g. data.wc.scores for
+    // World Cup), but keys them by a normalized "pukey" version of the player's
+    // name rather than the raw display name used in g.players — handled below.
+    var poolData = data[pool.id] || {};
+    var poolPicksData = poolData.picks || {};
+    var poolScoresData = poolData.scores || {};
+    if(pool.id === "cws") {
+      // cws.html never syncs a "scores" field — only /picks and /results under
+      // groups/{id}/data/cws2026. Compute each player's score from that directly.
+      var cwsData = data[POOL_DATA_KEY.cws] || {};
+      var cwsPicks = cwsData.picks || {};
+      var cwsResults = cwsData.results || {};
+      poolPicksData = {}; poolScoresData = {};
+      (g.players||[]).forEach(function(p){
+        var userPicks = cwsPicks[pukey(p)] || {};
+        var hasAny = Object.keys(userPicks).length > 0;
+        poolPicksData[p] = hasAny ? userPicks : null;
+        if(hasAny) poolScoresData[p] = calcCwsScore(userPicks, cwsResults);
+      });
+      poolData = { grandMax: CWS_GRAND_MAX };
+    }
+    function lookupScore(scoresObj, name) {
+      if(scoresObj[name] !== undefined) return scoresObj[name];
+      var pk = pukey(name);
+      if(scoresObj[pk] !== undefined) return scoresObj[pk];
+      return undefined;
+    }
     var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
     // Rank players by their stored score for this pool
     var poolScores = [];
     (g.players||[]).forEach(function(p){
-      var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
+      var sv = lookupScore(poolScoresData, p);
+      var pts = (sv !== undefined) ? sv : null;
       poolScores.push({name:p, pts:pts});
     });
     poolScores.sort(function(a,b){
@@ -1885,7 +1939,7 @@ function renderHub() {
         h += '</div>';
       } else if((status==="open"||status==="locked") && myPoolRank!==null && myPoolPts!==null) {
         var rc2=myPoolRank===1?'#fbbf24':myPoolRank===2?'#94a3b8':myPoolRank===3?'#b45309':'#475569';
-        var grandMaxVal2 = (data[pool.id]||{}).grandMax || null;
+        var grandMaxVal2 = poolData.grandMax || null;
         var totalPlayers2 = poolScores.filter(function(s){ return s.pts !== null; }).length || (g.players||[]).length;
         h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
         h += '<span style="font-size:9px;font-weight:700;color:'+rc2+'">#'+myPoolRank+' of '+totalPlayers2+'</span>';
@@ -1893,14 +1947,16 @@ function renderHub() {
         h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myPoolPts+'</b>'+(grandMaxVal2!==null?' / '+grandMaxVal2:'')+'  pts</span>';
         h += '</div>';
       } else if(status==="open"||status==="locked") {
-        var poolPicks2 = poolPicksData[myName];
+        var poolPicks2 = poolPicksData[myName] !== undefined ? poolPicksData[myName] : poolPicksData[pukey(myName)];
         var hasPicks = poolPicks2 !== undefined && poolPicks2 !== null;
-        var grandMaxVal = (data[pool.id]||{}).grandMax || null;
-        var myMaxScore = ((data[pool.id]||{}).maxScores||{})[myName] !== undefined ? ((data[pool.id]||{}).maxScores||{})[myName] : null;
+        var grandMaxVal = poolData.grandMax || null;
+        var myMaxScore = lookupScore(poolData.maxScores||{}, myName);
+        if(myMaxScore===undefined) myMaxScore = null;
         h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
         if(hasPicks && grandMaxVal !== null && myPoolPts === null) {
           // Has picks but no results yet — show score/max
-          var myRawScore = poolScoresData[myName] !== undefined ? poolScoresData[myName] : 0;
+          var myRawScore = lookupScore(poolScoresData, myName);
+          if(myRawScore===undefined) myRawScore = 0;
           h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myRawScore+'</b> / '+grandMaxVal+' pts</span>';
         } else if(!hasPicks) {
           h += '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
@@ -1921,8 +1977,8 @@ function renderHub() {
     // Mini leaderboard for open/locked pools
     if((status==="open"||status==="locked") && poolScores.length > 0) {
       var hasAnyPts = poolScores.some(function(s){ return s.pts !== null && s.pts > 0; });
-      var grandMaxLb = (data[pool.id]||{}).grandMax || null;
-      var maxScoresLb = (data[pool.id]||{}).maxScores || {};
+      var grandMaxLb = poolData.grandMax || null;
+      var maxScoresLb = poolData.maxScores || {};
       h += '<div style="border-top:1px solid #0f1923;padding:8px 12px 10px">';
       h += '<div style="font-size:8px;color:#334155;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;font-weight:700">Leaderboard</div>';
       poolScores.forEach(function(p, i){
