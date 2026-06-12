@@ -450,6 +450,7 @@ function generateGuestName(){
   return "Guest" + num;
 }
 function isGuest(){
+  if(SC.currentUser && SC.currentUser.isGuest) return true;
   try{ return localStorage.getItem("pp_guest")==="1"; }catch(e){ return false; }
 }
 function saveGuest(name){
@@ -462,13 +463,8 @@ function saveGuest(name){
 }
 function createGuestSession(){
   var newGuest = generateGuestName();
-  SC.currentUser = { username: newGuest, groups: [], emoji: "🎯" };
-  saveSession(newGuest, "🎯");
+  SC.currentUser = { username: newGuest, groups: [], emoji: "🎯", isGuest: true };
   try { localStorage.setItem("pp_guest","1"); } catch(e) {}
-  if(DB) {
-    var gkey = userKey(newGuest);
-    DB.ref("users/"+gkey).set({ username: newGuest, password: "", groups: [], emoji: "🎯", lastActive: Date.now(), createdAt: Date.now() });
-  }
 }
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
@@ -802,14 +798,13 @@ function topbar(showBack, hideUser) {
   h += '<div style="cursor:pointer" id="btn-logo"><div class="logo"><span class="scorecery-logo">SCORECERY</span></div></div>';
   h += '<div class="topbar-right">';
   if(SC.currentUser && !hideUser) {
-    var em = SC.currentUser.emoji || '&#127919;';
-    var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
-    h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
-    var _hasPassword = true;
-    try{ _hasPassword = !localStorage.getItem("pp_guest"); }catch(e){}
-    if(!_hasPassword) {
+    if(isGuest()) {
       h += '<button class="btn-topbar-login" id="btn-topbar-login" style="font-size:10px;padding:4px 10px;border-radius:8px;background:transparent;border:1px solid #2d3f52;color:#94a3b8;cursor:pointer;font-family:inherit;font-weight:600">Log In</button>';
       h += '<button class="btn-topbar-signup" id="btn-topbar-signup" style="font-size:10px;padding:4px 10px;border-radius:8px;background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.3);color:#a5b4fc;cursor:pointer;font-family:inherit;font-weight:600">Register</button>';
+    } else {
+      var em = SC.currentUser.emoji || '&#127919;';
+      var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
+      h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
     }
   }
   if(hideUser) {
@@ -829,6 +824,7 @@ function render(h) {
   if(bb) bb.addEventListener("click", function(){
     if(SC.screen==="join"||SC.screen==="create"||SC.screen==="join-pw"){ SC.screen="profile"; SC.error=""; draw(); }
     else if(SC.screen==="created"){ SC.screen="hub"; subscribeGroup(SC.group.id); draw(); }
+    else if(SC.screen==="public-leaderboard"){ SC.publicGroup=null; SC.screen="profile"; draw(); }
   });
   var plogo = document.getElementById("btn-logo");
   bindLogoMasterTap(plogo);
@@ -861,6 +857,7 @@ function draw() {
   else if(s==="create")   renderCreate();
   else if(s==="created")  renderCreated();
   else if(s==="hub")      renderHub();
+  else if(s==="public-leaderboard") renderPublicLeaderboard();
   else if(s==="admin")    renderAdmin();
 }
 
@@ -1100,7 +1097,7 @@ function renderProfile() {
   var greet = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
   h += '<div class="home-header">';
   h += '<div>';
-  var displayName = u.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
+  var displayName = isGuest() ? "" : (u.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "");
   h += '<div class="home-greeting">Good ' + greet + (displayName ? ', <span>' + x(displayName) + '</span>' : '') + '</div>';
   h += '</div>';
   h += '<div class="home-avatar" id="btn-edit-emoji">' + em + '</div>';
@@ -1638,7 +1635,68 @@ function joinGroup(code) {
   });
 }
 
-// ── CREATE ────────────────────────────────────────────────────────────────────
+// ── PUBLIC LEADERBOARD (read-only, guests) ─────────────────────────────────────
+function viewPublicLeaderboard(gid) {
+  loadGroup(gid, function(group, err){
+    if(err || !group || !group.public) { toast("Leaderboard not available"); return; }
+    SC.publicGroup = group;
+    SC.screen = "public-leaderboard";
+    draw();
+  });
+}
+
+function renderPublicLeaderboard() {
+  var g = SC.publicGroup;
+  if(!g) { SC.screen="profile"; draw(); return; }
+  var data = g.data || {};
+  var pools = groupPools(g);
+  var standings = calcStandings(g, data);
+  var statuses = SC.globalStatuses || {};
+
+  var h = topbar(true);
+  h += '<div class="main fade-up">';
+  h += '<div class="home-header"><div><div class="home-greeting">'+x(g.name||"Group")+'</div>';
+  h += '<div style="font-size:10px;font-weight:700;color:var(--muted);margin-top:2px">'+(g.players||[]).length+' player'+((g.players||[]).length!==1?'s':'')+' &middot; Public leaderboard</div></div></div>';
+
+  // Competition pills
+  if(pools.length>0) {
+    h += '<div style="display:flex;gap:5px;padding:0 0 12px;flex-wrap:wrap">';
+    pools.forEach(function(pool){
+      var st = statuses[pool.id] || "coming-soon";
+      var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
+      var col = st==="open"?'var(--green)':st==="locked"?'var(--red)':st==="complete"?'var(--blue)':'var(--dim)';
+      var lbl = st==="open"?'Open':st==="locked"?'Live':st==="complete"?'Final':'Soon';
+      h += '<span style="font-size:9px;font-weight:800;padding:3px 9px;border-radius:8px;background:'+bg+';border:2px solid var(--border);color:'+col+';box-shadow:2px 2px 0 var(--border)">'+pool.icon+' '+x(pool.name)+' · '+lbl+'</span>';
+    });
+    h += '</div>';
+  }
+
+  h += '<div class="standings-card" style="margin-bottom:0"><div class="standings-head"><div class="standings-title">&#127942; Leaderboard</div></div>';
+  if(standings.length > 0) {
+    standings.forEach(function(p, i){
+      var rankColors = ['var(--gold-dark)','var(--muted)','#b45309'];
+      var rankColor = rankColors[i] || 'var(--dim)';
+      var medals = ['🥇','🥈','🥉'];
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border2)">';
+      h += '<div style="font-size:13px;width:22px;text-align:center;flex-shrink:0">'+(medals[i]||'<span style="font-size:10px;font-weight:900;color:var(--dim)">'+(i+1)+'</span>')+'</div>';
+      h += '<div style="font-size:12px;font-weight:800;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
+      h += '<div style="font-size:12px;font-weight:900;color:'+(p.pts>0?rankColor:'var(--dim)')+';flex-shrink:0">'+p.pts+'<span style="font-size:8px;font-weight:700;color:var(--muted)"> pts</span></div>';
+      h += '</div>';
+    });
+  } else {
+    h += '<div style="padding:16px;text-align:center;font-size:12px;color:var(--muted)">No standings yet</div>';
+  }
+  h += '</div>';
+
+  h += '<div style="text-align:center;margin-top:18px"><button class="btn btn-gold" id="btn-public-signup">Sign up to play &rarr;</button></div>';
+  h += '</div>';
+
+  render(h);
+  var signupBtn = document.getElementById("btn-public-signup");
+  if(signupBtn) signupBtn.addEventListener("click", function(){ showAuthModal("signup"); });
+}
+
+
 function renderCreate() {
   var f = SC.createForm;
   var h = topbar(true);
@@ -1871,6 +1929,16 @@ function renderHub() {
     h += '<button class="btn btn-gold" id="save-group-pw-btn" style="padding:8px 14px;font-size:12px">Save Password</button>';
     h += '</div>';
     h += '<div id="group-pw-msg" style="font-size:11px;min-height:16px;margin-top:6px"></div>';
+    h += '</div>';
+
+    // Public leaderboard toggle
+    h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
+    h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">&#127760; Public Leaderboard</div>';
+    h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">When on, anyone (even guests who haven\'t signed in) can find this group and view a read-only leaderboard — no picks, settings, or member info.</div>';
+    h += '<div class="pcr-btns">';
+    h += '<button class="pcr-btn'+(g.public?' sel-open':'')+'" id="group-public-on">On</button>';
+    h += '<button class="pcr-btn'+(!g.public?' sel-locked':'')+'" id="group-public-off">Off</button>';
+    h += '</div>';
     h += '</div>';
 
 
@@ -2115,6 +2183,20 @@ function renderHub() {
 
   var sgpb = document.getElementById("save-group-pw-btn");
   if(sgpb) sgpb.addEventListener("click", saveGroupPassword);
+
+  var gpubOn = document.getElementById("group-public-on");
+  var gpubOff = document.getElementById("group-public-off");
+  function setGroupPublic(val) {
+    if(!SC.group || !DB) return;
+    DB.ref("groups/"+SC.group.id+"/public").set(val, function(err){
+      if(err){ toast("Failed to save"); return; }
+      SC.group.public = val;
+      toast(val ? "Leaderboard is now public" : "Leaderboard is now private");
+      draw();
+    });
+  }
+  if(gpubOn) gpubOn.addEventListener("click", function(){ setGroupPublic(true); });
+  if(gpubOff) gpubOff.addEventListener("click", function(){ setGroupPublic(false); });
 
   document.querySelectorAll("[data-epool]").forEach(function(row){
     row.addEventListener("click", function(){
@@ -3266,18 +3348,27 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   var q = (query||"").toLowerCase().trim();
   var myName = SC.currentUser ? SC.currentUser.username : null;
   var myGroupIds = (SC.currentUser && SC.currentUser.groups) || [];
+  var guest = isGuest();
   var filtered = groups.filter(function(g){
-    // Hide groups the current user has already joined
-    if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
-    if(myGroupIds.indexOf(g.id) >= 0) return false;
-    // Only show groups with at least one pool that's currently Open
-    var hasOpenPool = (g.pools||[]).some(function(pid){ return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open"; });
-    if(!hasOpenPool) return false;
+    if(guest) {
+      // Guests can only browse groups that have opted into a public leaderboard
+      if(!g.public) return false;
+    } else {
+      // Hide groups the current user has already joined
+      if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
+      if(myGroupIds.indexOf(g.id) >= 0) return false;
+      // Only show groups with at least one pool that's currently Open
+      var hasOpenPool = (g.pools||[]).some(function(pid){ return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open"; });
+      if(!hasOpenPool) return false;
+    }
     if(!q) return true;
     return (g.name||"").toLowerCase().indexOf(q)>=0;
   });
   if(filtered.length===0){
-    var emptyMsg = q ? "No groups match your search" : (groups.length>0 ? "No open groups to join right now" : "No groups yet — be the first!");
+    var emptyMsg;
+    if(q) emptyMsg = "No groups match your search";
+    else if(guest) emptyMsg = "No public leaderboards yet";
+    else emptyMsg = groups.length>0 ? "No open groups to join right now" : "No groups yet — be the first!";
     tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+emptyMsg+'</td></tr>';
     return;
   }
@@ -3304,11 +3395,14 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
     h += '<td style="color:#64748b;font-size:11px">'+playerCount+'</td>';
     h += '<td>'+compHtml+'</td>';
-    h += '<td><span class="join-link">Join &#8250;</span></td></tr>';
+    h += '<td><span class="join-link">'+(guest?'View &#8250;':'Join &#8250;')+'</span></td></tr>';
   });
   tbody.innerHTML = h;
   tbody.querySelectorAll("tr.clickable-row").forEach(function(el){
-    el.addEventListener("click", function(){ joinGroup(this.getAttribute("data-gid")); });
+    el.addEventListener("click", function(){
+      var gid = this.getAttribute("data-gid");
+      if(guest) viewPublicLeaderboard(gid); else joinGroup(gid);
+    });
   });
 }
 
@@ -3399,13 +3493,14 @@ function purgeOldCompletedGroups() {
     if(DB) {
       DB.ref("users/"+key).once("value", function(sn){
         var u = sn.val();
-        if(u) {
+        if(u && u.password) {
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
-          // Update lastActive for guest accounts
-          if(!u.password) DB.ref("users/"+key+"/lastActive").set(Date.now());
-        } else if(isGuest()) {
-          // User record missing — refresh it
-          DB.ref("users/"+key).set({ username: savedUser, password: "", groups: [], emoji: _cachedEmoji, lastActive: Date.now(), createdAt: Date.now() });
+        } else {
+          // Either no record, or a legacy persisted guest account — guests
+          // are view-only and shouldn't be remembered across visits.
+          clearSession();
+          createGuestSession();
+          SC.screen = "home";
         }
         draw();
       });
