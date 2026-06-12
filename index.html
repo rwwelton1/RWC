@@ -266,6 +266,22 @@ button,input,select{font-family:'Nunito',sans-serif}
 .emoji-grid{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-height:280px;overflow-y:auto}
 .emoji-opt{width:46px;height:46px;border-radius:8px;font-size:24px;background:var(--cream);border:2px solid var(--border2);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:2px 2px 0 var(--border2)}
 .emoji-opt:active{transform:translate(2px,2px);box-shadow:none;border-color:var(--border)}
+/* QUICK PROFILE MODAL */
+#quick-profile-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:500;display:none;align-items:flex-end;justify-content:center}
+#quick-profile-modal.open{display:flex}
+.qp-sheet{background:#ffffff;border:3px solid var(--border);border-radius:14px 14px 0 0;width:100%;max-width:480px;padding:20px 16px 36px;box-shadow:0 -4px 0 var(--border)}
+.qp-handle{width:36px;height:4px;background:var(--border2);border-radius:2px;margin:0 auto 16px}
+.qp-head{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.qp-avatar{width:44px;height:44px;border-radius:10px;background:var(--gold-bg);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;box-shadow:2px 2px 0 var(--border)}
+.qp-name{font-size:16px;font-weight:900;color:var(--text)}
+.qp-name-pill{display:inline-flex;align-items:center;gap:8px;background:var(--cream);border:2px solid var(--border);border-radius:20px;padding:8px 14px;font-size:15px;font-weight:900;color:var(--text);box-shadow:2px 2px 0 var(--border)}
+.qp-pencil{cursor:pointer;font-size:14px;line-height:1}
+.qp-pencil:active{transform:translate(1px,1px)}
+.qp-btn{width:100%;padding:12px;border-radius:10px;font-size:13px;font-weight:800;font-family:'Nunito',sans-serif;cursor:pointer;margin-bottom:8px;border:2px solid var(--border);box-shadow:3px 3px 0 var(--border);text-align:left;display:flex;align-items:center;gap:8px}
+.qp-btn:active{transform:translate(3px,3px);box-shadow:none}
+.qp-btn-primary{background:#ffffff;color:var(--text)}
+.qp-btn-danger{background:var(--red-bg);color:var(--red)}
+.qp-cancel-btn{width:100%;padding:10px;border-radius:8px;background:none;border:none;color:var(--muted);font-size:12px;font-weight:700;font-family:'Nunito',sans-serif;cursor:pointer;margin-top:4px}
 /* AUTH MODAL */
 .auth-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:600;display:flex;align-items:center;justify-content:center;padding:20px}
 .auth-modal-box{background:#ffffff;border:3px solid var(--border);border-radius:16px;width:100%;max-width:360px;padding:24px 20px;position:relative;box-shadow:5px 5px 0 var(--border)}
@@ -688,7 +704,6 @@ function topbar(showBack) {
     var em = SC.currentUser.emoji || '&#127919;';
     var _tname = SC.currentUser.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
     h += '<button class="btn btn-ghost btn-sm" id="btn-profile" style="gap:5px;display:flex;align-items:center">'+em+' '+x(_tname)+'</button>';
-    h += '<button class="btn btn-ghost btn-sm" id="btn-rename-user" title="Change display name" style="font-size:10px;padding:0 7px">&#9998;</button>';
     var _hasPassword = true;
     try{ _hasPassword = !localStorage.getItem("pp_guest"); }catch(e){}
     if(!_hasPassword) {
@@ -715,24 +730,9 @@ function render(h) {
   var plogo = document.getElementById("btn-logo");
   if(plogo) plogo.addEventListener("click", function(){ if(SC.currentUser){ SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.screen="profile"; draw(); } });
   var profbtn = document.getElementById("btn-profile");
-  if(profbtn) profbtn.addEventListener("click", function(){ SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.screen="profile"; draw(); });
-  var renameBtn = document.getElementById("btn-rename-user");
-  if(renameBtn) renameBtn.addEventListener("click", function(e){
-    e.stopPropagation();
-    if(!SC.currentUser) return;
-    var current = SC.currentUser.username;
-    var next = prompt("Change your display name:", current);
-    if(next===null) return;
-    next = next.trim();
-    if(!next || next===current) return;
-    authSignup(next, function(err, user){
-      if(err){ toast(err); return; }
-      migrateRenamedUserPicks(current, user.username, user.groups);
-      SC.currentUser = user;
-      saveSession(user.username, user.emoji);
-      toast("Name updated \u2713");
-      draw();
-    });
+  if(profbtn) profbtn.addEventListener("click", function(){
+    if(isGuest()){ showGuestPrompt(); return; }
+    showQuickProfile();
   });
   var topSignup = document.getElementById("btn-home-signup-top");
   if(topSignup) topSignup.addEventListener("click", function(){ SC.authTab="signup"; SC.screen="auth"; draw(); });
@@ -1328,6 +1328,29 @@ function openEmojiPicker() {
 }
 function closeEmojiPicker() {
   document.getElementById("emoji-modal").classList.remove("open");
+}
+
+// ── QUICK PROFILE MODAL ──────────────────────────────────────────────────────
+function showQuickProfile() {
+  var u = SC.currentUser;
+  if(!u) return;
+  document.getElementById("qp-username").textContent = u.username;
+  document.getElementById("qp-avatar").textContent = u.emoji || "🎯";
+  document.getElementById("quick-profile-modal").classList.add("open");
+}
+function hideQuickProfile() {
+  document.getElementById("quick-profile-modal").classList.remove("open");
+}
+function logOut() {
+  hideQuickProfile();
+  clearSession();
+  SC.currentUser = null;
+  SC.group = null;
+  SC.isAdmin = false;
+  SC.isMaster = false;
+  SC.groupAdmin = false;
+  SC.screen = "home";
+  draw();
 }
 
 // ── LANDING ───────────────────────────────────────────────────────────────────
@@ -3403,6 +3426,37 @@ function executeCopy(targetUser){
 })();
 </script>
 
+<script>
+// ── QUICK PROFILE MODAL BINDINGS ──────────────────────────────────────────────
+(function(){
+  document.getElementById("quick-profile-modal").addEventListener("click", function(e){
+    if(e.target === this) hideQuickProfile();
+  });
+  document.getElementById("qp-cancel").addEventListener("click", hideQuickProfile);
+  document.getElementById("qp-rename").addEventListener("click", function(){
+    if(!SC.currentUser) return;
+    var current = SC.currentUser.username;
+    var next = prompt("Change your display name:", current);
+    if(next===null) return;
+    next = next.trim();
+    if(!next || next===current) return;
+    authSignup(next, function(err, user){
+      if(err){ toast(err); return; }
+      migrateRenamedUserPicks(current, user.username, user.groups);
+      SC.currentUser = user;
+      saveSession(user.username, user.emoji);
+      hideQuickProfile();
+      toast("Name updated \u2713");
+      draw();
+    });
+  });
+  document.getElementById("qp-logout").addEventListener("click", function(){
+    if(confirm("Log out?")) logOut();
+  });
+})();
+</script>
+
+
 <div id="invite-modal">
   <div class="invite-sheet">
     <div class="invite-handle"></div>
@@ -3414,6 +3468,18 @@ function executeCopy(targetUser){
       <button class="invite-copy-btn" id="invite-copy-btn">&#128203; Copy</button>
     </div>
     <button class="invite-cancel-btn" id="invite-cancel-btn">Cancel</button>
+  </div>
+</div>
+
+<div id="quick-profile-modal">
+  <div class="qp-sheet">
+    <div class="qp-handle"></div>
+    <div class="qp-head">
+      <div class="qp-avatar" id="qp-avatar">🎯</div>
+      <div class="qp-name-pill"><span id="qp-username">Username</span><span class="qp-pencil" id="qp-rename">&#9998;</span></div>
+    </div>
+    <button class="qp-btn qp-btn-danger" id="qp-logout">&#128682; Log Out</button>
+    <button class="qp-cancel-btn" id="qp-cancel">Close</button>
   </div>
 </div>
 </body>
