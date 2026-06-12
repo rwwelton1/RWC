@@ -298,6 +298,7 @@ a{color:inherit;text-decoration:none}
 // =====================================================
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
+var PUBLIC_VIEW=(function(){ return /[?&]public=1/.test(location.search); })();
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/wc2026":"wc2026";
 var RESULTS_BASE="wc2026";
@@ -357,7 +358,7 @@ var GROUPS={
 };
 
 var GROUP_IDS=["A","B","C","D","E","F","G","H","I","J","K","L"];
-var PTS={groupWinner:2,qualifier:1,wildcard:1};
+var PTS={groupWinner:2,qualifier:1,perfectGroup:2};
 var WILD_CARD_COUNT=8;
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
@@ -399,35 +400,61 @@ function groupPicksDone(user,gid){
   var uk=ukey(user);return !!(ST.picks[uk]&&ST.picks[uk].groups&&ST.picks[uk].groups[gid]);
 }
 
+// Per-group scoring (max 7 pts per group):
+//  - A team is "predicted to advance" if it's the user's 1st or 2nd place
+//    pick, OR it's their 3rd place pick AND they also chose it as one of
+//    their 8 wild card picks.
+//  - A team "actually advances" if it actually finished 1st or 2nd, OR it
+//    actually finished 3rd AND that team is one of the official 8 wild
+//    card teams that advanced.
+//  - +1 for each team in BOTH sets (max 3).
+//  - +2 bonus if the user's 1st-place pick actually won the group.
+//  - +2 "perfect group" bonus if the user's 1st/2nd/3rd picks exactly match
+//    the actual 1st/2nd/3rd finishers (regardless of wild card status).
+// Max = 1*3 + 2 + 2 = 7.
+function groupScoreDetail(user,gid){
+  var rr=(ST.results.groups||{})[gid];
+  var out={score:0,hits:[]};
+  if(!rr||!rr.length)return out;
+  var ur=getGroupRanking(user,gid);
+  var uwc=getUserWildcards(user);
+  var rwc=getResultWildcards();
+
+  var predicted=[ur[0],ur[1]];
+  if(ur[2]&&uwc.indexOf(ur[2])>=0)predicted.push(ur[2]);
+
+  var actual=[rr[0],rr[1]];
+  if(rr[2]&&rwc.length&&rwc.indexOf(rr[2])>=0)actual.push(rr[2]);
+
+  predicted.forEach(function(t){
+    if(t&&actual.indexOf(t)>=0){
+      out.score+=PTS.qualifier;
+      out.hits.push({gid:gid,team:t,pts:PTS.qualifier,type:"qualifier"});
+    }
+  });
+  if(ur[0]&&ur[0]===rr[0]){
+    out.score+=PTS.groupWinner;
+    out.hits.push({gid:gid,team:rr[0],pts:PTS.groupWinner,type:"winner"});
+  }
+  if(ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2]){
+    out.score+=PTS.perfectGroup;
+    out.hits.push({gid:gid,team:"Group "+gid,pts:PTS.perfectGroup,type:"perfect"});
+  }
+  return out;
+}
+function groupScore(user,gid){return groupScoreDetail(user,gid).score;}
+// Max possible additional points from a group whose results aren't set yet
+var GROUP_MAX_PTS=(PTS.qualifier*3)+PTS.groupWinner+PTS.perfectGroup;
+
 // ── Scoring ───────────────────────────────────────────────
 function calcScore(user){
-  var total=0,res=ST.results.groups||{};
-  var rwc=getResultWildcards();
-  var uwc=getUserWildcards(user);
-  GROUP_IDS.forEach(function(gid){
-    var rr=res[gid];if(!rr||!rr.length)return;
-    var ur=getGroupRanking(user,gid);
-    // User's predicted qualifiers: positions 1 and 2
-    var userTop2=[ur[0],ur[1]];
-    // +1 for each of user's top-2 picks that actually qualified (1st or 2nd)
-    userTop2.forEach(function(t){
-      if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
-    });
-    // +2 bonus if user picked the exact group winner in 1st place
-    if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
-  });
-  // +1 for each wild card tab pick that actually qualified as a wild card
-  if(rwc.length&&uwc.length)uwc.forEach(function(t){
-    if(rwc.indexOf(t)>=0)total+=PTS.wildcard;
-  });
+  var total=0;
+  GROUP_IDS.forEach(function(gid){total+=groupScore(user,gid);});
   return total;
 }
 function calcMaxPossible(user){
   var total=calcScore(user),res=ST.results.groups||{};
-  GROUP_IDS.forEach(function(gid){if(!(res[gid]&&res[gid].length))total+=(PTS.qualifier*2)+PTS.groupWinner;});
-  var rwc=getResultWildcards(),uwc=getUserWildcards(user);
-  if(!rwc.length&&uwc.length)total+=uwc.length*PTS.wildcard;
+  GROUP_IDS.forEach(function(gid){if(!(res[gid]&&res[gid].length))total+=GROUP_MAX_PTS;});
   return total;
 }
 
@@ -441,34 +468,14 @@ function syncScoresToGroup(){
   });
 }
 
-// Phase 1 = group stage + wild cards
+// Phase 1 = group stage (wild card picks are scored as part of each group's total)
 function calcPhase1Score(user){
-  var total=0,res=ST.results.groups||{};
-  var rwc=getResultWildcards();
-  var uwc=getUserWildcards(user);
-  GROUP_IDS.forEach(function(gid){
-    var rr=res[gid];if(!rr||!rr.length)return;
-    var ur=getGroupRanking(user,gid);
-    [ur[0],ur[1]].forEach(function(t){
-      if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
-    });
-    if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
-  });
-  if(rwc.length&&uwc.length)uwc.forEach(function(t){
-    if(rwc.indexOf(t)>=0)total+=PTS.wildcard;
-  });
-  return total;
+  return calcScore(user);
 }
 function calcPhase1MaxPossible(user){
-  var total=calcPhase1Score(user),res=ST.results.groups||{};
-  // Each unsettled group: max = +1 +1 (both qualifiers) + 2 bonus = 4pts
-  GROUP_IDS.forEach(function(gid){if(!(res[gid]&&res[gid].length))total+=(PTS.qualifier*2)+PTS.groupWinner;});
-  // Wild cards: if results not set yet, full 8 possible; if set, only remaining correct picks count
-  var rwc=getResultWildcards(),uwc=getUserWildcards(user);
-  if(!rwc.length) total+=WILD_CARD_COUNT*PTS.wildcard;
-  return total;
+  return calcMaxPossible(user);
 }
+
 
 // Phase 2 = knockout bracket
 function calcPhase2Score(user){
@@ -714,7 +721,7 @@ function animateLBScores(){
 function buildDragList(ranking, gid, rr, viewer, canDrag, isAdmin){
   var h='<div class="drag-list" id="'+(isAdmin?"adm-dl-":"dl-")+gid+'" data-gid="'+x(gid)+'" data-admin="'+(isAdmin?1:0)+'">';
   if(!isAdmin){
-    h+='<div class="zone-header z-qual">▲ Qualify directly &nbsp;<span style="font-weight:400;opacity:.7">1st = 3pts · 2nd = 1pt</span></div>';
+    h+='<div class="zone-header z-qual">▲ Qualify directly &nbsp;<span style="font-weight:400;opacity:.7">1st = +1 +2 bonus · 2nd = +1 · perfect group = +2</span></div>';
   }
   ranking.forEach(function(name,idx){
     var t=GROUPS[gid].teams.find(function(t){return t.n===name;});
@@ -730,9 +737,10 @@ function buildDragList(ranking, gid, rr, viewer, canDrag, isAdmin){
     var zoneCls=!isAdmin?(idx<=1?" zone-qual":idx===2?" zone-wc":" zone-elim"):"";
     var ptsStr="";
     if(rr&&viewer&&!isAdmin){
-      var ur=getGroupRanking(viewer,gid);
-      if(rPos===0&&ur[0]===name) ptsStr='+3';
-      else if(rPos===1&&ur[1]===name) ptsStr='+1';
+      var detail=groupScoreDetail(viewer,gid);
+      var teamPts=detail.hits.filter(function(h){return h.team===name;}).reduce(function(a,b){return a+b.pts;},0);
+      if(teamPts>0) ptsStr='+'+teamPts;
+      if(idx===2&&detail.hits.some(function(h){return h.type==="perfect";})) ptsStr+=(ptsStr?' ':'')+'+2 perfect';
     }
     var badge="";
     if(rr&&rPos>=0){
@@ -815,7 +823,7 @@ function renderWildCards(){
   var h='<div class="wc-wrap">';
   if(phase==="knockout")h+='<div class="phase-banner locked" style="border-radius:7px;margin-bottom:10px">&#128274; Group stage closed</div>';
   h+='<div class="wc-hdr">🎟️ Wild Card Picks</div>';
-  h+='<div class="wc-sub">The 12 teams you ranked 3rd. Pick <b>8</b> you think advance from 3rd place. +1pt each correct.</div>';
+  h+='<div class="wc-sub">The 12 teams you ranked 3rd. Pick <b>8</b> you think advance from 3rd place. If a pick advances, you earn the +1 qualifier point for that team in its group.</div>';
   h+='<div class="wc-count-bar"><span class="wc-count-num">'+uWC.length+'</span> / '+WILD_CARD_COUNT+' selected</div>';
   h+='<div>';
   pool.forEach(function(entry){
@@ -865,8 +873,9 @@ function renderLB(){
   h+='</div>';
   // Scoring key pills — theme style
   h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
-  h+='<span style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:8px;background:var(--blue-bg);border:2px solid var(--border);color:var(--blue);box-shadow:2px 2px 0 var(--border)">✓ Qualifier correct +1</span>';
-  h+='<span style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:8px;background:var(--gold-bg);border:2px solid var(--border);color:var(--gold-dark);box-shadow:2px 2px 0 var(--border)">🥇 Exact 1st place +2 bonus</span>';
+  h+='<span style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:8px;background:var(--blue-bg);border:2px solid var(--border);color:var(--blue);box-shadow:2px 2px 0 var(--border)">✓ Predicted team advances +1</span>';
+  h+='<span style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:8px;background:var(--gold-bg);border:2px solid var(--border);color:var(--gold-dark);box-shadow:2px 2px 0 var(--border)">🥇 Group winner +2 bonus</span>';
+  h+='<span style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:8px;background:var(--green-bg);border:2px solid var(--border);color:var(--green);box-shadow:2px 2px 0 var(--border)">💯 Perfect group +2</span>';
   h+='</div></div>';
 
   // Player cards
@@ -881,16 +890,12 @@ function renderLB(){
     // Per-group breakdown
     var groupHits=[];
     GROUP_IDS.forEach(function(gid){
-      var rr=res[gid];if(!rr||!rr.length)return;
-      var ur=getGroupRanking(p,gid);
-      if(ur[0]&&ur[0]===rr[0])groupHits.push({gid:gid,team:rr[0],pts:2,type:"winner"});
-      [ur[0],ur[1]].forEach(function(t){
-        if(!t)return;
-        if(rr[0]===t||rr[1]===t)groupHits.push({gid:gid,team:t,pts:1,type:"qualifier"});
-      });
+      groupHits=groupHits.concat(groupScoreDetail(p,gid).hits);
     });
 
-    // Wild card hits
+    // Wild card hits (informational — how many of the user's 8 wild card
+    // picks ended up among the official 8; scoring is folded into the
+    // per-group breakdown above)
     var uwc=getUserWildcards(p);
     var wcHits=rwc.length?uwc.filter(function(t){return rwc.indexOf(t)>=0;}):[];
     var wcTotal=uwc.length;
@@ -960,7 +965,7 @@ function renderLB(){
     h+='<div style="flex:1;text-align:center;border-right:2px solid var(--border2)">';
     h+='<div style="font-size:18px;font-weight:900;color:'+(wcSc>0?'var(--green)':'var(--dim)')+'">'+wcSc+'</div>';
     h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Wild Cards</div>';
-    h+='<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+wcSc+' / '+wcTotal+' correct</div>';
+    h+='<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+wcSc+' / '+wcTotal+' picked &middot; in group pts</div>';
     h+='</div>';
 
     h+='<div style="flex:1;text-align:center">';
@@ -974,8 +979,8 @@ function renderLB(){
       h+='<div style="height:2px;background:var(--border2);margin:0 14px"></div>';
       h+='<div style="padding:8px 14px 12px;display:flex;flex-wrap:wrap;gap:5px">';
       groupHits.forEach(function(hit){
-        var bg=hit.type==="winner"?'var(--gold-bg)':'var(--blue-bg)';
-        var col=hit.type==="winner"?'var(--gold-dark)':'var(--blue)';
+        var bg=hit.type==="winner"?'var(--gold-bg)':hit.type==="perfect"?'var(--green-bg)':hit.type==="third"?'var(--cream)':'var(--blue-bg)';
+        var col=hit.type==="winner"?'var(--gold-dark)':hit.type==="perfect"?'var(--green)':hit.type==="third"?'var(--dim)':'var(--blue)';
         h+='<span style="font-size:8px;font-weight:800;padding:3px 8px;border-radius:8px;background:'+bg+';border:2px solid var(--border);color:'+col+';box-shadow:2px 2px 0 var(--border)">'+x(hit.team)+' +'+hit.pts+'</span>';
       });
       wcHits.forEach(function(t){
@@ -1265,17 +1270,18 @@ function renderRules(){
 
   h+=section("⚽","Phase 1 — Group Stage",
     "<b style='color:var(--text)'>How to play:</b> Go to the Groups tab and drag teams into your predicted finishing order (1st–4th) for all 12 groups. Then visit Wild Cards to pick which 8 third-place teams advance.<br><br>"+
-    "<b style='color:var(--text)'>Scoring:</b><br>"+
-    pts("Group winner (1st place correct)","3","var(--wc-gold)")+
-    pts("Runner-up qualifies (2nd place correct)","1","#93c5fd")+
-    pts("Wild card qualifier (3rd place correct)","1","var(--wc-green)")+
-    "<br><b style='color:var(--text)'>Note:</b> You only get the group winner bonus (3pts) if you have them in 1st. For the +1 qualifier point, order doesn't matter — if the actual 2nd-place team appears anywhere in your top 3, you earn the point. If a team qualifies as a 3rd-place wild card and you had them in your top 3 for that group, you also earn a point (no need to have also picked them in the Wild Cards tab)."
+    "<b style='color:var(--text)'>Scoring (max 7 pts per group):</b><br>"+
+    pts("Group winner advances (1 qualify + 2 bonus)","3","var(--wc-gold)")+
+    pts("Runner-up advances (2nd place correct)","1","#93c5fd")+
+    pts("3rd place pick advances as a wild card","1","var(--wc-green)")+
+    pts("Perfect group (1st, 2nd & 3rd all correct)","2","var(--wc-green)")+
+    "<br><b style='color:var(--text)'>How it works:</b> For each group, you're predicting which teams will reach the knockout stage: your 1st and 2nd place picks always count, and your 3rd place pick counts too if you also choose it as one of your 8 Wild Card picks. You earn <b style='color:var(--text)'>+1 for each of those predicted teams that actually advances</b> — whether it advances by finishing 1st/2nd in its group, or by being one of the official 8 third-place wild card teams (max 3 per group). On top of that, you get a <b style='color:var(--text)'>+2 bonus</b> if your 1st-place pick actually wins the group, and a further <b style='color:var(--text)'>+2 'perfect group' bonus</b> if your 1st, 2nd, and 3rd place picks exactly match the actual finishing order. Maximum: 3 + 2 + 2 = <b style='color:var(--text)'>7 points per group</b> (84 total across all 12 groups)."
   );
 
   h+=section("🎟️","Wild Cards",
     "After ranking your 12 groups, the 12 third-place teams appear in the Wild Cards tab. "+
-    "Pick <b style='color:var(--text)'>8</b> of them to advance to the Round of 32 — these are the 8 best third-place finishers. "+
-    "Each correct wild card pick earns <b style='color:var(--wc-gold)'>+1 pt</b>."
+    "Pick <b style='color:var(--text)'>8</b> of them — these are your predictions for which third-place teams advance to the Round of 32. "+
+    "There's no separate point pool here: if one of these picks actually advances, you earn the +1 'qualifies' point for that team in its group (see Phase 1 scoring)."
   );
 
   h+=section("📊","Phase 2 — Knockout Bracket",
@@ -1385,7 +1391,13 @@ function renderResultsInto(){
   h+='</div></div>';
 
   groups.forEach(function(group){
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px">';
+    // Sort by points desc, then goal difference desc, then goals for desc
+    group.rows.sort(function(a,b){
+      if(b.pts!==a.pts)return b.pts-a.pts;
+      if(b.gd!==a.gd)return b.gd-a.gd;
+      return (b.gf||0)-(a.gf||0);
+    });
+    h+='<div style="background:#ffffff;border:2px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:14px;box-shadow:4px 4px 0 var(--border)">';
     // Header
     h+='<div style="padding:7px 12px;background:linear-gradient(90deg,#0e2fa8,#1248c8);border-bottom:1px solid rgba(245,197,24,.25);display:flex;align-items:center;justify-content:space-between">';
     h+='<div style="font-size:10px;font-weight:800;color:#fff">'+x(group.name)+'</div>';
@@ -1498,6 +1510,7 @@ function renderAdmin(){
 function draw(){
   var locked=isLocked(),viewer=activeViewer(),phase=ST.results.phase||"groups",h='';
   var lockedCls=locked?' locked':'';
+  if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar" style="padding:8px 12px;gap:8px">';
   h+='<a href="index.html" style="display:flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:18px;font-weight:900;flex-shrink:0;text-decoration:none;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border)">&#8592;</a>';
   h+='<div class="header-center">';
@@ -1509,10 +1522,12 @@ function draw(){
     var lockIcon=locked?'&nbsp;&#128274;':'';
     h+='<span class="tag'+lockedCls+'" style="font-size:9px;padding:3px 8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+pem(ST.user)+x(ST.user)+lockIcon+'</span>';
   }
-  var adminCls=ST.admin?'btn-gold':'btn-ghost';
-  var adminIcon=ST.admin?'&#9889;':'&#9881;';
-  h+='<button class="btn '+adminCls+'" id="b-admin" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px">'+adminIcon+'</button>';
-  if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center">&#8635;</button>';
+  if(!PUBLIC_VIEW){
+    var adminCls=ST.admin?'btn-gold':'btn-ghost';
+    var adminIcon=ST.admin?'&#9889;':'&#9881;';
+    h+='<button class="btn '+adminCls+'" id="b-admin" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px">'+adminIcon+'</button>';
+    if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center">&#8635;</button>';
+  }
   h+='</div>';
   h+='</div>';
   var tabs=[{id:"leaderboard",lbl:"Leaderboard"},{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"results",lbl:"Results"},{id:"rules",lbl:"Rules"}];
@@ -1523,7 +1538,7 @@ function draw(){
   // Countdown bar — shown until tournament starts
   var cdHtml=renderCountdown();
   if(cdHtml)h+=cdHtml;
-  if(!ST.user&&!ST.admin&&ST.page!=="leaderboard"){
+  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&ST.page!=="leaderboard"){
     h+='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
     PARTS.forEach(function(p){h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+pem(p)+x(p)+'</div><div class="user-btn-sub">'+(ST.locked[ukey(p)]?"&#128274; Locked":"Click to pick")+'</div></button>';});
     h+='</div></div>';
