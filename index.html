@@ -368,6 +368,8 @@ button,input,select{font-family:'Nunito',sans-serif}
 
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+
 <script>
 // ── POOL LIBRARY ─────────────────────────────────────────────────────────────
 var POOL_LIBRARY = [
@@ -508,6 +510,39 @@ function authLogin(username, cb) {
     var u = sn.val();
     if(!u) { cb("Username not found"); return; }
     cb(null, { username: u.username, groups: u.groups || [], emoji: u.emoji || "🎯" });
+  });
+}
+
+// ── GOOGLE AUTH ────────────────────────────────────────────────────────────────
+function signInWithGoogle(cb) {
+  if(!window.firebase || !firebase.auth) { cb("Google sign-in unavailable"); return; }
+  if(!DB) { cb("No database connection"); return; }
+  var provider = new firebase.auth.GoogleAuthProvider();
+  firebase.auth().signInWithPopup(provider).then(function(result){
+    var fbUser = result.user;
+    var uid = fbUser.uid;
+    DB.ref("googleUsers/"+uid).once("value", function(sn){
+      var existingUsername = sn.val();
+      if(existingUsername) { authLogin(existingUsername, cb); return; }
+      // First time signing in with this Google account — create a Scorecery username
+      var base = ((fbUser.displayName||fbUser.email||"player").split("@")[0]||"player")
+        .toLowerCase().replace(/[^a-z0-9_]/g,"") || "player";
+      (function tryUsername(n){
+        var candidate = base + (n>0?n:"");
+        var key = userKey(candidate);
+        DB.ref("users/"+key).once("value", function(usn){
+          if(usn.val()) { tryUsername(n+1); return; }
+          var newData = { username: candidate, groups: [], emoji: "🎯", googleUid: uid };
+          DB.ref("users/"+key).set(newData, function(err){
+            if(err){ cb("Failed to save — check connection"); return; }
+            DB.ref("googleUsers/"+uid).set(candidate);
+            cb(null, { username: candidate, groups: [], emoji: "🎯" });
+          });
+        });
+      })(0);
+    });
+  }).catch(function(err){
+    cb((err&&err.message)?err.message:"Google sign-in failed");
   });
 }
 
@@ -739,6 +774,20 @@ function showAuthModal(tab) {
     var el = document.createElement("div");
     el.id = "auth-modal-overlay";
     el.className = "auth-modal-overlay";
+    var cardHtml = '<div class="auth-card">';
+    if(isLogin) {
+      cardHtml += '<div class="auth-field"><label class="auth-label">Username</label>' +
+        '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false"></div>' +
+        '<div class="auth-err" id="modal-auth-err"></div>' +
+        '<button class="auth-btn" id="modal-auth-submit">Log In</button>' +
+        '<div class="landing-divider" style="margin:14px 0">or</div>' +
+        '<button class="auth-btn" id="modal-google-btn" style="background:#ffffff;display:flex;align-items:center;justify-content:center;gap:8px">'+googleIconSvg()+' Continue with Google</button>';
+    } else {
+      cardHtml += '<div class="auth-err" id="modal-auth-err"></div>' +
+        '<div style="font-size:11px;color:var(--muted);font-weight:700;text-align:center;margin-bottom:14px">New accounts are created with Google.</div>' +
+        '<button class="auth-btn" id="modal-google-btn" style="background:#ffffff;display:flex;align-items:center;justify-content:center;gap:8px">'+googleIconSvg()+' Sign up with Google</button>';
+    }
+    cardHtml += '</div>';
     el.innerHTML = '<div class="auth-modal-box">' +
       '<button class="auth-modal-close" id="auth-modal-close">&#10005;</button>' +
       '<div class="auth-logo" style="font-size:22px;margin-bottom:2px"><span class="scorecery-logo">SCORECERY</span></div>' +
@@ -747,14 +796,7 @@ function showAuthModal(tab) {
         '<button class="auth-tab'+(isLogin?" active":"")+'" id="modal-tab-login">Log In</button>' +
         '<button class="auth-tab'+(isLogin?"":" active")+'" id="modal-tab-signup">Sign Up</button>' +
       '</div>' +
-      '<div class="auth-card">' +
-        '<div class="auth-field"><label class="auth-label">Username</label>' +
-        '<input class="auth-input" id="modal-auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>' +
-        '<div class="auth-field"><label class="auth-label">Password</label>' +
-        '<input class="auth-input" id="modal-auth-password" type="password" placeholder="'+(isLogin?"your password":"choose a password")+'" autocomplete="'+(isLogin?"current-password":"new-password")+'"></div>' +
-        '<div class="auth-err" id="modal-auth-err"></div>' +
-        '<button class="auth-btn" id="modal-auth-submit">'+(isLogin?"Log In":"Register")+'</button>' +
-      '</div></div>';
+      cardHtml + '</div>';
     document.body.appendChild(el);
 
     // Close on overlay click
@@ -769,49 +811,59 @@ function showAuthModal(tab) {
       SC.authTab="signup"; el.remove(); buildModal();
     });
 
-    var unameEl = document.getElementById("modal-auth-username");
-    var pwEl = document.getElementById("modal-auth-password");
     var errEl = document.getElementById("modal-auth-err");
-    var submitBtn = document.getElementById("modal-auth-submit");
 
-    function doSubmit() {
-      var uname = unameEl.value.trim();
-      var pw = pwEl.value;
+    function onAuthSuccess(user) {
+      try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
+      SC.currentUser = user;
+      saveSession(user.username, user.emoji);
+      el.remove();
+      SC.screen = "profile";
+      toast("Welcome, "+user.username+" \u2713");
+      draw();
+    }
+
+    var googleBtn = document.getElementById("modal-google-btn");
+    googleBtn.addEventListener("click", function(){
       errEl.textContent = "";
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Please wait...";
-      if(isLogin) {
-        authLogin(uname, pw, function(err, user){
+      googleBtn.disabled = true;
+      signInWithGoogle(function(err, user){
+        googleBtn.disabled = false;
+        if(err){ errEl.textContent = err; return; }
+        onAuthSuccess(user);
+      });
+    });
+
+    if(isLogin) {
+      var unameEl = document.getElementById("modal-auth-username");
+      var submitBtn = document.getElementById("modal-auth-submit");
+      function doSubmit() {
+        var uname = unameEl.value.trim();
+        errEl.textContent = "";
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Please wait...";
+        authLogin(uname, function(err, user){
           submitBtn.disabled = false;
           submitBtn.textContent = "Log In";
           if(err){ errEl.textContent = err; return; }
-          try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
-          SC.currentUser = user;
-          saveSession(user.username, user.emoji);
-          el.remove();
-          SC.screen = "profile";
-          draw();
-        });
-      } else {
-        authSignup(uname, pw, function(err, user){
-          submitBtn.disabled = false;
-          submitBtn.textContent = "Save";
-          if(err){ errEl.textContent = err; return; }
-          SC.currentUser = user;
-          saveSession(user.username, user.emoji);
-          el.remove();
-          SC.screen = "profile";
-          toast("Registered as "+user.username+" ✓");
-          draw();
+          onAuthSuccess(user);
         });
       }
+      submitBtn.addEventListener("click", doSubmit);
+      unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+      setTimeout(function(){ unameEl.focus(); }, 50);
     }
-
-    submitBtn.addEventListener("click", doSubmit);
-    pwEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
-    setTimeout(function(){ unameEl.focus(); }, 50);
   }
   buildModal();
+}
+
+function googleIconSvg(){
+  return '<svg width="16" height="16" viewBox="0 0 48 48" style="flex-shrink:0">' +
+    '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>' +
+    '<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>' +
+    '<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>' +
+    '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.97 6.19C6.51 42.62 14.62 48 24 48z"/>' +
+    '</svg>';
 }
 
 function renderAuth() {
@@ -826,10 +878,18 @@ function renderAuth() {
   h += '<button class="auth-tab'+(!isLogin?" active":"")+'" id="tab-signup">Sign Up</button>';
   h += '</div>';
   h += '<div class="auth-card">';
-  h += '<div class="auth-field"><label class="auth-label">'+(isLogin?"Username":"Choose a username")+'</label>';
-  h += '<input class="auth-input" id="auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false" value="'+(isLogin?"":x(SC.currentUser?SC.currentUser.username:""))+'"></div>';
-  h += '<div class="auth-err" id="auth-err"></div>';
-  h += '<button class="auth-btn" id="auth-submit">'+(isLogin?"Log In":"Register")+'</button>';
+  if(isLogin) {
+    h += '<div class="auth-field"><label class="auth-label">Username</label>';
+    h += '<input class="auth-input" id="auth-username" type="text" placeholder="your username" autocomplete="username" autocorrect="off" autocapitalize="off" spellcheck="false"></div>';
+    h += '<div class="auth-err" id="auth-err"></div>';
+    h += '<button class="auth-btn" id="auth-submit">Log In</button>';
+    h += '<div class="landing-divider" style="margin:14px 0">or</div>';
+    h += '<button class="auth-btn" id="auth-google-btn" style="background:#ffffff;display:flex;align-items:center;justify-content:center;gap:8px">'+googleIconSvg()+' Continue with Google</button>';
+  } else {
+    h += '<div class="auth-err" id="auth-err"></div>';
+    h += '<div style="font-size:11px;color:var(--muted);font-weight:700;text-align:center;margin-bottom:14px">New accounts are created with Google.</div>';
+    h += '<button class="auth-btn" id="auth-google-btn" style="background:#ffffff;display:flex;align-items:center;justify-content:center;gap:8px">'+googleIconSvg()+' Sign up with Google</button>';
+  }
   h += '</div></div></div>';
 
   document.getElementById("root").innerHTML = h;
@@ -846,43 +906,47 @@ function renderAuth() {
   document.getElementById("tab-login").addEventListener("click", function(){ SC.authTab="login"; draw(); });
   document.getElementById("tab-signup").addEventListener("click", function(){ SC.authTab="signup"; draw(); });
 
-  var unameEl = document.getElementById("auth-username");
   var errEl = document.getElementById("auth-err");
-  var submitBtn = document.getElementById("auth-submit");
 
-  function doSubmit() {
-    var uname = unameEl.value.trim();
+  function onAuthSuccess(user) {
+    try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
+    SC.currentUser = user;
+    saveSession(user.username, user.emoji);
+    SC.screen = "profile";
+    toast("Welcome, "+user.username+" \u2713");
+    draw();
+  }
+
+  var googleBtn = document.getElementById("auth-google-btn");
+  googleBtn.addEventListener("click", function(){
     errEl.textContent = "";
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Please wait...";
-    if(isLogin) {
+    googleBtn.disabled = true;
+    signInWithGoogle(function(err, user){
+      googleBtn.disabled = false;
+      if(err){ errEl.textContent = err; return; }
+      onAuthSuccess(user);
+    });
+  });
+
+  if(isLogin) {
+    var unameEl = document.getElementById("auth-username");
+    var submitBtn = document.getElementById("auth-submit");
+    function doSubmit() {
+      var uname = unameEl.value.trim();
+      errEl.textContent = "";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Please wait...";
       authLogin(uname, function(err, user){
         submitBtn.disabled = false;
         submitBtn.textContent = "Log In";
         if(err){ errEl.textContent = err; return; }
-        try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
-        SC.currentUser = user;
-        saveSession(user.username, user.emoji);
-        SC.screen = "profile";
-        draw();
-      });
-    } else {
-      authSignup(uname, function(err, user){
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Register";
-        if(err){ errEl.textContent = err; return; }
-        SC.currentUser = user;
-        saveSession(user.username, user.emoji);
-        SC.screen = "profile";
-        toast("Registered as "+user.username+" ✓");
-        draw();
+        onAuthSuccess(user);
       });
     }
+    submitBtn.addEventListener("click", doSubmit);
+    unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
+    unameEl.focus();
   }
-
-  submitBtn.addEventListener("click", doSubmit);
-  unameEl.addEventListener("keydown", function(e){ if(e.key==="Enter") doSubmit(); });
-  unameEl.focus();
 }
 
 // ── PROFILE SCREEN ────────────────────────────────────────────────────────────
@@ -1330,7 +1394,7 @@ function openInviteModal() {
   var msg = "Hey! Join my Scorecery group for the 2026 season 🏆\n\n"
     + "Group: " + g.name + "\n"
     + "Password: " + (g.adminPw || "ask me") + "\n\n"
-    + "Search for the group name after signing up at:\nhttps://scorecery.vercel.app";
+    + "Search for the group name after signing up at:\nhttps://scorecery.net";
 
   var preview = document.getElementById("invite-msg-preview");
   if(preview) preview.textContent = msg;
