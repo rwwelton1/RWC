@@ -276,6 +276,7 @@ function loadData(){
       var g=sn.val()||{};
       if(g&&g.players&&g.players.length)PARTS=g.players;
       GROUP_ADMIN_PW=(g&&g.groupAdminPw)||"password";
+      ST.groupPublic=!!(g&&g.public);
       s2();
     },function(){s2();});
   }
@@ -595,6 +596,16 @@ function toggleLock(weekId){
   draw();
 }
 
+function setGroupPublic(val){
+  if(!GROUP_ID||!DB)return;
+  DB.ref("groups/"+GROUP_ID+"/public").set(val,function(err){
+    if(err){toast("Failed to save");return;}
+    ST.groupPublic=val;
+    toast(val?"Leaderboard is now public":"Leaderboard is now private");
+    draw();
+  });
+}
+
 // ── Renderers ────────────────────────────────────────────
 function userSelectScreen(){
   var h='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
@@ -751,11 +762,16 @@ function renderImportPanel(weekId){
   h+='</div>';
   if(ST.importError) h+='<div style="font-size:10px;font-weight:700;color:var(--red2);margin-bottom:6px">'+x(ST.importError)+'</div>';
   if(ST.importGames&&ST.importGames.length){
-    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:8px 0 4px">Tap up to 10 games, then add to '+x(ST.weekLabels[weekId]||weekId)+'</div>';
+    var selCount=Object.keys(ST.importSelected).length;
+    h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin:8px 0 4px">';
+    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap up to 10 games, then add to '+x(ST.weekLabels[weekId]||weekId)+'</div>';
+    h+='<div style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</div>';
+    h+='</div>';
     ST.importGames.forEach(function(g,i){
       var checked=!!ST.importSelected[i];
-      h+='<label style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer">';
-      h+='<input type="checkbox" data-imp-idx="'+i+'" '+(checked?"checked":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
+      var disable=!checked&&selCount>=10;
+      h+='<label style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+'">';
+      h+='<input type="checkbox" data-imp-idx="'+i+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
       h+='<div style="flex:1;min-width:0">';
       h+='<div style="font-size:11px;font-weight:800">'+x(g.away)+' @ '+x(g.home)+'</div>';
       var meta=x(g.kickoff);
@@ -772,6 +788,13 @@ function renderImportPanel(weekId){
 
 function renderAdmin(){
   var h='<div class="adm-wrap">';
+  if(GROUP_ID){
+    h+='<div class="adm-sec-label">Group Settings</div>';
+    h+='<div class="adm-game"><div class="adm-game-title">Public Leaderboard — anyone (even guests) can view a read-only leaderboard for this group</div><div class="adm-btns">';
+    h+='<button class="adm-btn'+(ST.groupPublic?" sel":"")+'" id="b-pub-on">On</button>';
+    h+='<button class="adm-btn'+(!ST.groupPublic?" sel":"")+'" id="b-pub-off">Off</button>';
+    h+='</div></div>';
+  }
   h+='<div class="adm-sec-label">Weeks</div>';
   h+='<div class="week-bar">';
   ST.weekIds.forEach(function(w){h+='<button class="wtab'+(ST.curWeek===w?" active":"")+'" data-week="'+w+'">'+x(ST.weekLabels[w]||w)+'</button>';});
@@ -920,6 +943,8 @@ function bind(){
   el=document.getElementById("b-addweek"); if(el) el.addEventListener("click",addWeek);
   el=document.getElementById("b-delweek"); if(el) el.addEventListener("click",function(){removeWeek(ST.curWeek);});
   el=document.getElementById("b-lockweek"); if(el) el.addEventListener("click",function(){toggleLock(ST.curWeek);});
+  el=document.getElementById("b-pub-on"); if(el) el.addEventListener("click",function(){ setGroupPublic(true); });
+  el=document.getElementById("b-pub-off"); if(el) el.addEventListener("click",function(){ setGroupPublic(false); });
 
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){
     ST.showImport=!ST.showImport;
@@ -939,6 +964,11 @@ function bind(){
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
     var idx=this.getAttribute("data-imp-idx");
     if(this.checked) ST.importSelected[idx]=true; else delete ST.importSelected[idx];
+    draw();
+    if(Object.keys(ST.importSelected).length===10){
+      var btn=document.getElementById("b-add-imported");
+      if(btn) btn.scrollIntoView({behavior:"smooth",block:"center"});
+    }
   });
   el=document.getElementById("b-add-imported"); if(el) el.addEventListener("click",function(){addImportedGames(ST.curWeek);});
 
