@@ -374,7 +374,7 @@ function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&l
 var _tt;function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2500);}
 function ukey(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
-function isLocked(){return !!(ST.user&&(ST.locked[ukey(ST.user)]||(ST.results.phase==="knockout")));}
+function isLocked(){return !!(ST.user&&(isPlayerLocked(ST.user)||(ST.results.phase==="knockout")));}
 function stageOpenForPicks(stage){
   // Groups/wildcards are auto-open until kickoff
   if(stage==="groups"){
@@ -402,8 +402,34 @@ function groupPicksDone(user,gid){
   if(!stageOpenForPicks("groups")&&new Date()>=WC_KICKOFF) return true;
   return !!(ST.picks[uk]&&ST.picks[uk].groups&&ST.picks[uk].groups[gid]);
 }
+// True if this player is locked, either individually or because the
+// group stage has been globally closed once the tournament started.
+function isPlayerLocked(user){
+  var uk=ukey(user);
+  if(ST.locked[uk]) return true;
+  if(!stageOpenForPicks("groups")&&new Date()>=WC_KICKOFF) return true;
+  return false;
+}
 
 // ── Scoring ───────────────────────────────────────────────
+// Robust team-name matching: handles "Bosnia-Herzegovina" vs "Bosnia & Herz.",
+// "DR Congo" vs "Congo DR", etc. Compares whole words (ignoring punctuation/case),
+// allowing abbreviated words (e.g. "herz" matches "herzegovina").
+function _teamWords(s){
+  return (s||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim().split(/\s+/).filter(function(w){return w.length>1;});
+}
+function teamNameMatch(a,b){
+  if(!a||!b)return false;
+  if(a===b)return true;
+  var wa=_teamWords(a),wb=_teamWords(b);
+  if(!wa.length||!wb.length)return false;
+  var shorter=wa.length<=wb.length?wa:wb;
+  var longer=wa.length<=wb.length?wb:wa;
+  return shorter.every(function(sw){
+    return longer.some(function(lw){return lw.indexOf(sw)>=0||sw.indexOf(lw)>=0;});
+  });
+}
+
 // Returns the effective group ranking for scoring purposes:
 // official admin-set result if present, else pseudo-live result (once all 4 teams have played >=1 game)
 function getEffectiveGroupResult(gid){
@@ -613,6 +639,9 @@ function loadData(){
         });
       },80);
     });
+    // Pseudo-live group standings — persisted so scores survive page reloads
+    DB.ref(RESULTS_BASE+"/liveGroupResults").on("value",function(sn){ST.liveGroupResults=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(RESULTS_BASE+"/liveGroupFinal").on("value",function(sn){ST.liveGroupFinal=sn.val()||{};draw();_restoreScroll();});
   }
   s1();
 }
@@ -1314,6 +1343,7 @@ function applyLiveStandingsToScores(groups){
   // group stage's "max possible" score is reduced to reflect this group.
   if(!groups||!groups.length)return;
   var changed=false;
+  var changedGids=[];
   if(!ST.liveGroupResults)ST.liveGroupResults={};
   if(!ST.liveGroupFinal)ST.liveGroupFinal={};
   groups.forEach(function(group){
@@ -1328,23 +1358,31 @@ function applyLiveStandingsToScores(groups){
     var ranking=group.rows.map(function(row){
       var matched=null;
       GROUPS[gid].teams.forEach(function(t){
-        var a=row.name.toLowerCase(),b=t.n.toLowerCase();
-        if(a===b||a.indexOf(b)>=0||b.indexOf(a)>=0)matched=t.n;
+        if(teamNameMatch(row.name,t.n))matched=t.n;
       });
       return matched||row.name;
     }).filter(Boolean);
     if(ranking.length!==4)return;
+    var gidChanged=false;
     if(JSON.stringify(ST.liveGroupResults[gid])!==JSON.stringify(ranking)){
       ST.liveGroupResults[gid]=ranking;
-      changed=true;
+      changed=true;gidChanged=true;
     }
     // Once every team has played all 3 group-stage games, the group is final.
     var isFinal=minPlayed>=3;
     if(!!ST.liveGroupFinal[gid]!==isFinal){
       ST.liveGroupFinal[gid]=isFinal;
-      changed=true;
+      changed=true;gidChanged=true;
     }
+    if(gidChanged)changedGids.push(gid);
   });
+  // Persist any changed groups to Firebase so they survive page reloads
+  if(changedGids.length&&DB){
+    changedGids.forEach(function(gid){
+      DB.ref(RESULTS_BASE+"/liveGroupResults/"+gid).set(ST.liveGroupResults[gid]||null);
+      DB.ref(RESULTS_BASE+"/liveGroupFinal/"+gid).set(!!ST.liveGroupFinal[gid]);
+    });
+  }
   return changed;
 }
 
@@ -1398,7 +1436,12 @@ function renderResultsInto(){
             pts:parseInt(stats.points||stats.PTS||0)
           });
         });
-        if(rows.length) groups.push({name:name,rows:rows});
+        if(rows.length){
+          rows.sort(function(a,b){
+            return b.pts-a.pts || b.gd-a.gd || b.gf-a.gf;
+          });
+          groups.push({name:name,rows:rows});
+        }
       });
     }
   }catch(e){}
@@ -1441,7 +1484,12 @@ function renderResultsInto(){
       h+='<div style="font-size:9px;font-weight:700;color:var(--dim);width:16px;flex-shrink:0">'+(i+1)+'</div>';
       // Find flag from GROUPS
       var flag="";
-      for(var gid in GROUPS){var tm=GROUPS[gid].teams.find(function(t){return t.n===row.name||t.n===row.abbr;});if(tm){flag=tm.flag;break;}}
+      for(var gid in GROUPS){
+        var tm=GROUPS[gid].teams.find(function(t){
+          return t.n===row.name||t.n===row.abbr||teamNameMatch(row.name,t.n);
+        });
+        if(tm){flag=tm.flag;break;}
+      }
       h+='<div style="font-size:14px;width:22px;text-align:center;flex-shrink:0">'+flag+'</div>';
       h+='<div style="font-size:10px;font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px">'+x(row.name)+'</div>';
       h+='<div style="display:flex;gap:12px;font-size:9px;flex-shrink:0">';
@@ -1561,7 +1609,7 @@ function _drawNow(){
   if(cdHtml)h+=cdHtml;
   if(!ST.user&&!ST.admin&&ST.page!=="leaderboard"){
     h+='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
-    PARTS.forEach(function(p){h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+pem(p)+x(p)+'</div><div class="user-btn-sub">'+(ST.locked[ukey(p)]?"&#128274; Locked":"Click to pick")+'</div></button>';});
+    PARTS.forEach(function(p){h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+pem(p)+x(p)+'</div><div class="user-btn-sub">'+(isPlayerLocked(p)?"&#128274; Locked":"Click to pick")+'</div></button>';});
     h+='</div></div>';
     document.getElementById("root").innerHTML=h;bind();return;
   }
@@ -1573,7 +1621,7 @@ function _drawNow(){
     var beforeKickoff=new Date()<WC_KICKOFF;
     h+='<div class="lock-bar"><div class="lock-info">'+(locked?"&#128274; Locked":"&#9998; Making picks")+'</div>';
     h+='<div class="lock-chips">';
-    PARTS.forEach(function(p){var isV=viewer===p;h+='<div class="lchip '+(isV?"viewing":ST.locked[ukey(p)]?"done":"pend")+'" data-view="'+x(p)+'">'+x(p)+'</div>';});
+    PARTS.forEach(function(p){var isV=viewer===p;h+='<div class="lchip '+(isV?"viewing":isPlayerLocked(p)?"done":"pend")+'" data-view="'+x(p)+'">'+x(p)+'</div>';});
     h+='</div>';
     if(viewer!==ST.user)h+='<button class="btn btn-ghost" id="b-viewself" style="font-size:9px">My Picks</button>';
     if(viewer!==ST.user&&ST.viewUser)h+='<div class="viewer-badge" style="display:flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;background:var(--gold-bg);border:2px solid var(--border);font-size:9px;font-weight:800;color:var(--gold-dark);box-shadow:2px 2px 0 var(--border)"><span class="viewer-badge-eyes">👀</span>'+pem(ST.viewUser)+x(ST.viewUser)+'\'s picks</div>';
