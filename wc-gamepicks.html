@@ -106,6 +106,7 @@ a{color:inherit;text-decoration:none}
 /* TOAST */
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--text);color:#ffffff;padding:10px 18px;border-radius:10px;font-size:11px;font-weight:800;opacity:0;transition:opacity .25s,transform .25s;z-index:200;pointer-events:none;white-space:nowrap}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -234,7 +235,8 @@ var ST={
   games:{},
   picks:{},      // my picks: {gameId: "home"|"away"|"draw"}
   allPicks:{},   // everyone's picks: {ukey: {gameId: pick}}
-  players:{}     // {ukey: {name, emoji}}
+  players:{},    // {ukey: {name, emoji}}
+  _refreshing:false
 };
 // Picks require a real account — guests (and visitors with no session) must log in / sign up first.
 function isAuthed(){ return !!(ST.user && !ST.isGuest); }
@@ -290,9 +292,8 @@ function draw(){
   h+='</div>';
   if(ST.user){
     h+='<span class="tag" style="font-size:9px;padding:3px 8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(ST.emoji||"")+' '+x(ST.user)+'</span>';
-  } else {
-    h+='<div style="width:34px"></div>';
   }
+  h+='<button id="refresh-btn" style="display:flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:16px;flex-shrink:0;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);font-family:inherit"'+(ST._refreshing?' disabled':'')+'>'+(ST._refreshing?'<span style="display:inline-block;animation:spin .7s linear infinite">&#8635;</span>':'&#8635;')+'</button>';
   h+='</div>';
 
   if(!isAuthed()){
@@ -468,6 +469,8 @@ function bind(){
     var lbl=side==="draw"?"Draw":findTeamCode(ST.games[gid][side]);
     toast("\u2605 "+lbl);
   });
+  var refreshBtn=document.getElementById("refresh-btn");
+  if(refreshBtn)refreshBtn.addEventListener("click",refreshData);
 }
 
 // ── Load data ────────────────────────────────────────────
@@ -484,6 +487,33 @@ function loadData(){
     draw();
   });
   if(isAuthed())registerPlayer();
+}
+
+// Manual refresh — re-fetches games/picks/players once and re-renders
+function refreshData(){
+  if(!DB){toast("No connection");return;}
+  if(ST._refreshing)return;
+  ST._refreshing=true;
+  draw();
+  var pending=3;
+  function done(){
+    pending--;
+    if(pending<=0){
+      ST._refreshing=false;
+      draw();
+      toast("\u2713 Refreshed");
+    }
+  }
+  DB.ref("wc2026/games").once("value",function(sn){ST.games=sn.val()||{};done();},done);
+  DB.ref("wc2026/publicGamePickPlayers").once("value",function(sn){ST.players=sn.val()||{};done();},done);
+  DB.ref("wc2026/publicGamePicks").once("value",function(sn){
+    ST.allPicks=sn.val()||{};
+    if(isAuthed()){
+      var uk=ukey(ST.user);
+      ST.picks=ST.allPicks[uk]||{};
+    }
+    done();
+  },done);
 }
 
 draw();
