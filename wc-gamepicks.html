@@ -228,38 +228,58 @@ function findTeamCode(name){var t=findTeam(name);return t?t.code:(name||"").slic
 
 // Fetch the World Cup schedule + live scores from ESPN (mirrors worldcup.html admin fetch)
 function fetchGamesFromESPN(cb){
-  var start="20260611",end="20260719";
-  fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+start+"-"+end+"&limit=200")
-    .then(function(r){return r.json();})
-    .then(function(data){
-      var games={};
-      (data.events||[]).forEach(function(ev){
-        var comp=(ev.competitions||[])[0];
-        if(!comp)return;
-        var home=null,away=null;
-        (comp.competitors||[]).forEach(function(c){
-          var entry={name:(c.team&&(c.team.displayName||c.team.name))||"",score:(c.score!=null&&c.score!=="")?parseInt(c.score):null};
-          if(c.homeAway==="home")home=entry;else away=entry;
-        });
-        if(!home||!away)return;
-        var state=(ev.status&&ev.status.type&&ev.status.type.state)||"pre";
-        var completed=!!(ev.status&&ev.status.type&&ev.status.type.completed);
-        var winner=null;
-        if(completed&&home.score!=null&&away.score!=null){
-          if(home.score===away.score)winner="draw";
-          else winner=home.score>away.score?"home":"away";
-        }
-        games[ev.id]={
-          id:ev.id,date:ev.date,
-          home:findTeamName(home.name),homeFlag:findTeamFlag(home.name),homeScore:home.score,
-          away:findTeamName(away.name),awayFlag:findTeamFlag(away.name),awayScore:away.score,
-          status:completed?"post":state,
-          winner:winner
-        };
+  function parseEvents(data,games){
+    (data.events||[]).forEach(function(ev){
+      var comp=(ev.competitions||[])[0];
+      if(!comp)return;
+      var home=null,away=null;
+      (comp.competitors||[]).forEach(function(c){
+        var entry={name:(c.team&&(c.team.displayName||c.team.name))||"",score:(c.score!=null&&c.score!=="")?parseInt(c.score):null};
+        if(c.homeAway==="home")home=entry;else away=entry;
       });
-      if(cb)cb(games,null);
-    })
-    .catch(function(err){if(cb)cb(null,err);});
+      if(!home||!away)return;
+      var state=(ev.status&&ev.status.type&&ev.status.type.state)||"pre";
+      var completed=!!(ev.status&&ev.status.type&&ev.status.type.completed);
+      var winner=null;
+      if(completed&&home.score!=null&&away.score!=null){
+        if(home.score===away.score)winner="draw";
+        else winner=home.score>away.score?"home":"away";
+      }
+      games[ev.id]={
+        id:ev.id,date:ev.date,
+        home:findTeamName(home.name),homeFlag:findTeamFlag(home.name),homeScore:home.score,
+        away:findTeamName(away.name),awayFlag:findTeamFlag(away.name),awayScore:away.score,
+        status:completed?"post":state,
+        winner:winner
+      };
+    });
+  }
+  var start="20260611",end="20260719";
+  var now=new Date();
+  var pad=function(n){return n<10?"0"+n:""+n;};
+  var todayStr=now.getFullYear()+pad(now.getMonth()+1)+pad(now.getDate());
+  var urls=[
+    "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+start+"-"+end+"&limit=200",
+    // Today's scoreboard specifically — live scores can lag in the wide date-range query
+    "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+todayStr+"&limit=200"
+  ];
+  var games={};
+  var remaining=urls.length;
+  var anyOk=false;
+  urls.forEach(function(url){
+    fetch(url)
+      .then(function(r){return r.json();})
+      .then(function(data){
+        anyOk=true;
+        parseEvents(data,games);
+        remaining--;
+        if(remaining<=0&&cb)cb(games,null);
+      })
+      .catch(function(err){
+        remaining--;
+        if(remaining<=0&&cb)cb(anyOk?games:null,anyOk?null:err);
+      });
+  });
 }
 
 // ── State ────────────────────────────────────────────────
@@ -532,14 +552,14 @@ function refreshData(){
   ST._refreshing=true;
   draw();
 
-  function loadRest(){
+  function loadRest(espnSynced){
     var pending=3;
     function done(){
       pending--;
       if(pending<=0){
         ST._refreshing=false;
         draw();
-        toast("\u2713 Refreshed");
+        toast(espnSynced?"\u2713 Refreshed":"\u2713 Refreshed (live scores unavailable)");
       }
     }
     DB.ref("wc2026/games").once("value",function(sn){ST.games=sn.val()||{};done();},done);
@@ -558,9 +578,9 @@ function refreshData(){
   // then re-read everything so we display the fresh data.
   fetchGamesFromESPN(function(games,err){
     if(games&&Object.keys(games).length){
-      DB.ref("wc2026/games").update(games,function(){loadRest();});
+      DB.ref("wc2026/games").update(games,function(){loadRest(true);});
     } else {
-      loadRest();
+      loadRest(false);
     }
   });
 }
