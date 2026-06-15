@@ -457,10 +457,33 @@ var ALL_TEAMS=(function(){
   GROUP_IDS.forEach(function(gid){GROUPS[gid].teams.forEach(function(t){arr.push(t);});});
   return arr;
 })();
+// ESPN sometimes uses different official names than ours — map those here.
+var TEAM_ALIASES={
+  "united states":"USA",
+  "usa":"USA",
+  "us":"USA",
+  "turkey":"Türkiye",
+  "ivory coast":"Ivory Coast",
+  "cote d'ivoire":"Ivory Coast",
+  "côte d'ivoire":"Ivory Coast",
+  "czech republic":"Czechia",
+  "korea republic":"South Korea",
+  "republic of korea":"South Korea",
+  "cabo verde":"Cape Verde",
+  "bosnia and herzegovina":"Bosnia & Herz.",
+  "congo dr":"DR Congo",
+  "dr congo":"DR Congo",
+  "democratic republic of the congo":"DR Congo"
+};
 function findTeam(name){
   if(!name)return null;
   var exact=ALL_TEAMS.find(function(t){return t.n===name;});
   if(exact)return exact;
+  var alias=TEAM_ALIASES[name.toLowerCase().trim()];
+  if(alias){
+    var aliased=ALL_TEAMS.find(function(t){return t.n===alias;});
+    if(aliased)return aliased;
+  }
   return ALL_TEAMS.find(function(t){return teamNameMatch(name,t.n);})||null;
 }
 function findTeamFlag(name){var t=findTeam(name);return t?t.flag:"🏳️";}
@@ -720,9 +743,10 @@ function fetchGamesFromESPN(cb){
         var spread=null,line=null;
         var odds=comp.odds&&comp.odds[0];
         if(odds){
-          line=odds.details||null;
           var rawSpread=(typeof odds.spread==="number")?odds.spread:null;
-          if(rawSpread!=null&&rawSpread!==0){
+          // ESPN soccer "spread" sometimes actually returns moneyline odds (e.g. -210, -525)
+          // rather than a goal-based spread. Only treat small values as a true spread.
+          if(rawSpread!=null&&Math.abs(rawSpread)>0&&Math.abs(rawSpread)<=5){
             var favSide=null;
             // Try to read the favored team from the start of the details string (e.g. "MEX -1.5")
             if(odds.details){
@@ -739,10 +763,8 @@ function fetchGamesFromESPN(cb){
             // Fallback: ESPN convention — negative spread favors the home team
             if(!favSide)favSide=rawSpread<0?"home":"away";
             spread={favSide:favSide,value:Math.abs(rawSpread)};
-            if(!line){
-              var favName=favSide==="home"?findTeamName(home.name):findTeamName(away.name);
-              line=favName+" -"+Math.abs(rawSpread);
-            }
+            var favName=favSide==="home"?findTeamName(home.name):findTeamName(away.name);
+            line=favName+" -"+Math.abs(rawSpread);
           }
         }
         games[ev.id]={
