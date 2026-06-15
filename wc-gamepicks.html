@@ -266,19 +266,24 @@ function fetchGamesFromESPN(cb){
   var games={};
   var remaining=urls.length;
   var anyOk=false;
-  urls.forEach(function(url){
+  function fetchJSON(url,cb){
     fetch(url)
-      .then(function(r){return r.json();})
-      .then(function(data){
-        anyOk=true;
-        parseEvents(data,games);
-        remaining--;
-        if(remaining<=0&&cb)cb(games,null);
-      })
-      .catch(function(err){
-        remaining--;
-        if(remaining<=0&&cb)cb(anyOk?games:null,anyOk?null:err);
+      .then(function(r){ if(!r.ok)throw new Error("HTTP "+r.status); return r.json(); })
+      .then(function(data){cb(data,null);})
+      .catch(function(err1){
+        // Direct fetch failed (often CORS in some hosting environments) — retry via a CORS proxy
+        fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url))
+          .then(function(r){ if(!r.ok)throw new Error("HTTP "+r.status); return r.json(); })
+          .then(function(data){cb(data,null);})
+          .catch(function(err2){cb(null,err2||err1);});
       });
+  }
+  urls.forEach(function(url){
+    fetchJSON(url,function(data,err){
+      if(data){anyOk=true;parseEvents(data,games);}
+      remaining--;
+      if(remaining<=0&&cb)cb(anyOk?games:null,anyOk?null:err);
+    });
   });
 }
 
@@ -611,14 +616,15 @@ function refreshData(){
   ST._refreshing=true;
   draw();
 
-  function loadRest(espnSynced){
+  function loadRest(espnSynced,espnErr){
     var pending=3;
     function done(){
       pending--;
       if(pending<=0){
         ST._refreshing=false;
         draw();
-        toast(espnSynced?"\u2713 Refreshed":"\u2713 Refreshed (live scores unavailable)");
+        if(espnSynced)toast("\u2713 Refreshed");
+        else toast("\u2713 Refreshed (live scores unavailable: "+(espnErr&&espnErr.message?espnErr.message:"network error")+")");
       }
     }
     DB.ref("wc2026/games").once("value",function(sn){ST.games=sn.val()||{};done();},done);
@@ -639,7 +645,7 @@ function refreshData(){
     if(games&&Object.keys(games).length){
       DB.ref("wc2026/games").update(games,function(){loadRest(true);});
     } else {
-      loadRest(false);
+      loadRest(false,err);
     }
   });
 }
