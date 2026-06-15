@@ -230,11 +230,14 @@ var ST={
   page:"picks",
   user:URL_USER||(function(){try{return localStorage.getItem("pp_user");}catch(e){return null;}})(),
   emoji:(function(){try{return localStorage.getItem("pp_emoji")||"🎯";}catch(e){return "🎯";}})(),
+  isGuest:(function(){try{return localStorage.getItem("pp_guest")==="1";}catch(e){return false;}})(),
   games:{},
   picks:{},      // my picks: {gameId: "home"|"away"|"draw"}
   allPicks:{},   // everyone's picks: {ukey: {gameId: pick}}
   players:{}     // {ukey: {name, emoji}}
 };
+// Picks require a real account — guests (and visitors with no session) must log in / sign up first.
+function isAuthed(){ return !!(ST.user && !ST.isGuest); }
 
 // ── Game outcome / record helpers ──────────────────────────
 function isGameLocked(g){
@@ -263,7 +266,7 @@ function calcRecordFromPicks(picks){
 
 // ── Save pick ────────────────────────────────────────────
 function saveGamePick(gameId,side){
-  if(!ST.user||!DB)return;
+  if(!isAuthed()||!DB)return;
   var uk=ukey(ST.user);
   if(!ST.picks)ST.picks={};
   ST.picks[gameId]=side;
@@ -271,7 +274,7 @@ function saveGamePick(gameId,side){
   draw();
 }
 function registerPlayer(){
-  if(!ST.user||!DB)return;
+  if(!isAuthed()||!DB)return;
   var uk=ukey(ST.user);
   DB.ref("wc2026/publicGamePickPlayers/"+uk).set({name:ST.user,emoji:ST.emoji||"🎯"});
 }
@@ -292,10 +295,15 @@ function draw(){
   }
   h+='</div>';
 
-  if(!ST.user){
-    h+=renderNameEntry();
+  if(!isAuthed()){
+    h+='<div class="page-bar">';
+    h+='<button class="ptab'+(ST.page==="picks"?" active":"")+'" data-page="picks">My Picks</button>';
+    h+='<button class="ptab'+(ST.page==="leaderboard"?" active":"")+'" data-page="leaderboard">Leaderboard</button>';
+    h+='</div>';
+    if(ST.page==="leaderboard")h+=renderLeaderboard();
+    else h+=renderSignInRequired();
     document.getElementById("root").innerHTML=h;
-    bindNameEntry();
+    bind();
     return;
   }
 
@@ -312,39 +320,15 @@ function draw(){
   bind();
 }
 
-function renderNameEntry(){
+function renderSignInRequired(){
   var h='<div class="entry-wrap">';
-  h+='<div style="font-size:30px;margin-bottom:6px">🎮⚽</div>';
-  h+='<div style="font-size:14px;font-weight:900;color:var(--text)">World Cup Game Picks</div>';
-  h+='<div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7;max-width:280px;margin-left:auto;margin-right:auto">Pick the outcome of every World Cup match — home win, draw, or away win. Open to everyone. Just for fun!</div>';
-  h+='<input id="name-entry" placeholder="Enter your name" autocomplete="off">';
-  h+='<br><button id="name-entry-btn">Let&#39;s Go</button>';
+  h+='<div style="font-size:30px;margin-bottom:6px">🔒⚽</div>';
+  h+='<div style="font-size:14px;font-weight:900;color:var(--text)">Log In or Sign Up to Make Picks</div>';
+  h+='<div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7;max-width:280px;margin-left:auto;margin-right:auto">'+(ST.isGuest?'You&#39;re browsing as a guest. Create a free account on the Hub to save your World Cup Game Picks.':'Pick the outcome of every World Cup match — home win, draw, or away win. You&#39;ll need an account to save your picks.')+'</div>';
+  h+='<br><a href="index.html" style="display:inline-block;margin-top:14px;padding:10px 24px;border-radius:9px;border:2px solid var(--border);background:var(--gold);color:var(--text);font-weight:800;font-size:12px;box-shadow:3px 3px 0 var(--border);text-decoration:none">Go to Hub to Log In / Sign Up</a>';
+  h+='<div style="font-size:9px;color:var(--dim);margin-top:14px">You can still view the public leaderboard above.</div>';
   h+='</div>';
   return h;
-}
-function bindNameEntry(){
-  var inp=document.getElementById("name-entry");
-  var btn=document.getElementById("name-entry-btn");
-  function submit(){
-    var v=(inp.value||"").trim();
-    if(!v){inp.focus();return;}
-    ST.user=v;
-    try{localStorage.setItem("pp_user",v);}catch(e){}
-    registerPlayer();
-    if(DB){
-      var uk=ukey(ST.user);
-      // Try to pick up an existing emoji from the global users registry
-      DB.ref("users/"+uk+"/emoji").once("value",function(sn){
-        if(sn.val()){ST.emoji=sn.val();try{localStorage.setItem("pp_emoji",ST.emoji);}catch(e){}}
-        registerPlayer();
-        draw();
-      },function(){draw();});
-    } else {
-      draw();
-    }
-  }
-  if(btn)btn.addEventListener("click",submit);
-  if(inp)inp.addEventListener("keydown",function(e){if(e.key==="Enter")submit();});
 }
 
 function renderMyPicks(){
@@ -435,7 +419,7 @@ function renderLeaderboard(){
   h+='<div style="text-align:center;padding:10px 12px 4px;font-size:9px;color:var(--muted);line-height:1.6">🌍 Public leaderboard — everyone&#39;s World Cup Game Picks record. For fun only.</div>';
 
   var players=ST.players||{};
-  var myUk=ukey(ST.user||"");
+  var myUk=isAuthed()?ukey(ST.user||""):"";
   var rows=[];
   // Make sure the current user shows up even before their first pick syncs
   if(myUk&&!players[myUk])players[myUk]={name:ST.user,emoji:ST.emoji};
@@ -493,13 +477,13 @@ function loadData(){
   DB.ref("wc2026/publicGamePickPlayers").on("value",function(sn){ST.players=sn.val()||{};draw();});
   DB.ref("wc2026/publicGamePicks").on("value",function(sn){
     ST.allPicks=sn.val()||{};
-    if(ST.user){
+    if(isAuthed()){
       var uk=ukey(ST.user);
       ST.picks=ST.allPicks[uk]||{};
     }
     draw();
   });
-  if(ST.user)registerPlayer();
+  if(isAuthed())registerPlayer();
 }
 
 draw();

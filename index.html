@@ -468,6 +468,13 @@ function generateGuestName(){
 function isGuest(){
   try{ return localStorage.getItem("pp_guest")==="1"; }catch(e){ return false; }
 }
+// Gate any interactive action behind a real account.
+// Returns true (and shows the appropriate prompt) if the action should be blocked.
+function requireAuth(){
+  if(!SC.currentUser){ showAuthModal("login"); return true; }
+  if(isGuest()){ showGuestPrompt(); return true; }
+  return false;
+}
 function saveGuest(name){
   try{
     localStorage.setItem("pp_user", name);
@@ -487,7 +494,15 @@ function authSignup(username, cb) {
     var existing = sn.val();
     var currentKey = SC.currentUser ? userKey(SC.currentUser.username) : null;
     if(existing && newKey !== currentKey) { cb("Username already taken — choose another"); return; }
-    if(!SC.currentUser){ cb("No current session"); return; }
+    if(!SC.currentUser){
+      // Brand new visitor — create a fresh account directly (no prior guest session to migrate)
+      var freshData = { username: username, groups: [], emoji: "🎯", createdAt: Date.now() };
+      DB.ref("users/"+newKey).set(freshData, function(err){
+        if(err){ cb("Failed to save — check connection"); return; }
+        cb(null, { username: username, groups: [], emoji: "🎯" });
+      });
+      return;
+    }
     var oldKey = userKey(SC.currentUser.username);
     DB.ref("users/"+oldKey).once("value", function(oldSn){
       var oldData = oldSn.val()||{};
@@ -722,6 +737,9 @@ function topbar(showBack) {
       h += '<button class="btn-topbar-login" id="btn-topbar-login" style="font-size:10px;padding:4px 10px;border-radius:8px;background:transparent;border:1px solid #2d3f52;color:#94a3b8;cursor:pointer;font-family:inherit;font-weight:600">Log In</button>';
       h += '<button class="btn-topbar-signup" id="btn-topbar-signup" style="font-size:10px;padding:4px 10px;border-radius:8px;background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.3);color:#a5b4fc;cursor:pointer;font-family:inherit;font-weight:600">Register</button>';
     }
+  } else {
+    h += '<button class="btn-topbar-login" id="btn-topbar-login" style="font-size:10px;padding:4px 10px;border-radius:8px;background:transparent;border:2px solid var(--border);color:var(--text);cursor:pointer;font-family:inherit;font-weight:700">Log In</button>';
+    h += '<button class="btn-topbar-signup" id="btn-topbar-signup" style="font-size:10px;padding:4px 10px;border-radius:8px;background:var(--gold);border:2px solid var(--border);color:var(--text);cursor:pointer;font-family:inherit;font-weight:700">Sign Up</button>';
   }
   if(SC.isMaster && SC.screen!=="admin") {
     h += '<button class="btn btn-gold btn-sm" id="btn-topbar-admin">&#9889; Admin</button>';
@@ -1001,10 +1019,9 @@ function saveUserEmoji(emoji) {
 // ── TIER SYSTEM ──────────────────────────────────────────────────────────────
 function renderProfile() {
   var u = SC.currentUser;
-  if(!u) { SC.screen="home"; draw(); return; }
 
   // Check Firebase for admin trivia reset flag — if set, clear local entry and redraw
-  if(DB && !SC._triviaResetChecked) {
+  if(u && DB && !SC._triviaResetChecked) {
     SC._triviaResetChecked = true;
     var _rn = new Date();
     var _rjan = new Date(_rn.getFullYear(),0,1); var _rjul = new Date(_rn.getFullYear(),6,1);
@@ -1023,8 +1040,8 @@ function renderProfile() {
       });
     }
   }
-  var em = u.emoji || "🍺";
-  var myGroupIds = u.groups || [];
+  var em = (u && u.emoji) || "🎯";
+  var myGroupIds = (u && u.groups) || [];
 
   var h = topbar(false);
   h += '<div class="main fade-up">';
@@ -1034,7 +1051,7 @@ function renderProfile() {
   var greet = hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
   h += '<div class="home-header">';
   h += '<div>';
-  var displayName = u.username || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
+  var displayName = (u && u.username) || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
   h += '<div class="home-greeting">Good ' + greet + (displayName ? ', <span>' + x(displayName) + '</span>' : '') + '</div>';
   h += '</div>';
   h += '<div class="home-avatar" id="btn-edit-emoji">' + em + '</div>';
@@ -1054,7 +1071,7 @@ function renderProfile() {
   // Public Pools — open to everyone, no group required (styled like the trivia banner)
   if(SC.publicPools && SC.publicPools.wcGamePicks){
     var _pname = displayName || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
-    h += '<a href="wc-gamepicks.html?user='+encodeURIComponent(_pname)+'" class="trivia-slim" style="background:var(--blue-bg);text-decoration:none">';
+    h += '<a href="wc-gamepicks.html?user='+encodeURIComponent(_pname)+'" id="public-pool-link" class="trivia-slim" style="background:var(--blue-bg);text-decoration:none">';
     h += '<div style="flex:1"><div class="trivia-slim-lbl" style="text-decoration:none">Public Pool &middot; Open to Everyone</div><div class="trivia-slim-title" style="text-decoration:none">⚽ WC Game Picks are Live</div></div>';
     h += '<div style="font-size:18px;color:var(--muted)">&#8250;</div>';
     h += '</a>';
@@ -1138,9 +1155,11 @@ function renderProfile() {
   h += '</div>';
   render(h);
 
-  document.getElementById("btn-edit-emoji").addEventListener("click", openEmojiPicker);
+  document.getElementById("btn-edit-emoji").addEventListener("click", function(){ if(requireAuth())return; openEmojiPicker(); });
+  var poolLink = document.getElementById("public-pool-link");
+  if(poolLink) poolLink.addEventListener("click", function(e){ if(requireAuth()) e.preventDefault(); });
   document.getElementById("btn-create-profile").addEventListener("click", function(){
-    if(isGuest()){ showGuestPrompt(); return; }
+    if(requireAuth()) return;
     SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
   });
 
@@ -1153,12 +1172,12 @@ function renderProfile() {
     });
   }
   document.getElementById("btn-join-from-profile").addEventListener("click", function(){
-    if(isGuest()){ showGuestPrompt(); return; }
+    if(requireAuth()) return;
     SC.screen="join"; SC.error=""; draw();
   });
   var emptyJoin = document.getElementById("btn-join-empty");
   if(emptyJoin) emptyJoin.addEventListener("click", function(){
-    if(isGuest()){ showGuestPrompt(); return; }
+    if(requireAuth()) return;
     SC.screen="join"; SC.error=""; draw();
   });
 
@@ -1378,7 +1397,7 @@ function renderProfile() {
 // Join a group the user is already a member of — no password needed
 function joinGroupSilent(groupId) {
   if(!DB) return;
-  if(isGuest()) { showGuestPrompt(); return; }
+  if(requireAuth()) return;
   DB.ref("groups/"+groupId).once("value", function(sn){
     var group = sn.val();
     if(!group) { toast("Group not found"); return; }
@@ -1599,7 +1618,7 @@ function renderJoinPw() {
 
 function joinGroup(code) {
   if(!code||code.length<4) { SC.error="Please enter a valid group name."; draw(); return; }
-  if(isGuest()) { showGuestPrompt(); return; }
+  if(requireAuth()) return;
   loadGroup(code, function(group, err){
     if(err) { SC.error=err; draw(); return; }
 
@@ -2308,6 +2327,12 @@ function renderAdmin() {
   h += '<div id="admin-all-groups"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Loading groups...</div></div>';
   h += '</div>';
 
+  h += '<div class="section-label">Public Pool Players</div>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Remove a player from the World Cup Game Picks public pool. This deletes their picks and removes them from the public leaderboard.</div>';
+  h += '<div id="admin-public-pool-players"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Loading players...</div></div>';
+  h += '</div>';
+
   h += '<div class="section-label">Maintenance</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Guest accounts (no password) inactive for 30+ days are automatically purged. You can also run it manually.</div>';
@@ -2523,6 +2548,44 @@ function renderAdmin() {
     }
   });
 
+  // Load Public Pool Players list
+  if(DB) DB.ref("wc2026/publicGamePickPlayers").once("value", function(sn){
+    var container = document.getElementById("admin-public-pool-players");
+    if(!container) return;
+    var players = sn.val()||{};
+    var keys = Object.keys(players);
+    if(!keys.length){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:8px">No players yet</div>'; return; }
+    keys.sort(function(a,b){ return (players[a].name||a).localeCompare(players[b].name||b); });
+    var html = '<div class="pool-controls">';
+    keys.forEach(function(uk){
+      var p = players[uk]||{};
+      html += '<div class="pool-control-row">';
+      html += '<div class="pcr-name">'+(p.emoji||"🎯")+' '+x(p.name||uk)+'</div>';
+      html += '<div class="pcr-btns"><button class="pcr-btn sel-locked" data-admin-del-pool-player="'+x(uk)+'" data-admin-del-pool-name="'+x(p.name||uk)+'">Remove</button></div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    container.querySelectorAll("[data-admin-del-pool-player]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var uk = this.getAttribute("data-admin-del-pool-player");
+        var pname = this.getAttribute("data-admin-del-pool-name");
+        if(!confirm('Remove "'+pname+'" from the World Cup Game Picks pool? Their picks will be deleted.')) return;
+        var b = this;
+        b.textContent="Removing..."; b.style.pointerEvents="none";
+        var updates = {};
+        updates["wc2026/publicGamePickPlayers/"+uk] = null;
+        updates["wc2026/publicGamePicks/"+uk] = null;
+        DB.ref().update(updates, function(err){
+          if(err){ toast("Error"); b.textContent="Remove"; b.style.pointerEvents=""; return; }
+          var row = b.closest(".pool-control-row");
+          if(row) row.remove();
+          toast(pname+" removed from public pool");
+        });
+      });
+    });
+  });
+
   // Load users
   loadAdminUsers("");
   var us = document.getElementById("user-search");
@@ -2568,6 +2631,9 @@ function renderGroupAdminMembers(group, container) {
     } else {
       h += '<button data-ga-grant="'+x(player)+'" data-ga-gid="'+x(group.id)+'" style="font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">⚡</button>';
     }
+    if(!isCreator){
+      h += '<button data-ga-remove="'+x(player)+'" data-ga-gid="'+x(group.id)+'" style="font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid rgba(248,113,113,.5);background:rgba(248,113,113,.15);color:#f87171;cursor:pointer;font-family:inherit;font-weight:700">&#10005; Remove</button>';
+    }
     h += '</div>';
   });
   container.innerHTML = h;
@@ -2603,6 +2669,32 @@ function renderGroupAdminMembers(group, container) {
           if(err){ toast("Error"); return; }
           group.adminUsers = adminUsers;
           toast(player+" admin access revoked");
+          renderGroupAdminMembers(group, container);
+        });
+      });
+    });
+  });
+
+  container.querySelectorAll("[data-ga-remove]").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var player = this.getAttribute("data-ga-remove");
+      var gid = this.getAttribute("data-ga-gid");
+      if(player===group.createdBy){ toast("Can't remove the group creator"); return; }
+      if(!confirm("Remove "+player+" from "+group.name+"?")) return;
+      if(!DB) return;
+      DB.ref("groups/"+gid).once("value", function(sn){
+        var g = sn.val()||{};
+        var players = (g.players||[]).filter(function(p){ return p!==player; });
+        var adminUsers = (g.adminUsers||[]).filter(function(p){ return p!==player; });
+        var updates = {};
+        updates["groups/"+gid+"/players"] = players;
+        updates["groups/"+gid+"/adminUsers"] = adminUsers;
+        DB.ref().update(updates, function(err){
+          if(err){ toast("Error"); return; }
+          group.players = players;
+          group.adminUsers = adminUsers;
+          _groupsCache = null;
+          toast(player+" removed from "+group.name);
           renderGroupAdminMembers(group, container);
         });
       });
@@ -3394,15 +3486,9 @@ function purgeInactiveGuests() {
     // Run guest cleanup once per session (1% chance to avoid running every load)
     if(DB && Math.random() < 0.01) purgeInactiveGuests();
   } else {
-    // New visitor — auto-create a Guest#### account in Firebase
-    var newGuest = generateGuestName();
-    SC.currentUser = { username: newGuest, groups: [], emoji: "🎯" };
-    saveSession(newGuest, "🎯");
-    try { localStorage.setItem("pp_guest","1"); } catch(e) {}
-    if(DB) {
-      var gkey = userKey(newGuest);
-      DB.ref("users/"+gkey).set({ username: newGuest, password: "", groups: [], emoji: "🎯", lastActive: Date.now(), createdAt: Date.now() });
-    }
+    // New visitor — no auto-created guest account. Show the splash, then the
+    // Hub as a browsable (read-only) screen. Any interaction prompts login/signup.
+    SC.currentUser = null;
     SC.screen = "home";
     draw();
   }
