@@ -482,7 +482,21 @@ function saveGamePick(gameId,side){
   DB.ref(BASE+"/gamePicks/"+uk+"/"+gameId).set(side);
   draw();
 }
-// W-L-D record for a user's straight-up game picks (for fun only)
+// Determines which side "covers" the spread for a completed game.
+// Returns "home"|"away"|"push"|null (null = not yet decided / no scores).
+// If the game has no spread data, falls back to straight-up (draw = push).
+function gradeGameCover(g){
+  if(!g||g.status!=="post"||g.homeScore==null||g.awayScore==null)return null;
+  if(g.spread&&g.spread.favSide){
+    var diff=g.spread.favSide==="home"?(g.homeScore-g.awayScore):(g.awayScore-g.homeScore);
+    if(diff>g.spread.value)return g.spread.favSide;
+    if(diff<g.spread.value)return g.spread.favSide==="home"?"away":"home";
+    return "push";
+  }
+  if(g.homeScore===g.awayScore)return "push";
+  return g.homeScore>g.awayScore?"home":"away";
+}
+// W-L-D record for a user's against-the-spread game picks (for fun only)
 function calcGameRecord(user){
   var uk=ukey(user);
   var picks=(ST.gamePicks||{})[uk]||{};
@@ -491,9 +505,10 @@ function calcGameRecord(user){
     var g=ST.games[gid];
     var pick=picks[gid];
     if(!pick)continue;
-    if(!g.winner){pending++;continue;}
-    if(g.winner==="draw")d++;
-    else if(pick===g.winner)w++;
+    var cover=gradeGameCover(g);
+    if(cover===null){pending++;continue;}
+    if(cover==="push")d++;
+    else if(pick===cover)w++;
     else l++;
   }
   return {w:w,l:l,d:d,pending:pending};
@@ -700,14 +715,42 @@ function fetchGamesFromESPN(cb){
           if(home.score===away.score)winner="draw";
           else winner=home.score>away.score?"home":"away";
         }
-        var line=null;
-        if(comp.odds&&comp.odds[0]&&comp.odds[0].details)line=comp.odds[0].details;
+        // Parse the point spread (e.g. "Spain -2.5") instead of moneyline.
+        // spread = {favSide:"home"|"away", value:2.5} — favSide is favored by `value` goals.
+        var spread=null,line=null;
+        var odds=comp.odds&&comp.odds[0];
+        if(odds){
+          line=odds.details||null;
+          var rawSpread=(typeof odds.spread==="number")?odds.spread:null;
+          if(rawSpread!=null&&rawSpread!==0){
+            var favSide=null;
+            // Try to read the favored team from the start of the details string (e.g. "MEX -1.5")
+            if(odds.details){
+              var detTeam=odds.details.replace(/[-+]?\d+(\.\d+)?.*$/,"").trim();
+              if(detTeam){
+                if(teamNameMatch(detTeam,home.name))favSide="home";
+                else if(teamNameMatch(detTeam,away.name))favSide="away";
+              }
+            }
+            if(!favSide){
+              if(odds.homeTeamOdds&&odds.homeTeamOdds.favorite)favSide="home";
+              else if(odds.awayTeamOdds&&odds.awayTeamOdds.favorite)favSide="away";
+            }
+            // Fallback: ESPN convention — negative spread favors the home team
+            if(!favSide)favSide=rawSpread<0?"home":"away";
+            spread={favSide:favSide,value:Math.abs(rawSpread)};
+            if(!line){
+              var favName=favSide==="home"?findTeamName(home.name):findTeamName(away.name);
+              line=favName+" -"+Math.abs(rawSpread);
+            }
+          }
+        }
         games[ev.id]={
           id:ev.id,date:ev.date,
           home:findTeamName(home.name),homeFlag:findTeamFlag(home.name),homeScore:home.score,
           away:findTeamName(away.name),awayFlag:findTeamFlag(away.name),awayScore:away.score,
           status:completed?"post":state,
-          winner:winner,line:line
+          winner:winner,line:line,spread:spread
         };
       });
       if(cb)cb(games,null);
@@ -1358,13 +1401,13 @@ function renderBracket(){
 function renderGamePicks(){
   var viewer=activeViewer();
   var h='';
-  h+='<div style="text-align:center;padding:10px 12px 4px;font-size:9px;color:var(--muted);line-height:1.6">🎮 <b style="color:var(--text)">Game Picks</b> — pick the winner of each match straight-up, just for fun. Your record here doesn\'t affect your pool score.</div>';
+  h+='<div style="text-align:center;padding:10px 12px 4px;font-size:9px;color:var(--muted);line-height:1.6">🎮 <b style="color:var(--text)">Game Picks</b> — pick a team to cover the spread on each match, just for fun. Your record here doesn&#39;t affect your pool score.</div>';
 
   var rec=calcGameRecord(viewer);
   h+='<div class="gp-record">';
   h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--green)">'+rec.w+'</div><div class="gp-rec-lbl">Wins</div></div>';
   h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--red)">'+rec.l+'</div><div class="gp-rec-lbl">Losses</div></div>';
-  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--muted)">'+rec.d+'</div><div class="gp-rec-lbl">Draws</div></div>';
+  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--muted)">'+rec.d+'</div><div class="gp-rec-lbl">Pushes</div></div>';
   h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--gold-dark)">'+rec.pending+'</div><div class="gp-rec-lbl">Pending</div></div>';
   h+='</div>';
 
@@ -1380,11 +1423,11 @@ function renderGamePicks(){
   var myPicks=(ST.gamePicks||{})[uk]||{};
   var canPick=!!(ST.user&&viewer===ST.user);
 
-  var lastDateLbl=null;
   gids.forEach(function(gid){
     var g=games[gid];
     var locked=isGameLocked(g);
     var pick=myPicks[gid];
+    var cover=gradeGameCover(g); // "home"|"away"|"push"|null
     var dateLbl='';
     if(g.date){
       var d=new Date(g.date);
@@ -1397,24 +1440,37 @@ function renderGamePicks(){
       var key=side[0],name=side[1],flag=side[2],score=side[3];
       var cls="gp-team";
       if(pick===key)cls+=" picked";
-      if(g.winner){
-        if(g.winner===key)cls+=" win";
-        else if(g.winner!=="draw")cls+=" loss";
+      if(cover&&cover!=="push"){
+        if(cover===key)cls+=" win";
+        else cls+=" loss";
       }
       if(!canPick||locked)cls+=" locked-np";
       h+='<div class="'+cls+'" '+(canPick&&!locked?'data-gp-pick="'+x(gid)+'" data-gp-side="'+key+'"':'')+'>';
       h+='<div class="gp-flag">'+flag+'</div>';
       h+='<div class="gp-name">'+x(name)+'</div>';
+      // Spread badge for this side (e.g. "-2.5" for the favorite, "+2.5" for the underdog)
+      if(g.spread&&g.spread.favSide){
+        var spreadTxt=g.spread.favSide===key?("-"+g.spread.value):("+"+g.spread.value);
+        h+='<div style="font-size:9px;font-weight:800;color:var(--muted);margin-top:1px">'+spreadTxt+'</div>';
+      }
       if(g.status&&g.status!=="pre")h+='<div class="gp-score">'+(score!=null?score:0)+'</div>';
-      if(pick===key&&!g.winner)h+='<div style="font-size:8px;font-weight:800;color:var(--blue)">YOUR PICK</div>';
+      if(pick===key){
+        if(cover===null)h+='<div style="font-size:8px;font-weight:800;color:var(--blue)">YOUR PICK</div>';
+        else if(cover==="push")h+='<div style="font-size:8px;font-weight:800;color:var(--muted)">PUSH</div>';
+        else if(pick===cover)h+='<div style="font-size:8px;font-weight:800;color:var(--green)">&#10003; COVERED</div>';
+        else h+='<div style="font-size:8px;font-weight:800;color:var(--red)">&#10007; NO COVER</div>';
+      }
       h+='</div>';
       if(i===0)h+='<div class="gp-vs">VS</div>';
     });
     h+='</div>';
-    if(g.line)h+='<div class="gp-line">'+x(g.line)+'</div>';
-    if(g.winner){
-      if(g.winner==="draw")h+='<div class="gp-status" style="color:var(--muted)">Final — Draw</div>';
-      else h+='<div class="gp-status">Final</div>';
+    if(g.line)h+='<div class="gp-line">Line: '+x(g.line)+'</div>';
+    if(cover){
+      if(cover==="push")h+='<div class="gp-status" style="color:var(--muted)">Final — Push (exact spread)</div>';
+      else{
+        var coveredName=cover==="home"?g.home:g.away;
+        h+='<div class="gp-status">Final — '+x(coveredName)+' covers</div>';
+      }
     } else if(locked){
       h+='<div class="gp-status" style="color:var(--gold-dark)">🔒 In progress / kicked off</div>';
     } else if(!pick&&canPick){
