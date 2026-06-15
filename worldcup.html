@@ -114,6 +114,26 @@ a{color:inherit;text-decoration:none}
 .lchip.pend{background:#ffffff;color:var(--muted)}
 .lchip.viewing{background:var(--gold);color:var(--text)}
 
+/* GAME PICKS */
+.gp-record{display:flex;align-items:center;justify-content:center;gap:14px;padding:12px;background:var(--cream);border-bottom:2px solid var(--border2)}
+.gp-record .gp-rec-num{font-size:20px;font-weight:900}
+.gp-record .gp-rec-lbl{font-size:8px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.gp-card{background:var(--card);border:2px solid var(--border);border-radius:10px;margin:10px 12px;padding:10px;box-shadow:3px 3px 0 var(--border)}
+.gp-date{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;text-align:center}
+.gp-teams{display:flex;align-items:center;gap:8px}
+.gp-team{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 6px;border:2px solid var(--border2);border-radius:9px;cursor:pointer;background:#ffffff;text-align:center}
+.gp-team:active{transform:translate(2px,2px)}
+.gp-team.picked{border-color:var(--blue);background:var(--blue-bg);box-shadow:2px 2px 0 var(--border)}
+.gp-team.win{border-color:var(--green);background:var(--green-bg)}
+.gp-team.loss{border-color:var(--red);background:var(--red-bg);opacity:.7}
+.gp-team.locked-np{cursor:default;opacity:.6}
+.gp-flag{font-size:22px}
+.gp-name{font-size:9px;font-weight:800;color:var(--text)}
+.gp-score{font-size:14px;font-weight:900;color:var(--text)}
+.gp-vs{font-size:8px;font-weight:800;color:var(--muted)}
+.gp-line{font-size:8px;color:var(--muted);text-align:center;margin-top:6px}
+.gp-status{font-size:8px;font-weight:800;text-align:center;margin-top:6px;color:var(--green)}
+
 /* SCORE BANNER */
 .score-banner{display:flex;gap:6px;padding:8px 12px;border-bottom:2px solid var(--border2);overflow-x:auto;align-items:center;background:var(--cream)}
 .score-banner::-webkit-scrollbar{display:none}
@@ -362,7 +382,7 @@ var WILD_CARD_COUNT=8;
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
-var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{}};
+var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},gamePicks:{},games:{}};
 var _dragState=null; // active drag state
 
 try{
@@ -428,6 +448,55 @@ function teamNameMatch(a,b){
   return shorter.every(function(sw){
     return longer.some(function(lw){return lw.indexOf(sw)>=0||sw.indexOf(lw)>=0;});
   });
+}
+
+// ── Game Picks (for fun — does not affect pool score) ──────
+// Flat list of all 48 teams across all groups, for matching ESPN names to flags etc.
+var ALL_TEAMS=(function(){
+  var arr=[];
+  GROUP_IDS.forEach(function(gid){GROUPS[gid].teams.forEach(function(t){arr.push(t);});});
+  return arr;
+})();
+function findTeam(name){
+  if(!name)return null;
+  var exact=ALL_TEAMS.find(function(t){return t.n===name;});
+  if(exact)return exact;
+  return ALL_TEAMS.find(function(t){return teamNameMatch(name,t.n);})||null;
+}
+function findTeamFlag(name){var t=findTeam(name);return t?t.flag:"🏳️";}
+function findTeamName(name){var t=findTeam(name);return t?t.n:name;}
+
+// A game is locked for picking once it has kicked off (or is no longer "pre")
+function isGameLocked(g){
+  if(!g)return true;
+  if(g.status&&g.status!=="pre")return true;
+  if(g.date&&new Date(g.date)<=new Date())return true;
+  return false;
+}
+function saveGamePick(gameId,side){
+  if(!ST.user||!DB)return;
+  var uk=ukey(ST.user);
+  if(!ST.gamePicks)ST.gamePicks={};
+  if(!ST.gamePicks[uk])ST.gamePicks[uk]={};
+  ST.gamePicks[uk][gameId]=side;
+  DB.ref(BASE+"/gamePicks/"+uk+"/"+gameId).set(side);
+  draw();
+}
+// W-L-D record for a user's straight-up game picks (for fun only)
+function calcGameRecord(user){
+  var uk=ukey(user);
+  var picks=(ST.gamePicks||{})[uk]||{};
+  var w=0,l=0,d=0,pending=0;
+  for(var gid in ST.games){
+    var g=ST.games[gid];
+    var pick=picks[gid];
+    if(!pick)continue;
+    if(!g.winner){pending++;continue;}
+    if(g.winner==="draw")d++;
+    else if(pick===g.winner)w++;
+    else l++;
+  }
+  return {w:w,l:l,d:d,pending:pending};
 }
 
 // Returns the effective group ranking for scoring purposes:
@@ -608,6 +677,43 @@ function pushLiveGroupsToResults(groupsData){
   if(!DB||!groupsData)return;
   DB.ref(RESULTS_BASE+"/liveResults/groups").set(groupsData);
 }
+// Fetch the World Cup schedule + scores from ESPN for the Game Picks tab (for fun, no scoring impact)
+function fetchGamesFromESPN(cb){
+  var start="20260611",end="20260719";
+  fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+start+"-"+end+"&limit=200")
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var games={};
+      (data.events||[]).forEach(function(ev){
+        var comp=(ev.competitions||[])[0];
+        if(!comp)return;
+        var home=null,away=null;
+        (comp.competitors||[]).forEach(function(c){
+          var entry={name:(c.team&&(c.team.displayName||c.team.name))||"",score:(c.score!=null&&c.score!=="")?parseInt(c.score):null};
+          if(c.homeAway==="home")home=entry;else away=entry;
+        });
+        if(!home||!away)return;
+        var state=(ev.status&&ev.status.type&&ev.status.type.state)||"pre";
+        var completed=!!(ev.status&&ev.status.type&&ev.status.type.completed);
+        var winner=null;
+        if(completed&&home.score!=null&&away.score!=null){
+          if(home.score===away.score)winner="draw";
+          else winner=home.score>away.score?"home":"away";
+        }
+        var line=null;
+        if(comp.odds&&comp.odds[0]&&comp.odds[0].details)line=comp.odds[0].details;
+        games[ev.id]={
+          id:ev.id,date:ev.date,
+          home:findTeamName(home.name),homeFlag:findTeamFlag(home.name),homeScore:home.score,
+          away:findTeamName(away.name),awayFlag:findTeamFlag(away.name),awayScore:away.score,
+          status:completed?"post":state,
+          winner:winner,line:line
+        };
+      });
+      if(cb)cb(games,null);
+    })
+    .catch(function(err){if(cb)cb(null,err);});
+}
 function wipeBracketPicks(){
   if(!DB)return;
   // Remove bracket picks for all users
@@ -645,6 +751,9 @@ function loadData(){
     // Pseudo-live group standings — persisted so scores survive page reloads
     DB.ref(RESULTS_BASE+"/liveGroupResults").on("value",function(sn){ST.liveGroupResults=sn.val()||{};draw();_restoreScroll();});
     DB.ref(RESULTS_BASE+"/liveGroupFinal").on("value",function(sn){ST.liveGroupFinal=sn.val()||{};draw();_restoreScroll();});
+    // Game Picks — for-fun straight-up picks, no impact on pool score
+    DB.ref(BASE+"/gamePicks").on("value",function(sn){ST.gamePicks=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(RESULTS_BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};draw();_restoreScroll();});
   }
   s1();
 }
@@ -1245,6 +1354,78 @@ function renderBracket(){
   return h;
 }
 
+// ── GAME PICKS (for fun — does not affect pool score) ───────
+function renderGamePicks(){
+  var viewer=activeViewer();
+  var h='';
+  h+='<div style="text-align:center;padding:10px 12px 4px;font-size:9px;color:var(--muted);line-height:1.6">🎮 <b style="color:var(--text)">Game Picks</b> — pick the winner of each match straight-up, just for fun. Your record here doesn\'t affect your pool score.</div>';
+
+  var rec=calcGameRecord(viewer);
+  h+='<div class="gp-record">';
+  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--green)">'+rec.w+'</div><div class="gp-rec-lbl">Wins</div></div>';
+  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--red)">'+rec.l+'</div><div class="gp-rec-lbl">Losses</div></div>';
+  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--muted)">'+rec.d+'</div><div class="gp-rec-lbl">Draws</div></div>';
+  h+='<div style="text-align:center"><div class="gp-rec-num" style="color:var(--gold-dark)">'+rec.pending+'</div><div class="gp-rec-lbl">Pending</div></div>';
+  h+='</div>';
+
+  var games=ST.games||{};
+  var gids=Object.keys(games);
+  if(!gids.length){
+    h+='<div style="text-align:center;padding:40px 20px;color:var(--muted);font-size:11px;line-height:1.8">No games loaded yet.<br><span style="font-size:9px;color:var(--dim)">Check back once the admin loads the schedule.</span></div>';
+    return h;
+  }
+  gids.sort(function(a,b){return new Date(games[a].date)-new Date(games[b].date);});
+
+  var uk=ukey(viewer||"");
+  var myPicks=(ST.gamePicks||{})[uk]||{};
+  var canPick=!!(ST.user&&viewer===ST.user);
+
+  var lastDateLbl=null;
+  gids.forEach(function(gid){
+    var g=games[gid];
+    var locked=isGameLocked(g);
+    var pick=myPicks[gid];
+    var dateLbl='';
+    if(g.date){
+      var d=new Date(g.date);
+      dateLbl=d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+    }
+    h+='<div class="gp-card">';
+    if(dateLbl)h+='<div class="gp-date">'+x(dateLbl)+'</div>';
+    h+='<div class="gp-teams">';
+    [["home",g.home,g.homeFlag,g.homeScore],["away",g.away,g.awayFlag,g.awayScore]].forEach(function(side,i){
+      var key=side[0],name=side[1],flag=side[2],score=side[3];
+      var cls="gp-team";
+      if(pick===key)cls+=" picked";
+      if(g.winner){
+        if(g.winner===key)cls+=" win";
+        else if(g.winner!=="draw")cls+=" loss";
+      }
+      if(!canPick||locked)cls+=" locked-np";
+      h+='<div class="'+cls+'" '+(canPick&&!locked?'data-gp-pick="'+x(gid)+'" data-gp-side="'+key+'"':'')+'>';
+      h+='<div class="gp-flag">'+flag+'</div>';
+      h+='<div class="gp-name">'+x(name)+'</div>';
+      if(g.status&&g.status!=="pre")h+='<div class="gp-score">'+(score!=null?score:0)+'</div>';
+      if(pick===key&&!g.winner)h+='<div style="font-size:8px;font-weight:800;color:var(--blue)">YOUR PICK</div>';
+      h+='</div>';
+      if(i===0)h+='<div class="gp-vs">VS</div>';
+    });
+    h+='</div>';
+    if(g.line)h+='<div class="gp-line">'+x(g.line)+'</div>';
+    if(g.winner){
+      if(g.winner==="draw")h+='<div class="gp-status" style="color:var(--muted)">Final — Draw</div>';
+      else h+='<div class="gp-status">Final</div>';
+    } else if(locked){
+      h+='<div class="gp-status" style="color:var(--gold-dark)">🔒 In progress / kicked off</div>';
+    } else if(!pick&&canPick){
+      h+='<div class="gp-status" style="color:var(--muted);font-weight:700">Tap a team to pick</div>';
+    }
+    h+='</div>';
+  });
+
+  return h;
+}
+
 // ── RULES ─────────────────────────────────────────────────
 function renderRules(){
   function section(icon,title,body){
@@ -1548,6 +1729,13 @@ function renderAdmin(){
   h+='<div id="adm-live-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
 
+  h+='<div class="adm-sec-label">🎮 Game Picks Schedule</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the full match schedule + live scores from ESPN for the "for fun" Game Picks tab. Re-fetch anytime to update scores/results.</div>';
+  h+='<button id="adm-fetch-games" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(85,144,232,.4);background:rgba(85,144,232,.1);color:var(--blue);font-family:inherit;cursor:pointer">🗓️ Fetch Game Schedule &amp; Scores</button>';
+  h+='<div id="adm-games-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
   h+='<div class="adm-sec-label">Phase Control</div>';
   if(phase==="groups"){h+='<button class="adm-phase-btn adm-close" id="adm-close">&#128274; Close Group Stage → Open Knockout</button>';}
   else{h+='<div style="font-size:9px;color:var(--wc-green);padding:6px 0">&#10003; Knockout phase active</div><button class="adm-phase-btn adm-open" id="adm-reopen" style="margin-top:6px">Reopen Group Stage</button>';}
@@ -1604,7 +1792,7 @@ function _drawNow(){
   if(ST.admin)h+='<button class="btn btn-red" id="b-reset-top" style="width:34px;height:34px;padding:0;display:flex;align-items:center;justify-content:center">&#8635;</button>';
   h+='</div>';
   h+='</div>';
-  var tabs=[{id:"leaderboard",lbl:"Leaderboard"},{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"results",lbl:"Results"},{id:"rules",lbl:"Rules"}];
+  var tabs=[{id:"leaderboard",lbl:"Leaderboard"},{id:"groups",lbl:"Groups"},{id:"wildcard",lbl:"Wild Cards"},{id:"bracket",lbl:"Bracket"},{id:"games",lbl:"Game Picks"},{id:"results",lbl:"Results"},{id:"rules",lbl:"Rules"}];
   if(ST.admin)tabs.push({id:"admin",lbl:"Admin"});
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
@@ -1642,6 +1830,7 @@ function _drawNow(){
   if(ST.page==="groups")h+=renderGroups();
   else if(ST.page==="wildcard")h+=renderWildCards();
   else if(ST.page==="bracket")h+=renderBracket();
+  else if(ST.page==="games")h+=renderGamePicks();
   else if(ST.page==="results")h+='<div id="results-wrap" style="min-height:60vh;padding:10px 12px"><div style="text-align:center;padding:30px;color:var(--muted)">Loading results...</div></div>';
   else if(ST.page==="leaderboard")h+=renderLB();
   else if(ST.page==="rules")h+=renderRules();
@@ -1829,6 +2018,13 @@ function initDragList(list){
 
 function bind(){
   var els,i,el;
+  els=document.querySelectorAll("[data-gp-pick]");
+  for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
+    var gid=this.getAttribute("data-gp-pick");
+    var side=this.getAttribute("data-gp-side");
+    saveGamePick(gid,side);
+    toast((side==="home"?"\u2605 ":"\u2605 ")+findTeamName(ST.games[gid][side]));
+  });
   els=document.querySelectorAll("[data-bkpick]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
     if(!ST.user||isLocked())return;
@@ -1948,6 +2144,26 @@ function bind(){
         if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
         toast("Fetch failed");
       });
+  });
+  el=document.getElementById("adm-fetch-games");if(el)el.addEventListener("click",function(){
+    var statusEl=document.getElementById("adm-games-status");
+    if(statusEl)statusEl.textContent="Fetching schedule from ESPN...";
+    fetchGamesFromESPN(function(games,err){
+      if(err){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
+        toast("Fetch failed");
+        return;
+      }
+      var count=Object.keys(games||{}).length;
+      if(!count){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No games found</span>';
+        toast("No games found");
+        return;
+      }
+      if(DB)DB.ref(RESULTS_BASE+"/games").update(games);
+      if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Loaded '+count+' games</span>';
+      toast("🗓️ Game schedule updated");
+    });
   });
 }
 
