@@ -348,16 +348,19 @@ function draw(){
   h+='</div>';
   if(ST.user){
     h+='<span class="tag" style="font-size:9px;padding:3px 8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(ST.emoji||"")+' '+x(ST.user)+'</span>';
+  } else {
+    h+='<div style="width:34px"></div>';
   }
-  h+='<button id="refresh-btn" style="display:flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:16px;flex-shrink:0;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);font-family:inherit"'+(ST._refreshing?' disabled':'')+'>'+(ST._refreshing?'<span style="display:inline-block;animation:spin .7s linear infinite">&#8635;</span>':'&#8635;')+'</button>';
   h+='</div>';
 
   if(!isAuthed()){
     h+='<div class="page-bar">';
     h+='<button class="ptab'+(ST.page==="picks"?" active":"")+'" data-page="picks">My Picks</button>';
+    h+='<button class="ptab'+(ST.page==="scores"?" active":"")+'" data-page="scores">Scores</button>';
     h+='<button class="ptab'+(ST.page==="leaderboard"?" active":"")+'" data-page="leaderboard">Leaderboard</button>';
     h+='</div>';
     if(ST.page==="leaderboard")h+=renderLeaderboard();
+    else if(ST.page==="scores")h+=renderScores();
     else h+=renderSignInRequired();
     document.getElementById("root").innerHTML=h;
     bind();
@@ -365,12 +368,13 @@ function draw(){
   }
 
   // Tabs
-  var tabs=[{id:"picks",lbl:"My Picks"},{id:"leaderboard",lbl:"Leaderboard"}];
+  var tabs=[{id:"picks",lbl:"My Picks"},{id:"scores",lbl:"Scores"},{id:"leaderboard",lbl:"Leaderboard"}];
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
 
   if(ST.page==="leaderboard")h+=renderLeaderboard();
+  else if(ST.page==="scores")h+=renderScores();
   else h+=renderMyPicks();
 
   document.getElementById("root").innerHTML=h;
@@ -385,6 +389,61 @@ function renderSignInRequired(){
   h+='<br><a href="index.html" style="display:inline-block;margin-top:14px;padding:10px 24px;border-radius:9px;border:2px solid var(--border);background:var(--gold);color:var(--text);font-weight:800;font-size:12px;box-shadow:3px 3px 0 var(--border);text-decoration:none">Go to Hub to Log In / Sign Up</a>';
   h+='<div style="font-size:9px;color:var(--dim);margin-top:14px">You can still view the public leaderboard above.</div>';
   h+='</div>';
+  return h;
+}
+
+function renderScores(){
+  var h='';
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px 4px;gap:8px">';
+  h+='<div style="flex:1;font-size:9px;color:var(--muted);line-height:1.6">⚽ Live scores and results for every World Cup match.</div>';
+  h+='<button id="refresh-btn" style="display:flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:16px;flex-shrink:0;color:var(--text);background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);font-family:inherit"'+(ST._refreshing?' disabled':'')+'>'+(ST._refreshing?'<span style="display:inline-block;animation:spin .7s linear infinite">&#8635;</span>':'&#8635;')+'</button>';
+  h+='</div>';
+
+  var games=ST.games||{};
+  var gids=Object.keys(games);
+  if(!gids.length){
+    h+='<div style="text-align:center;padding:40px 20px;color:var(--muted);font-size:11px;line-height:1.8">No games loaded yet.<br><span style="font-size:9px;color:var(--dim)">Tap refresh to load the schedule.</span></div>';
+    return h;
+  }
+  gids.sort(function(a,b){return new Date(games[a].date)-new Date(games[b].date);});
+
+  gids.forEach(function(gid){
+    var g=games[gid];
+    var outcome=gameOutcome(g);
+    var locked=isGameLocked(g);
+    var dateLbl='',timeLbl='';
+    if(g.date){
+      var d=new Date(g.date);
+      dateLbl=d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+      timeLbl=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+    }
+    h+='<div class="gp-card">';
+    if(dateLbl)h+='<div class="gp-date">'+x(dateLbl)+'</div>';
+
+    h+='<div class="gp-bug">';
+    h+='<div class="gp-team"><div class="gp-flag">'+g.homeFlag+'</div><div class="gp-code">'+x(findTeamCode(g.home))+'</div>';
+    if(g.status&&g.status!=="pre")h+='<div class="gp-score">'+(g.homeScore!=null?g.homeScore:0)+'</div>';
+    h+='</div>';
+    h+='<div class="gp-center">';
+    if(timeLbl)h+='<div class="gp-time">'+x(timeLbl)+'</div>';
+    h+='<div class="gp-vs">VS</div>';
+    h+='</div>';
+    h+='<div class="gp-team"><div class="gp-flag">'+g.awayFlag+'</div><div class="gp-code">'+x(findTeamCode(g.away))+'</div>';
+    if(g.status&&g.status!=="pre")h+='<div class="gp-score">'+(g.awayScore!=null?g.awayScore:0)+'</div>';
+    h+='</div>';
+    h+='</div>';
+
+    if(outcome){
+      if(outcome==="draw")h+='<div class="gp-status" style="color:var(--muted)">Final — Draw</div>';
+      else h+='<div class="gp-status">Final — '+x(findTeamCode(outcome==="home"?g.home:g.away))+' win</div>';
+    } else if(locked){
+      h+='<div class="gp-status" style="color:var(--gold-dark)">🔒 In progress / kicked off</div>';
+    } else {
+      h+='<div class="gp-status" style="color:var(--muted);font-weight:700">Not started</div>';
+    }
+    h+='</div>';
+  });
+
   return h;
 }
 
