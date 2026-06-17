@@ -239,8 +239,19 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 /* No pick */
 .gp-nopick{color:var(--dim);font-size:9px;font-weight:700}
 /* Week selector */
-.gp-week-bar{padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;gap:6px;overflow-x:auto;flex-shrink:0}
+.gp-week-bar{padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;gap:6px;overflow-x:auto;flex-shrink:0;align-items:center}
 .gp-week-bar::-webkit-scrollbar{display:none}
+/* Compare mode */
+.gp-compare-btn{flex-shrink:0;padding:5px 12px;border-radius:8px;border:2px solid var(--border);background:#ffffff;color:var(--muted);font-size:9px;font-weight:800;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);margin-left:auto;white-space:nowrap}
+.gp-compare-btn.active{background:var(--blue-bg);color:var(--blue);border-color:var(--border)}
+.gp-compare-btn:active{transform:translate(2px,2px);box-shadow:none}
+.gp-table tr.gp-row-selectable{cursor:pointer}
+.gp-table tr.gp-row-selectable:active td{background:var(--cream)}
+.gp-table tr.gp-row-dimmed td{opacity:.2}
+.gp-table tr.gp-row-dimmed td:first-child{opacity:.2}
+.gp-table tr.gp-row-selected td{background:var(--blue-bg)!important}
+.gp-table tr.gp-row-selected td:first-child{background:var(--blue-bg)!important}
+.gp-compare-hint{font-size:9px;font-weight:700;color:var(--blue);padding:5px 12px;background:var(--blue-bg);border-bottom:1px solid var(--border2);text-align:center;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -283,7 +294,9 @@ var ST={
   importGames:[],
   importSelected:{},
   importLoading:false,
-  importError:""
+  importError:"",
+  compareMode:false,
+  compareSelected:{}
 };
 
 var DB=null;
@@ -1102,7 +1115,12 @@ function renderGroupPicks(){
   ST.weekIds.forEach(function(w){
     h+='<button class="wtab'+(weekId===w?" active":"")+'" data-week="'+w+'">'+x(ST.weekLabels[w]||w)+'</button>';
   });
+  h+='<button class="gp-compare-btn'+(ST.compareMode?" active":"")+'" id="b-compare-toggle">'+(ST.compareMode?'&#10005; Clear':'&#9878; Compare')+'</button>';
   h+='</div>';
+  if(ST.compareMode){
+    var selCount=Object.keys(ST.compareSelected).length;
+    h+='<div class="gp-compare-hint">'+(selCount===0?'Tap rows to select players to compare':selCount+' player'+(selCount!==1?'s':'')+' selected &mdash; tap rows to add/remove')+'</div>';
+  }
 
   if(!weekId){ h+='<div class="lb-note">No week selected.</div>'; return h; }
 
@@ -1173,10 +1191,15 @@ function renderGroupPicks(){
     });
 
     var isMe=ST.user&&player===ST.user;
-    h+='<tr'+(isMe?' style="background:var(--gold-bg)"':'')+'>';
+    var isSelected=ST.compareMode&&ST.compareSelected[ukey(player)];
+    var hasSelection=ST.compareMode&&Object.keys(ST.compareSelected).length>0;
+    var isDimmed=ST.compareMode&&hasSelection&&!isSelected;
+    var rowCls=(ST.compareMode?"gp-row-selectable":"")+(isSelected?" gp-row-selected":isDimmed?" gp-row-dimmed":"");
+    h+='<tr class="'+rowCls+'" data-compare-player="'+x(ukey(player))+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>';
 
     // Name cell
-    h+='<td class="gp-name"'+(isMe?' style="background:var(--gold-bg)"':'')+'>'+pem(player)+x(player)+'</td>';
+    var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+pem(player)+x(player)+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
 
     // Pick cells
     active.forEach(function(gid){
@@ -1306,6 +1329,53 @@ function bind(){
   el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
+
+  // Compare mode toggle
+  el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
+    ST.compareMode=!ST.compareMode;
+    ST.compareSelected={};
+    draw();
+  });
+
+  // Compare row tap — toggle selection without full redraw for instant feel
+  els=document.querySelectorAll("tr[data-compare-player]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
+    if(!ST.compareMode) return;
+    var pk=this.getAttribute("data-compare-player");
+    if(ST.compareSelected[pk]) delete ST.compareSelected[pk];
+    else ST.compareSelected[pk]=true;
+    // Update all rows instantly without full redraw
+    var allRows=document.querySelectorAll("tr[data-compare-player]");
+    var hasSelection=Object.keys(ST.compareSelected).length>0;
+    for(var j=0;j<allRows.length;j++){
+      var rp=allRows[j].getAttribute("data-compare-player");
+      var rSel=!!ST.compareSelected[rp];
+      allRows[j].classList.remove("gp-row-selected","gp-row-dimmed");
+      if(rSel) allRows[j].classList.add("gp-row-selected");
+      else if(hasSelection) allRows[j].classList.add("gp-row-dimmed");
+      // Update checkmark in name cell
+      var nameCell=allRows[j].querySelector(".gp-name");
+      if(nameCell){
+        nameCell.style.background=rSel?"var(--blue-bg)":"";
+        var tick=nameCell.querySelector(".gp-sel-tick");
+        if(rSel&&!tick){
+          var s=document.createElement("span");
+          s.className="gp-sel-tick";
+          s.style.cssText="font-size:9px;color:var(--blue)";
+          s.textContent=" ✓";
+          nameCell.appendChild(s);
+        } else if(!rSel&&tick){
+          tick.remove();
+        }
+      }
+    }
+    // Update hint text
+    var hint=document.querySelector(".gp-compare-hint");
+    if(hint){
+      var sc=Object.keys(ST.compareSelected).length;
+      hint.textContent=sc===0?"Tap rows to select players to compare":sc+" player"+(sc!==1?"s":"")+" selected — tap rows to add/remove";
+    }
+  });
 
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="picks";draw();return;}
