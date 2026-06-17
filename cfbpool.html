@@ -546,10 +546,9 @@ function startScoreRefresh(){
 function stopScoreRefresh(){clearInterval(_scTimer);_scTimer=null;}
 
 // ── ESPN SCHEDULE IMPORT (Admin) ───────────────────────────────────────────
-function fetchEspnSchedule(year,week,conf){
+function fetchEspnSchedule(year,week){
   ST.importLoading=true; ST.importError=""; draw();
-  var grp=conf||"80";
-  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups="+grp+"&limit=300";
+  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
   fetch(url)
     .then(function(r){return r.json();})
     .then(function(data){
@@ -583,6 +582,9 @@ function parseEspnSchedule(data){
     }
     var awayLogo=teamLogo(away);
     var homeLogo=teamLogo(home);
+    // Conference IDs for client-side filtering
+    var awayConf=String((away.team&&away.team.conferenceId)||"");
+    var homeConf=String((home.team&&home.team.conferenceId)||"");
     var dt=ev.date?new Date(ev.date):null;
     var kickoff=dt?dt.toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}):"";
     var kickoffTs=dt?dt.getTime():null;
@@ -604,7 +606,7 @@ function parseEspnSchedule(data){
         else favSide="home";
       }
     }
-    return {away:awayName,home:homeName,awayLogo:awayLogo,homeLogo:homeLogo,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide};
+    return {away:awayName,home:homeName,awayLogo:awayLogo,homeLogo:homeLogo,awayConf:awayConf,homeConf:homeConf,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide};
   });
 }
 function guessWeekNumber(label){
@@ -1170,49 +1172,47 @@ function renderStandings(){
 function renderImportPanel(weekId){
   var year=ST.importYear||2026;
   var week=ST.importWeek||guessWeekNumber(ST.weekLabels[weekId]);
-  var conf=ST.importConf||"80";
   var CONFS=[
-    {v:"80",l:"All FBS"},
-    {v:"1",l:"ACC"},
-    {v:"4",l:"Big 12"},
-    {v:"5",l:"Big Ten"},
-    {v:"9",l:"SEC"},
-    {v:"17",l:"AAC"},
-    {v:"8",l:"Mountain West"},
-    {v:"151",l:"Sun Belt"},
-    {v:"37",l:"CUSA"},
-    {v:"18",l:"MAC"},
-    {v:"48",l:"Independents"}
+    {v:"1",l:"ACC"},{v:"4",l:"Big 12"},{v:"5",l:"Big Ten"},{v:"9",l:"SEC"},
+    {v:"17",l:"AAC"},{v:"8",l:"MWC"},{v:"151",l:"Sun Belt"},
+    {v:"37",l:"CUSA"},{v:"18",l:"MAC"},{v:"48",l:"Ind"}
   ];
   var h='<div class="adm-game">';
   h+='<div class="adm-game-title">College Football Schedule &mdash; FBS (via ESPN)</div>';
   h+='<div class="adm-row">';
   h+='<input class="adm-input" id="imp-year" type="number" placeholder="Year" value="'+year+'" style="max-width:80px">';
   h+='<input class="adm-input" id="imp-week" type="number" placeholder="Week #" value="'+week+'" style="max-width:80px">';
-  h+='<select class="adm-input" id="imp-conf" style="flex:1;min-width:0">';
-  CONFS.forEach(function(c){ h+='<option value="'+c.v+'"'+(conf===c.v?" selected":"")+'>'+c.l+'</option>'; });
-  h+='</select>';
-  h+='<button class="btn btn-gold" id="b-fetch-espn">'+(ST.importLoading?"Loading\u2026":"Fetch")+'</button>';
+  h+='<button class="btn btn-gold" id="b-fetch-espn" style="flex-shrink:0">'+(ST.importLoading?"Loading\u2026":"Fetch Games")+'</button>';
   h+='</div>';
+
+  // Filter pills — only show after games are loaded
+  if(ST.importGames&&ST.importGames.length){
+    h+='<div style="display:flex;gap:5px;flex-wrap:wrap;margin:8px 0 4px">';
+    // Top 25 pill
+    h+='<button id="b-imp-top25" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#ffffff;color:var(--muted)')+'"># Top 25</button>';
+    // Conference pills
+    CONFS.forEach(function(c){
+      var active=ST.importConf===c.v;
+      h+='<button class="imp-conf-pill" data-conf="'+c.v+'" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(active?'background:var(--blue-bg);color:var(--blue)':'background:#ffffff;color:var(--muted)')+'">'+(active?'✕ ':'')+c.l+'</button>';
+    });
+    h+='</div>';
+  }
+
   if(ST.importError) h+='<div style="font-size:10px;font-weight:700;color:var(--red2);margin-bottom:6px">'+x(ST.importError)+'</div>';
   if(ST.importGames&&ST.importGames.length){
     var selCount=Object.keys(ST.importSelected).length;
-    // Filter to ranked games if top25 mode active
-    var filteredGames=ST.importGames;
-    if(ST.importTop25){
-      filteredGames=ST.importGames.filter(function(g){
-        return RANKINGS[normalizeTeamName(g.away)]||RANKINGS[normalizeTeamName(g.home)];
-      });
-    }
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;gap:8px">';
+    // Apply filters
+    var filteredGames=ST.importGames.filter(function(g){
+      var confOk=!ST.importConf||(g.awayConf===ST.importConf||g.homeConf===ST.importConf);
+      var rankOk=!ST.importTop25||(RANKINGS[normalizeTeamName(g.away)]||RANKINGS[normalizeTeamName(g.home)]);
+      return confOk&&rankOk;
+    });
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0;gap:8px">';
     h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap to select &middot; Hold for tiebreaker</div>';
-    h+='<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">';
-    h+='<button id="b-imp-top25" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#ffffff;color:var(--muted)')+'"># Top 25</button>';
     h+='<span style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</span>';
     h+='</div>';
-    h+='</div>';
     var curTb=ST.tiebreaker[weekId]||{};
-    filteredGames.forEach(function(g,i){
+    filteredGames.forEach(function(g){
       var origIdx=ST.importGames.indexOf(g);
       var checked=!!ST.importSelected[origIdx];
       var disable=!checked&&selCount>=10;
@@ -1238,7 +1238,7 @@ function renderImportPanel(weekId){
       h+='<div style="font-size:9px;color:var(--muted)">'+meta+'</div>';
       h+='</div></label>';
     });
-    if(ST.importTop25&&!filteredGames.length) h+='<div style="font-size:10px;color:var(--muted);padding:10px 0;text-align:center">No ranked teams in this week\'s games</div>';
+    if(!filteredGames.length) h+='<div style="font-size:10px;color:var(--muted);padding:10px 0;text-align:center">No games match the current filter</div>';
     h+='<button class="btn btn-green" id="b-add-imported" style="margin-top:10px;width:100%">Add Selected to '+x(ST.weekLabels[weekId]||weekId)+'</button>';
   }
   h+='</div>';
@@ -1815,14 +1815,18 @@ function bind(){
   });
   el=document.getElementById("imp-year"); if(el) el.addEventListener("change",function(){ST.importYear=parseInt(this.value)||2026;});
   el=document.getElementById("imp-week"); if(el) el.addEventListener("change",function(){ST.importWeek=parseInt(this.value)||1;});
-  el=document.getElementById("imp-conf"); if(el) el.addEventListener("change",function(){ST.importConf=this.value;});
   el=document.getElementById("b-imp-top25"); if(el) el.addEventListener("click",function(){ ST.importTop25=!ST.importTop25; draw(); });
+  els=document.querySelectorAll(".imp-conf-pill[data-conf]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var v=this.getAttribute("data-conf");
+    ST.importConf=(ST.importConf===v)?null:v; // toggle off if same
+    draw();
+  });
   el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
-    var yEl=document.getElementById("imp-year"), wEl=document.getElementById("imp-week"), cEl=document.getElementById("imp-conf");
+    var yEl=document.getElementById("imp-year"), wEl=document.getElementById("imp-week");
     ST.importYear=parseInt(yEl.value)||2026;
     ST.importWeek=parseInt(wEl.value)||1;
-    ST.importConf=(cEl&&cEl.value)||"80";
-    fetchEspnSchedule(ST.importYear,ST.importWeek,ST.importConf);
+    fetchEspnSchedule(ST.importYear,ST.importWeek);
   });
   els=document.querySelectorAll("[data-imp-idx]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
