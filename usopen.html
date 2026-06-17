@@ -213,6 +213,8 @@ var ST={
   eventName:"US Open "+TOURNAMENT_YEAR,
   eventStatus:"pre",
   adminFieldSearch:"",
+  oddsApiKey:"",
+  oddsData:null,  // [{name, odds}] from The Odds API or hardcoded
 };
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
@@ -348,23 +350,97 @@ function fetchLive(force){
     .catch(function(){ST.liveLoading=false;ST.golfers=[];draw();});
 }
 
-// Fetch field (pre-tournament competitor list) from ESPN event endpoint
+// Fetch field — tries multiple ESPN endpoints, falls back gracefully
 function fetchESPNField(cb){
-  var urls=[];
-  if(_espnEventId){
-    urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+_espnEventId);
-  }
-  urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard");
+  var found=false;
 
-  function tryUrl(idx){
-    if(idx>=urls.length){cb([]);return;}
-    fetch(urls[idx]).then(function(r){return r.json();}).then(function(data){
-      var golfers=extractFieldFromESPN(data);
-      if(golfers.length){cb(golfers);}
-      else tryUrl(idx+1);
-    }).catch(function(){tryUrl(idx+1);});
+  function done(golfers){
+    if(found)return;
+    found=true;
+    cb(golfers);
   }
-  // First get the schedule to find the event ID if we don't have it
+
+  // Try 1: sports.core.api.espn.com competitors endpoint (works pre-tournament)
+  function tryCoreApi(){
+    // This endpoint has the field even before the tournament starts
+    var coreUrl="https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events?limit=20&dates="+TOURNAMENT_YEAR;
+    fetch(coreUrl)
+      .then(function(r){return r.json();})
+      .then(function(data){
+        // Find the US Open event ref
+        var items=data.items||[];
+        var usOpenRef=null;
+        // items are $ref URLs — we need to follow them
+        if(!items.length){tryLeaderboard();return;}
+        var checked=0;
+        var total=Math.min(items.length,20);
+        items.slice(0,total).forEach(function(item){
+          var ref=item.$ref||"";
+          fetch(ref)
+            .then(function(r){return r.json();})
+            .then(function(ev){
+              checked++;
+              var nm=(ev.name||ev.shortName||"").toLowerCase();
+              if(!usOpenRef&&(nm.indexOf("u.s. open")>=0||nm.indexOf("us open")>=0)){
+                usOpenRef=ev;
+                ST.eventName=ev.name||ST.eventName;
+                // Now fetch competitors
+                var compRef=(ev.competitions&&ev.competitions[0]&&ev.competitions[0].$ref)||"";
+                if(compRef){
+                  fetch(compRef).then(function(r){return r.json();}).then(function(comp){
+                    var competitorRefs=(comp.competitors&&comp.competitors.items)||[];
+                    if(!competitorRefs.length){tryLeaderboard();return;}
+                    var golfers=[],cdone=0,ctotal=competitorRefs.length;
+                    competitorRefs.forEach(function(cr){
+                      fetch(cr.$ref||cr).then(function(r){return r.json();}).then(function(c){
+                        var ath=c.athlete||{};
+                        var aref=ath.$ref||"";
+                        // Athlete ref has name
+                        if(aref){
+                          fetch(aref).then(function(r){return r.json();}).then(function(a){
+                            golfers.push({id:String(a.id||a.displayName||""),name:a.displayName||a.fullName||"",country:(a.flag&&a.flag.alt)||""});
+                            cdone++;if(cdone===ctotal)done(golfers.filter(function(g){return g.name;}));
+                          }).catch(function(){cdone++;if(cdone===ctotal)done(golfers.filter(function(g){return g.name;}));});
+                        } else {
+                          cdone++;if(cdone===ctotal)done(golfers.filter(function(g){return g.name;}));
+                        }
+                      }).catch(function(){cdone++;if(cdone===ctotal)done(golfers.filter(function(g){return g.name;}));});
+                    });
+                  }).catch(function(){tryLeaderboard();});
+                } else {tryLeaderboard();}
+              }
+              if(checked===total&&!usOpenRef) tryLeaderboard();
+            })
+            .catch(function(){checked++;if(checked===total&&!usOpenRef)tryLeaderboard();});
+        });
+      })
+      .catch(function(){tryLeaderboard();});
+  }
+
+  // Try 2: site.api.espn.com leaderboard (works once tournament starts)
+  function tryLeaderboard(){
+    if(found)return;
+    var urls=[];
+    if(_espnEventId) urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+_espnEventId);
+    urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard");
+    // Also try scoreboard
+    urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard");
+
+    var idx=0;
+    function next(){
+      if(found||idx>=urls.length){if(!found)done([]);return;}
+      fetch(urls[idx++])
+        .then(function(r){return r.json();})
+        .then(function(data){
+          var golfers=extractFieldFromESPN(data);
+          if(golfers.length)done(golfers);
+          else next();
+        }).catch(next);
+    }
+    next();
+  }
+
+  // Start with schedule to get event ID, then try core API
   if(!_espnEventId){
     fetch("https://site.api.espn.com/apis/site/v2/sports/golf/pga/schedule?dates="+TOURNAMENT_YEAR)
       .then(function(r){return r.json();})
@@ -377,14 +453,14 @@ function fetchESPNField(cb){
           if(nm.indexOf("u.s. open")>=0||nm.indexOf("us open")>=0){
             _espnEventId=events[i].id||null;
             ST.eventName=events[i].name||ST.eventName;
-            if(_espnEventId) urls[0]="https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+_espnEventId;
             break;
           }
         }
-        tryUrl(0);
-      }).catch(function(){tryUrl(0);});
+        tryLeaderboard();
+      })
+      .catch(function(){tryLeaderboard();});
   } else {
-    tryUrl(0);
+    tryLeaderboard();
   }
 }
 
@@ -855,7 +931,90 @@ function renderPool(){
   return h;
 }
 
-// ── ADMIN ─────────────────────────────────────────────────────────────────────
+// ── ODDS HELPERS ──────────────────────────────────────────────────────────────
+function parseOddsApiResponse(data){
+  var results=[];
+  if(!Array.isArray(data))return results;
+  data.forEach(function(event){
+    var bookmakers=event.bookmakers||[];
+    var dk=bookmakers.find(function(b){return b.key==="draftkings";});
+    if(!dk)return;
+    var market=(dk.markets||[]).find(function(m){return m.key==="outrights";});
+    if(!market)return;
+    (market.outcomes||[]).forEach(function(o){
+      results.push({name:o.name,odds:Math.round(o.price)});
+    });
+  });
+  results.sort(function(a,b){
+    return oddsToImplied(a.odds)-oddsToImplied(b.odds);
+  });
+  return results;
+}
+
+// American odds -> implied probability -> salary tier + salary
+function oddsToImplied(american){
+  if(american>0) return 100/(american+100);
+  return Math.abs(american)/(Math.abs(american)+100);
+}
+function oddsToTier(american){
+  var p=oddsToImplied(american);
+  if(p>=0.12)  return "t1"; // roughly +700 and shorter
+  if(p>=0.05)  return "t2"; // +700 to +1900
+  if(p>=0.02)  return "t3"; // +1900 to +4900
+  return "t4";               // +5000 and longer
+}
+function oddsToSalary(american){
+  // Scale salary linearly within tier bands based on implied prob
+  var p=oddsToImplied(american);
+  // $5000 (longest shot) to $15000 (heavy favorite), scaled
+  var raw=Math.round((5000+p*60000)/500)*500;
+  return Math.min(15000,Math.max(5000,raw));
+}
+function fmtAmericanOdds(n){
+  return n>0?"+"+n:String(n);
+}
+
+// Hardcoded 2026 US Open DraftKings outright odds (Jun 17, 2026)
+var HARDCODED_ODDS=[
+  {name:"Scottie Scheffler",odds:450},{name:"Rory McIlroy",odds:930},
+  {name:"Jon Rahm",odds:1175},{name:"Xander Schauffele",odds:1900},
+  {name:"Cameron Young",odds:1900},{name:"Tommy Fleetwood",odds:2200},
+  {name:"Matt Fitzpatrick",odds:2300},{name:"Ludvig Aberg",odds:2000},
+  {name:"Bryson DeChambeau",odds:2000},{name:"Sam Burns",odds:3600},
+  {name:"Si Woo Kim",odds:3600},{name:"Brooks Koepka",odds:2200},
+  {name:"Tyrrell Hatton",odds:4400},{name:"Justin Thomas",odds:3500},
+  {name:"Wyndham Clark",odds:3500},{name:"Collin Morikawa",odds:4000},
+  {name:"Russell Henley",odds:4000},{name:"Patrick Cantlay",odds:5000},
+  {name:"Viktor Hovland",odds:5000},{name:"Hideki Matsuyama",odds:5500},
+  {name:"Joaquin Niemann",odds:5500},{name:"Jordan Spieth",odds:6000},
+  {name:"Aaron Rai",odds:10500},{name:"Min Woo Lee",odds:6000},
+  {name:"Robert MacIntyre",odds:6000},{name:"Cameron Smith",odds:6500},
+  {name:"Ben Griffin",odds:6500},{name:"Kristoffer Reitan",odds:6500},
+  {name:"Rasmus Neergaard-Petersen",odds:7000},{name:"Tony Finau",odds:7000},
+  {name:"Jason Day",odds:7000},{name:"Will Zalatoris",odds:7000},
+  {name:"Maverick McNealy",odds:7500},{name:"Jake Knapp",odds:8000},
+  {name:"J.T. Poston",odds:8000},{name:"Sepp Straka",odds:8000},
+  {name:"Rickie Fowler",odds:8000},{name:"Akshay Bhatia",odds:8000},
+  {name:"Jacob Bridgeman",odds:8000},{name:"Kurt Kitayama",odds:8000},
+  {name:"Alex Fitzpatrick",odds:8000},{name:"Sahith Theegala",odds:10000},
+  {name:"Harris English",odds:10000},{name:"Corey Conners",odds:10000},
+  {name:"Danny Willett",odds:10000},{name:"Justin Rose",odds:3500},
+  {name:"Shane Lowry",odds:4500},{name:"Chris Gotterup",odds:4500},
+  {name:"Patrick Reed",odds:4000},{name:"J.J. Spaun",odds:4000},
+  {name:"Nick Dunlap",odds:10000},{name:"Keegan Bradley",odds:12000},
+  {name:"Tom Kim",odds:12000},{name:"Adam Scott",odds:12000},
+  {name:"Billy Horschel",odds:12000},{name:"Denny McCarthy",odds:15000},
+  {name:"Eric Cole",odds:15000},{name:"Adam Hadwin",odds:15000},
+  {name:"Sungjae Im",odds:15000},{name:"Keith Mitchell",odds:15000},
+  {name:"Davis Riley",odds:15000},{name:"Stephan Jaeger",odds:15000},
+  {name:"Austin Eckroat",odds:15000},{name:"Thorbjorn Olesen",odds:15000},
+  {name:"Lucas Glover",odds:15000},{name:"Bud Cauley",odds:20000},
+  {name:"Emiliano Grillo",odds:20000},{name:"Mark Hubbard",odds:20000},
+  {name:"Michael Kim",odds:20000},{name:"David Puig",odds:20000},
+  {name:"Pierceson Coody",odds:20000},{name:"Ben Silverman",odds:20000},
+];
+
+
 function renderAdmin(){
   var h='';
   var all=mergedGolfers();
@@ -876,12 +1035,49 @@ function renderAdmin(){
   h+='<div style="font-size:11px;font-weight:900;margin-bottom:4px">Tournament Field</div>';
   h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:10px">'+fieldCount+' golfers in field · '+salCount+' with salaries assigned</div>';
 
-  // Import from ESPN button
-  h+='<div style="background:var(--blue-bg);border:2px solid var(--blue);border-radius:10px;padding:10px 12px;margin-bottom:12px">';
-  h+='<div style="font-size:10px;font-weight:800;color:var(--blue);margin-bottom:4px">📡 Import from ESPN</div>';
-  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:8px">Fetches the tournament field from ESPN. Works once the field is announced (typically ~1 week out).</div>';
-  h+='<button class="btn btn-green" id="btn-import-espn" style="font-size:10px;padding:6px 14px">⬇ Pull ESPN Field</button>';
-  h+='<span id="espn-import-status" style="font-size:9px;color:var(--muted);font-weight:700;margin-left:8px"></span>';
+  // Import from DraftKings / Odds API
+  h+='<div style="background:var(--blue-bg);border:2px solid var(--blue);border-radius:10px;padding:10px 12px;margin-bottom:10px">';
+  h+='<div style="font-size:10px;font-weight:800;color:var(--blue);margin-bottom:4px">🎰 Import from DraftKings Odds</div>';
+  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:8px">Pulls live DraftKings outright win odds via The Odds API (free). Enter your free API key from <b>the-odds-api.com</b> — 500 free requests/month.</div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">';
+  h+='<input class="adm-input" id="odds-api-key" placeholder="Your Odds API key…" style="flex:1;min-width:160px;padding:6px 10px;font-size:11px" value="'+x(ST.oddsApiKey||"")+'">';
+  h+='<button class="btn btn-green" id="btn-import-odds" style="font-size:10px;padding:6px 14px">⬇ Pull DK Odds</button>';
+  h+='</div>';
+  h+='<div id="odds-import-status" style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:6px"></div>';
+  // Show loaded odds preview
+  if(ST.oddsData&&ST.oddsData.length){
+    h+='<div style="font-size:9px;font-weight:800;color:var(--blue);margin-bottom:4px">'+ST.oddsData.length+' golfers — tap ⚡ Apply to set salaries</div>';
+    h+='<button class="btn btn-gold" id="btn-apply-odds-salaries" style="font-size:10px;padding:6px 14px;margin-bottom:6px">⚡ Apply Odds → Salaries</button>';
+    h+='<div style="max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:3px">';
+    ST.oddsData.slice(0,20).forEach(function(od){
+      var tier=oddsToTier(od.odds);
+      var tm=tierMeta(tier);
+      h+='<div style="display:flex;align-items:center;gap:6px;padding:3px 0">';
+      h+='<span class="tier-badge '+tm.cls+'">'+tm.label+'</span>';
+      h+='<span style="flex:1;font-size:10px;font-weight:800">'+x(od.name)+'</span>';
+      h+='<span style="font-size:10px;font-weight:900;color:var(--muted)">'+fmtAmericanOdds(od.odds)+'</span>';
+      h+='<span style="font-size:10px;font-weight:900;color:var(--text)">'+fmtSal(oddsToSalary(od.odds))+'</span>';
+      h+='</div>';
+    });
+    if(ST.oddsData.length>20)h+='<div style="font-size:9px;color:var(--muted);padding:4px 0">…and '+(ST.oddsData.length-20)+' more</div>';
+    h+='</div>';
+  }
+  // Hardcoded current odds fallback
+  h+='<div style="margin-top:8px">';
+  h+='<button class="btn" id="btn-use-hardcoded-odds" style="font-size:9px;padding:5px 12px">📋 Use Current 2026 US Open Odds</button>';
+  h+='<span style="font-size:8px;color:var(--muted);font-weight:700;margin-left:6px">No API key needed · updated Jun 17</span>';
+  h+='</div>';
+  h+='</div>';
+
+  // Paste-from-text import
+  h+='<div style="background:var(--purple-bg);border:2px solid var(--purple);border-radius:10px;padding:10px 12px;margin-bottom:12px">';
+  h+='<div style="font-size:10px;font-weight:800;color:var(--purple);margin-bottom:4px">📋 Paste Field List</div>';
+  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:6px">Copy the player list from usopen.com, pgatour.com, or anywhere — one name per line. Works any time.</div>';
+  h+='<textarea id="adm-paste-field" style="width:100%;height:100px;background:var(--cream);border:2px solid var(--border);border-radius:8px;padding:8px;font-size:11px;font-weight:700;font-family:\'Nunito\',sans-serif;resize:vertical;outline:none" placeholder="Scottie Scheffler\nRory McIlroy\nXander Schauffele\n…"></textarea>';
+  h+='<div style="display:flex;gap:6px;margin-top:6px;align-items:center">';
+  h+='<button class="btn" id="btn-import-paste" style="font-size:10px;padding:6px 14px;background:var(--purple);color:#fff;border-color:var(--purple)">⬇ Import Names</button>';
+  h+='<span id="paste-import-status" style="font-size:9px;color:var(--muted);font-weight:700"></span>';
+  h+='</div>';
   h+='</div>';
 
   // Add golfer manually
@@ -1045,8 +1241,149 @@ function bind(){
     toast(newVal?"🔒 Picks locked":"🔓 Picks unlocked");
   });
 
-  // Admin: import from ESPN
-  el=document.getElementById("btn-import-espn");
+  // Admin: pull DraftKings odds via The Odds API
+  el=document.getElementById("btn-import-odds");
+  if(el)el.addEventListener("click",function(){
+    var keyInp=document.getElementById("odds-api-key");
+    var key=(keyInp?keyInp.value:"").trim();
+    ST.oddsApiKey=key;
+    if(!key){
+      var s=document.getElementById("odds-import-status");
+      if(s)s.textContent="Enter your API key first — get one free at the-odds-api.com";
+      return;
+    }
+    var statusEl=document.getElementById("odds-import-status");
+    if(statusEl)statusEl.textContent="Fetching…";
+    this.disabled=true;
+    var btn=this;
+    // The Odds API — golf outright winner market, DraftKings US
+    var url="https://api.the-odds-api.com/v4/sports/golf_masters_tournament_winner/odds/?regions=us&markets=outrights&bookmakers=draftkings&oddsFormat=american&apiKey="+encodeURIComponent(key);
+    // Try US Open specific market first, fall back to generic golf outrights
+    var urls=[
+      "https://api.the-odds-api.com/v4/sports/golf_us_open_winner/odds/?regions=us&markets=outrights&bookmakers=draftkings&oddsFormat=american&apiKey="+encodeURIComponent(key),
+      "https://api.the-odds-api.com/v4/sports/golf_pga_championship_winner/odds/?regions=us&markets=outrights&bookmakers=draftkings&oddsFormat=american&apiKey="+encodeURIComponent(key),
+    ];
+    // First get available sports to find exact key
+    fetch("https://api.the-odds-api.com/v4/sports/?apiKey="+encodeURIComponent(key))
+      .then(function(r){return r.json();})
+      .then(function(sports){
+        // Find golf US Open
+        var usOpenSport=null;
+        if(Array.isArray(sports)){
+          usOpenSport=sports.find(function(s){
+            var k=(s.key||"").toLowerCase();
+            return k.indexOf("us_open")>=0||k.indexOf("golf_us")>=0;
+          });
+          if(!usOpenSport){
+            usOpenSport=sports.find(function(s){
+              var k=(s.key||"").toLowerCase();
+              return k.indexOf("golf")>=0&&k.indexOf("winner")>=0;
+            });
+          }
+        }
+        var sportKey=usOpenSport?usOpenSport.key:"golf_us_open_winner";
+        return fetch("https://api.the-odds-api.com/v4/sports/"+sportKey+"/odds/?regions=us&markets=outrights&bookmakers=draftkings&oddsFormat=american&apiKey="+encodeURIComponent(key));
+      })
+      .then(function(r){return r.json();})
+      .then(function(data){
+        btn.disabled=false;
+        var odds=parseOddsApiResponse(data);
+        if(!odds.length){
+          if(statusEl)statusEl.textContent="No DraftKings golf odds found — try the hardcoded button below";
+          return;
+        }
+        ST.oddsData=odds;
+        if(statusEl)statusEl.textContent="✓ Loaded "+odds.length+" golfers from DraftKings";
+        draw();
+      })
+      .catch(function(err){
+        btn.disabled=false;
+        if(statusEl)statusEl.textContent="Error: "+(err.message||"check API key");
+      });
+  });
+
+  // Admin: use hardcoded odds
+  el=document.getElementById("btn-use-hardcoded-odds");
+  if(el)el.addEventListener("click",function(){
+    ST.oddsData=HARDCODED_ODDS.slice();
+    toast("✓ Loaded "+ST.oddsData.length+" golfers from hardcoded odds");
+    draw();
+  });
+
+  // Admin: apply odds -> salaries and field
+  el=document.getElementById("btn-apply-odds-salaries");
+  if(el)el.addEventListener("click",function(){
+    if(!ST.oddsData||!ST.oddsData.length){toast("No odds data loaded");return;}
+    var updates={};
+    ST.oddsData.forEach(function(od){
+      var id=od.name.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"");
+      var tier=oddsToTier(od.odds);
+      var salary=oddsToSalary(od.odds);
+      // Add to field if not already present
+      if(!ST.manualGolfers[id]&&!ST.golfers.find(function(g){return g.id===id;})){
+        updates[BASE+"/field/"+id]={name:od.name,country:""};
+      }
+      updates[BASE+"/salaries/"+id]={name:od.name,salary:salary,tier:tier,odds:od.odds};
+    });
+    DB.ref().update(updates,function(err){
+      if(!err)toast("✓ Applied "+ST.oddsData.length+" salaries from odds");
+      else toast("Error saving");
+    });
+  });
+
+  // Admin: import from paste
+  el=document.getElementById("btn-import-paste");
+  if(el)el.addEventListener("click",function(){
+    var ta=document.getElementById("adm-paste-field");
+    var statusEl=document.getElementById("paste-import-status");
+    if(!ta)return;
+    var raw=ta.value||"";
+    // Parse: split on newlines, strip numbers/bullets/parenthetical suffixes like "(a)"
+    var lines=raw.split(/[\n,]+/).map(function(l){
+      return l
+        .replace(/^\s*\d+[\.\)]\s*/,"")   // "1. " or "1) "
+        .replace(/\(a\)/gi,"")             // amateur designation
+        .replace(/\s*\([^)]*\)\s*$/,"")    // trailing parens
+        .replace(/^\W+/,"")                // leading non-word
+        .trim();
+    }).filter(function(l){return l.length>2;});
+
+    if(!lines.length){if(statusEl)statusEl.textContent="No names found";return;}
+
+    var updates={};
+    var added=0,skipped=0;
+    lines.forEach(function(name){
+      var id=name.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"");
+      if(!id)return;
+      // Check if already exists
+      var exists=ST.manualGolfers[id]||Object.keys(ST.salaries).some(function(k){
+        return (ST.salaries[k].name||"").toLowerCase()===name.toLowerCase();
+      });
+      if(exists){skipped++;return;}
+      updates[BASE+"/field/"+id]={name:name,country:""};
+      // Default T4 salary — admin can adjust after
+      updates[BASE+"/salaries/"+id]={name:name,salary:tierMeta("t4").salary,tier:"t4"};
+      added++;
+    });
+
+    if(!added){
+      if(statusEl)statusEl.textContent="All "+lines.length+" already in field";
+      toast("All names already imported");
+      return;
+    }
+
+    DB.ref().update(updates,function(err){
+      if(!err){
+        ta.value="";
+        var msg="✓ Added "+added+(skipped?" · "+skipped+" skipped":"");
+        if(statusEl)statusEl.textContent=msg;
+        toast(msg);
+      } else {
+        if(statusEl)statusEl.textContent="Error saving";
+        toast("Error saving to Firebase");
+      }
+    });
+  });
   if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("espn-import-status");
     if(statusEl)statusEl.textContent="Fetching…";
