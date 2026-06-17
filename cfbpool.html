@@ -207,6 +207,40 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .countdown-bar.expired{background:#0d1a0d}
 .countdown-bar.expired .countdown-label{color:#4a7c59}
 .countdown-bar.expired .countdown-timer{color:#6ee7b7;font-size:12px}
+/* ── GROUP PICKS TABLE ── */
+.gp-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:16px;min-height:50vh}
+.gp-table{border-collapse:separate;border-spacing:0;font-size:11px;white-space:nowrap;background:var(--bg)}
+/* Sticky first column */
+.gp-table td:first-child,.gp-table th:first-child{position:sticky;left:0;z-index:2;background:#ffffff;border-right:2px solid var(--border)}
+.gp-table th:first-child{background:var(--cream)}
+/* Header row */
+.gp-table th{padding:6px 8px;background:var(--cream);border-bottom:2px solid var(--border);border-right:1px solid var(--border2);font-weight:900;text-align:center;vertical-align:bottom;font-size:10px}
+/* Data cells */
+.gp-table td{padding:7px 8px;border-bottom:1px solid var(--border2);border-right:1px solid var(--border2);text-align:center;background:#ffffff;vertical-align:middle}
+/* Name column */
+.gp-name{font-weight:900;font-size:12px;text-align:left;min-width:90px;max-width:120px;overflow:hidden;text-overflow:ellipsis}
+/* Game header */
+.gp-game-head{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:64px}
+.gp-logos{display:flex;align-items:center;gap:3px;justify-content:center}
+.gp-logo{width:22px;height:22px;object-fit:contain;border-radius:3px}
+.gp-logo-fallback{width:22px;height:22px;border-radius:3px;background:var(--border2);display:inline-block}
+.gp-vs{font-size:8px;color:var(--muted);font-weight:800}
+/* Pick cell */
+.gp-pick{display:flex;flex-direction:column;align-items:center;gap:2px}
+.gp-pick-logo{width:22px;height:22px;object-fit:contain;border-radius:3px}
+.gp-pick-conf{font-size:10px;font-weight:900;color:var(--text)}
+.gp-pick.wrong{opacity:.3}
+.gp-pick.correct{filter:drop-shadow(0 0 3px rgba(93,186,74,.6))}
+.gp-pick.push{opacity:.5}
+/* Points column */
+.gp-pts-cell{min-width:60px;font-weight:900;text-align:center}
+.gp-pts-earned{font-size:13px;font-weight:900;color:var(--text)}
+.gp-pts-possible{font-size:9px;font-weight:700;color:var(--muted)}
+/* No pick */
+.gp-nopick{color:var(--dim);font-size:9px;font-weight:700}
+/* Week selector */
+.gp-week-bar{padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;gap:6px;overflow-x:auto;flex-shrink:0}
+.gp-week-bar::-webkit-scrollbar{display:none}
 </style>
 </head>
 <body>
@@ -1054,6 +1088,136 @@ function renderAdmin(){
   return h;
 }
 
+// ── GROUP PICKS VIEW ──────────────────────────────────────
+function renderGroupPicks(){
+  var h='';
+  if(ST.weekIds.length===0){
+    h+='<div class="lb-note">No weeks set up yet.</div>';
+    return h;
+  }
+
+  // Week selector — show all weeks
+  var weekId=ST.curWeek||currentWeekId();
+  h+='<div class="gp-week-bar">';
+  ST.weekIds.forEach(function(w){
+    h+='<button class="wtab'+(weekId===w?" active":"")+'" data-week="'+w+'">'+x(ST.weekLabels[w]||w)+'</button>';
+  });
+  h+='</div>';
+
+  if(!weekId){ h+='<div class="lb-note">No week selected.</div>'; return h; }
+
+  var games=ST.games[weekId]||{};
+  var results=ST.results[weekId]||{};
+  var locked=!!ST.locked[weekId];
+  var active=activeGames(weekId);
+
+  if(!active.length){
+    h+='<div class="lb-note">No games set up for this week yet.</div>';
+    return h;
+  }
+
+  // Sort players by week score descending (if locked), else season score
+  var players=PARTS.slice();
+  if(locked){
+    players.sort(function(a,b){ return weekScore(weekId,b).total - weekScore(weekId,a).total; });
+  }
+
+  h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
+
+  // Sticky name column header
+  h+='<th class="gp-name" style="min-width:90px">'+(locked?'&#128202; '+x(ST.weekLabels[weekId]||weekId):'&#9998; '+x(ST.weekLabels[weekId]||weekId))+'</th>';
+
+  // Game columns
+  active.forEach(function(gid){
+    var g=games[gid]||{};
+    var awayLogo=g.awayLogo||"";
+    var homeLogo=g.homeLogo||"";
+    h+='<th>';
+    h+='<div class="gp-game-head">';
+    h+='<div class="gp-logos">';
+    h+=awayLogo?'<img class="gp-logo" src="'+awayLogo+'" onerror="this.style.display=\'none\'">'
+               :'<span class="gp-logo-fallback"></span>';
+    h+='<span class="gp-vs">@</span>';
+    h+=homeLogo?'<img class="gp-logo" src="'+homeLogo+'" onerror="this.style.display=\'none\'">'
+               :'<span class="gp-logo-fallback"></span>';
+    h+='</div>';
+    h+='<div style="font-size:8px;color:var(--muted);font-weight:700;max-width:68px;overflow:hidden;text-overflow:ellipsis">'+x(g.away||'')+'</div>';
+    h+='</div>';
+    h+='</th>';
+  });
+
+  // Points column header
+  h+='<th class="gp-pts-cell" style="min-width:58px">Pts</th>';
+  h+='</tr></thead><tbody>';
+
+  // Player rows
+  players.forEach(function(player){
+    var uk=ukey(player);
+    var picks=((ST.picks[weekId]||{})[uk])||{};
+    var ws=weekScore(weekId,player);
+
+    // Points still possible = sum of conf values on pending (unresolved) picks
+    var stillPossible=0;
+    active.forEach(function(gid){
+      var p=picks[gid]||{};
+      var r=results[gid];
+      if(p.side&&p.conf&&!r) stillPossible+=Number(p.conf);
+    });
+
+    var isMe=ST.user&&player===ST.user;
+    h+='<tr'+(isMe?' style="background:var(--gold-bg)"':'')+'>';
+
+    // Name cell
+    h+='<td class="gp-name"'+(isMe?' style="background:var(--gold-bg)"':'')+'>'+pem(player)+x(player)+'</td>';
+
+    // Pick cells
+    active.forEach(function(gid){
+      var g=games[gid]||{};
+      var p=picks[gid]||{};
+      var r=results[gid];
+      h+='<td>';
+      if(!p.side){
+        h+='<span class="gp-nopick">&ndash;</span>';
+      } else {
+        var pickedLogo=p.side==="away"?(g.awayLogo||""):(g.homeLogo||"");
+        var pickedName=p.side==="away"?(g.away||""):(g.home||"");
+        var outcome="pending";
+        if(r){
+          if(r==="push") outcome="push";
+          else if(r===p.side) outcome="correct";
+          else outcome="wrong";
+        }
+        h+='<div class="gp-pick'+(outcome!=="pending"?" "+outcome:"")+'">';
+        if(pickedLogo){
+          h+='<img class="gp-pick-logo" src="'+pickedLogo+'" title="'+x(pickedName)+'" onerror="this.outerHTML=\'<div class=gp-logo-fallback></div>\'">';
+        } else {
+          h+='<div style="font-size:9px;font-weight:800;color:var(--muted);max-width:52px;overflow:hidden;text-overflow:ellipsis">'+x(pickedName)+'</div>';
+        }
+        h+='<div class="gp-pick-conf"'+(outcome==="correct"?' style="color:var(--green)"':outcome==="wrong"?' style="color:var(--red2)"':'')+'>'+( p.conf||'–')+'</div>';
+        h+='</div>';
+      }
+      h+='</td>';
+    });
+
+    // Points cell
+    h+='<td class="gp-pts-cell">';
+    if(locked&&stillPossible===0){
+      // Week complete
+      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
+    } else if(ws.total>0||stillPossible>0){
+      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
+      if(stillPossible>0) h+='<div class="gp-pts-possible">+'+stillPossible+' poss</div>';
+    } else {
+      h+='<span class="gp-nopick">–</span>';
+    }
+    h+='</td>';
+    h+='</tr>';
+  });
+
+  h+='</tbody></table></div>';
+  return h;
+}
+
 // ── Main draw ────────────────────────────────────────────
 function draw(){
   var h='';
@@ -1069,13 +1233,13 @@ function draw(){
   if(!PUBLIC_VIEW) h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
   h+='</div></div>';
 
-  var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
+  var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"group",lbl:"&#128101; Group"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
   if(ST.admin) tabs.push({id:"admin",lbl:"&#9881; Admin"});
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
 
-  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&ST.page!=="scores"){
+  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&ST.page!=="scores"&&ST.page!=="group"){
     h+=userSelectScreen();
     document.getElementById("root").innerHTML=h;
     stopScoreRefresh();
@@ -1083,6 +1247,7 @@ function draw(){
   }
 
   if(ST.page==="picks") h+=renderPicks();
+  else if(ST.page==="group") h+=renderGroupPicks();
   else if(ST.page==="scores") h+='<div class="scores-wrap" id="scores-wrap"><div class="scores-loading">Loading scores&hellip;</div></div>';
   else if(ST.page==="standings") h+=renderStandings();
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
