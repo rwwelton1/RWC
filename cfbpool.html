@@ -1178,13 +1178,15 @@ function renderImportPanel(weekId){
   if(ST.importGames&&ST.importGames.length){
     var selCount=Object.keys(ST.importSelected).length;
     h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin:8px 0 4px">';
-    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap up to 10 games, then add to '+x(ST.weekLabels[weekId]||weekId)+'</div>';
+    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap to select &middot; Hold to set as tiebreaker</div>';
     h+='<div style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</div>';
     h+='</div>';
+    var curTb=ST.tiebreaker[weekId]||{};
     ST.importGames.forEach(function(g,i){
       var checked=!!ST.importSelected[i];
       var disable=!checked&&selCount>=10;
-      h+='<label style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+'">';
+      var isTb=curTb.away&&curTb.home&&curTb.away===g.away&&curTb.home===g.home;
+      h+='<label data-imp-label="'+i+'" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":"")+'">';
       h+='<input type="checkbox" data-imp-idx="'+i+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
       h+='<div style="flex:1;min-width:0">';
       h+='<div style="display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800">';
@@ -1193,6 +1195,7 @@ function renderImportPanel(weekId){
       h+='<span style="font-size:9px;font-weight:700;color:var(--muted)">@</span>';
       if(g.homeLogo) h+='<img src="'+g.homeLogo+'" style="width:18px;height:18px;object-fit:contain;border-radius:3px" onerror="this.style.display=\'none\'">';
       h+=x(g.home);
+      if(isTb) h+='<span style="font-size:8px;font-weight:900;color:var(--purple);background:var(--purple-bg);border:1px solid var(--purple);border-radius:3px;padding:0 4px;margin-left:4px">TB</span>';
       h+='</div>';
       var meta=x(g.kickoff);
       if(g.spread) meta+=' &middot; '+(g.favSide==="away"?x(g.away):x(g.home))+' -'+g.spread;
@@ -1792,6 +1795,33 @@ function bind(){
     }
   });
   el=document.getElementById("b-add-imported"); if(el) el.addEventListener("click",function(){addImportedGames(ST.curWeek);});
+
+  // Long-press on import game labels to set as tiebreaker
+  els=document.querySelectorAll("label[data-imp-label]");
+  for(i=0;i<els.length;i++)(function(label){
+    var _lpt=null;
+    function startPress(){
+      _lpt=setTimeout(function(){
+        _lpt=null;
+        var idx=parseInt(label.getAttribute("data-imp-label"));
+        var g=ST.importGames[idx];
+        if(!g) return;
+        setTiebreakerField(ST.curWeek,"away",g.away);
+        setTiebreakerField(ST.curWeek,"home",g.home);
+        if(g.awayLogo) setTiebreakerField(ST.curWeek,"awayLogo",g.awayLogo);
+        if(g.homeLogo) setTiebreakerField(ST.curWeek,"homeLogo",g.homeLogo);
+        toast("&#128081; Tiebreaker set: "+g.away+" @ "+g.home);
+        draw();
+      },600);
+    }
+    function cancelPress(){ clearTimeout(_lpt); _lpt=null; }
+    label.addEventListener("touchstart",startPress,{passive:true});
+    label.addEventListener("touchend",cancelPress);
+    label.addEventListener("touchmove",cancelPress);
+    label.addEventListener("mousedown",startPress);
+    label.addEventListener("mouseup",cancelPress);
+    label.addEventListener("mouseleave",cancelPress);
+  })(els[i]);
 
   els=document.querySelectorAll(".adm-input[data-field]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
