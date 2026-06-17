@@ -170,7 +170,7 @@ var DB=firebase.database();
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/usopen":"usopen2025";
-var TOURNAMENT_YEAR=2025;
+var TOURNAMENT_YEAR=2026;
 var CAP=50000;       // salary cap
 var ROSTER_SIZE=6;   // picks per team
 
@@ -202,7 +202,8 @@ var ST={
   admin:false,
   liveLoading:false,
   liveLastFetch:0,
-  golfers:[],          // from ESPN
+  golfers:[],          // from ESPN (live)
+  manualGolfers:{},    // from Firebase field: id -> {name, country}
   salaries:{},         // golfer id -> {salary, tier, name}
   picks:{},            // ukey -> [golferId, ...]  (array of 6 ids)
   locked:false,
@@ -211,6 +212,7 @@ var ST={
   activeRosterSlot:null, // 0-5, which slot is being filled
   eventName:"US Open "+TOURNAMENT_YEAR,
   eventStatus:"pre",
+  adminFieldSearch:"",
 };
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
@@ -294,6 +296,7 @@ function loadData(){
   }
   function s3(){
     DB.ref("globalSettings/masterPw").once("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+    DB.ref(BASE+"/field").on("value",function(sn){ST.manualGolfers=sn.val()||{};draw();});
     DB.ref(BASE+"/salaries").on("value",function(sn){ST.salaries=sn.val()||{};draw();});
     DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=!!sn.val();draw();});
@@ -311,6 +314,8 @@ function saveRoster(roster){
 }
 
 // ── ESPN LIVE FETCH ───────────────────────────────────────────────────────────
+var _espnEventId=null;
+
 function fetchLive(force){
   if(ST.liveLoading)return;
   var age=Date.now()-ST.liveLastFetch;
@@ -328,7 +333,7 @@ function fetchLive(force){
         var nm=(events[i].name||"").toLowerCase();
         if(nm.indexOf("u.s. open")>=0||nm.indexOf("us open")>=0){usOpen=events[i];break;}
       }
-      if(usOpen)ST.eventName=usOpen.name||ST.eventName;
+      if(usOpen){ST.eventName=usOpen.name||ST.eventName; _espnEventId=usOpen.id||null;}
       var lbUrl=usOpen&&usOpen.id
         ?"https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+usOpen.id
         :"https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard";
@@ -341,6 +346,62 @@ function fetchLive(force){
       parseESPN(data); draw();
     })
     .catch(function(){ST.liveLoading=false;ST.golfers=[];draw();});
+}
+
+// Fetch field (pre-tournament competitor list) from ESPN event endpoint
+function fetchESPNField(cb){
+  var urls=[];
+  if(_espnEventId){
+    urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+_espnEventId);
+  }
+  urls.push("https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard");
+
+  function tryUrl(idx){
+    if(idx>=urls.length){cb([]);return;}
+    fetch(urls[idx]).then(function(r){return r.json();}).then(function(data){
+      var golfers=extractFieldFromESPN(data);
+      if(golfers.length){cb(golfers);}
+      else tryUrl(idx+1);
+    }).catch(function(){tryUrl(idx+1);});
+  }
+  // First get the schedule to find the event ID if we don't have it
+  if(!_espnEventId){
+    fetch("https://site.api.espn.com/apis/site/v2/sports/golf/pga/schedule?dates="+TOURNAMENT_YEAR)
+      .then(function(r){return r.json();})
+      .then(function(data){
+        var events=[];
+        if(data.seasons&&data.seasons[0])events=data.seasons[0].events||[];
+        else if(data.events)events=data.events;
+        for(var i=0;i<events.length;i++){
+          var nm=(events[i].name||"").toLowerCase();
+          if(nm.indexOf("u.s. open")>=0||nm.indexOf("us open")>=0){
+            _espnEventId=events[i].id||null;
+            ST.eventName=events[i].name||ST.eventName;
+            if(_espnEventId) urls[0]="https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard/"+_espnEventId;
+            break;
+          }
+        }
+        tryUrl(0);
+      }).catch(function(){tryUrl(0);});
+  } else {
+    tryUrl(0);
+  }
+}
+
+function extractFieldFromESPN(data){
+  var golfers=[];
+  var event=(data.events&&data.events[0])||data;
+  var comp=(event.competitions&&event.competitions[0])||{};
+  var competitors=comp.competitors||[];
+  if(!competitors.length&&event.competitors)competitors=event.competitors;
+  competitors.forEach(function(c){
+    var athlete=c.athlete||{};
+    var name=athlete.displayName||athlete.fullName||c.displayName||"";
+    if(!name)return;
+    var country=(athlete.flag&&athlete.flag.alt)||(athlete.country&&(athlete.country.abbreviation||athlete.country.displayName))||"";
+    golfers.push({id:String(athlete.id||name),name:name,country:country});
+  });
+  return golfers;
 }
 
 function parseESPN(data){
@@ -380,17 +441,40 @@ function parseESPN(data){
   autoSeedSalaries();
 }
 
-function autoSeedSalaries(){
-  // Only seed if no salaries set yet and we have golfers
-  if(Object.keys(ST.salaries).length>0||!ST.golfers.length)return;
-  var sal={};
-  ST.golfers.forEach(function(g,i){
-    var tier=i<10?"t1":i<25?"t2":i<50?"t3":"t4";
-    var salary=tierMeta(tier).salary;
-    sal[g.id]={name:g.name,salary:salary,tier:tier};
+// Returns the unified golfer list: ESPN data takes priority, manual fills gaps
+function mergedGolfers(){
+  var list=[];
+  var seen={};
+  // ESPN golfers first
+  ST.golfers.forEach(function(g){
+    seen[g.id]=true;
+    list.push(g);
   });
-  // Don't save automatically — admin saves from admin tab
-  // But store locally so picks page works before admin configures
+  // Manual golfers not yet in ESPN list
+  Object.keys(ST.manualGolfers).forEach(function(id){
+    if(seen[id])return;
+    var m=ST.manualGolfers[id];
+    list.push({id:id,name:m.name||id,pos:"",score:null,thru:"",cut:false,country:m.country||""});
+  });
+  // Sort: ESPN-sourced (have pos) first, then manual alphabetically
+  list.sort(function(a,b){
+    var ha=parseInt(a.pos)||9999, hb=parseInt(b.pos)||9999;
+    if(ha!==hb)return ha-hb;
+    return(a.name||"").localeCompare(b.name||"");
+  });
+  return list;
+}
+
+function autoSeedSalaries(){
+  // Only auto-seed if no salaries set yet
+  if(Object.keys(ST.salaries).length>0)return;
+  var all=mergedGolfers();
+  if(!all.length)return;
+  var sal={};
+  all.forEach(function(g,i){
+    var tier=i<10?"t1":i<25?"t2":i<50?"t3":"t4";
+    sal[g.id]={name:g.name,salary:tierMeta(tier).salary,tier:tier};
+  });
   ST.salaries=sal;
 }
 
@@ -536,7 +620,7 @@ function renderRoster(){
       h+='<div class="empty">Tap a slot above to start picking.<br><span style="font-size:10px;color:var(--dim)">'+ROSTER_SIZE+' golfers · $'+CAP.toLocaleString()+' cap</span></div>';
     } else {
       roster.forEach(function(gid,si){
-        var g=ST.golfers.find(function(g){return g.id===gid;});
+        var g=mergedGolfers().find(function(g){return g.id===gid;});
         var sal=salaryOf(gid);
         var pts=golferPts(gid);
         var tid=tierOf(gid);
@@ -595,7 +679,7 @@ function golferListHtml(roster,spend){
   var slot=ST.activeRosterSlot;
   var currentInSlot=roster[slot];
 
-  var list=ST.golfers.filter(function(g){
+  var list=mergedGolfers().filter(function(g){
     if(!g.name)return false;
     if(!ST.salaries[g.id])return false; // only show golfers with assigned salaries
     if(q&&g.name.toLowerCase().indexOf(q)<0&&(g.country||"").toLowerCase().indexOf(q)<0)return false;
@@ -604,7 +688,11 @@ function golferListHtml(roster,spend){
   });
 
   if(!list.length){
-    return'<div class="empty">No golfers found.<br><span style="font-size:10px;color:var(--dim)">Admin must assign salaries first.</span></div>';
+    var hasSalaries=Object.keys(ST.salaries).length>0;
+    var hasGolfers=mergedGolfers().length>0;
+    if(!hasGolfers)return'<div class="empty">No golfers in the field yet.<br><span style="font-size:10px;color:var(--dim)">Admin adds golfers in the ⚙️ Admin tab.</span></div>';
+    if(!hasSalaries)return'<div class="empty">Salaries not set yet.<br><span style="font-size:10px;color:var(--dim)">Admin sets salaries in the ⚙️ Admin tab.</span></div>';
+    return'<div class="empty">No golfers match your search.</div>';
   }
 
   var h='<div style="display:flex;flex-direction:column;gap:3px">';
@@ -673,7 +761,7 @@ function renderLeaderboard(){
 
   if(myRos.length){
     h+='<div class="section-label">My Picks</div>';
-    ST.golfers.filter(function(g){return myRos.indexOf(g.id)>=0;}).forEach(function(g){
+    mergedGolfers().filter(function(g){return myRos.indexOf(g.id)>=0;}).forEach(function(g){
       var pts=golferPts(g.id);
       h+='<div class="golfer-row my-pick'+(g.cut?" cut":"")+'">'+
         '<div class="golfer-pos">'+x(g.pos||"—")+'</div>'+
@@ -770,61 +858,92 @@ function renderPool(){
 // ── ADMIN ─────────────────────────────────────────────────────────────────────
 function renderAdmin(){
   var h='';
+  var all=mergedGolfers();
+  var fieldCount=Object.keys(ST.manualGolfers).length;
+  var salCount=Object.keys(ST.salaries).length;
 
-  // Lock toggle
+  // ── Controls ──
   h+='<div class="card">';
-  h+='<div style="font-size:11px;font-weight:900;margin-bottom:8px">Pool Controls</div>';
+  h+='<div style="font-size:11px;font-weight:900;margin-bottom:10px">Pool Controls</div>';
   h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">';
-  h+='<div style="font-size:11px;font-weight:700;color:var(--muted)">Picks are currently <b style="color:var(--text)">'+(ST.locked?"LOCKED":"OPEN")+'</b></div>';
-  h+='<button class="btn '+(ST.locked?"btn-green":"btn-red")+'" id="btn-toggle-lock">'+(ST.locked?"🔓 Unlock Picks":"🔒 Lock Picks")+'</button>';
+  h+='<div style="font-size:11px;font-weight:700;color:var(--muted)">Picks <b style="color:var(--text)">'+(ST.locked?"LOCKED":"OPEN")+'</b></div>';
+  h+='<button class="btn '+(ST.locked?"btn-green":"btn-red")+'" id="btn-toggle-lock">'+(ST.locked?"🔓 Unlock":"🔒 Lock Picks")+'</button>';
   h+='</div>';
   h+='</div>';
 
-  // Salary assignment
+  // ── Field Management ──
   h+='<div class="card">';
-  h+='<div style="font-size:11px;font-weight:900;margin-bottom:4px">Golfer Salaries</div>';
-  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:10px">Set a salary for each golfer. Salaries are visible to all players. Cap: '+fmtSal(CAP)+' for '+ROSTER_SIZE+' picks.</div>';
+  h+='<div style="font-size:11px;font-weight:900;margin-bottom:4px">Tournament Field</div>';
+  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:10px">'+fieldCount+' golfers in field · '+salCount+' with salaries assigned</div>';
 
-  // Tier defaults info
-  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">';
+  // Import from ESPN button
+  h+='<div style="background:var(--blue-bg);border:2px solid var(--blue);border-radius:10px;padding:10px 12px;margin-bottom:12px">';
+  h+='<div style="font-size:10px;font-weight:800;color:var(--blue);margin-bottom:4px">📡 Import from ESPN</div>';
+  h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:8px">Fetches the tournament field from ESPN. Works once the field is announced (typically ~1 week out).</div>';
+  h+='<button class="btn btn-green" id="btn-import-espn" style="font-size:10px;padding:6px 14px">⬇ Pull ESPN Field</button>';
+  h+='<span id="espn-import-status" style="font-size:9px;color:var(--muted);font-weight:700;margin-left:8px"></span>';
+  h+='</div>';
+
+  // Add golfer manually
+  h+='<div style="background:var(--cream);border:2px solid var(--border2);border-radius:10px;padding:10px 12px;margin-bottom:12px">';
+  h+='<div style="font-size:10px;font-weight:800;color:var(--text);margin-bottom:8px">➕ Add Golfer Manually</div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+  h+='<input class="adm-input" id="adm-golfer-name" placeholder="Full name (e.g. Scottie Scheffler)" style="flex:1;min-width:160px;padding:7px 10px;font-size:12px">';
+  h+='<input class="adm-input" id="adm-golfer-country" placeholder="Country (e.g. USA)" style="width:90px;padding:7px 10px;font-size:12px">';
+  h+='</div>';
+  h+='<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">';
   TIERS.forEach(function(t){
-    h+='<span class="tier-badge '+t.cls+'">'+t.label+' · '+fmtSal(t.salary)+'</span>';
+    h+='<button class="btn" data-add-tier="'+t.id+'" style="font-size:9px;padding:5px 10px">'+t.label+' · '+fmtSal(t.salary)+'</button>';
   });
   h+='</div>';
-
-  h+='<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">';
-  h+='<button class="btn" id="btn-autoseed-salaries" style="font-size:9px">⚡ Auto-assign by ranking</button>';
-  h+='<button class="btn btn-gold" id="btn-save-salaries" style="font-size:9px">💾 Save All Salaries</button>';
+  h+='<div id="adm-add-err" style="font-size:9px;color:var(--red);min-height:14px;margin-top:4px;font-weight:700"></div>';
   h+='</div>';
 
-  if(!ST.golfers.length){
-    h+='<div style="font-size:11px;color:var(--muted);padding:10px 0">No golfers loaded yet — refresh the Live tab first.</div>';
+  // Bulk clear
+  h+='<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">';
+  h+='<button class="btn" id="btn-autoseed-salaries" style="font-size:9px">⚡ Auto-assign salaries by order</button>';
+  h+='<button class="btn btn-gold" id="btn-save-salaries" style="font-size:9px">💾 Save All Salaries</button>';
+  h+='<button class="btn btn-red" id="btn-clear-field" style="font-size:9px">🗑 Clear Field</button>';
+  h+='</div>';
+
+  // Tier legend
+  h+='<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px">';
+  TIERS.forEach(function(t){h+='<span class="tier-badge '+t.cls+'">'+t.label+' · '+fmtSal(t.salary)+'</span>';});
+  h+='</div>';
+
+  // Field search
+  h+='<div style="position:relative;margin-bottom:8px">';
+  h+='<span style="position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--muted);pointer-events:none">🔍</span>';
+  h+='<input class="adm-input" id="adm-field-search" placeholder="Search golfers…" value="'+x(ST.adminFieldSearch)+'" style="padding:7px 10px 7px 28px;font-size:12px">';
+  h+='</div>';
+
+  if(!all.length){
+    h+='<div style="text-align:center;padding:20px;font-size:11px;color:var(--muted);font-weight:700">No golfers yet.<br>Import from ESPN or add manually above.</div>';
   } else {
-    h+='<div id="salary-list">';
-    h+=salaryListHtml();
-    h+='</div>';
+    var q=ST.adminFieldSearch.toLowerCase();
+    var filtered=all.filter(function(g){return !q||g.name.toLowerCase().indexOf(q)>=0;});
+    h+='<div style="font-size:9px;color:var(--muted);font-weight:700;margin-bottom:6px">'+filtered.length+' golfers'+( q?' matching "'+x(ST.adminFieldSearch)+'"':'')+' — tap salary to edit</div>';
+    filtered.forEach(function(g){
+      var s=ST.salaries[g.id]||{};
+      var sal=s.salary||"";
+      var tid=s.tier||"t4";
+      var tm=tierMeta(tid);
+      h+='<div class="adm-golfer-row">';
+      h+='<span class="tier-badge '+tm.cls+'" style="flex-shrink:0;cursor:pointer" data-cycle-tier="'+x(g.id)+'">'+tm.label+'</span>';
+      h+='<div style="flex:1;font-size:11px;font-weight:800;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 6px">'+x(g.name);
+      if(g.country)h+=' <span style="font-size:8px;color:var(--muted);font-weight:700">'+x(g.country)+'</span>';
+      h+='</div>';
+      h+='<select class="adm-input" data-tier-for="'+x(g.id)+'" style="width:76px;padding:4px 5px;font-size:9px;display:none">';
+      TIERS.forEach(function(t){h+='<option value="'+t.id+'"'+(tid===t.id?" selected":"")+'>'+t.label+'</option>';});
+      h+='</select>';
+      h+='<input class="adm-input" data-sal-for="'+x(g.id)+'" type="number" step="500" min="500" max="25000" value="'+x(sal)+'" style="width:76px;padding:4px 8px;font-size:11px" placeholder="$">';
+      // Source badge
+      if(ST.manualGolfers[g.id])h+='<span style="font-size:8px;color:var(--muted);font-weight:700;margin-left:4px;flex-shrink:0">manual</span>';
+      h+='<button data-remove-golfer="'+x(g.id)+'" style="font-size:12px;background:none;color:var(--muted);padding:2px 5px;flex-shrink:0" title="Remove">✕</button>';
+      h+='</div>';
+    });
   }
   h+='</div>';
-
-  return h;
-}
-
-function salaryListHtml(){
-  var h='';
-  ST.golfers.forEach(function(g){
-    var s=ST.salaries[g.id]||{};
-    var sal=s.salary||"";
-    var tid=s.tier||"t4";
-    h+='<div class="adm-golfer-row">';
-    h+='<div style="flex:1;font-size:11px;font-weight:800;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(g.name)+'</div>';
-    h+='<select class="adm-input" data-tier-for="'+x(g.id)+'" style="width:80px;padding:4px 6px;font-size:9px;margin-right:6px">';
-    TIERS.forEach(function(t){
-      h+='<option value="'+t.id+'"'+(tid===t.id?" selected":"")+'>'+t.label+'</option>';
-    });
-    h+='</select>';
-    h+='<input class="adm-input" data-sal-for="'+x(g.id)+'" type="number" step="500" min="1000" max="25000" value="'+x(sal)+'" style="width:80px;padding:4px 8px;font-size:11px" placeholder="Salary">';
-    h+='</div>';
-  });
   return h;
 }
 
@@ -926,12 +1045,115 @@ function bind(){
     toast(newVal?"🔒 Picks locked":"🔓 Picks unlocked");
   });
 
-  // Admin: auto-seed salaries by ESPN rank
+  // Admin: import from ESPN
+  el=document.getElementById("btn-import-espn");
+  if(el)el.addEventListener("click",function(){
+    var statusEl=document.getElementById("espn-import-status");
+    if(statusEl)statusEl.textContent="Fetching…";
+    this.disabled=true;
+    var btn=this;
+    fetchESPNField(function(golfers){
+      btn.disabled=false;
+      if(!golfers.length){
+        if(statusEl)statusEl.textContent="No field data yet from ESPN";
+        toast("ESPN field not available yet");
+        return;
+      }
+      // Merge into manualGolfers without overwriting existing entries
+      var updates={};
+      var added=0;
+      golfers.forEach(function(g){
+        if(!ST.manualGolfers[g.id]){
+          updates[g.id]={name:g.name,country:g.country||""};
+          added++;
+        }
+      });
+      if(!added){
+        if(statusEl)statusEl.textContent="All "+golfers.length+" already in field";
+        toast("Field already up to date");
+        return;
+      }
+      DB.ref(BASE+"/field").update(updates,function(err){
+        if(!err){
+          if(statusEl)statusEl.textContent="✓ Added "+added+" golfer"+(added!==1?"s":"")+" from ESPN";
+          toast("✓ Imported "+added+" golfers");
+        } else {
+          if(statusEl)statusEl.textContent="Error saving";
+          toast("Error saving to Firebase");
+        }
+      });
+    });
+  });
+
+  // Admin: add golfer manually via tier button
+  els=document.querySelectorAll("[data-add-tier]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var errEl=document.getElementById("adm-add-err");
+    var nameInp=document.getElementById("adm-golfer-name");
+    var countryInp=document.getElementById("adm-golfer-country");
+    var name=(nameInp?nameInp.value:"").trim();
+    if(!name){if(errEl)errEl.textContent="Enter a golfer name";return;}
+    var tid=this.getAttribute("data-add-tier");
+    var salary=tierMeta(tid).salary;
+    var country=(countryInp?countryInp.value:"").trim();
+    var id=name.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"");
+    // Save to field and salaries atomically
+    var updates={};
+    updates[BASE+"/field/"+id]={name:name,country:country};
+    updates[BASE+"/salaries/"+id]={name:name,salary:salary,tier:tid};
+    DB.ref().update(updates,function(err){
+      if(!err){
+        if(nameInp)nameInp.value="";
+        if(countryInp)countryInp.value="";
+        if(errEl)errEl.textContent="";
+        toast("✓ Added "+name);
+      } else {
+        if(errEl)errEl.textContent="Error saving";
+      }
+    });
+  });
+
+  // Admin: field search
+  el=document.getElementById("adm-field-search");
+  if(el)el.addEventListener("input",function(){ST.adminFieldSearch=this.value;draw();});
+
+  // Admin: remove golfer
+  els=document.querySelectorAll("[data-remove-golfer]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var gid=this.getAttribute("data-remove-golfer");
+    if(!confirm("Remove this golfer from the field?"))return;
+    var updates={};
+    updates[BASE+"/field/"+gid]=null;
+    updates[BASE+"/salaries/"+gid]=null;
+    DB.ref().update(updates,function(err){
+      if(!err)toast("Removed");
+    });
+  });
+
+  // Admin: cycle tier badge (tap to cycle T1→T2→T3→T4→T1)
+  els=document.querySelectorAll("[data-cycle-tier]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var gid=this.getAttribute("data-cycle-tier");
+    var tierSel=document.querySelector('[data-tier-for="'+gid+'"]');
+    var salInp=document.querySelector('[data-sal-for="'+gid+'"]');
+    if(!tierSel)return;
+    var order=["t1","t2","t3","t4"];
+    var cur=tierSel.value||"t4";
+    var next=order[(order.indexOf(cur)+1)%order.length];
+    tierSel.value=next;
+    if(salInp)salInp.value=tierMeta(next).salary;
+    // Update badge visually
+    var tm=tierMeta(next);
+    this.className="tier-badge "+tm.cls;
+    this.textContent=tm.label;
+  });
+
+  // Admin: auto-seed salaries by order
   el=document.getElementById("btn-autoseed-salaries");
   if(el)el.addEventListener("click",function(){
-    if(!ST.golfers.length){toast("No golfers loaded");return;}
-    // Update all inputs to tier-default salaries based on ranking order
-    ST.golfers.forEach(function(g,idx){
+    var all=mergedGolfers();
+    if(!all.length){toast("No golfers in field");return;}
+    all.forEach(function(g,idx){
       var tier=idx<10?"t1":idx<25?"t2":idx<50?"t3":"t4";
       var salary=tierMeta(tier).salary;
       var salInp=document.querySelector('[data-sal-for="'+g.id+'"]');
@@ -939,23 +1161,36 @@ function bind(){
       if(salInp)salInp.value=salary;
       if(tierSel)tierSel.value=tier;
     });
-    toast("Auto-assigned — click Save to commit");
+    toast("Auto-assigned — tap Save to commit");
   });
 
   // Admin: save salaries
   el=document.getElementById("btn-save-salaries");
   if(el)el.addEventListener("click",function(){
+    var all=mergedGolfers();
     var sal={};
-    ST.golfers.forEach(function(g){
+    all.forEach(function(g){
       var salInp=document.querySelector('[data-sal-for="'+g.id+'"]');
       var tierSel=document.querySelector('[data-tier-for="'+g.id+'"]');
       var salary=salInp?parseInt(salInp.value)||0:0;
       var tier=tierSel?tierSel.value:"t4";
-      if(salary>0) sal[g.id]={name:g.name,salary:salary,tier:tier};
+      if(salary>0)sal[g.id]={name:g.name,salary:salary,tier:tier};
     });
     DB.ref(BASE+"/salaries").set(sal,function(err){
       if(!err)toast("✓ Salaries saved!");
       else toast("Error saving salaries");
+    });
+  });
+
+  // Admin: clear entire field
+  el=document.getElementById("btn-clear-field");
+  if(el)el.addEventListener("click",function(){
+    if(!confirm("Clear ALL golfers from the field? This also clears salaries."))return;
+    var updates={};
+    updates[BASE+"/field"]=null;
+    updates[BASE+"/salaries"]=null;
+    DB.ref().update(updates,function(err){
+      if(!err)toast("Field cleared");
     });
   });
 }
