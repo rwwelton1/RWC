@@ -365,6 +365,12 @@ button,input,select{font-family:'Nunito',sans-serif}
   paint-order:stroke fill;
 }
 .topbar .logo{font-size:17px;flex-shrink:0;white-space:nowrap}
+/* PULL-TO-REFRESH */
+#ptr-indicator{position:fixed;top:0;left:50%;transform:translateX(-50%);background:var(--gold);color:var(--text);font-size:10px;font-weight:800;padding:4px 14px;border-radius:0 0 10px 10px;border:2px solid var(--border);border-top:none;box-shadow:0 3px 0 var(--border);z-index:200;opacity:0;transition:opacity .2s;pointer-events:none}
+#ptr-indicator.show{opacity:1}
+/* LIVE PULSE */
+@keyframes livePulse{0%,100%{opacity:1}50%{opacity:.4}}
+.live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--red);animation:livePulse 1.4s ease infinite;margin-right:4px;vertical-align:middle;flex-shrink:0}
 /* TROPHY CASE */
 .trophy-hero{background:linear-gradient(135deg,#1a1200,#2d1f00);border:2px solid var(--border);border-radius:16px;padding:24px 20px;margin-bottom:16px;text-align:center;position:relative;overflow:hidden;box-shadow:4px 4px 0 var(--border)}
 .trophy-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(232,200,64,.15) 0%,transparent 70%);pointer-events:none}
@@ -414,6 +420,7 @@ button,input,select{font-family:'Nunito',sans-serif}
 <div class="bg-grid"></div>
 <div class="bg-glow"></div>
 <div id="root"></div>
+<div id="ptr-indicator">↓ Release to refresh</div>
 <div id="toast"></div>
 
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -535,6 +542,27 @@ function ukey(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");
 
 function poolById(id){ for(var i=0;i<POOL_LIBRARY.length;i++) if(POOL_LIBRARY[i].id===id) return POOL_LIBRARY[i]; return null; }
 function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(id); }).filter(Boolean); }
+
+// Returns a compact countdown string from now to a future timestamp, or elapsed since a past one
+function formatCountdown(tsMs) {
+  var diff = tsMs - Date.now();
+  var abs = Math.abs(diff);
+  var past = diff < 0;
+  var s = Math.floor(abs/1000);
+  var m = Math.floor(s/60); s = s%60;
+  var hr = Math.floor(m/60); m = m%60;
+  var d = Math.floor(hr/24); hr = hr%24;
+  var str = d>0 ? d+'d '+(hr>0?hr+'h':'') : hr>0 ? hr+'h '+(m>0?m+'m':'') : m>0 ? m+'m' : s+'s';
+  return past ? str.trim()+' ago' : str.trim();
+}
+
+// Parse a date string like "Jun 11" or "Jun 11-Jul 19" → timestamp of start date (current year)
+function parseDatesStart(datesStr) {
+  if(!datesStr) return null;
+  var part = datesStr.split('-')[0].trim(); // "Jun 11"
+  var d = new Date(part + ' ' + new Date().getFullYear());
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
 
 // ── SESSION STORAGE ───────────────────────────────────────────────────────────
 function saveSession(username, emoji){
@@ -1713,11 +1741,10 @@ function renderTrophyCase() {
   h += '<div class="trophy-hero-icon">'+em+'</div>';
   h += '<div class="trophy-hero-name">'+x(u.username)+'</div>';
   h += '<div class="trophy-hero-sub">Trophy Case</div>';
-  h += '<div class="trophy-stats-row">';
+  h += '<div class="trophy-stats-row" style="grid-template-columns:repeat(3,1fr)">';
   h += '<div class="trophy-stat"><div class="trophy-stat-val gold" id="tc-wins">—</div><div class="trophy-stat-label">Wins</div></div>';
   h += '<div class="trophy-stat"><div class="trophy-stat-val" id="tc-podiums">—</div><div class="trophy-stat-label">Podiums</div></div>';
   h += '<div class="trophy-stat"><div class="trophy-stat-val blue" id="tc-entered">—</div><div class="trophy-stat-label">Entered</div></div>';
-  h += '<div class="trophy-stat"><div class="trophy-stat-val green" id="tc-winrate">—</div><div class="trophy-stat-label">Win Rate</div></div>';
   h += '</div>';
   h += '</div>';
 
@@ -1748,45 +1775,84 @@ function renderTrophyCase() {
     return DB.ref("groups/"+gid).once("value").then(function(sn){ return sn.val(); });
   });
 
-  Promise.all(groupPromises).then(function(groups){
-    groups = groups.filter(Boolean);
-    DB.ref("globalSettings/results").once("value", function(rSnap){
-      var globalResults = rSnap.val() || {};
-      var totalEntered=0, totalWins=0, totalPodiums=0;
-      var sportMap = {};
-      var historyEntries = [];
+  var ukey = u.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
 
-      groups.forEach(function(g){
-        var pools = groupPools(g);
-        var isMember = (g.players||[]).indexOf(u.username) >= 0;
-        if(!isMember) return;
-        pools.forEach(function(pool){
-          var r = globalResults[pool.id];
-          var sid = pool.id;
-          if(!sportMap[sid]) sportMap[sid] = { pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
-          sportMap[sid].entries++;
-          totalEntered++;
-          var finish=null, pts=0;
-          if(r){
-            if(r.first===u.username)       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
-            else if(r.second===u.username) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
-            else if(r.third===u.username)  { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
-            else if(r.first||r.second)     { finish=99; }
+  Promise.all([
+    Promise.all(groupPromises),
+    DB.ref("users/"+ukey+"/trophies").once("value").then(function(sn){ return sn.val() || {}; }),
+    DB.ref("globalSettings/results").once("value").then(function(sn){ return sn.val() || {}; })
+  ]).then(function(all){
+    var groups = all[0].filter(Boolean);
+    var archivedTrophies = all[1]; // { poolId: { finish, pts, poolName, poolIcon, ts } }
+    var globalResults = all[2];
+
+    var totalEntered=0, totalWins=0, totalPodiums=0;
+    var sportMap = {};
+    var historyEntries = [];
+    var livePoolIds = {}; // track which pools we already have live data for
+
+    // ── Live group data ──────────────────────────────────────────────────────
+    groups.forEach(function(g){
+      var pools = groupPools(g);
+      var isMember = (g.players||[]).indexOf(u.username) >= 0;
+      if(!isMember) return;
+      pools.forEach(function(pool){
+        var r = globalResults[pool.id];
+        var sid = pool.id;
+        livePoolIds[sid] = true;
+        if(!sportMap[sid]) sportMap[sid] = { pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
+        sportMap[sid].entries++;
+        totalEntered++;
+        var finish=null, pts=0;
+        if(r){
+          if(r.first===u.username)       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
+          else if(r.second===u.username) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
+          else if(r.third===u.username)  { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
+          else if(r.first||r.second)     { finish=99; }
+        }
+        sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts });
+        if(r && (r.first||r.second||r.third)){
+          var yr = new Date().getFullYear();
+          historyEntries.push({ pool:pool, group:g.name, finish:finish, pts:pts, year:yr, ts:Date.now() });
+          // Write-through: always snapshot current win with full data (group name + year)
+          if(finish && finish < 4) {
+            var yr = new Date().getFullYear();
+            var archiveKey = pool.id + "_" + yr;
+            var snap = { poolId:pool.id, poolName:pool.name, poolIcon:pool.icon, finish:finish, pts:pts, groupName:g.name, year:yr, ts:Date.now() };
+            DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
           }
-          sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts });
-          if(r && (r.first||r.second||r.third)){
-            historyEntries.push({ pool:pool, group:g.name, finish:finish, pts:pts });
-          } else if(!r){
-            historyEntries.push({ pool:pool, group:g.name, finish:null, pts:0, active:true });
-          }
-        });
+        } else if(!r){
+          historyEntries.push({ pool:pool, group:g.name, finish:null, pts:0, active:true });
+        }
       });
+    });
+
+    // ── Archived trophies for deleted groups ─────────────────────────────────
+    Object.keys(archivedTrophies).forEach(function(archiveKey){
+      // archiveKey is poolId_year (e.g. "wc_2026") or legacy poolId
+      var t = archivedTrophies[archiveKey];
+      var poolId = t.poolId || archiveKey.replace(/_\d{4}$/, "");
+      if(livePoolIds[poolId]) return; // already covered by live data
+      var pool = poolById(poolId);
+      if(!pool) {
+        pool = { id:poolId, name:t.poolName||poolId, icon:t.poolIcon||"🏆", bg:"linear-gradient(135deg,#334155,#475569)", desc:"", dates:"" };
+      }
+      totalEntered++;
+      if(!sportMap[poolId]) sportMap[poolId] = { pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
+      sportMap[poolId].entries++;
+      if(t.finish===1)      { totalWins++; totalPodiums++; sportMap[poolId].wins++; }
+      else if(t.finish===2) { totalPodiums++; sportMap[poolId].seconds++; }
+      else if(t.finish===3) { totalPodiums++; sportMap[poolId].thirds++; }
+      var gName = t.groupName || "";
+      sportMap[poolId].groups.push({ name:gName, finish:t.finish, pts:t.pts||0, year:t.year });
+      historyEntries.push({ pool:pool, group:gName, finish:t.finish, pts:t.pts||0, year:t.year, ts:t.ts });
+    });
 
       var winRate = totalEntered>0 ? Math.round(totalWins/totalEntered*100) : 0;
-      ["tc-wins","tc-podiums","tc-entered","tc-winrate"].forEach(function(id, idx){
+      ["tc-wins","tc-podiums","tc-entered"].forEach(function(id, idx){
         var el = document.getElementById(id);
         if(!el) return;
-        el.textContent = [totalWins, totalPodiums, totalEntered, winRate+"%"][idx];
+        el.textContent = [totalWins, totalPodiums, totalEntered][idx];
       });
 
       var sportsEl = document.getElementById("tc-sports");
@@ -1829,12 +1895,12 @@ function renderTrophyCase() {
               groupEntries.forEach(function(ge){
                 var finIcon=ge.finish===1?"🥇":ge.finish===2?"🥈":ge.finish===3?"🥉":ge.finish===99?"🏁":"⏳";
                 var finColor=ge.finish===1?"var(--gold-dark)":ge.finish===2?"#666":ge.finish===3?"#b45309":ge.finish===99?"var(--blue)":"var(--muted)";
-                var finTxt=ge.finish===1?"1st Place":ge.finish===2?"2nd Place":ge.finish===3?"3rd Place":ge.finish===99?"Competed":"Active";
+                var finTxt=ge.finish===1?"1st":ge.finish===2?"2nd":ge.finish===3?"3rd":ge.finish===99?"Competed":"Active";
+                var yearPart=ge.year?ge.year+' · ':'';
                 sh+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border2)">';
                 sh+='<div style="font-size:15px;flex-shrink:0">'+finIcon+'</div>';
-                sh+='<div style="flex:1;font-size:11px;font-weight:700;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(ge.name)+'</div>';
+                sh+='<div style="flex:1;font-size:11px;font-weight:700;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+yearPart+x(ge.name||'—')+'</div>';
                 sh+='<div style="font-size:11px;font-weight:900;color:'+finColor+'">'+finTxt+'</div>';
-                if(ge.pts>0) sh+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin-left:4px">+'+ge.pts+'</div>';
                 sh+='</div>';
               });
               sh+='</div>';
@@ -1850,6 +1916,10 @@ function renderTrophyCase() {
         historyEntries.sort(function(a,b){
           if(a.active&&!b.active) return -1;
           if(!a.active&&b.active) return 1;
+          // Most recent year first
+          var ya = a.year || (a.ts ? new Date(a.ts).getFullYear() : 0);
+          var yb = b.year || (b.ts ? new Date(b.ts).getFullYear() : 0);
+          if(yb!==ya) return yb-ya;
           var fa=a.finish||99,fb=b.finish||99;
           if(fa!==fb) return fa-fb;
           return a.pool.name.localeCompare(b.pool.name);
@@ -1860,23 +1930,23 @@ function renderTrophyCase() {
           var hh="";
           historyEntries.forEach(function(e){
             var finIcon=e.active?"⏳":e.finish===1?"🥇":e.finish===2?"🥈":e.finish===3?"🥉":e.finish===99?"🏁":"🔵";
-            var finTxt=e.active?"Active":e.finish===1?"1st Place":e.finish===2?"2nd Place":e.finish===3?"3rd Place":e.finish===99?"Competed":"—";
+            var finTxt=e.active?"Active":e.finish===1?"1st":e.finish===2?"2nd":e.finish===3?"3rd":e.finish===99?"Competed":"—";
             var finCol=e.active?"var(--green)":e.finish===1?"var(--gold-dark)":e.finish===2?"#666":e.finish===3?"#b45309":e.finish===99?"var(--blue)":"var(--muted)";
+            var yearStr=e.year?String(e.year):(e.ts?String(new Date(e.ts).getFullYear()):"");
+            var subLine=[yearStr, x(e.group||"—")].filter(Boolean).join(" · ");
             hh+='<div class="history-row">';
             hh+='<div class="history-icon">'+finIcon+'</div>';
             hh+='<div class="history-info">';
             hh+='<div class="history-pool">'+e.pool.icon+' '+x(e.pool.name)+'</div>';
-            hh+='<div class="history-group">'+x(e.group)+'</div>';
+            hh+='<div class="history-group">'+subLine+'</div>';
             hh+='</div>';
             hh+='<div class="history-result" style="color:'+finCol+'">'+finTxt+'</div>';
-            if(e.pts>0) hh+='<div style="font-size:10px;font-weight:800;color:var(--muted);background:var(--gold-bg);border:2px solid var(--border);border-radius:6px;padding:2px 7px;box-shadow:1px 1px 0 var(--border);flex-shrink:0">+'+e.pts+'</div>';
             hh+='</div>';
           });
           histEl.innerHTML=hh;
         }
       }
     });
-  });
 }
 
 // ── EMOJI PICKER ──────────────────────────────────────────────────────────────
@@ -2420,6 +2490,17 @@ function renderHub() {
     }
     h += '<div class="pool-info"><div class="pool-name">'+x(pool.name)+'</div>';
     h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div>';
+    // ── Countdown / live indicator ──────────────────────────────────────────
+    if(status==="locked") {
+      var lockedTs = (SC.completedAt||{})[pool.id] || null;
+      var liveStr = lockedTs ? formatCountdown(lockedTs)+' since lock' : 'Scores updating live';
+      h += '<div style="display:flex;align-items:center;margin-top:3px"><span class="live-dot"></span><span style="font-size:9px;font-weight:700;color:#94a3b8">'+liveStr+'</span></div>';
+    } else if(status==="coming-soon" && pool.dates) {
+      var startTs = parseDatesStart(pool.dates);
+      if(startTs && startTs > Date.now()) {
+        h += '<div style="font-size:9px;font-weight:700;color:#64748b;margin-top:3px">Opens in '+formatCountdown(startTs)+'</div>';
+      }
+    }
     if(myName) {
       if(status==="complete" && myFinish) {
         var fc=myFinish===1?'#fbbf24':myFinish===2?'#94a3b8':'#b45309';
@@ -2505,6 +2586,25 @@ function renderHub() {
       h += '</div>';
     }
 
+    // ── Activity: top mover since last snapshot ──────────────────────────────
+    if((status==="open"||status==="locked") && prevRanksH && poolScores.length > 1) {
+      var bigMover = null, bigDiff = 0;
+      poolScores.forEach(function(p, i){
+        if(prevRanksH[p.name] === undefined) return;
+        var diff = prevRanksH[p.name] - (i+1);
+        if(Math.abs(diff) > Math.abs(bigDiff)){ bigDiff = diff; bigMover = p.name; }
+      });
+      if(bigMover && bigDiff !== 0) {
+        var mvIcon = bigDiff > 0 ? '▲' : '▼';
+        var mvCol  = bigDiff > 0 ? '#6ee7b7' : '#fca5a5';
+        var mvSpots = Math.abs(bigDiff) === 1 ? '1 spot' : Math.abs(bigDiff)+' spots';
+        h += '<div style="border-top:1px solid #0f1923;padding:6px 12px;display:flex;align-items:center;gap:6px">';
+        h += '<span style="font-size:9px;color:'+mvCol+';font-weight:900">'+mvIcon+'</span>';
+        h += '<span style="font-size:10px;color:#475569;font-weight:700">'+playerEmoji(bigMover)+' <b style="color:#94a3b8">'+x(bigMover)+'</b> moved '+mvSpots+'</span>';
+        h += '</div>';
+      }
+    }
+
     if(result&&(result.first||result.second||result.third)){
       h += '<div class="pool-winner"><div class="podium">';
       if(result.first)  h+='<div class="podium-item p1">1st <b>'+x(result.first)+'</b></div>';
@@ -2534,6 +2634,29 @@ function renderHub() {
 
   h += '</div>';
   render(h);
+
+  // ── Pull-to-refresh ────────────────────────────────────────────────────────
+  (function(){
+    var startY=0, pulling=false, threshold=72;
+    var ind = document.getElementById("ptr-indicator");
+    var main = document.querySelector(".main");
+    if(!main) return;
+    main.addEventListener("touchstart", function(e){
+      if(window.scrollY===0){ startY=e.touches[0].clientY; pulling=true; }
+    }, {passive:true});
+    main.addEventListener("touchmove", function(e){
+      if(!pulling) return;
+      var dy = e.touches[0].clientY - startY;
+      if(dy > 20 && ind) ind.classList.add("show");
+    }, {passive:true});
+    main.addEventListener("touchend", function(e){
+      if(!pulling) return;
+      pulling=false;
+      var dy = e.changedTouches[0].clientY - startY;
+      if(ind) ind.classList.remove("show");
+      if(dy >= threshold){ toast("Refreshing…","info"); draw(); }
+    }, {passive:true});
+  })();
 
   document.getElementById("btn-leave").addEventListener("click", function(){
     SC.group=null; SC.isAdmin=false; SC.isMaster=false; SC.groupAdmin=false; SC.showGroupSettings=false; SC.screen="profile"; draw();
@@ -3665,7 +3788,59 @@ function saveAdminResults() {
     });
     if(Object.keys(r).length>0) newResults[pool.id]=r;
   });
-  if(DB) DB.ref("globalSettings/results").set(newResults, function(){ toast("Results saved &#10003;"); });
+  if(DB) DB.ref("globalSettings/results").set(newResults, function(){
+    toast("Results saved &#10003;");
+    // Fan out trophy records to each affected user so they survive group deletion
+    archiveTrophiesFromResults(newResults);
+  });
+}
+
+// Write permanent trophy records to each winner's user node
+// Called from admin save — loads all groups to find group names for each winner
+function archiveTrophiesFromResults(results) {
+  if(!DB || !results) return;
+  var finishPts = {first:4, second:2, third:1};
+  var finishNum = {first:1, second:2, third:3};
+  var year = new Date().getFullYear();
+
+  // Load all groups to find which group each winner was in
+  DB.ref("groups").once("value", function(gsn){
+    var allGroups = gsn.val() || {};
+
+    Object.keys(results).forEach(function(poolId){
+      var r = results[poolId];
+      var pool = poolById(poolId);
+      if(!pool) return;
+
+      ["first","second","third"].forEach(function(place){
+        var username = r[place];
+        if(!username) return;
+        var ukey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+
+        // Find which group this user played this pool in
+        var groupName = "";
+        Object.values(allGroups).forEach(function(g){
+          if(!g || !g.pools) return;
+          if(g.pools.indexOf(poolId) >= 0 && (g.players||[]).indexOf(username) >= 0) {
+            groupName = g.name || groupName;
+          }
+        });
+
+        var archiveKey = poolId + "_" + year;
+        var entry = {
+          poolId: poolId,
+          poolName: pool.name,
+          poolIcon: pool.icon,
+          finish: finishNum[place],
+          pts: finishPts[place],
+          groupName: groupName,
+          year: year,
+          ts: Date.now()
+        };
+        DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(entry);
+      });
+    });
+  });
 }
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────
