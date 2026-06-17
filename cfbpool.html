@@ -199,6 +199,14 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .week-row-label{font-weight:700;color:var(--muted)}
 .week-row-score{font-weight:900;color:var(--text)}
 .week-row-detail{font-size:9px;font-weight:700;color:var(--muted)}
+/* ── COUNTDOWN BAR ── */
+.countdown-bar{background:linear-gradient(135deg,#1a1200,#2d1f00);border-bottom:2px solid var(--border);padding:7px 12px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.countdown-label{font-size:9px;font-weight:800;color:#b89a00;text-transform:uppercase;letter-spacing:.06em;flex-shrink:0}
+.countdown-timer{font-size:15px;font-weight:900;color:#fbbf24;letter-spacing:.03em;flex:1;font-variant-numeric:tabular-nums}
+.countdown-sub{font-size:9px;font-weight:700;color:#64748b;flex-shrink:0}
+.countdown-bar.expired{background:#0d1a0d}
+.countdown-bar.expired .countdown-label{color:#4a7c59}
+.countdown-bar.expired .countdown-timer{color:#6ee7b7;font-size:12px}
 </style>
 </head>
 <body>
@@ -483,6 +491,7 @@ function parseEspnSchedule(data){
     var homeName=(home.team&&(home.team.shortDisplayName||home.team.displayName))||"TBD";
     var dt=ev.date?new Date(ev.date):null;
     var kickoff=dt?dt.toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}):"";
+    var kickoffTs=dt?dt.getTime():null;
     var venue=(comp.venue&&comp.venue.fullName)||"";
     var spread=0,favSide="home";
     var odds=(comp.odds||[])[0];
@@ -496,13 +505,79 @@ function parseEspnSchedule(data){
         else favSide="home";
       }
     }
-    return {away:awayName,home:homeName,kickoff:kickoff,venue:venue,spread:spread,favSide:favSide};
+    return {away:awayName,home:homeName,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,spread:spread,favSide:favSide};
   });
 }
 function guessWeekNumber(label){
   var m=String(label||"").match(/(\d+)/);
   return m?parseInt(m[1]):1;
 }
+
+// ── Countdown helpers ─────────────────────────────────────
+var _countdownTimer=null;
+
+// Parse kickoff string like "Sat, Aug 29 at 12:00 PM" → timestamp (ms)
+// Falls back to kickoffTs if stored, otherwise parses the display string
+function parseKickoffTs(game){
+  if(game.kickoffTs) return game.kickoffTs;
+  var s=String(game.kickoff||"");
+  if(!s) return null;
+  // Try removing the weekday prefix: "Sat, Aug 29 at 12:00 PM" → "Aug 29 at 12:00 PM"
+  s=s.replace(/^[A-Za-z]+,?\s*/,"");
+  // Replace "at" with space: "Aug 29 12:00 PM"
+  s=s.replace(/\s+at\s+/," ");
+  // Append current year if missing
+  var yr=new Date().getFullYear();
+  var d=new Date(s+" "+yr);
+  if(isNaN(d.getTime())) return null;
+  return d.getTime();
+}
+
+function getFirstKickoff(weekId){
+  var games=ST.games[weekId]||{};
+  var earliest=null;
+  GAME_IDS.forEach(function(gid){
+    var g=games[gid];
+    if(!g||!g.away||!g.home) return;
+    var ts=parseKickoffTs(g);
+    if(ts&&(earliest===null||ts<earliest)) earliest=ts;
+  });
+  return earliest;
+}
+
+function formatCountdownCfb(ms){
+  if(ms<=0) return null;
+  var s=Math.floor(ms/1000);
+  var m=Math.floor(s/60); s=s%60;
+  var h=Math.floor(m/60); m=m%60;
+  var d=Math.floor(h/24); h=h%24;
+  if(d>0) return d+'d '+(h>0?h+'h '+('0'+m).slice(-2)+'m':'');
+  if(h>0) return h+'h '+('0'+m).slice(-2)+'m '+('0'+s).slice(-2)+'s';
+  return ('0'+m).slice(-2)+'m '+('0'+s).slice(-2)+'s';
+}
+
+function startCountdown(weekId){
+  stopCountdown();
+  var firstKickoff=getFirstKickoff(weekId);
+  if(!firstKickoff) return;
+  function tick(){
+    var el=document.getElementById("countdown-display");
+    var sub=document.getElementById("countdown-sub");
+    if(!el) { stopCountdown(); return; }
+    var remaining=firstKickoff-Date.now();
+    if(remaining<=0){
+      el.parentElement.classList.add("expired");
+      el.textContent="Picks are locked — first game kicked off";
+      if(sub) sub.textContent="";
+      stopCountdown();
+    } else {
+      el.textContent=formatCountdownCfb(remaining)+" until first kickoff";
+    }
+  }
+  tick();
+  _countdownTimer=setInterval(tick,1000);
+}
+function stopCountdown(){ clearInterval(_countdownTimer); _countdownTimer=null; }
 function addImportedGames(weekId){
   var selected=ST.importGames.filter(function(g,i){return ST.importSelected[i];});
   if(!selected.length){toast("Select at least one game");return;}
@@ -516,6 +591,7 @@ function addImportedGames(weekId){
     setGameField(weekId,gid,"favSide",g.favSide);
     setGameField(weekId,gid,"spread",g.spread);
     setGameField(weekId,gid,"kickoff",g.kickoff);
+    if(g.kickoffTs) setGameField(weekId,gid,"kickoffTs",g.kickoffTs);
   }
   ST.importSelected={};
   if(selected.length>n) toast("Added "+n+" games &mdash; "+(selected.length-n)+" more selected but no empty slots left");
@@ -772,6 +848,19 @@ function renderPicks(){
     return h;
   }
 
+  // Countdown bar — only when week is unlocked and games have kickoff times
+  if(!locked){
+    var firstTs=getFirstKickoff(weekId);
+    if(firstTs){
+      var remaining=firstTs-Date.now();
+      if(remaining>0){
+        h+='<div class="countdown-bar"><span class="countdown-label">&#9200; Locks in</span><span class="countdown-timer" id="countdown-display">--</span></div>';
+      } else {
+        h+='<div class="countdown-bar expired"><span class="countdown-label">&#128274;</span><span class="countdown-timer" id="countdown-display">Picks are locked — first game kicked off</span></div>';
+      }
+    }
+  }
+
   h+='<div class="games-wrap">';
   // Pre-compute which confidence values are already used by other games
   var allUsedConfs={};
@@ -990,6 +1079,12 @@ function draw(){
     if(_scData) renderScoresInto(); else startScoreRefresh();
   } else {
     stopScoreRefresh();
+  }
+  // Start countdown if on picks tab, week is unlocked, and we have kickoff data
+  if(ST.page==="picks"&&ST.curWeek&&!ST.locked[ST.curWeek]&&document.getElementById("countdown-display")){
+    startCountdown(ST.curWeek);
+  } else {
+    stopCountdown();
   }
 }
 
