@@ -1032,8 +1032,7 @@ function showAuthModal(tab) {
         SC.currentUser = user;
         saveSession(user.username, user.emoji);
         el.remove();
-        SC.screen = "profile";
-        draw();
+        _afterAuthSuccess();
         toast("Welcome, " + user.username + " ✓");
       });
     });
@@ -1053,8 +1052,7 @@ function showAuthModal(tab) {
           SC.currentUser = user;
           saveSession(user.username, user.emoji);
           el.remove();
-          SC.screen = "profile";
-          draw();
+          _afterAuthSuccess();
         });
       }
       submitBtn.addEventListener("click", doSubmit);
@@ -1063,6 +1061,55 @@ function showAuthModal(tab) {
     }
   }
   buildModal();
+}
+
+// Called after any successful login/signup — handles pending join deep-link
+function _afterAuthSuccess() {
+  if(SC._pendingJoin) {
+    var pj = SC._pendingJoin;
+    SC._pendingJoin = null;
+    loadGroup(pj.name, function(group, err){
+      if(err || !group) { SC.error = err || "Group not found"; SC.screen = "profile"; draw(); return; }
+      var alreadyMember = SC.currentUser && (group.players||[]).indexOf(SC.currentUser.username) >= 0;
+      function enterGroup(){
+        if(!alreadyMember && SC.currentUser){
+          var newPlayers = (group.players||[]).slice();
+          if(newPlayers.indexOf(SC.currentUser.username) < 0){
+            newPlayers.push(SC.currentUser.username);
+            group.players = newPlayers;
+            if(DB) DB.ref("groups/"+group.id+"/players").set(newPlayers);
+          }
+          addGroupToUser(SC.currentUser.username, group.id);
+        }
+        SC.isAdmin=false; SC.isMaster=false;
+        SC.group=group; SC.group.data=group.data||{statuses:{},results:{}};
+        SC.groupAdmin=false; SC.showGroupSettings=false;
+        if(!SC.isMaster) checkGroupAdmin(group);
+        saveLastGroup(group.id);
+        subscribeGroup(group.id);
+        subscribeGroupPlayers(group.id);
+        SC.screen="hub"; SC.error=""; draw();
+      }
+      if(alreadyMember){
+        enterGroup();
+      } else {
+        SC.joinTarget = { group: group, onSuccess: enterGroup };
+        SC.screen = "join-pw";
+        SC.error = "";
+        draw();
+        // Pre-fill password if provided in link
+        if(pj.pw){
+          setTimeout(function(){
+            var inp = document.getElementById("join-pw-input");
+            if(inp){ inp.value = pj.pw; inp.focus(); }
+          }, 50);
+        }
+      }
+    });
+  } else {
+    SC.screen = "profile";
+    draw();
+  }
 }
 
 function renderAuth() {
@@ -1114,8 +1161,7 @@ function renderAuth() {
         try{ localStorage.removeItem("pp_guest"); localStorage.removeItem("pp_guest_name"); }catch(e){}
         SC.currentUser = user;
         saveSession(user.username, user.emoji);
-        SC.screen = "profile";
-        draw();
+        _afterAuthSuccess();
       });
     } else {
       authSignup(uname, function(err, user){
@@ -1124,9 +1170,8 @@ function renderAuth() {
         if(err){ errEl.textContent = err; return; }
         SC.currentUser = user;
         saveSession(user.username, user.emoji);
-        SC.screen = "profile";
         toast("Registered as "+user.username+" ✓","ok");
-        draw();
+        _afterAuthSuccess();
       });
     }
   }
@@ -1668,11 +1713,12 @@ function closeInviteModal() {
 
 // ── GROUP / PUBLIC POOL INVITE ─────────────────────────────────────────────────
 function openGroupInviteModal(groupName, groupPw, groupId) {
-  var url = "https://scorecery.net";
+  var base = "https://scorecery.net";
+  var deepLink = base + "?join=" + encodeURIComponent(groupName) + (groupPw ? "&pw=" + encodeURIComponent(groupPw) : "");
   var msg = "Hey! Join my Scorecery group 🏆\n\n"
-    + "Group: " + groupName + "\n"
-    + (groupPw ? "Password: " + groupPw + "\n\n" : "\n")
-    + "Sign up at " + url + ", then search for \"" + groupName + "\" to join.";
+    + "Tap the link to go straight to the join screen:\n"
+    + deepLink + "\n\n"
+    + "Or search for \"" + groupName + "\" at " + base;
   _openShareSheet("Join " + groupName + " on Scorecery", msg);
 }
 
@@ -4192,8 +4238,60 @@ function purgeInactiveGuests() {
     clearSession();
   }
 
+  // ── Deep-link: ?join=GroupName&pw=password ────────────────────────────────
+  var _urlParams = new URLSearchParams(location.search);
+  var _joinName = _urlParams.get("join");
+  var _joinPw   = _urlParams.get("pw") || "";
+  // Store so we can use after auth completes
+  if(_joinName) { SC._pendingJoin = { name: _joinName, pw: _joinPw }; }
+
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
+
+  function _handlePendingJoin() {
+    if(!SC._pendingJoin) return false;
+    var pj = SC._pendingJoin;
+    SC._pendingJoin = null;
+    // Use joinGroup which loads the group and routes to join-pw screen
+    // Pre-fill password input after render by patching SC.joinTarget
+    loadGroup(pj.name, function(group, err){
+      if(err || !group) { SC.error = err || "Group not found"; draw(); return; }
+      var alreadyMember = SC.currentUser && (group.players||[]).indexOf(SC.currentUser.username) >= 0;
+      function enterGroup(){
+        if(!alreadyMember && SC.currentUser){
+          var newPlayers = (group.players||[]).slice();
+          if(newPlayers.indexOf(SC.currentUser.username) < 0){
+            newPlayers.push(SC.currentUser.username);
+            group.players = newPlayers;
+            if(DB) DB.ref("groups/"+group.id+"/players").set(newPlayers);
+          }
+          addGroupToUser(SC.currentUser.username, group.id);
+        }
+        SC.isAdmin=false; SC.isMaster=false;
+        SC.group=group; SC.group.data=group.data||{statuses:{},results:{}};
+        SC.groupAdmin=false; SC.showGroupSettings=false;
+        if(!SC.isMaster) checkGroupAdmin(group);
+        saveLastGroup(group.id);
+        subscribeGroup(group.id);
+        subscribeGroupPlayers(group.id);
+        SC.screen="hub"; SC.error=""; draw();
+      }
+      if(alreadyMember){
+        enterGroup();
+      } else {
+        SC.joinTarget = { group: group, onSuccess: enterGroup, prefillPw: pj.pw };
+        SC.screen = "join-pw";
+        SC.error = "";
+        draw();
+        // Pre-fill the password input
+        if(pj.pw){
+          var inp = document.getElementById("join-pw-input");
+          if(inp) inp.value = pj.pw;
+        }
+      }
+    });
+    return true;
+  }
 
   if(savedUser) {
     // Returning user — load from Firebase
@@ -4207,19 +4305,17 @@ function purgeInactiveGuests() {
         if(u) {
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
         } else {
-          // Session references a user that no longer exists — clear and go to landing
           clearSession();
           SC.currentUser = null;
           SC.screen = "landing";
         }
-        draw();
+        if(!_handlePendingJoin()) draw();
       });
-    } else { draw(); }
+    } else { if(!_handlePendingJoin()) draw(); }
   } else {
-    // New visitor — no auto-created guest account. Show the splash, then the
-    // Hub as a browsable (read-only) screen. Any interaction prompts login/signup.
     SC.currentUser = null;
-    SC.screen = "home";
+    // If there's a pending join, show auth first — after login _pendingJoin will be picked up
+    SC.screen = _joinName ? "home" : "home";
     draw();
   }
 })();
