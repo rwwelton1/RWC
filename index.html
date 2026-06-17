@@ -572,7 +572,7 @@ function isGuest(){
 // Gate any interactive action behind a real account.
 // Returns true (and shows the appropriate prompt) if the action should be blocked.
 function requireAuth(){
-  if(!SC.currentUser){ showAuthModal("login"); return true; }
+  if(!SC.currentUser){ showAuthModal("signup"); return true; }
   if(isGuest()){ showGuestPrompt(); return true; }
   return false;
 }
@@ -889,7 +889,7 @@ function draw() {
   if(s==="auth")     renderAuth();
   else if(s==="home")     renderHome();
   else if(s==="profile")  renderProfile();
-  else if(s==="landing")  renderProfile();
+  else if(s==="landing")  SC.currentUser ? renderProfile() : renderUnauthLanding();
   else if(s==="join")     renderJoin();
   else if(s==="join-pw")  renderJoinPw();
   else if(s==="create")   renderCreate();
@@ -902,7 +902,7 @@ function draw() {
 
 // ── AUTH SCREEN ───────────────────────────────────────────────────────────────
 function renderHome() {
-  // Show a full-screen splash, then auto-transition to profile
+  // Show a full-screen splash, then auto-transition to profile (if logged in) or unauth landing
   document.getElementById("root").innerHTML =
     '<div id="splash-screen" style="position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999">' +
       '<div id="splash-logo" style="opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease">' +
@@ -921,7 +921,7 @@ function renderHome() {
     });
   });
 
-  // After 1.6s, fade out and go to profile
+  // After 1.6s, fade out and navigate
   setTimeout(function(){
     var splash = document.getElementById("splash-screen");
     if(splash){
@@ -929,7 +929,7 @@ function renderHome() {
       splash.style.opacity="0";
     }
     setTimeout(function(){
-      SC.screen="profile";
+      SC.screen = SC.currentUser ? "profile" : "landing";
       draw();
     }, 400);
   }, 1600);
@@ -1122,8 +1122,9 @@ function saveUserEmoji(emoji) {
 // ── TIER SYSTEM ──────────────────────────────────────────────────────────────
 function renderProfile() {
   var u = SC.currentUser;
+  if(!u) { SC.screen="landing"; draw(); return; }
 
-  // Check Firebase for admin trivia reset flag — if set, clear local entry and redraw
+  // Check Firebase for admin trivia reset flag
   if(u && DB && !SC._triviaResetChecked) {
     SC._triviaResetChecked = true;
     var _rn = new Date();
@@ -1156,11 +1157,9 @@ function renderProfile() {
   h += '<div>';
   var displayName = (u && u.username) || (function(){ try{ return localStorage.getItem("pp_user"); }catch(e){ return ""; } })() || "";
   h += '<div class="home-greeting">Good ' + greet + (displayName ? ', <span>' + x(displayName) + '</span>' : '') + '</div>';
+  h += '<button id="btn-trophy-case" style="display:inline-flex;align-items:center;gap:5px;margin-top:5px;background:var(--gold-bg);border:2px solid var(--border);border-radius:8px;padding:4px 10px;font-size:10px;font-weight:800;color:var(--gold-dark);cursor:pointer;font-family:inherit;box-shadow:2px 2px 0 var(--border)">🏆 Trophy Case</button>';
   h += '</div>';
-  h += '<div style="display:flex;gap:8px;align-items:center">';
-  h += '<button class="home-avatar" id="btn-trophy-case" title="Trophy Case" style="font-size:18px">🏆</button>';
-  h += '<div class="home-avatar" id="btn-edit-emoji">' + em + '</div>';
-  h += '</div>';
+  h += '<button class="home-avatar" id="btn-edit-emoji" style="font-size:22px">' + em + '</button>';
   h += '</div>';
 
   // My Groups section — cards with standings
@@ -1889,6 +1888,58 @@ function closeEmojiPicker() {
 }
 
 // ── LANDING ───────────────────────────────────────────────────────────────────
+// ── UNAUTHENTICATED LANDING ───────────────────────────────────────────────────
+function renderUnauthLanding() {
+  var h = '<div class="topbar">';
+  h += '<div style="cursor:pointer" id="btn-logo"><div class="logo"><span class="scorecery-logo" style="'+CURRENT_LOGO_STYLE+'">SCORECERY</span></div></div>';
+  h += '<div class="topbar-right">';
+  h += '<button class="btn-topbar-login" id="btn-topbar-login" style="font-size:10px;padding:4px 10px;border-radius:8px;background:transparent;border:2px solid var(--border);color:var(--text);cursor:pointer;font-family:inherit;font-weight:700">Log In</button>';
+  h += '<button class="btn-topbar-signup" id="btn-topbar-signup" style="font-size:10px;padding:4px 10px;border-radius:8px;background:var(--gold);border:2px solid var(--border);color:var(--text);cursor:pointer;font-family:inherit;font-weight:700">Sign Up</button>';
+  h += '</div></div>';
+
+  h += '<div class="main fade-up">';
+
+  // Hero
+  h += '<div style="text-align:center;padding:32px 0 24px">';
+  h += '<div style="font-size:44px;font-weight:900;line-height:1;margin-bottom:6px"><span class="scorecery-logo" style="font-size:44px;'+CURRENT_LOGO_STYLE+'">SCORECERY</span></div>';
+  h += '<div style="font-size:12px;color:var(--muted);font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:24px">Sports Pick\'em Groups</div>';
+  h += '<button id="btn-landing-create" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:13px 24px;border-radius:12px;border:2px solid var(--border);background:var(--gold);color:var(--text);font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:4px 4px 0 var(--border);width:100%;max-width:320px">+ Create a Group</button>';
+  h += '<div style="font-size:10px;color:var(--muted);margin-top:12px;font-weight:700">Already have an account? <button id="btn-landing-login" style="background:none;border:none;color:var(--blue);font-size:10px;font-weight:800;cursor:pointer;font-family:inherit;padding:0">Log in</button></div>';
+  h += '</div>';
+
+  // Browse groups
+  h += '<div class="section-label">Browse Groups</div>';
+  h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="landing-group-search" placeholder="Search groups..." autocomplete="off"></div>';
+  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Players</th><th>Competition</th><th></th></tr></thead><tbody id="landing-groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
+
+  h += '</div>';
+  document.getElementById("root").innerHTML = h;
+
+  // Topbar logo
+  var logo = document.getElementById("btn-logo");
+  if(logo) logo.addEventListener("click", function(){ SC.screen="landing"; draw(); });
+
+  // Sign-up / log-in buttons
+  document.getElementById("btn-topbar-signup").addEventListener("click", function(){ showAuthModal("signup"); });
+  document.getElementById("btn-topbar-login").addEventListener("click", function(){ showAuthModal("login"); });
+
+  // Create a Group CTA → triggers auth then create
+  document.getElementById("btn-landing-create").addEventListener("click", function(){
+    if(requireAuth()) return;
+    SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
+  });
+
+  // Username log in link
+  document.getElementById("btn-landing-login").addEventListener("click", function(){ showAuthModal("login"); });
+
+  // Groups table
+  loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, ""); });
+  var si = document.getElementById("landing-group-search");
+  if(si) si.addEventListener("input", function(){
+    loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, this.value.trim()); }.bind(this));
+  });
+}
+
 function renderLanding() {
   var u = SC.currentUser;
   var myGroups = u ? (u.groups || []) : [];
@@ -3881,6 +3932,11 @@ function purgeInactiveGuests() {
 (function(){
   if(DB) subscribeGlobalStatuses();
 
+  // Evict any legacy guest session — guests no longer get auto-loaded
+  if(isGuest()) {
+    clearSession();
+  }
+
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
 
@@ -3895,17 +3951,15 @@ function purgeInactiveGuests() {
         var u = sn.val();
         if(u) {
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
-          // Update lastActive for guest accounts
-          if(!u.password) DB.ref("users/"+key+"/lastActive").set(Date.now());
-        } else if(isGuest()) {
-          // User record missing — refresh it
-          DB.ref("users/"+key).set({ username: savedUser, password: "", groups: [], emoji: _cachedEmoji, lastActive: Date.now(), createdAt: Date.now() });
+        } else {
+          // Session references a user that no longer exists — clear and go to landing
+          clearSession();
+          SC.currentUser = null;
+          SC.screen = "landing";
         }
         draw();
       });
     } else { draw(); }
-    // Run guest cleanup once per session (1% chance to avoid running every load)
-    if(DB && Math.random() < 0.01) purgeInactiveGuests();
   } else {
     // New visitor — no auto-created guest account. Show the splash, then the
     // Hub as a browsable (read-only) screen. Any interaction prompts login/signup.
