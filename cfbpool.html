@@ -947,23 +947,32 @@ function renderPicks(){
 }
 
 function renderStandings(){
+  var SEASON_WEEKS=15; // total weeks in a CFB season
+  var MAX_PTS_PER_WEEK=55; // max confidence pts with 10 games (1+2+...+10)
+
   var h='<div class="lb-wrap" style="padding:0">';
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
 
   var completedWeeks=ST.weekIds.filter(function(w){return ST.locked[w];});
   var curWeekId=currentWeekId();
   var curLocked=!!(curWeekId&&ST.locked[curWeekId]);
-  var showCurWeek=curWeekId&&!curLocked; // show current open week as a progress column
+  var weeksPlayed=completedWeeks.length;
+  var weeksRemaining=Math.max(0, SEASON_WEEKS - weeksPlayed);
 
   var rows=PARTS.map(function(p){
     var total=seasonScore(p);
     var weekScores={};
     ST.weekIds.forEach(function(w){ weekScores[w]=weekScore(w,p); });
-    return {name:p,total:total,weekScores:weekScores};
+    // Possible = total earned so far + max pts from all remaining weeks
+    var possible=total + (weeksRemaining * MAX_PTS_PER_WEEK);
+    return {name:p,total:total,possible:possible,weekScores:weekScores};
   });
   rows.sort(function(a,b){return b.total-a.total;});
 
-  // Compute per-week best and worst scores for color coding
+  // Leader's current total — a player is eliminated if their possible < leader's total
+  var leaderTotal=rows.length?rows[0].total:0;
+
+  // Per-week best/worst for color coding
   var weekBest={}, weekWorst={};
   completedWeeks.forEach(function(w){
     var scores=PARTS.map(function(p){ return weekScore(w,p).total; });
@@ -972,16 +981,17 @@ function renderStandings(){
   });
 
   h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
-  h+='<th style="min-width:32px;text-align:center;font-size:9px;padding:6px 4px">#</th>';
+  h+='<th style="min-width:28px;text-align:center;font-size:9px;padding:6px 4px">#</th>';
   h+='<th class="gp-name" data-sort-name="1" style="min-width:90px;cursor:pointer">Players</th>';
-  h+='<th class="gp-pts-cell" data-sort-total="1" style="min-width:52px;cursor:pointer;left:90px">Total</th>';
+  h+='<th class="gp-pts-cell" data-sort-total="1" style="min-width:48px;cursor:pointer;left:90px;font-size:9px">Pts</th>';
+  h+='<th data-sort-possible="1" style="cursor:pointer;min-width:52px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
 
   completedWeeks.forEach(function(w){
-    h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:60px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
+    h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:58px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
   });
 
-  if(showCurWeek){
-    h+='<th style="min-width:72px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'</th>';
+  if(curWeekId&&!curLocked){
+    h+='<th style="min-width:62px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'</th>';
   }
 
   h+='</tr></thead><tbody>';
@@ -989,25 +999,33 @@ function renderStandings(){
   rows.forEach(function(r,i){
     var rank=i+1;
     var isMe=ST.user&&r.name===ST.user;
-
-    // Build data attrs for sorting
-    var sortAttrs='data-total="'+r.total+'" data-name="'+x(ukey(r.name))+'" data-rank="'+rank+'"';
+    var sortAttrs='data-total="'+r.total+'" data-possible="'+r.possible+'" data-name="'+x(ukey(r.name))+'" data-rank="'+rank+'"';
     completedWeeks.forEach(function(w){
       sortAttrs+=' data-week-'+w+'="'+r.weekScores[w].total+'"';
     });
 
     h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(ukey(r.name))+'">';
 
-    // Rank cell
+    // Rank
     var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
-    h+='<td style="text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px'+(isMe?';background:var(--gold-bg)':'')+'" class="rank-cell">'+rank+'</td>';
+    h+='<td style="text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px'+(isMe?';background:var(--gold-bg)':'')+'">'+rank+'</td>';
 
-    // Name cell
+    // Name
     h+='<td class="gp-name"'+(isMe?' style="background:var(--gold-bg)"':'')+'>'+pem(r.name)+x(r.name)+'</td>';
 
-    // Total cell
+    // Points earned
     h+='<td class="gp-pts-cell"'+(isMe?' style="background:var(--gold-bg)"':'')+' style="left:90px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div class="gp-pts-earned">'+r.total+'</div>';
+    h+='</td>';
+
+    // Points possible
+    var isEliminated=weeksRemaining>0&&r.possible<leaderTotal&&rank>1;
+    h+='<td style="text-align:center;padding:7px 6px">';
+    if(isEliminated){
+      h+='<div style="font-size:11px;font-weight:900;color:var(--red2)">&#10007; &ndash;</div>';
+    } else {
+      h+='<div style="font-size:12px;font-weight:900;color:var(--blue)">'+r.possible+'</div>';
+    }
     h+='</td>';
 
     // Week score cells
@@ -1028,8 +1046,8 @@ function renderStandings(){
       h+='</td>';
     });
 
-    // Current week progress
-    if(showCurWeek){
+    // Current open week progress
+    if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
       var made=0,confSet=0;
@@ -1534,6 +1552,8 @@ function bind(){
   }
   el=document.querySelector("th[data-sort-total]");
   if(el) el.addEventListener("click",function(){ stSortRows("data-total"); });
+  el=document.querySelector("th[data-sort-possible]");
+  if(el) el.addEventListener("click",function(){ stSortRows("data-possible"); });
   els=document.querySelectorAll("th[data-sort-week]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     stSortRows("data-week-"+this.getAttribute("data-sort-week"));
