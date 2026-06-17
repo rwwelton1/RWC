@@ -213,6 +213,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 /* Sticky first column */
 .gp-table td:first-child,.gp-table th:first-child{position:sticky;left:0;z-index:2;background:#ffffff;border-right:2px solid var(--border)}
 .gp-table th:first-child{background:var(--cream)}
+.gp-table td:nth-child(2),.gp-table th:nth-child(2){position:sticky;left:90px;z-index:2;background:#ffffff;border-right:2px solid var(--border2)}
+.gp-table th:nth-child(2){background:var(--cream)}
 /* Header row */
 .gp-table th{padding:6px 8px;background:var(--cream);border-bottom:2px solid var(--border);border-right:1px solid var(--border2);font-weight:900;text-align:center;vertical-align:bottom;font-size:10px}
 /* Data cells */
@@ -251,7 +253,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-table tr.gp-row-dimmed td:first-child{opacity:.2}
 .gp-table tr.gp-row-selected td{background:var(--blue-bg)!important}
 .gp-table tr.gp-row-selected td:first-child{background:var(--blue-bg)!important}
-.gp-compare-hint{font-size:9px;font-weight:700;color:var(--blue);padding:5px 12px;background:var(--blue-bg);border-bottom:1px solid var(--border2);text-align:center;flex-shrink:0}
+.gp-table tr.gp-row-hidden{display:none}
+.gp-compare-hint{font-size:9px;font-weight:700;color:var(--blue);padding:5px 10px;background:var(--blue-bg);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+.gp-isolate-btn{padding:3px 10px;border-radius:6px;border:2px solid var(--border);background:#ffffff;color:var(--text);font-size:9px;font-weight:800;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:1px 1px 0 var(--border);white-space:nowrap;flex-shrink:0}
+.gp-isolate-btn:active{transform:translate(1px,1px);box-shadow:none}
+.gp-table th[data-sort-gid],.gp-table th[data-sort-pts]{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.gp-table th[data-sort-gid]:active,.gp-table th[data-sort-pts]:active{background:var(--border2)}
 </style>
 </head>
 <body>
@@ -296,7 +303,8 @@ var ST={
   importLoading:false,
   importError:"",
   compareMode:false,
-  compareSelected:{}
+  compareSelected:{},
+  compareIsolated:false
 };
 
 var DB=null;
@@ -1119,7 +1127,13 @@ function renderGroupPicks(){
   h+='</div>';
   if(ST.compareMode){
     var selCount=Object.keys(ST.compareSelected).length;
-    h+='<div class="gp-compare-hint">'+(selCount===0?'Tap rows to select players to compare':selCount+' player'+(selCount!==1?'s':'')+' selected &mdash; tap rows to add/remove')+'</div>';
+    var hintTxt=selCount===0?'Tap rows to select players':selCount+' selected';
+    h+='<div class="gp-compare-hint">';
+    h+='<span>'+hintTxt+'</span>';
+    if(selCount>0){
+      h+='<button class="gp-isolate-btn" id="b-isolate-toggle">'+(ST.compareIsolated?'&#128065; Unisolate':'&#128269; Isolate')+'</button>';
+    }
+    h+='</div>';
   }
 
   if(!weekId){ h+='<div class="lb-note">No week selected.</div>'; return h; }
@@ -1142,15 +1156,18 @@ function renderGroupPicks(){
 
   h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
 
-  // Sticky name column header
-  h+='<th class="gp-name" style="min-width:90px">'+(locked?'&#128202; '+x(ST.weekLabels[weekId]||weekId):'&#9998; '+x(ST.weekLabels[weekId]||weekId))+'</th>';
+  // Sticky name column header — tappable to sort alpha
+  h+='<th class="gp-name" data-sort-name="1" style="min-width:90px;cursor:pointer">Players</th>';
+
+  // Sticky Pts column — second column
+  h+='<th class="gp-pts-cell" data-sort-pts="1" style="min-width:58px;cursor:pointer;left:90px">Pts</th>';
 
   // Game columns
   active.forEach(function(gid){
     var g=games[gid]||{};
     var awayLogo=g.awayLogo||"";
     var homeLogo=g.homeLogo||"";
-    h+='<th>';
+    h+='<th data-sort-gid="'+gid+'">';
     h+='<div class="gp-game-head">';
     h+='<div class="gp-logos">';
     h+=awayLogo?'<img class="gp-logo" src="'+awayLogo+'" onerror="this.style.display=\'none\'">'
@@ -1172,8 +1189,7 @@ function renderGroupPicks(){
     h+='</th>';
   });
 
-  // Points column header
-  h+='<th class="gp-pts-cell" style="min-width:58px">Pts</th>';
+  // Points column header already added as 2nd sticky column above
   h+='</tr></thead><tbody>';
 
   // Player rows
@@ -1194,12 +1210,27 @@ function renderGroupPicks(){
     var isSelected=ST.compareMode&&ST.compareSelected[ukey(player)];
     var hasSelection=ST.compareMode&&Object.keys(ST.compareSelected).length>0;
     var isDimmed=ST.compareMode&&hasSelection&&!isSelected;
-    var rowCls=(ST.compareMode?"gp-row-selectable":"")+(isSelected?" gp-row-selected":isDimmed?" gp-row-dimmed":"");
-    h+='<tr class="'+rowCls+'" data-compare-player="'+x(ukey(player))+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>';
+    var isHidden=ST.compareMode&&ST.compareIsolated&&hasSelection&&!isSelected;
+    var rowCls=(ST.compareMode?"gp-row-selectable":"")+(isSelected?" gp-row-selected":isDimmed?" gp-row-dimmed":"")+(isHidden?" gp-row-hidden":"");
+    var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'"';
+    active.forEach(function(gid){ var p=picks[gid]||{}; confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"'; });
+    h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(ukey(player))+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
     h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+pem(player)+x(player)+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
+
+    // Points cell — second column (sticky)
+    h+='<td class="gp-pts-cell">';
+    if(locked&&stillPossible===0){
+      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
+    } else if(ws.total>0||stillPossible>0){
+      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
+      if(stillPossible>0) h+='<div class="gp-pts-possible">+'+stillPossible+'</div>';
+    } else {
+      h+='<span class="gp-nopick">–</span>';
+    }
+    h+='</td>';
 
     // Pick cells
     active.forEach(function(gid){
@@ -1230,18 +1261,6 @@ function renderGroupPicks(){
       h+='</td>';
     });
 
-    // Points cell
-    h+='<td class="gp-pts-cell">';
-    if(locked&&stillPossible===0){
-      // Week complete
-      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
-    } else if(ws.total>0||stillPossible>0){
-      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
-      if(stillPossible>0) h+='<div class="gp-pts-possible">+'+stillPossible+' poss</div>';
-    } else {
-      h+='<span class="gp-nopick">–</span>';
-    }
-    h+='</td>';
     h+='</tr>';
   });
 
@@ -1334,7 +1353,26 @@ function bind(){
   el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
     ST.compareMode=!ST.compareMode;
     ST.compareSelected={};
+    ST.compareIsolated=false;
     draw();
+  });
+
+  // Isolate/Unisolate toggle
+  el=document.getElementById("b-isolate-toggle"); if(el) el.addEventListener("click",function(){
+    ST.compareIsolated=!ST.compareIsolated;
+    // Update row visibility instantly
+    var allRows=document.querySelectorAll("tr[data-compare-player]");
+    var hasSelection=Object.keys(ST.compareSelected).length>0;
+    for(var j=0;j<allRows.length;j++){
+      var rp=allRows[j].getAttribute("data-compare-player");
+      var rSel=!!ST.compareSelected[rp];
+      if(ST.compareIsolated&&hasSelection&&!rSel){
+        allRows[j].classList.add("gp-row-hidden");
+      } else {
+        allRows[j].classList.remove("gp-row-hidden");
+      }
+    }
+    this.textContent=ST.compareIsolated?'\uD83D\uDC41 Unisolate':'\uD83D\uDD0D Isolate';
   });
 
   // Compare row tap — toggle selection without full redraw for instant feel
@@ -1370,11 +1408,87 @@ function bind(){
       }
     }
     // Update hint text
-    var hint=document.querySelector(".gp-compare-hint");
+    var hint=document.querySelector(".gp-compare-hint span");
     if(hint){
       var sc=Object.keys(ST.compareSelected).length;
-      hint.textContent=sc===0?"Tap rows to select players to compare":sc+" player"+(sc!==1?"s":"")+" selected — tap rows to add/remove";
+      hint.textContent=sc===0?"Tap rows to select players":sc+" selected";
     }
+    // Show/hide isolate button
+    var isoBtn=document.getElementById("b-isolate-toggle");
+    var sc2=Object.keys(ST.compareSelected).length;
+    if(sc2>0&&!isoBtn){
+      var hintEl=document.querySelector(".gp-compare-hint");
+      if(hintEl){
+        var nb=document.createElement("button");
+        nb.id="b-isolate-toggle"; nb.className="gp-isolate-btn";
+        nb.textContent=ST.compareIsolated?"\uD83D\uDC41 Unisolate":"\uD83D\uDD0D Isolate";
+        hintEl.appendChild(nb);
+        nb.addEventListener("click",function(){
+          ST.compareIsolated=!ST.compareIsolated;
+          var ar=document.querySelectorAll("tr[data-compare-player]");
+          var hs=Object.keys(ST.compareSelected).length>0;
+          for(var k=0;k<ar.length;k++){
+            var rp2=ar[k].getAttribute("data-compare-player");
+            var rs2=!!ST.compareSelected[rp2];
+            if(ST.compareIsolated&&hs&&!rs2) ar[k].classList.add("gp-row-hidden");
+            else ar[k].classList.remove("gp-row-hidden");
+          }
+          this.textContent=ST.compareIsolated?"\uD83D\uDC41 Unisolate":"\uD83D\uDD0D Isolate";
+        });
+      }
+    } else if(sc2===0&&isoBtn){
+      isoBtn.remove();
+      ST.compareIsolated=false;
+    }
+  });
+
+  // ── Column sort (game confidence + pts) ─────────────────
+  var _gpSortState={col:null,dir:1}; // dir: 1=desc, -1=asc
+  function gpSortRows(attr,numeric){
+    var tbody=document.querySelector(".gp-table tbody");
+    if(!tbody) return;
+    var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
+    if(_gpSortState.col===attr){ _gpSortState.dir*=-1; }
+    else{ _gpSortState.col=attr; _gpSortState.dir=1; }
+    rows.sort(function(a,b){
+      var av=numeric?Number(a.getAttribute(attr)||0):a.getAttribute(attr)||"";
+      var bv=numeric?Number(b.getAttribute(attr)||0):b.getAttribute(attr)||"";
+      return (av>bv?-1:av<bv?1:0)*_gpSortState.dir;
+    });
+    rows.forEach(function(r){ tbody.appendChild(r); });
+  }
+  els=document.querySelectorAll("th[data-sort-gid]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    gpSortRows("data-conf-"+this.getAttribute("data-sort-gid"),true);
+  });
+  el=document.querySelector("th[data-sort-name]");
+  if(el) el.addEventListener("click",function(){
+    var tbody=document.querySelector(".gp-table tbody");
+    if(!tbody) return;
+    var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
+    if(_gpSortState.col==="name"){ _gpSortState.dir*=-1; }
+    else{ _gpSortState.col="name"; _gpSortState.dir=1; }
+    rows.sort(function(a,b){
+      var an=a.getAttribute("data-compare-player")||"";
+      var bn=b.getAttribute("data-compare-player")||"";
+      return an.localeCompare(bn)*_gpSortState.dir;
+    });
+    rows.forEach(function(r){ tbody.appendChild(r); });
+  });
+  el=document.querySelector("th[data-sort-pts]");
+  if(el) el.addEventListener("click",function(){
+    // Sort by total possible (earned + possible), then by possible alone
+    var tbody=document.querySelector(".gp-table tbody");
+    if(!tbody) return;
+    var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
+    if(_gpSortState.col==="pts"){ _gpSortState.dir*=-1; }
+    else{ _gpSortState.col="pts"; _gpSortState.dir=1; }
+    rows.sort(function(a,b){
+      var ae=Number(a.getAttribute("data-pts-earned")||0)+Number(a.getAttribute("data-pts")||0);
+      var be=Number(b.getAttribute("data-pts-earned")||0)+Number(b.getAttribute("data-pts")||0);
+      return (ae>be?-1:ae<be?1:0)*_gpSortState.dir;
+    });
+    rows.forEach(function(r){ tbody.appendChild(r); });
   });
 
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
