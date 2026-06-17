@@ -298,6 +298,7 @@ var ST={
   results:{},
   picks:{},
   locked:{},
+  tiebreaker:{},
   showImport:false,
   importYear:null,
   importWeek:null,
@@ -323,8 +324,30 @@ function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").replace(
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
 
 // ── Helpers ──────────────────────────────────────────────
+function getLastKickoff(weekId){
+  var games=ST.games[weekId]||{};
+  var latest=null;
+  GAME_IDS.forEach(function(gid){
+    var g=games[gid];
+    if(!g||!g.away||!g.home) return;
+    var ts=parseKickoffTs(g);
+    if(ts&&(latest===null||ts>latest)) latest=ts;
+  });
+  return latest;
+}
+
 function currentWeekId(){
-  for(var i=0;i<ST.weekIds.length;i++){ if(!ST.locked[ST.weekIds[i]]) return ST.weekIds[i]; }
+  var EXPIRY_MS=60*60*1000; // 60 hours after last kickoff
+  for(var i=0;i<ST.weekIds.length;i++){
+    var w=ST.weekIds[i];
+    if(ST.locked[w]) continue; // skip fully locked weeks
+    var lastKickoff=getLastKickoff(w);
+    if(!lastKickoff) return w; // no kickoff times set — stay on this week
+    var expiry=lastKickoff+(EXPIRY_MS);
+    if(Date.now()<expiry) return w; // still within the viewing window
+    // Past expiry — continue to next week
+  }
+  // All unlocked weeks have expired or all weeks locked — return last week
   return ST.weekIds.length?ST.weekIds[ST.weekIds.length-1]:null;
 }
 function activeGames(weekId){
@@ -399,6 +422,7 @@ function loadData(){
       DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();});
       DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();});
       DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();});
+      DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};draw();});
     });
   }
   s1();
@@ -698,6 +722,23 @@ function setPickSide(weekId,gid,side){
     if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
   });
 }
+function setTiebreakerField(weekId,field,value){
+  if(!ST.tiebreaker[weekId]) ST.tiebreaker[weekId]={};
+  ST.tiebreaker[weekId][field]=value;
+  if(DB) DB.ref(BASE+"/tiebreaker/"+weekId+"/"+field).set(value);
+}
+function setTiebreakerGuess(weekId,value){
+  if(!ST.user){toast("Select your name first");return;}
+  if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
+  var uk=ukey(ST.user);
+  if(!ST.picks[weekId]) ST.picks[weekId]={};
+  if(!ST.picks[weekId][uk]) ST.picks[weekId][uk]={};
+  ST.picks[weekId][uk].tb=value?Number(value):null;
+  if(DB){
+    if(value) DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/tb").set(Number(value));
+    else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/tb").remove();
+  }
+}
 function resetAllConf(weekId){
   if(!ST.user){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
@@ -961,6 +1002,35 @@ function renderPicks(){
     h+=renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs);
   });
   h+='</div>';
+
+  // Tiebreaker card
+  var tb=ST.tiebreaker[weekId]||{};
+  if(tb.away&&tb.home){
+    var tbPick=((ST.picks[weekId]||{})[ukey(ST.user)]||{}).tb||"";
+    var tbLocked=!!ST.locked[weekId];
+    h+='<div class="games-wrap" style="padding-top:0">';
+    h+='<div class="game-card" style="border-color:var(--purple);box-shadow:4px 4px 0 var(--purple)">';
+    h+='<div class="gc-head" style="background:var(--purple-bg)"><div class="gc-label" style="color:var(--purple);font-weight:900;letter-spacing:.06em">TIEBREAKER</div>';
+    if(tb.actual!=null) h+='<div class="gc-pts earned">Actual: '+tb.actual+'</div>';
+    h+='</div>';
+    h+='<div style="padding:10px 12px;display:flex;align-items:center;gap:8px">';
+    if(tb.awayLogo) h+='<img src="'+tb.awayLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+    h+='<span style="font-size:12px;font-weight:800">'+x(tb.away)+'</span>';
+    h+='<span style="font-size:10px;color:var(--muted);font-weight:700">@</span>';
+    if(tb.homeLogo) h+='<img src="'+tb.homeLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+    h+='<span style="font-size:12px;font-weight:800">'+x(tb.home)+'</span>';
+    h+='</div>';
+    h+='<div style="padding:8px 12px;background:var(--cream);border-top:1px solid var(--border2);display:flex;align-items:center;gap:8px">';
+    h+='<span style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Total Points</span>';
+    if(tbLocked){
+      h+='<span style="font-size:14px;font-weight:900;color:var(--purple)">'+(tbPick||'–')+'</span>';
+    } else {
+      h+='<input id="tb-guess-input" type="number" min="0" max="200" placeholder="e.g. 47" value="'+x(tbPick)+'" '+(ST.user?'':'disabled')+' style="width:80px;border:2px solid var(--border);border-radius:6px;padding:5px 8px;font-size:13px;font-weight:800;font-family:\'Nunito\',sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
+    }
+    h+='</div>';
+    h+='</div></div>';
+  }
+
   return h;
 }
 
@@ -1054,9 +1124,15 @@ function renderStandings(){
       var col=isBest?'var(--green)':isWorst?'var(--red2)':'var(--text)';
       var bg=isBest?'rgba(93,186,74,.1)':isWorst?'rgba(232,85,85,.1)':'';
       var weight=isBest||isWorst?'900':'700';
+      // Tiebreaker asterisk: week locked, tied for best, tiebreaker actual set
+      var tbW=ST.tiebreaker[w]||{};
+      var tbDecided=tbW.actual!=null&&isBest&&weekBest[w]===weekWorst[w]===false;
+      // Check if any other player also has the best score (tied)
+      var tiedForBest=isBest&&PARTS.filter(function(p){return weekScore(w,p).total===weekBest[w];}).length>1;
+      var showAsterisk=tiedForBest&&tbW.actual!=null;
       h+='<td style="text-align:center;padding:7px 6px'+(bg?';background:'+bg:'')+'">';
       if(ws.total>0||ws.correct>0||ws.wrong>0){
-        h+='<div style="font-size:13px;font-weight:'+weight+';color:'+col+'">'+ws.total+'</div>';
+        h+='<div style="font-size:13px;font-weight:'+weight+';color:'+col+'">'+ws.total+(showAsterisk?'<span style="font-size:9px;color:var(--purple);vertical-align:super">*</span>':'')+'</div>';
         h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+ws.correct+'-'+ws.wrong+'</div>';
       } else {
         h+='<span class="gp-nopick">&ndash;</span>';
@@ -1186,11 +1262,29 @@ function renderAdmin(){
     }
     h+='</div>';
   });
+  // Tiebreaker section
+  var tb=ST.tiebreaker[weekId]||{};
+  h+='<div class="adm-sec-label">Tiebreaker Game</div>';
+  h+='<div class="adm-game">';
+  h+='<div class="adm-game-title">Used only when first place players tie on total points for this week</div>';
+  h+='<div class="adm-row">';
+  h+='<input class="adm-input" id="tb-away" placeholder="Away team" value="'+x(tb.away||"")+'">';
+  h+='<input class="adm-input" id="tb-home" placeholder="Home team" value="'+x(tb.home||"")+'">';
+  h+='</div>';
+  h+='<div class="adm-row">';
+  h+='<input class="adm-input" id="tb-away-logo" placeholder="Away logo URL (optional)" value="'+x(tb.awayLogo||"")+'" style="font-size:9px">';
+  h+='<input class="adm-input" id="tb-home-logo" placeholder="Home logo URL (optional)" value="'+x(tb.homeLogo||"")+'" style="font-size:9px">';
+  h+='</div>';
+  h+='<div class="adm-row">';
+  h+='<input class="adm-input" id="tb-actual" type="number" placeholder="Actual total points scored" value="'+(tb.actual!=null?tb.actual:"")+'" style="max-width:220px">';
+  h+='<button class="adm-btn" id="b-tb-save">Save</button>';
+  h+='</div>';
+  if(tb.away&&tb.home) h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">&#10003; '+x(tb.away)+' @ '+x(tb.home)+(tb.actual!=null?' &mdash; Actual: <b>'+tb.actual+'</b>':'')+'</div>';
+  h+='</div>';
+
   h+='</div>';
   return h;
 }
-
-// ── GROUP PICKS VIEW ──────────────────────────────────────
 function renderGroupPicks(){
   var h='';
   if(ST.weekIds.length===0){
@@ -1294,9 +1388,34 @@ function renderGroupPicks(){
     active.forEach(function(gid){ var p=picks[gid]||{}; confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"'; });
     h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(ukey(player))+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
 
+    // Compute streak — consecutive correct picks across all resolved games (most recent first)
+    var streak=0;
+    var allResolved=[];
+    ST.weekIds.forEach(function(w){
+      var wGames=ST.games[w]||{};
+      var wResults=ST.results[w]||{};
+      var wPicks=((ST.picks[w]||{})[uk])||{};
+      GAME_IDS.forEach(function(gid){
+        var g=wGames[gid];
+        if(!g||!g.away||!g.home) return;
+        var r=wResults[gid];
+        if(!r||r==="push") return; // only resolved non-push games
+        var p=wPicks[gid]||{};
+        if(!p.side) return; // must have picked
+        var ts=parseKickoffTs(g)||0;
+        allResolved.push({ts:ts,correct:p.side===r});
+      });
+    });
+    allResolved.sort(function(a,b){return b.ts-a.ts;}); // most recent first
+    for(var si=0;si<allResolved.length;si++){
+      if(allResolved[si].correct) streak++;
+      else break;
+    }
+    var onFire=streak>=3;
+
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+pem(player)+x(player)+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+x(player)+(onFire?' <span style="font-size:11px">&#128293;</span>':'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
@@ -1419,6 +1538,23 @@ function bind(){
   el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
+
+  // Tiebreaker guess input (picks tab)
+  el=document.getElementById("tb-guess-input"); if(el) el.addEventListener("change",function(){
+    setTiebreakerGuess(ST.curWeek, this.value);
+  });
+
+  // Tiebreaker admin save
+  el=document.getElementById("b-tb-save"); if(el) el.addEventListener("click",function(){
+    var away=document.getElementById("tb-away"); if(away) setTiebreakerField(ST.curWeek,"away",away.value.trim());
+    var home=document.getElementById("tb-home"); if(home) setTiebreakerField(ST.curWeek,"home",home.value.trim());
+    var al=document.getElementById("tb-away-logo"); if(al) setTiebreakerField(ST.curWeek,"awayLogo",al.value.trim());
+    var hl=document.getElementById("tb-home-logo"); if(hl) setTiebreakerField(ST.curWeek,"homeLogo",hl.value.trim());
+    var act=document.getElementById("tb-actual");
+    if(act) setTiebreakerField(ST.curWeek,"actual",act.value!==''?Number(act.value):null);
+    toast("&#10003; Tiebreaker saved");
+    draw();
+  });
 
   // Compare mode toggle
   el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
