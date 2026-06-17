@@ -306,6 +306,8 @@ var ST={
   importSelected:{},
   importLoading:false,
   importError:"",
+  importConf:"80",
+  importTop25:false,
   compareMode:false,
   compareSelected:{},
   compareIsolated:false
@@ -544,9 +546,10 @@ function startScoreRefresh(){
 function stopScoreRefresh(){clearInterval(_scTimer);_scTimer=null;}
 
 // ── ESPN SCHEDULE IMPORT (Admin) ───────────────────────────────────────────
-function fetchEspnSchedule(year,week){
+function fetchEspnSchedule(year,week,conf){
   ST.importLoading=true; ST.importError=""; draw();
-  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
+  var grp=conf||"80";
+  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups="+grp+"&limit=300";
   fetch(url)
     .then(function(r){return r.json();})
     .then(function(data){
@@ -1099,7 +1102,7 @@ function renderStandings(){
     h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+'</td>';
 
     // Name
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+pem(r.name)+x(r.name)+'</td>';
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+x(r.name)+'</td>';
 
     // Points earned
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
@@ -1167,33 +1170,65 @@ function renderStandings(){
 function renderImportPanel(weekId){
   var year=ST.importYear||2026;
   var week=ST.importWeek||guessWeekNumber(ST.weekLabels[weekId]);
+  var conf=ST.importConf||"80";
+  var CONFS=[
+    {v:"80",l:"All FBS"},
+    {v:"1",l:"ACC"},
+    {v:"4",l:"Big 12"},
+    {v:"5",l:"Big Ten"},
+    {v:"9",l:"SEC"},
+    {v:"17",l:"AAC"},
+    {v:"8",l:"Mountain West"},
+    {v:"151",l:"Sun Belt"},
+    {v:"37",l:"CUSA"},
+    {v:"18",l:"MAC"},
+    {v:"48",l:"Independents"}
+  ];
   var h='<div class="adm-game">';
   h+='<div class="adm-game-title">College Football Schedule &mdash; FBS (via ESPN)</div>';
   h+='<div class="adm-row">';
-  h+='<input class="adm-input" id="imp-year" type="number" placeholder="Year" value="'+year+'" style="max-width:90px">';
-  h+='<input class="adm-input" id="imp-week" type="number" placeholder="ESPN Week #" value="'+week+'" style="max-width:120px">';
-  h+='<button class="btn btn-gold" id="b-fetch-espn">'+(ST.importLoading?"Loading\u2026":"Fetch Games")+'</button>';
+  h+='<input class="adm-input" id="imp-year" type="number" placeholder="Year" value="'+year+'" style="max-width:80px">';
+  h+='<input class="adm-input" id="imp-week" type="number" placeholder="Week #" value="'+week+'" style="max-width:80px">';
+  h+='<select class="adm-input" id="imp-conf" style="flex:1;min-width:0">';
+  CONFS.forEach(function(c){ h+='<option value="'+c.v+'"'+(conf===c.v?" selected":"")+'>'+c.l+'</option>'; });
+  h+='</select>';
+  h+='<button class="btn btn-gold" id="b-fetch-espn">'+(ST.importLoading?"Loading\u2026":"Fetch")+'</button>';
   h+='</div>';
   if(ST.importError) h+='<div style="font-size:10px;font-weight:700;color:var(--red2);margin-bottom:6px">'+x(ST.importError)+'</div>';
   if(ST.importGames&&ST.importGames.length){
     var selCount=Object.keys(ST.importSelected).length;
-    h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin:8px 0 4px">';
-    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap to select &middot; Hold to set as tiebreaker</div>';
-    h+='<div style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</div>';
+    // Filter to ranked games if top25 mode active
+    var filteredGames=ST.importGames;
+    if(ST.importTop25){
+      filteredGames=ST.importGames.filter(function(g){
+        return RANKINGS[normalizeTeamName(g.away)]||RANKINGS[normalizeTeamName(g.home)];
+      });
+    }
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px;gap:8px">';
+    h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap to select &middot; Hold for tiebreaker</div>';
+    h+='<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">';
+    h+='<button id="b-imp-top25" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#ffffff;color:var(--muted)')+'"># Top 25</button>';
+    h+='<span style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</span>';
+    h+='</div>';
     h+='</div>';
     var curTb=ST.tiebreaker[weekId]||{};
-    ST.importGames.forEach(function(g,i){
-      var checked=!!ST.importSelected[i];
+    filteredGames.forEach(function(g,i){
+      var origIdx=ST.importGames.indexOf(g);
+      var checked=!!ST.importSelected[origIdx];
       var disable=!checked&&selCount>=10;
       var isTb=curTb.away&&curTb.home&&curTb.away===g.away&&curTb.home===g.home;
-      h+='<label data-imp-label="'+i+'" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":"")+'">';
-      h+='<input type="checkbox" data-imp-idx="'+i+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
+      var awayRank=RANKINGS[normalizeTeamName(g.away)];
+      var homeRank=RANKINGS[normalizeTeamName(g.home)];
+      h+='<label data-imp-label="'+origIdx+'" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":"")+'">';
+      h+='<input type="checkbox" data-imp-idx="'+origIdx+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
       h+='<div style="flex:1;min-width:0">';
-      h+='<div style="display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800">';
+      h+='<div style="display:flex;align-items:center;gap:4px;font-size:11px;font-weight:800">';
       if(g.awayLogo) h+='<img src="'+g.awayLogo+'" style="width:18px;height:18px;object-fit:contain;border-radius:3px" onerror="this.style.display=\'none\'">';
+      if(awayRank) h+='<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px">#'+awayRank.rank+'</span>';
       h+=x(g.away);
       h+='<span style="font-size:9px;font-weight:700;color:var(--muted)">@</span>';
       if(g.homeLogo) h+='<img src="'+g.homeLogo+'" style="width:18px;height:18px;object-fit:contain;border-radius:3px" onerror="this.style.display=\'none\'">';
+      if(homeRank) h+='<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px">#'+homeRank.rank+'</span>';
       h+=x(g.home);
       if(isTb) h+='<span style="font-size:8px;font-weight:900;color:var(--purple);background:var(--purple-bg);border:1px solid var(--purple);border-radius:3px;padding:0 4px;margin-left:4px">TB</span>';
       h+='</div>';
@@ -1203,6 +1238,7 @@ function renderImportPanel(weekId){
       h+='<div style="font-size:9px;color:var(--muted)">'+meta+'</div>';
       h+='</div></label>';
     });
+    if(ST.importTop25&&!filteredGames.length) h+='<div style="font-size:10px;color:var(--muted);padding:10px 0;text-align:center">No ranked teams in this week\'s games</div>';
     h+='<button class="btn btn-green" id="b-add-imported" style="margin-top:10px;width:100%">Add Selected to '+x(ST.weekLabels[weekId]||weekId)+'</button>';
   }
   h+='</div>';
@@ -1269,20 +1305,24 @@ function renderAdmin(){
   var tb=ST.tiebreaker[weekId]||{};
   h+='<div class="adm-sec-label">Tiebreaker Game</div>';
   h+='<div class="adm-game">';
-  h+='<div class="adm-game-title">Used only when first place players tie on total points for this week</div>';
-  h+='<div class="adm-row">';
-  h+='<input class="adm-input" id="tb-away" placeholder="Away team" value="'+x(tb.away||"")+'">';
-  h+='<input class="adm-input" id="tb-home" placeholder="Home team" value="'+x(tb.home||"")+'">';
-  h+='</div>';
-  h+='<div class="adm-row">';
-  h+='<input class="adm-input" id="tb-away-logo" placeholder="Away logo URL (optional)" value="'+x(tb.awayLogo||"")+'" style="font-size:9px">';
-  h+='<input class="adm-input" id="tb-home-logo" placeholder="Home logo URL (optional)" value="'+x(tb.homeLogo||"")+'" style="font-size:9px">';
-  h+='</div>';
-  h+='<div class="adm-row">';
-  h+='<input class="adm-input" id="tb-actual" type="number" placeholder="Actual total points scored" value="'+(tb.actual!=null?tb.actual:"")+'" style="max-width:220px">';
-  h+='<button class="adm-btn" id="b-tb-save">Save</button>';
-  h+='</div>';
-  if(tb.away&&tb.home) h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">&#10003; '+x(tb.away)+' @ '+x(tb.home)+(tb.actual!=null?' &mdash; Actual: <b>'+tb.actual+'</b>':'')+'</div>';
+  h+='<div class="adm-game-title">Hold any game in the ESPN import list to set it as the tiebreaker</div>';
+  if(tb.away&&tb.home){
+    h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px;background:var(--purple-bg);border-radius:8px;border:1px solid var(--purple)">';
+    if(tb.awayLogo) h+='<img src="'+tb.awayLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+    h+='<span style="font-size:12px;font-weight:800">'+x(tb.away)+'</span>';
+    h+='<span style="color:var(--muted);font-weight:700">@</span>';
+    if(tb.homeLogo) h+='<img src="'+tb.homeLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+    h+='<span style="font-size:12px;font-weight:800">'+x(tb.home)+'</span>';
+    if(tb.actual!=null) h+='<span style="margin-left:auto;font-size:12px;font-weight:900;color:var(--purple)">'+tb.actual+' pts</span>';
+    h+='</div>';
+    h+='<div class="adm-row">';
+    h+='<input class="adm-input" id="tb-actual" type="number" placeholder="Total points scored" value="'+(tb.actual!=null?tb.actual:"")+'" style="flex:1">';
+    h+='<button class="adm-btn" id="b-tb-fetch-result" style="white-space:nowrap">&#128202; Fetch</button>';
+    h+='<button class="adm-btn sel" id="b-tb-save">Save</button>';
+    h+='</div>';
+  } else {
+    h+='<div style="font-size:10px;color:var(--muted);padding:8px 0">No tiebreaker set yet. Import games above and hold one to set it.</div>';
+  }
   h+='</div>';
 
   h+='</div>';
@@ -1547,12 +1587,9 @@ function bind(){
     setTiebreakerGuess(ST.curWeek, this.value);
   });
 
-  // Tiebreaker admin save
+  // Tiebreaker admin
+  el=document.getElementById("b-tb-fetch-result"); if(el) el.addEventListener("click",function(){ fetchTiebreakerResult(ST.curWeek); });
   el=document.getElementById("b-tb-save"); if(el) el.addEventListener("click",function(){
-    var away=document.getElementById("tb-away"); if(away) setTiebreakerField(ST.curWeek,"away",away.value.trim());
-    var home=document.getElementById("tb-home"); if(home) setTiebreakerField(ST.curWeek,"home",home.value.trim());
-    var al=document.getElementById("tb-away-logo"); if(al) setTiebreakerField(ST.curWeek,"awayLogo",al.value.trim());
-    var hl=document.getElementById("tb-home-logo"); if(hl) setTiebreakerField(ST.curWeek,"homeLogo",hl.value.trim());
     var act=document.getElementById("tb-actual");
     if(act) setTiebreakerField(ST.curWeek,"actual",act.value!==''?Number(act.value):null);
     toast("&#10003; Tiebreaker saved");
@@ -1778,11 +1815,14 @@ function bind(){
   });
   el=document.getElementById("imp-year"); if(el) el.addEventListener("change",function(){ST.importYear=parseInt(this.value)||2026;});
   el=document.getElementById("imp-week"); if(el) el.addEventListener("change",function(){ST.importWeek=parseInt(this.value)||1;});
+  el=document.getElementById("imp-conf"); if(el) el.addEventListener("change",function(){ST.importConf=this.value;});
+  el=document.getElementById("b-imp-top25"); if(el) el.addEventListener("click",function(){ ST.importTop25=!ST.importTop25; draw(); });
   el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
-    var yEl=document.getElementById("imp-year"), wEl=document.getElementById("imp-week");
+    var yEl=document.getElementById("imp-year"), wEl=document.getElementById("imp-week"), cEl=document.getElementById("imp-conf");
     ST.importYear=parseInt(yEl.value)||2026;
     ST.importWeek=parseInt(wEl.value)||1;
-    fetchEspnSchedule(ST.importYear,ST.importWeek);
+    ST.importConf=(cEl&&cEl.value)||"80";
+    fetchEspnSchedule(ST.importYear,ST.importWeek,ST.importConf);
   });
   els=document.querySelectorAll("[data-imp-idx]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
@@ -1849,6 +1889,54 @@ var RANKINGS = {}; // normalized team name → {rank, source}
 
 function normalizeTeamName(n){
   return String(n||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+}
+
+function fetchTiebreakerResult(weekId){
+  var tb=ST.tiebreaker[weekId]||{};
+  if(!tb.away||!tb.home){toast("No tiebreaker game set");return;}
+  var btn=document.getElementById("b-tb-fetch-result");
+  if(btn){btn.textContent="Loading…";btn.disabled=true;}
+  var year=ST.importYear||new Date().getFullYear();
+  var week=ST.importWeek||guessWeekNumber(ST.weekLabels[weekId]);
+  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
+  fetch(url)
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var events=(data&&data.events)||[];
+      var normAway=normalizeTeamName(tb.away), normHome=normalizeTeamName(tb.home);
+      var found=null;
+      events.forEach(function(ev){
+        var comp=(ev.competitions||[])[0]||{};
+        var comps=comp.competitors||[];
+        var away=comps.find(function(c){return c.homeAway==="away";})||{};
+        var home=comps.find(function(c){return c.homeAway==="home";})||{};
+        var an=normalizeTeamName((away.team&&(away.team.shortDisplayName||away.team.displayName))||"");
+        var hn=normalizeTeamName((home.team&&(home.team.shortDisplayName||home.team.displayName))||"");
+        if((an===normAway||an.indexOf(normAway)>=0||normAway.indexOf(an)>=0)&&
+           (hn===normHome||hn.indexOf(normHome)>=0||normHome.indexOf(hn)>=0)){
+          var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+          if(state==="post"){
+            var aScore=parseInt(away.score)||0;
+            var hScore=parseInt(home.score)||0;
+            found=aScore+hScore;
+          }
+        }
+      });
+      if(found!==null){
+        setTiebreakerField(weekId,"actual",found);
+        var inp=document.getElementById("tb-actual");
+        if(inp) inp.value=found;
+        toast("&#10003; Total: "+found+" pts");
+        draw();
+      } else {
+        toast("Game not found or not final yet");
+      }
+      if(btn){btn.textContent="&#128202; Fetch";btn.disabled=false;}
+    })
+    .catch(function(){
+      toast("Could not reach ESPN");
+      if(btn){btn.textContent="&#128202; Fetch";btn.disabled=false;}
+    });
 }
 
 function fetchRankings(){
