@@ -598,6 +598,16 @@ function parseKickoffTs(game){
   return d.getTime();
 }
 
+// Returns true if this specific game's pick window is closed
+// (either the whole week is locked, or this game's kickoff has passed)
+function isGameLocked(weekId, gid){
+  if(ST.locked[weekId]) return true;
+  var g=(ST.games[weekId]||{})[gid];
+  if(!g) return false;
+  var ts=parseKickoffTs(g);
+  return ts?Date.now()>=ts:false;
+}
+
 function getFirstKickoff(weekId){
   var games=ST.games[weekId]||{};
   var earliest=null;
@@ -667,7 +677,7 @@ function addImportedGames(weekId){
 // ── Pick actions ─────────────────────────────────────────
 function setPickSide(weekId,gid,side){
   if(!ST.user){toast("Select your name first");return;}
-  if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
+  if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
   var uk=ukey(ST.user);
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
@@ -697,7 +707,7 @@ function resetAllConf(weekId){
 }
 function setConf(weekId,gid,confRaw){
   if(!ST.user){toast("Select your name first");return;}
-  if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
+  if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
   var uk=ukey(ST.user);
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
@@ -821,10 +831,13 @@ function confChips(selected,weekId,gid,N,canPick,usedConfs){
 
 function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs){
   var pick=viewerPicks[gid]||{};
+  var gameLocked=isGameLocked(weekId,gid); // per-game kickoff lock
+  var effectiveLocked=locked||gameLocked;
+  var effectiveCanPick=canPick&&!gameLocked;
   function logoImg(url){ return url?'<img src="'+url+'" style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px" onerror="this.style.display=\'none\'">':""; }
   var h='<div class="game-card">';
   h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+'</div><div id="tick-'+gid+'" style="min-width:20px"></div>';
-  if(locked&&result){
+  if(effectiveLocked&&result){
     if(result==="push") h+='<div class="gc-pts push">PUSH</div>';
     else if(pick.side){
       var won=pick.side===result;
@@ -832,6 +845,8 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     } else {
       h+='<div class="gc-pts">&ndash;</div>';
     }
+  } else if(gameLocked&&!result){
+    h+='<div class="gc-pts" style="color:var(--muted)">&#128274;</div>';
   }
   h+='</div>';
   ["away","home"].forEach(function(side){
@@ -839,19 +854,21 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     var logo=side==="away"?(g.awayLogo||""):(g.homeLogo||"");
     var sel=pick.side===side;
     var cls="team-pick";
-    if(locked&&result){
+    if(effectiveLocked&&result){
       if(result==="push") cls+=" push";
       else if(result===side) cls+=" winner";
       else cls+=" loser";
       if(sel) cls+=" mypick";
     } else if(sel) cls+=" mypick";
-    if(canPick) cls+=" clickable";
+    if(effectiveCanPick) cls+=" clickable";
     h+='<div class="'+cls+'" data-pick-week="'+weekId+'" data-pick-gid="'+gid+'" data-pick-side="'+side+'">';
-    h+='<div style="display:flex;align-items:center;flex:1;min-width:0">'+logoImg(logo)+'<div class="tp-name">'+x(team)+'</div></div>';
+    var teamRank=RANKINGS[normalizeTeamName(team)];
+    var rankBadge=teamRank?'<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 3px;margin-left:5px;line-height:1.5;vertical-align:middle;flex-shrink:0">#'+teamRank.rank+'</span>':'';
+    h+='<div style="display:flex;align-items:center;flex:1;min-width:0">'+logoImg(logo)+'<div class="tp-name">'+x(team)+'</div>'+rankBadge+'</div>';
     h+='<div class="tp-spread">'+spreadLabel(g,side)+'</div>';
     h+='</div>';
   });
-  h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,canPick,usedConfs)+'</div>';
+  h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,effectiveCanPick,usedConfs)+'</div>';
   h+='</div>';
   return h;
 }
@@ -876,27 +893,16 @@ function renderPicks(){
   h+='</div>';
 
   var locked=!!ST.locked[weekId];
-  var viewer=ST.viewUser||ST.user;
+  var viewer=ST.user;
   var viewerPicks=((ST.picks[weekId]||{})[ukey(viewer)])||{};
-  var isViewingOther=!!(ST.viewUser&&ST.viewUser!==ST.user);
-  var canPick=!!(ST.user&&!locked&&!isViewingOther);
+  var canPick=!!(ST.user&&!locked);
   var active=activeGames(weekId);
   var N=active.length;
 
   h+='<div class="lock-bar">';
   if(locked){
-    if(isViewingOther){
-      h+='<div class="lock-info">&#128065; Viewing '+x(ST.viewUser)+'\'s picks</div>';
-    } else {
-      var ws=weekScore(weekId,viewer);
-      h+='<div class="lock-info">&#128274; Locked &middot; '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+' pts</div>';
-    }
-    h+='<div class="lock-chips">';
-    PARTS.forEach(function(p){
-      h+='<div class="lchip'+(viewer===p?" done":"")+'" data-view="'+x(p)+'" style="cursor:pointer">'+pem(p)+x(p)+'</div>';
-    });
-    h+='</div>';
-    if(isViewingOther) h+='<button class="btn btn-ghost" id="b-viewself" style="margin-left:5px">My Picks</button>';
+    var ws=weekScore(weekId,viewer);
+    h+='<div class="lock-info">&#128274; Locked &middot; '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+' pts</div>';
   } else {
     var made=0,confs={};
     active.forEach(function(gid){
@@ -981,10 +987,10 @@ function renderStandings(){
   });
 
   h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
-  h+='<th style="min-width:28px;text-align:center;font-size:9px;padding:6px 4px">#</th>';
-  h+='<th class="gp-name" data-sort-name="1" style="min-width:90px;cursor:pointer">Players</th>';
-  h+='<th class="gp-pts-cell" data-sort-total="1" style="min-width:48px;cursor:pointer;left:90px;font-size:9px">Pts</th>';
-  h+='<th data-sort-possible="1" style="cursor:pointer;min-width:52px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
+  h+='<th style="position:sticky;left:0;z-index:3;background:var(--cream);width:28px;min-width:28px;text-align:center;font-size:9px;padding:6px 4px;border-right:1px solid var(--border2)">#</th>';
+  h+='<th data-sort-name="1" style="position:sticky;left:28px;z-index:3;background:var(--cream);min-width:100px;cursor:pointer;text-align:left;padding:6px 8px;border-right:2px solid var(--border)">Players</th>';
+  h+='<th data-sort-total="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:9px">Pts</th>';
+  h+='<th data-sort-possible="1" style="cursor:pointer;min-width:48px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
 
   completedWeeks.forEach(function(w){
     h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:58px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
@@ -1008,14 +1014,14 @@ function renderStandings(){
 
     // Rank
     var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
-    h+='<td style="text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px'+(isMe?';background:var(--gold-bg)':'')+'">'+rank+'</td>';
+    h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+'</td>';
 
     // Name
-    h+='<td class="gp-name"'+(isMe?' style="background:var(--gold-bg)"':'')+'>'+pem(r.name)+x(r.name)+'</td>';
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+pem(r.name)+x(r.name)+'</td>';
 
     // Points earned
-    h+='<td class="gp-pts-cell"'+(isMe?' style="background:var(--gold-bg)"':'')+' style="left:90px'+(isMe?';background:var(--gold-bg)':'')+'">';
-    h+='<div class="gp-pts-earned">'+r.total+'</div>';
+    h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
+    h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
     h+='</td>';
 
     // Points possible
@@ -1050,11 +1056,15 @@ function renderStandings(){
     if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
-      var made=0,confSet=0;
-      active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;if(p.conf)confSet++;});
+      var made=0;
+      active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;});
+      var allDone=active.length>0&&made===active.length;
       h+='<td style="text-align:center;padding:7px 6px">';
-      h+='<div style="font-size:10px;font-weight:800;color:var(--muted)">'+made+'/'+active.length+'</div>';
-      if(confSet>0) h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+confSet+' conf</div>';
+      if(allDone){
+        h+='<div style="font-size:16px">&#10003;</div>';
+      } else {
+        h+='<div style="font-size:10px;font-weight:800;color:var(--muted)">'+made+'/'+active.length+'</div>';
+      }
       h+='</td>';
     }
 
@@ -1237,13 +1247,14 @@ function renderGroupPicks(){
     h+=homeLogo?'<img class="gp-logo" src="'+homeLogo+'" onerror="this.style.display=\'none\'">'
                :'<span class="gp-logo-fallback"></span>';
     h+='</div>';
-    // Show spread as "Favorite -X" under logos
-    var favName="", favSpread="";
+    // Spread line with optional rank badge next to favorite name
+    var favName="", favSpread="", favRank=null;
     if(g.favSide==="even"||!g.spread){
       favSpread="PK";
     } else {
       favName=g.favSide==="away"?(g.away||""):(g.home||"");
-      favSpread=x(favName)+' -'+g.spread;
+      favRank=RANKINGS[normalizeTeamName(favName)]||null;
+      favSpread=x(favName)+(favRank?'<span style="font-size:7px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px;margin-left:2px;line-height:1.4;vertical-align:middle">#'+favRank.rank+'</span>':'')+' -'+g.spread;
     }
     h+='<div style="font-size:8px;color:var(--muted);font-weight:800;white-space:nowrap">'+favSpread+'</div>';
     h+='</div>';
@@ -1298,9 +1309,16 @@ function renderGroupPicks(){
       var g=games[gid]||{};
       var p=picks[gid]||{};
       var r=results[gid];
+      var gameLocked=isGameLocked(weekId,gid);
+      var isMyRow=ST.user&&player===ST.user;
+      // Hide picks for other players until the game kicks off
+      var showPick=isMyRow||gameLocked;
       h+='<td>';
       if(!p.side){
-        h+='<span class="gp-nopick">&ndash;</span>';
+        h+='<span class="gp-nopick">'+(showPick?'&ndash;':'')+'</span>';
+      } else if(!showPick){
+        // Game not yet kicked off — hide other players' picks
+        h+='<span style="font-size:14px;color:var(--border2)">&#9632;</span>';
       } else {
         var pickedLogo=p.side==="away"?(g.awayLogo||""):(g.homeLogo||"");
         var pickedName=p.side==="away"?(g.away||""):(g.home||"");
@@ -1391,23 +1409,11 @@ function bind(){
   els=document.querySelectorAll(".wtab[data-week]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.curWeek=this.getAttribute("data-week");ST.viewUser=null;draw();});
 
-  els=document.querySelectorAll(".lchip[data-view]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    var p=this.getAttribute("data-view");
-    ST.viewUser=(ST.user===p)?null:p;
-    draw();
-  });
-
-  el=document.getElementById("past-week-select"); if(el) el.addEventListener("change",function(){
-    var v=this.value;
-    ST.curWeek=v||currentWeekId();
-    ST.viewUser=null;
-    draw();
-  });
-
-  el=document.getElementById("b-viewself"); if(el) el.addEventListener("click",function(){ST.viewUser=null;draw();});
   el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
+  el=document.getElementById("past-week-select"); if(el) el.addEventListener("change",function(){
+    var v=this.value; ST.curWeek=v||currentWeekId(); draw();
+  });
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
 
   // Compare mode toggle
@@ -1667,6 +1673,40 @@ function bind(){
 }
 
 loadData();
+
+// ── CFB Rankings ──────────────────────────────────────────
+var RANKINGS = {}; // normalized team name → {rank, source}
+
+function normalizeTeamName(n){
+  return String(n||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+}
+
+function fetchRankings(){
+  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings")
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var polls=(data&&data.rankings)||[];
+      // Priority: CFP first, then AP Top 25
+      var cfp=null, ap=null;
+      polls.forEach(function(p){
+        var n=String(p.name||p.shortName||"");
+        if(!cfp&&n.indexOf("CFP")>=0) cfp=p;
+        if(!ap&&n.indexOf("AP")>=0) ap=p;
+      });
+      var poll=cfp||ap;
+      if(!poll||!poll.ranks) return;
+      var source=cfp?"CFP":"AP";
+      var map={};
+      poll.ranks.forEach(function(entry){
+        var team=entry.team&&(entry.team.shortDisplayName||entry.team.displayName||entry.team.name);
+        if(team) map[normalizeTeamName(team)]={rank:entry.current||entry.rank,source:source};
+      });
+      RANKINGS=map;
+      if(ST.page==="group") draw();
+    })
+    .catch(function(){}); // silently fail — rankings are optional
+}
+fetchRankings();
 </script>
 </body>
 </html>
