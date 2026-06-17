@@ -255,8 +255,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-table tr.gp-row-selected td:first-child{background:var(--blue-bg)!important}
 .gp-table tr.gp-row-hidden{display:none}
 .gp-compare-hint{font-size:9px;font-weight:700;color:var(--blue);padding:5px 10px;background:var(--blue-bg);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
-.gp-isolate-btn{padding:3px 10px;border-radius:6px;border:2px solid var(--border);background:#ffffff;color:var(--text);font-size:9px;font-weight:800;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:1px 1px 0 var(--border);white-space:nowrap;flex-shrink:0}
+.gp-isolate-btn{padding:3px 10px;border-radius:6px;border:2px solid var(--border);background:var(--green-bg);color:var(--green);font-size:9px;font-weight:800;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:1px 1px 0 var(--border);white-space:nowrap;flex-shrink:0}
 .gp-isolate-btn:active{transform:translate(1px,1px);box-shadow:none}
+.gp-isolate-btn.active{background:var(--red-bg);color:var(--red2);border-color:var(--border)}
 .gp-table th[data-sort-gid],.gp-table th[data-sort-pts]{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .gp-table th[data-sort-gid]:active,.gp-table th[data-sort-pts]:active{background:var(--border2)}
 </style>
@@ -946,61 +947,103 @@ function renderPicks(){
 }
 
 function renderStandings(){
-  var h='<div class="lb-wrap">';
+  var h='<div class="lb-wrap" style="padding:0">';
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
+
+  var completedWeeks=ST.weekIds.filter(function(w){return ST.locked[w];});
   var curWeekId=currentWeekId();
   var curLocked=!!(curWeekId&&ST.locked[curWeekId]);
-  var rows=PARTS.map(function(p){return {name:p,total:seasonScore(p)};});
+  var showCurWeek=curWeekId&&!curLocked; // show current open week as a progress column
+
+  var rows=PARTS.map(function(p){
+    var total=seasonScore(p);
+    var weekScores={};
+    ST.weekIds.forEach(function(w){ weekScores[w]=weekScore(w,p); });
+    return {name:p,total:total,weekScores:weekScores};
+  });
   rows.sort(function(a,b){return b.total-a.total;});
 
-  rows.forEach(function(r,i){
-    // Current week pick progress sub-line
-    var progressLine="";
-    if(curWeekId){
-      var active=activeGames(curWeekId);
-      var N=active.length;
-      if(!curLocked&&N>0){
-        var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
-        var made=0,confSet=0;
-        active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;if(p.conf)confSet++;});
-        progressLine=made+'/'+N+' picked'+(confSet>0?' &middot; '+confSet+' conf set':'');
-      } else if(curLocked){
-        var ws=weekScore(curWeekId,r.name);
-        progressLine=x(ST.weekLabels[curWeekId]||curWeekId)+': '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+'pts';
-      }
-    }
-
-    var medal=i===0?"&#129351;":i===1?"&#129352;":i===2?"&#129353;":(i+1);
-    h+='<div class="plyr-accordion'+(i===0?" open":"")+'" id="acc-'+ukey(r.name)+'">';
-    h+='<div class="plyr-acc-head" data-acc="'+ukey(r.name)+'">';
-    h+='<div style="font-size:18px;width:26px;text-align:center;flex-shrink:0">'+medal+'</div>';
-    h+='<div style="flex:1;min-width:0">';
-    h+='<div style="display:flex;justify-content:space-between;align-items:baseline">';
-    h+='<div class="lb-name">'+pem(r.name)+x(r.name)+'</div>';
-    h+='<div class="lb-pts"><b>'+r.total+'</b> pts</div>';
-    h+='</div>';
-    if(progressLine) h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:1px">'+progressLine+'</div>';
-    h+='</div>';
-    h+='<span class="plyr-acc-arrow">&#8250;</span>';
-    h+='</div>';
-
-    // Accordion body: week-by-week breakdown
-    h+='<div class="plyr-acc-body">';
-    var completedWeeks=ST.weekIds.filter(function(w){return ST.locked[w];});
-    if(!completedWeeks.length){
-      h+='<div style="font-size:10px;color:var(--muted);padding:4px 0">No completed weeks yet</div>';
-    } else {
-      completedWeeks.forEach(function(w){
-        var ws=weekScore(w,r.name);
-        var lbl=ST.weekLabels[w]||w;
-        h+='<div class="week-row">';
-        h+='<span class="week-row-label">'+x(lbl)+'</span>';
-        h+='<span><span class="week-row-score">'+ws.total+'</span> <span class="week-row-detail">'+ws.correct+'-'+ws.wrong+(ws.pending>0?' &middot; '+ws.pending+' live':'')+'</span></span>';
-        h+='</div>';
-      });
-    }
-    h+='</div></div>';
+  // Compute per-week best and worst scores for color coding
+  var weekBest={}, weekWorst={};
+  completedWeeks.forEach(function(w){
+    var scores=PARTS.map(function(p){ return weekScore(w,p).total; });
+    weekBest[w]=Math.max.apply(null,scores);
+    weekWorst[w]=Math.min.apply(null,scores);
   });
+
+  h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
+  h+='<th style="min-width:32px;text-align:center;font-size:9px;padding:6px 4px">#</th>';
+  h+='<th class="gp-name" data-sort-name="1" style="min-width:90px;cursor:pointer">Players</th>';
+  h+='<th class="gp-pts-cell" data-sort-total="1" style="min-width:52px;cursor:pointer;left:90px">Total</th>';
+
+  completedWeeks.forEach(function(w){
+    h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:60px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
+  });
+
+  if(showCurWeek){
+    h+='<th style="min-width:72px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'</th>';
+  }
+
+  h+='</tr></thead><tbody>';
+
+  rows.forEach(function(r,i){
+    var rank=i+1;
+    var isMe=ST.user&&r.name===ST.user;
+
+    // Build data attrs for sorting
+    var sortAttrs='data-total="'+r.total+'" data-name="'+x(ukey(r.name))+'" data-rank="'+rank+'"';
+    completedWeeks.forEach(function(w){
+      sortAttrs+=' data-week-'+w+'="'+r.weekScores[w].total+'"';
+    });
+
+    h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(ukey(r.name))+'">';
+
+    // Rank cell
+    var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
+    h+='<td style="text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px'+(isMe?';background:var(--gold-bg)':'')+'" class="rank-cell">'+rank+'</td>';
+
+    // Name cell
+    h+='<td class="gp-name"'+(isMe?' style="background:var(--gold-bg)"':'')+'>'+pem(r.name)+x(r.name)+'</td>';
+
+    // Total cell
+    h+='<td class="gp-pts-cell"'+(isMe?' style="background:var(--gold-bg)"':'')+' style="left:90px'+(isMe?';background:var(--gold-bg)':'')+'">';
+    h+='<div class="gp-pts-earned">'+r.total+'</div>';
+    h+='</td>';
+
+    // Week score cells
+    completedWeeks.forEach(function(w){
+      var ws=r.weekScores[w];
+      var isBest=ws.total>0&&ws.total===weekBest[w];
+      var isWorst=ws.total===weekWorst[w]&&weekBest[w]!==weekWorst[w];
+      var col=isBest?'var(--green)':isWorst?'var(--red2)':'var(--text)';
+      var bg=isBest?'rgba(93,186,74,.1)':isWorst?'rgba(232,85,85,.1)':'';
+      var weight=isBest||isWorst?'900':'700';
+      h+='<td style="text-align:center;padding:7px 6px'+(bg?';background:'+bg:'')+'">';
+      if(ws.total>0||ws.correct>0||ws.wrong>0){
+        h+='<div style="font-size:13px;font-weight:'+weight+';color:'+col+'">'+ws.total+'</div>';
+        h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+ws.correct+'-'+ws.wrong+'</div>';
+      } else {
+        h+='<span class="gp-nopick">&ndash;</span>';
+      }
+      h+='</td>';
+    });
+
+    // Current week progress
+    if(showCurWeek){
+      var active=activeGames(curWeekId);
+      var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
+      var made=0,confSet=0;
+      active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;if(p.conf)confSet++;});
+      h+='<td style="text-align:center;padding:7px 6px">';
+      h+='<div style="font-size:10px;font-weight:800;color:var(--muted)">'+made+'/'+active.length+'</div>';
+      if(confSet>0) h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+confSet+' conf</div>';
+      h+='</td>';
+    }
+
+    h+='</tr>';
+  });
+
+  h+='</tbody></table></div>';
   h+='</div>';
   return h;
 }
@@ -1131,7 +1174,7 @@ function renderGroupPicks(){
     h+='<div class="gp-compare-hint">';
     h+='<span>'+hintTxt+'</span>';
     if(selCount>0){
-      h+='<button class="gp-isolate-btn" id="b-isolate-toggle">'+(ST.compareIsolated?'&#128065; Unisolate':'&#128269; Isolate')+'</button>';
+      h+='<button class="gp-isolate-btn'+(ST.compareIsolated?' active':'')+'" id="b-isolate-toggle">'+(ST.compareIsolated?'Unisolate':'Isolate')+'</button>';
     }
     h+='</div>';
   }
@@ -1372,7 +1415,7 @@ function bind(){
         allRows[j].classList.remove("gp-row-hidden");
       }
     }
-    this.textContent=ST.compareIsolated?'\uD83D\uDC41 Unisolate':'\uD83D\uDD0D Isolate';
+    this.textContent=ST.compareIsolated?'Unisolate':'Isolate';this.classList.toggle('active',ST.compareIsolated);
   });
 
   // Compare row tap — toggle selection without full redraw for instant feel
@@ -1421,7 +1464,7 @@ function bind(){
       if(hintEl){
         var nb=document.createElement("button");
         nb.id="b-isolate-toggle"; nb.className="gp-isolate-btn";
-        nb.textContent=ST.compareIsolated?"\uD83D\uDC41 Unisolate":"\uD83D\uDD0D Isolate";
+        nb.textContent=ST.compareIsolated?"Unisolate":"Isolate";nb.classList.toggle("active",ST.compareIsolated);
         hintEl.appendChild(nb);
         nb.addEventListener("click",function(){
           ST.compareIsolated=!ST.compareIsolated;
@@ -1433,7 +1476,7 @@ function bind(){
             if(ST.compareIsolated&&hs&&!rs2) ar[k].classList.add("gp-row-hidden");
             else ar[k].classList.remove("gp-row-hidden");
           }
-          this.textContent=ST.compareIsolated?"\uD83D\uDC41 Unisolate":"\uD83D\uDD0D Isolate";
+          this.textContent=ST.compareIsolated?"Unisolate":"Isolate";this.classList.toggle("active",ST.compareIsolated);
         });
       }
     } else if(sc2===0&&isoBtn){
@@ -1474,6 +1517,37 @@ function bind(){
       return an.localeCompare(bn)*_gpSortState.dir;
     });
     rows.forEach(function(r){ tbody.appendChild(r); });
+  });
+
+  // Standings table sorts
+  var stTbody=document.querySelector(".gp-table tbody");
+  var _stSortState={col:null,dir:1};
+  function stSortRows(attr){
+    if(!stTbody) return;
+    var rows=Array.prototype.slice.call(stTbody.querySelectorAll("tr[data-st-player]"));
+    if(_stSortState.col===attr){ _stSortState.dir*=-1; } else { _stSortState.col=attr; _stSortState.dir=1; }
+    rows.sort(function(a,b){
+      var av=Number(a.getAttribute(attr)||0), bv=Number(b.getAttribute(attr)||0);
+      return (av>bv?-1:av<bv?1:0)*_stSortState.dir;
+    });
+    rows.forEach(function(r){ stTbody.appendChild(r); });
+  }
+  el=document.querySelector("th[data-sort-total]");
+  if(el) el.addEventListener("click",function(){ stSortRows("data-total"); });
+  els=document.querySelectorAll("th[data-sort-week]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    stSortRows("data-week-"+this.getAttribute("data-sort-week"));
+  });
+  // Name sort for standings
+  el=document.querySelector(".gp-table th[data-sort-name]");
+  if(el&&stTbody) el.addEventListener("click",function(){
+    var rows=Array.prototype.slice.call(stTbody.querySelectorAll("tr[data-st-player]"));
+    if(_stSortState.col==="name"){ _stSortState.dir*=-1; } else { _stSortState.col="name"; _stSortState.dir=1; }
+    rows.sort(function(a,b){
+      var an=a.getAttribute("data-name")||"", bn=b.getAttribute("data-name")||"";
+      return an.localeCompare(bn)*_stSortState.dir;
+    });
+    rows.forEach(function(r){ stTbody.appendChild(r); });
   });
   el=document.querySelector("th[data-sort-pts]");
   if(el) el.addEventListener("click",function(){
