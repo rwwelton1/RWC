@@ -757,22 +757,32 @@ function golferListHtml(roster,spend){
 
   var list=mergedGolfers().filter(function(g){
     if(!g.name)return false;
-    if(!ST.salaries[g.id])return false; // only show golfers with assigned salaries
     if(q&&g.name.toLowerCase().indexOf(q)<0&&(g.country||"").toLowerCase().indexOf(q)<0)return false;
     if(ST.filterTier!=="all"&&tierOf(g.id)!==ST.filterTier)return false;
     return true;
   });
 
+  // Separate: golfers with salaries (pickable) vs without (display-only for now)
+  var pickable=list.filter(function(g){return !!ST.salaries[g.id];});
+  var unpaid=list.filter(function(g){return !ST.salaries[g.id];});
+
   if(!list.length){
-    var hasSalaries=Object.keys(ST.salaries).length>0;
     var hasGolfers=mergedGolfers().length>0;
-    if(!hasGolfers)return'<div class="empty">No golfers in the field yet.<br><span style="font-size:10px;color:var(--dim)">Admin adds golfers in the ⚙️ Admin tab.</span></div>';
-    if(!hasSalaries)return'<div class="empty">Salaries not set yet.<br><span style="font-size:10px;color:var(--dim)">Admin sets salaries in the ⚙️ Admin tab.</span></div>';
+    if(!hasGolfers){
+      // Still loading from Firebase
+      var loadingState=Object.keys(ST.salaries).length===0&&Object.keys(ST.manualGolfers).length===0;
+      if(loadingState)return'<div class="empty">⏳ Loading golfers…<br><span style="font-size:10px;color:var(--dim)">Fetching from Firebase</span></div>';
+      return'<div class="empty">No golfers in the field yet.<br><span style="font-size:10px;color:var(--dim)">Admin adds golfers in the ⚙️ Admin tab.</span></div>';
+    }
     return'<div class="empty">No golfers match your search.</div>';
   }
 
+  if(!pickable.length&&list.length){
+    return'<div class="empty">⏳ Loading salaries…<br><span style="font-size:10px;color:var(--dim)">Fetching from Firebase</span></div>';
+  }
+
   var tierOrder={t1:0,t2:1,t3:2,t4:3};
-  list.sort(function(a,b){
+  pickable.sort(function(a,b){
     var ta=tierOrder[tierOf(a.id)||"t4"]||3;
     var tb=tierOrder[tierOf(b.id)||"t4"]||3;
     if(ta!==tb)return ta-tb;
@@ -780,7 +790,7 @@ function golferListHtml(roster,spend){
   });
 
   var h='<div style="display:flex;flex-direction:column;gap:3px">';
-  list.forEach(function(g){
+  pickable.forEach(function(g){
     var sal=salaryOf(g.id);
     var tid=tierOf(g.id);
     var tm=tid?tierMeta(tid):null;
@@ -1031,7 +1041,10 @@ function renderAdmin(){
 
   // ── Controls ──
   h+='<div class="card">';
-  h+='<div style="font-size:11px;font-weight:900;margin-bottom:10px">Pool Controls</div>';
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">';
+  h+='<div style="font-size:11px;font-weight:900">Pool Controls</div>';
+  h+='<button class="btn btn-ghost" id="btn-exit-admin" style="font-size:9px;padding:3px 9px;color:var(--muted)">✕ Exit Admin</button>';
+  h+='</div>';
   h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">';
   h+='<div style="font-size:11px;font-weight:700;color:var(--muted)">Picks <b style="color:var(--text)">'+(ST.locked?"LOCKED":"OPEN")+'</b></div>';
   h+='<button class="btn '+(ST.locked?"btn-green":"btn-red")+'" id="btn-toggle-lock">'+(ST.locked?"🔓 Unlock":"🔒 Lock Picks")+'</button>';
@@ -1158,7 +1171,9 @@ function bind(){
   // Tabs
   els=document.querySelectorAll(".ptab");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    ST.page=this.getAttribute("data-page");
+    var newPage=this.getAttribute("data-page");
+    if(newPage!=="admin") ST.admin=false; // exit admin mode when switching away
+    ST.page=newPage;
     ST.activeRosterSlot=null; ST.search="";
     if(ST.page==="leaderboard"||ST.page==="roster")fetchLive(false);
     draw();
@@ -1240,6 +1255,10 @@ function bind(){
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     ST.filterTier=this.getAttribute("data-ftier"); draw();
   });
+
+  // Admin: exit
+  el=document.getElementById("btn-exit-admin");
+  if(el)el.addEventListener("click",function(){ST.admin=false;ST.page="roster";draw();});
 
   // Admin: lock toggle
   el=document.getElementById("btn-toggle-lock");
