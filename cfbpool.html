@@ -173,6 +173,31 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .sc-score.pre{font-size:9px;font-weight:700;color:var(--dim)}
 .scores-empty{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700;line-height:2}
 .scores-loading{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700}
+
+/* ── CONFIDENCE CHIPS ── */
+.conf-row{padding:7px 10px;display:flex;align-items:center;gap:6px;background:var(--cream);flex-wrap:wrap}
+.conf-label{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0;margin-right:2px}
+.conf-chips{display:flex;gap:4px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1}
+.conf-chips::-webkit-scrollbar{display:none}
+.conf-chip{flex-shrink:0;width:28px;height:28px;border-radius:7px;border:2px solid var(--border2);background:#ffffff;color:var(--muted);font-size:10px;font-weight:900;display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:'Nunito',sans-serif;transition:transform .1s,box-shadow .1s;box-shadow:1px 1px 0 var(--border2)}
+.conf-chip:active{transform:translate(1px,1px);box-shadow:none}
+.conf-chip.sel{background:var(--gold);color:var(--text);border-color:var(--border);box-shadow:2px 2px 0 var(--border)}
+/* ── SAVE FLASH ── */
+@keyframes saveFlash{0%{opacity:0;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}100%{opacity:0;transform:scale(1)}}
+.save-tick{font-size:10px;font-weight:900;color:var(--green);animation:saveFlash .9s ease forwards;pointer-events:none}
+/* ── PLAYER ACCORDION ── */
+.plyr-accordion{background:#ffffff;border:2px solid var(--border);border-radius:12px;margin-bottom:8px;overflow:hidden;box-shadow:4px 4px 0 var(--border)}
+.plyr-acc-head{display:flex;align-items:center;gap:9px;padding:10px 12px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.plyr-acc-head:active{background:var(--cream)}
+.plyr-acc-body{display:none;border-top:2px solid var(--border2);padding:8px 12px 10px}
+.plyr-accordion.open .plyr-acc-body{display:block}
+.plyr-accordion.open .plyr-acc-arrow{transform:rotate(90deg)}
+.plyr-acc-arrow{font-size:12px;color:var(--dim);transition:transform .2s;flex-shrink:0}
+.week-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border2);font-size:11px}
+.week-row:last-child{border-bottom:none}
+.week-row-label{font-weight:700;color:var(--muted)}
+.week-row-score{font-weight:900;color:var(--text)}
+.week-row-detail{font-size:9px;font-weight:700;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -185,6 +210,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 // =====================================================
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
+var PUBLIC_VIEW=(function(){ return /[?&]public=1/.test(location.search); })();
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cfbpool":"cfbpool";
 var MASTER_PW="Sloop"; // default, overwritten by Firebase on load
@@ -196,7 +222,7 @@ var GAME_IDS=[];
 for(var _gi=1;_gi<=10;_gi++) GAME_IDS.push("g"+_gi);
 
 var ST={
-  page:"picks",
+  page:(PUBLIC_VIEW?"standings":"picks"),
   user:URL_USER||null,
   viewUser:null,
   admin:false,
@@ -508,7 +534,9 @@ function setPickSide(weekId,gid,side){
   else cur.side=side;
   ST.picks[weekId][uk][gid]=cur;
   draw();
-  if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur);
+  if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
+    if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
+  });
 }
 function setConf(weekId,gid,confRaw){
   if(!ST.user){toast("Select your name first");return;}
@@ -530,7 +558,8 @@ function setConf(weekId,gid,confRaw){
   if(conf)picks[gid].conf=conf; else delete picks[gid].conf;
   draw();
   if(DB){
-    if(conf)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").set(conf);
+    var _confCb=function(err){ if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } } };
+    if(conf)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").set(conf,_confCb);
     else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
   }
 }
@@ -616,16 +645,24 @@ function userSelectScreen(){
   return h;
 }
 
-function confOptions(selected,N){
-  var h='<option value="">&ndash;</option>';
-  for(var i=1;i<=N;i++) h+='<option value="'+i+'"'+(Number(selected)===i?" selected":"")+'>'+i+'</option>';
+function confChips(selected,weekId,gid,N,canPick){
+  var h='<div class="conf-chips">';
+  for(var i=1;i<=N;i++){
+    var sel=Number(selected)===i;
+    if(canPick){
+      h+='<button class="conf-chip'+(sel?' sel':'')+'" data-conf-week="'+weekId+'" data-conf-gid="'+gid+'" data-conf-val="'+i+'">'+i+'</button>';
+    } else {
+      h+='<div class="conf-chip'+(sel?' sel':'')+'" style="cursor:default">'+i+'</div>';
+    }
+  }
+  h+='</div>';
   return h;
 }
 
 function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N){
   var pick=viewerPicks[gid]||{};
   var h='<div class="game-card">';
-  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+'</div>';
+  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+'</div><div id="tick-'+gid+'" style="min-width:20px"></div>';
   if(locked&&result){
     if(result==="push") h+='<div class="gc-pts push">PUSH</div>';
     else if(pick.side){
@@ -651,7 +688,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N){
     h+='<div class="tp-name">'+x(team)+'</div><div class="tp-spread">'+spreadLabel(g,side)+'</div>';
     h+='</div>';
   });
-  h+='<div class="conf-row">Confidence <select class="conf-select" data-conf-week="'+weekId+'" data-conf-gid="'+gid+'" '+(canPick?'':'disabled')+'>'+confOptions(pick.conf,N)+'</select></div>';
+  h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,canPick)+'</div>';
   h+='</div>';
   return h;
 }
@@ -728,25 +765,60 @@ function renderPicks(){
 function renderStandings(){
   var h='<div class="lb-wrap">';
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
+  var curWeekId=currentWeekId();
+  var curLocked=!!(curWeekId&&ST.locked[curWeekId]);
   var rows=PARTS.map(function(p){return {name:p,total:seasonScore(p)};});
   rows.sort(function(a,b){return b.total-a.total;});
+
   rows.forEach(function(r,i){
-    h+='<div class="lb-row'+(i===0?" first":i===1?" second":i===2?" third":"")+'">';
-    h+='<div class="lb-medal">'+(i===0?"&#129351;":i===1?"&#129352;":i===2?"&#129353;":(i+1))+'</div>';
-    h+='<div class="lb-body"><div class="lb-top"><div class="lb-name">'+pem(r.name)+x(r.name)+'</div><div class="lb-pts"><b>'+r.total+'</b> pts</div></div></div>';
+    // Current week pick progress sub-line
+    var progressLine="";
+    if(curWeekId){
+      var active=activeGames(curWeekId);
+      var N=active.length;
+      if(!curLocked&&N>0){
+        var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
+        var made=0,confSet=0;
+        active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;if(p.conf)confSet++;});
+        progressLine=made+'/'+N+' picked'+(confSet>0?' &middot; '+confSet+' conf set':'');
+      } else if(curLocked){
+        var ws=weekScore(curWeekId,r.name);
+        progressLine=x(ST.weekLabels[curWeekId]||curWeekId)+': '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+'pts';
+      }
+    }
+
+    var medal=i===0?"&#129351;":i===1?"&#129352;":i===2?"&#129353;":(i+1);
+    h+='<div class="plyr-accordion'+(i===0?" open":"")+'" id="acc-'+ukey(r.name)+'">';
+    h+='<div class="plyr-acc-head" data-acc="'+ukey(r.name)+'">';
+    h+='<div style="font-size:18px;width:26px;text-align:center;flex-shrink:0">'+medal+'</div>';
+    h+='<div style="flex:1;min-width:0">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:baseline">';
+    h+='<div class="lb-name">'+pem(r.name)+x(r.name)+'</div>';
+    h+='<div class="lb-pts"><b>'+r.total+'</b> pts</div>';
     h+='</div>';
+    if(progressLine) h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:1px">'+progressLine+'</div>';
+    h+='</div>';
+    h+='<span class="plyr-acc-arrow">&#8250;</span>';
+    h+='</div>';
+
+    // Accordion body: week-by-week breakdown
+    h+='<div class="plyr-acc-body">';
+    var completedWeeks=ST.weekIds.filter(function(w){return ST.locked[w];});
+    if(!completedWeeks.length){
+      h+='<div style="font-size:10px;color:var(--muted);padding:4px 0">No completed weeks yet</div>';
+    } else {
+      completedWeeks.forEach(function(w){
+        var ws=weekScore(w,r.name);
+        var lbl=ST.weekLabels[w]||w;
+        h+='<div class="week-row">';
+        h+='<span class="week-row-label">'+x(lbl)+'</span>';
+        h+='<span><span class="week-row-score">'+ws.total+'</span> <span class="week-row-detail">'+ws.correct+'-'+ws.wrong+(ws.pending>0?' &middot; '+ws.pending+' live':'')+'</span></span>';
+        h+='</div>';
+      });
+    }
+    h+='</div></div>';
   });
   h+='</div>';
-  h+='<div class="adm-sec-label">Weekly Breakdown</div>';
-  h+='<div style="overflow-x:auto;margin:0 10px 16px"><table class="stand-table"><thead><tr><th>Player</th>';
-  ST.weekIds.forEach(function(w){h+='<th>'+x(ST.weekLabels[w]||w)+'</th>';});
-  h+='<th>Total</th></tr></thead><tbody>';
-  rows.forEach(function(r){
-    h+='<tr><td>'+pem(r.name)+x(r.name)+'</td>';
-    ST.weekIds.forEach(function(w){h+='<td>'+weekScore(w,r.name).total+'</td>';});
-    h+='<td><b>'+r.total+'</b></td></tr>';
-  });
-  h+='</tbody></table></div>';
   return h;
 }
 
@@ -851,6 +923,7 @@ function renderAdmin(){
 // ── Main draw ────────────────────────────────────────────
 function draw(){
   var h='';
+  if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
   h+='<div class="topbar-left"><a href="index.html" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
   h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">College Football &middot; Confidence Pool</div></div>';
@@ -859,7 +932,7 @@ function draw(){
     h+='<span class="tag">'+pem(ST.user)+x(ST.user)+'</span>';
     if(!URL_USER) h+='<button class="btn btn-ghost" id="b-switch">&#8646;</button>';
   }
-  h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
+  if(!PUBLIC_VIEW) h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
   h+='</div></div>';
 
   var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
@@ -868,7 +941,7 @@ function draw(){
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
 
-  if(!ST.user&&!ST.admin&&ST.page!=="scores"){
+  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&ST.page!=="scores"){
     h+=userSelectScreen();
     document.getElementById("root").innerHTML=h;
     stopScoreRefresh();
@@ -935,9 +1008,19 @@ function bind(){
     setPickSide(this.getAttribute("data-pick-week"),this.getAttribute("data-pick-gid"),this.getAttribute("data-pick-side"));
   });
 
-  els=document.querySelectorAll(".conf-select");
-  for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
-    setConf(this.getAttribute("data-conf-week"),this.getAttribute("data-conf-gid"),this.value);
+  els=document.querySelectorAll(".conf-chip[data-conf-val]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var wk=this.getAttribute("data-conf-week");
+    var gi=this.getAttribute("data-conf-gid");
+    var val=this.getAttribute("data-conf-val");
+    var cur=(((ST.picks[wk]||{})[ukey(ST.user)]||{})[gi]||{}).conf;
+    setConf(wk,gi,Number(cur)===Number(val)?null:val);
+  });
+
+  els=document.querySelectorAll(".plyr-acc-head[data-acc]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var acc=document.getElementById("acc-"+this.getAttribute("data-acc"));
+    if(acc) acc.classList.toggle("open");
   });
 
   el=document.getElementById("b-addweek"); if(el) el.addEventListener("click",addWeek);
