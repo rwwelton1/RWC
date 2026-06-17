@@ -72,6 +72,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .wtab.add{background:var(--blue-bg);color:var(--blue)}
 .wtab.danger{background:var(--red-bg);color:var(--red2)}
 .wtab-select{flex-shrink:0;padding:6px 10px;font-size:10px;font-weight:800;border:2px solid var(--border);background:var(--blue-bg);color:var(--blue);border-radius:8px;font-family:'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border)}
+.week-select-bar{padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.week-select-main{flex:1;padding:7px 10px;font-size:11px;font-weight:800;border:2px solid var(--border);background:#ffffff;color:var(--text);border-radius:8px;font-family:'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23777'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
 
 /* ── LOCK BAR ── */
 .lock-bar{display:flex;align-items:center;gap:7px;padding:7px 12px;border-bottom:2px solid var(--border2);flex-wrap:wrap;background:var(--cream);flex-shrink:0}
@@ -558,6 +560,11 @@ function parseEspnSchedule(data){
     var kickoff=dt?dt.toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}):"";
     var kickoffTs=dt?dt.getTime():null;
     var venue=(comp.venue&&comp.venue.fullName)||"";
+    // TV broadcast network
+    var tv="";
+    var geo=(comp.geoBroadcasts||[]).find(function(b){ return b.type&&b.type.shortName==="TV"; });
+    if(geo&&geo.media) tv=geo.media.shortName||geo.media.name||"";
+    if(!tv&&comp.broadcasts&&comp.broadcasts.length) tv=(comp.broadcasts[0].names||[])[0]||"";
     var spread=0,favSide="home";
     var odds=(comp.odds||[])[0];
     if(odds&&odds.details){
@@ -570,7 +577,7 @@ function parseEspnSchedule(data){
         else favSide="home";
       }
     }
-    return {away:awayName,home:homeName,awayLogo:awayLogo,homeLogo:homeLogo,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,spread:spread,favSide:favSide};
+    return {away:awayName,home:homeName,awayLogo:awayLogo,homeLogo:homeLogo,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide};
   });
 }
 function guessWeekNumber(label){
@@ -667,6 +674,7 @@ function addImportedGames(weekId){
     if(g.kickoffTs) setGameField(weekId,gid,"kickoffTs",g.kickoffTs);
     if(g.awayLogo) setGameField(weekId,gid,"awayLogo",g.awayLogo);
     if(g.homeLogo) setGameField(weekId,gid,"homeLogo",g.homeLogo);
+    if(g.tv) setGameField(weekId,gid,"tv",g.tv);
   }
   ST.importSelected={};
   if(selected.length>n) toast("Added "+n+" games &mdash; "+(selected.length-n)+" more selected but no empty slots left");
@@ -803,6 +811,20 @@ function setGroupPublic(val){
 }
 
 // ── Renderers ────────────────────────────────────────────
+function weekDropdown(curWeek, extraContent){
+  // Single dropdown showing all weeks, with optional extra content (like Compare button)
+  var h='<div class="week-select-bar">';
+  h+='<select class="week-select-main" id="week-dropdown">';
+  ST.weekIds.forEach(function(w){
+    var lbl=ST.weekLabels[w]||w;
+    var suffix=ST.locked[w]?" · Final":w===currentWeekId()?" · Current":"";
+    h+='<option value="'+w+'"'+(curWeek===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
+  });
+  h+='</select>';
+  if(extraContent) h+=extraContent;
+  h+='</div>';
+  return h;
+}
 function userSelectScreen(){
   var h='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
   PARTS.forEach(function(p){
@@ -836,7 +858,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   var effectiveCanPick=canPick&&!gameLocked;
   function logoImg(url){ return url?'<img src="'+url+'" style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px" onerror="this.style.display=\'none\'">':""; }
   var h='<div class="game-card">';
-  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+'</div><div id="tick-'+gid+'" style="min-width:20px"></div>';
+  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div><div id="tick-'+gid+'" style="min-width:20px"></div>';
   if(effectiveLocked&&result){
     if(result==="push") h+='<div class="gc-pts push">PUSH</div>';
     else if(pick.side){
@@ -879,18 +901,8 @@ function renderPicks(){
     h+='<div class="lb-note">No weeks have been set up yet. '+(ST.admin?'Head to the Admin tab to add Week 1 and its 10 games.':'Check back once your admin sets up Week 1.')+'</div>';
     return h;
   }
-  var weekId=ST.curWeek;
-  var curId=currentWeekId();
-  var pastWeeks=ST.weekIds.filter(function(w){return w!==curId&&ST.locked[w];});
-  h+='<div class="week-bar">';
-  h+='<button class="wtab'+(weekId===curId?" active":"")+'" data-week="'+curId+'">'+x(ST.weekLabels[curId]||curId)+(ST.locked[curId]?" &middot; Final":" &middot; Current")+'</button>';
-  if(pastWeeks.length){
-    h+='<select class="wtab-select" id="past-week-select">';
-    h+='<option value="">&#128218; Past Weeks&hellip;</option>';
-    pastWeeks.forEach(function(w){h+='<option value="'+w+'"'+(weekId===w?" selected":"")+'>'+x(ST.weekLabels[w]||w)+'</option>';});
-    h+='</select>';
-  }
-  h+='</div>';
+  var weekId=ST.curWeek||currentWeekId();
+  h+=weekDropdown(weekId);
 
   var locked=!!ST.locked[weekId];
   var viewer=ST.user;
@@ -1128,10 +1140,8 @@ function renderAdmin(){
     h+='</div></div>';
   }
   h+='<div class="adm-sec-label">Weeks</div>';
-  h+='<div class="week-bar">';
-  ST.weekIds.forEach(function(w){h+='<button class="wtab'+(ST.curWeek===w?" active":"")+'" data-week="'+w+'">'+x(ST.weekLabels[w]||w)+'</button>';});
-  h+='<button class="wtab add" id="b-addweek">+ Add Week</button>';
-  h+='</div>';
+  var addWeekBtn='<button class="wtab add" id="b-addweek" style="flex-shrink:0;white-space:nowrap">+ Add</button>';
+  h+=weekDropdown(ST.curWeek, addWeekBtn);
 
   if(!ST.curWeek){h+='<div class="lb-note">Add a week to start entering matchups.</div></div>';return h;}
 
@@ -1188,14 +1198,10 @@ function renderGroupPicks(){
     return h;
   }
 
-  // Week selector — show all weeks
+  // Week selector — dropdown with Compare button
   var weekId=ST.curWeek||currentWeekId();
-  h+='<div class="gp-week-bar">';
-  ST.weekIds.forEach(function(w){
-    h+='<button class="wtab'+(weekId===w?" active":"")+'" data-week="'+w+'">'+x(ST.weekLabels[w]||w)+'</button>';
-  });
-  h+='<button class="gp-compare-btn'+(ST.compareMode?" active":"")+'" id="b-compare-toggle">'+(ST.compareMode?'&#10005; Clear':'&#9878; Compare')+'</button>';
-  h+='</div>';
+  var compareBtnHtml='<button class="gp-compare-btn'+(ST.compareMode?" active":"")+'" id="b-compare-toggle">'+(ST.compareMode?'&#10005; Clear':'&#9878; Compare')+'</button>';
+  h+=weekDropdown(weekId, compareBtnHtml);
   if(ST.compareMode){
     var selCount=Object.keys(ST.compareSelected).length;
     var hintTxt=selCount===0?'Tap rows to select players':selCount+' selected';
@@ -1318,7 +1324,7 @@ function renderGroupPicks(){
         h+='<span class="gp-nopick">'+(showPick?'&ndash;':'')+'</span>';
       } else if(!showPick){
         // Game not yet kicked off — hide other players' picks
-        h+='<span style="font-size:14px;color:var(--border2)">&#9632;</span>';
+        h+='';
       } else {
         var pickedLogo=p.side==="away"?(g.awayLogo||""):(g.homeLogo||"");
         var pickedName=p.side==="away"?(g.away||""):(g.home||"");
@@ -1406,14 +1412,12 @@ function bind(){
   els=document.querySelectorAll(".user-btn");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");ST.viewUser=null;draw();});
 
-  els=document.querySelectorAll(".wtab[data-week]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.curWeek=this.getAttribute("data-week");ST.viewUser=null;draw();});
+  el=document.getElementById("week-dropdown"); if(el) el.addEventListener("change",function(){
+    ST.curWeek=this.value; draw();
+  });
 
   el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
-  el=document.getElementById("past-week-select"); if(el) el.addEventListener("change",function(){
-    var v=this.value; ST.curWeek=v||currentWeekId(); draw();
-  });
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
 
   // Compare mode toggle
