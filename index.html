@@ -2076,56 +2076,49 @@ function renderTrophyCase() {
 
       // ── Scorecery Rating — combined power across all pools ────────────────
       // Sum power ratings from all finished pool entries
-      // ── Scorecery Rating — use livePoolIds only to avoid archive duplicates ─
-      var _totalPower=0, _ratedPools=0, _ratedSports={};
+      // ── Scorecery Rating — career rating across all pools ────────────────────
+      var _crW=0,_crS=0,_crT=0,_crE=0,_crPools=0,_crSports={};
       Object.keys(sportMap).forEach(function(sid){
-        // Only use pools we computed live (not duplicated from archive)
-        if(!livePoolIds[sid]) return;
+        if(!livePoolIds[sid]) return; // live data only, no archive duplicates
         var s=sportMap[sid];
-        // Dedupe groups by name to avoid archive double-counting
         var _seenGroups={};
         var _finGroups=s.groups.filter(function(ge){
           if(ge.active) return false;
           if(_seenGroups[ge.name]) return false;
-          _seenGroups[ge.name]=true;
-          return true;
+          _seenGroups[ge.name]=true; return true;
         });
-        var _finCount=_finGroups.length;
-        if(_finCount===0) return;
-        // Recount wins/seconds/thirds from deduped groups
-        var _w=0,_s2=0,_t=0;
+        if(!_finGroups.length) return;
         _finGroups.forEach(function(ge){
-          if(ge.finish===1)_w++;
-          else if(ge.finish===2)_s2++;
-          else if(ge.finish===3)_t++;
+          _crE++;
+          if(ge.finish===1)_crW++;
+          else if(ge.finish===2)_crS++;
+          else if(ge.finish===3)_crT++;
         });
-        var _raw=(_w*500)+(_s2*175)+(_t*75)+(_finCount-_w-_s2-_t)*20;
-        if(_finCount>=3&&_w/_finCount>=0.4) _raw+=75;
-        var _poolPower=Math.max(10,Math.min(999,Math.round(_raw/1.1)));
-        _totalPower+=_poolPower;
-        _ratedPools++;
-        // Track unique sports for breadth bonus
-        var _spt=(s.pool.sport)||sid;
-        _ratedSports[_spt]=true;
+        _crPools++;
+        _crSports[(s.pool&&s.pool.sport)||sid]=true;
       });
-      // Final rating: average of pool powers + breadth bonus per unique sport
       var _scRating=0;
-      if(_ratedPools>0){
-        var _avg=Math.round(_totalPower/_ratedPools);
-        var _sportCount=Object.keys(_ratedSports).length;
-        var _breadthBonus=Math.min(100,(_sportCount-1)*25);
-        _scRating=Math.min(9999,_avg+_breadthBonus);
+      if(_crE>0){
+        // Career total using same weights as pool power but over all entries
+        var _careerRaw=(_crW*500)+(_crS*175)+(_crT*75)+(_crE-_crW-_crS-_crT)*20;
+        if(_crE>=3&&_crW/_crE>=0.4) _careerRaw+=75;
+        // Breadth: +50 per sport beyond first (max +200)
+        var _sportCount=Object.keys(_crSports).length;
+        var _breadth=Math.min(200,(_sportCount-1)*50);
+        // Longevity: +5 per entry (max +50)
+        var _longevity=Math.min(50,_crE*5);
+        _scRating=Math.min(999,Math.round((_careerRaw+_breadth+_longevity)/3.5));
       }
       (function(){
         var rEl=document.getElementById("tc-rating");
         var rBar=document.getElementById("tc-rating-bar");
         var rSub=document.getElementById("tc-rating-sub");
         if(rEl) rEl.textContent=_scRating>0?_scRating:"—";
-        if(rBar) setTimeout(function(){ rBar.style.width=(_scRating/9999*100)+"%"; },100);
+        if(rBar) setTimeout(function(){ rBar.style.width=(_scRating/999*100)+"%"; },100);
         if(rSub){
           var tier=_scRating>=800?"Elite":_scRating>=600?"All-Star":_scRating>=400?"Veteran":_scRating>=200?"Amateur":"Rookie";
-          var _sportCount2=Object.keys(_ratedSports).length;
-          rSub.textContent=_ratedPools>0?tier+" · "+_ratedPools+" pool"+(_ratedPools!==1?"s":"")+" · "+_sportCount2+" sport"+(_sportCount2!==1?"s":""):"Compete to earn a rating";
+          var _sc2=Object.keys(_crSports).length;
+          rSub.textContent=_crPools>0?tier+" · "+_crPools+" pool"+(_crPools!==1?"s":"")+" · "+_sc2+" sport"+(_sc2!==1?"s":""):"Compete to earn a rating";
         }
       })();
 
@@ -4342,31 +4335,40 @@ function calcStandings(g, data) {
   pools.forEach(function(pool){
     var _poolDataKey = pool.id;
     if(pool.id==="cws" && data["cws2026"]) _poolDataKey="cws2026";
-    // usopen stores player standings in "playerscores" (separate from golfer scores)
-    var poolScores = pool.id==="usopen"
-      ? (data[_poolDataKey]||{}).playerscores||{}
-      : (data[_poolDataKey]||{}).scores||{};
+    // usopen: compute entry totals from picks+scores directly in index
+    // so we don't depend on playerscores being pre-synced from usopen.html
+    if(pool.id==="usopen"){
+      var _uData=data[_poolDataKey]||{};
+      var _uPicks=_uData.picks||{};    // {ukey: {name, picks:[], cap}}
+      var _uScores=_uData.scores||{};  // {ukey(golferName): {score, cut}}
+      // Build golfer score map: normName -> {score, cut}
+      var _uGolferScores={};
+      Object.keys(_uScores).forEach(function(gk){
+        _uGolferScores[gk]=_uScores[gk];
+      });
+      var _hasAnyScore=Object.keys(_uScores).length>0;
+      golfScores[pool.id]={};
+      players.forEach(function(p){
+        var pk=_uPicks[ukey(p)];
+        if(!pk||!pk.picks) return;
+        var total=0;
+        pk.picks.forEach(function(gname){
+          var gk=gname.toLowerCase().replace(/[^a-z]/g,"");
+          var sc=_uGolferScores[gk]||null;
+          if(sc&&!sc.cut&&sc.score!==undefined&&sc.score!==null) total+=Number(sc.score);
+        });
+        golfScores[pool.id][p]={score:total,cut:false};
+        scores[p]+=(100-total);
+      });
+      return; // skip normal flow for this pool
+    }
+    var poolScores = (data[_poolDataKey]||{}).scores||{};
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
-      var isGolf = pool.id==="usopen";
-      if(isGolf) {
-        golfScores[pool.id] = {};
-        players.forEach(function(p){
-          var raw = poolScores[ukey(p)];
-          // playerscores stores plain numbers (entry totals, lower=better for golf)
-          if(raw !== undefined && raw !== null) {
-            var numScore = Number(raw);
-            golfScores[pool.id][p] = { score: numScore, cut: false };
-            // Invert for sort: lower golf score = higher rank
-            scores[p] += (100 - numScore);
-          }
-        });
-      } else {
-        players.forEach(function(p){
-          var pts = poolScores[ukey(p)];
-          if(pts !== undefined && pts > 0) scores[p] += pts;
-        });
-      }
+      players.forEach(function(p){
+        var pts = poolScores[ukey(p)];
+        if(pts !== undefined && pts > 0) scores[p] += pts;
+      });
     } else {
       var r=(data.results||{})[pool.id]; if(!r) return;
       if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
