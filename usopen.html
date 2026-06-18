@@ -861,33 +861,54 @@ function parseLiveScores(data){
                shortDetail.toLowerCase().indexOf("wd")>=0;
 
     var pos=c.order?String(c.order):"";
-    // Use c.status.displayValue — this is PER-PLAYER ("Thru 9", "F", "E4", "1:05 PM")
-    // shortDetail is competition-level and will be "F" for everyone once R1 ends
+    // Extract thru from multiple ESPN fields — priority order:
+    // 1. c.today holes played (ESPN app shows "Today: -1(4)" — the (4) is holesPlayed)
+    // 2. c.status.displayValue per-player (e.g. "Thru 9", "F")
+    // 3. Count non-null linescores holes
     var thru="";
-    var dv=displayValue.trim();
-    if(dv&&dv!=="Scheduled"&&dv.indexOf(":")< 0&&dv!==""){
-      // Strip leading * or T
-      thru=dv.replace(/^[*T]\s*/,"").trim();
+    var holesPlayed=0;
+    var isFinished=false;
+
+    // Method 1: c.today — ESPN stores {score, period/holesPlayed}
+    var todayObj=c.today||null;
+    if(todayObj){
+      // today can be a string like "-1(4)" or object with holesPlayed
+      if(typeof todayObj==="object"){
+        holesPlayed=todayObj.holesPlayed||todayObj.period||0;
+      } else if(typeof todayObj==="string"){
+        var tm=todayObj.match(/\((\d+)\)/);
+        if(tm) holesPlayed=parseInt(tm[1]);
+      }
     }
-    // Fallback to shortDetail if no per-player value
-    if(!thru&&shortDetail&&shortDetail!=="Scheduled"&&shortDetail.indexOf(":")<0){
-      thru=shortDetail.replace(/^[*T]\s*/,"").trim();
-    }
-    // Last fallback: count played holes from linescores
-    if(!thru){
+
+    // Method 2: linescores last round — count holes with real scores
+    if(!holesPlayed){
       var linescores=c.linescores||[];
       if(linescores.length){
         var lastRd=linescores[linescores.length-1];
-        var lastRdHoles=0;
         if(lastRd&&lastRd.linescores){
           for(var lh=0;lh<lastRd.linescores.length;lh++){
             var hv=lastRd.linescores[lh];
-            if(hv&&hv.displayValue&&hv.displayValue!=="-"&&hv.displayValue!=="") lastRdHoles++;
+            // Count holes that have a numeric value (par/birdie/bogey etc)
+            if(hv&&hv.value!==null&&hv.value!==undefined&&hv.value!==0&&hv.displayValue&&hv.displayValue!=="-"&&hv.displayValue!=="") holesPlayed++;
           }
         }
-        if(lastRdHoles>=18) thru="F";
-        else if(lastRdHoles>0) thru="Thru "+lastRdHoles;
-        else if(linescores.length>1) thru="F";
+      }
+    }
+
+    // Determine finish/in-progress
+    if(status==="STATUS_FINISHED"||status==="STATUS_PLAY_COMPLETE") isFinished=true;
+    var dv=displayValue.trim();
+    if(dv==="F"||dv==="Final") isFinished=true;
+
+    if(isFinished||holesPlayed>=18){
+      thru="F";
+    } else if(holesPlayed>0){
+      thru="Thru "+holesPlayed;
+    } else {
+      // Method 3: displayValue per-player (may be tee time or "Thru X")
+      if(dv&&dv!=="Scheduled"&&dv.indexOf(":")<0){
+        thru=dv.replace(/^[*T]\s*/,"").trim();
       }
     }
 
