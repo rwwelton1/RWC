@@ -223,6 +223,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .live-score.even{color:var(--blue)}
 .live-score.cut-score{color:var(--dim);font-size:11px}
 .live-empty{padding:60px 20px;text-align:center;color:var(--dim);font-size:12px;font-weight:800;line-height:2}
+/* Pull to refresh */
+.ptr-indicator{display:none;text-align:center;padding:10px;font-size:11px;font-weight:800;color:var(--muted);background:var(--cream)}
+.ptr-indicator.visible{display:block}
 .live-footer{text-align:center;font-size:8px;font-weight:700;color:var(--dim);padding:10px 0 4px}
 
 </style>
@@ -850,39 +853,41 @@ function parseLiveScores(data){
     else scoreNum=parseInt(scoreRaw)||0;
 
     var status=(c.status&&c.status.type&&c.status.type.name)||"";
+    var displayValue=(c.status&&c.status.displayValue)||"";
     var shortDetail=(c.status&&c.status.type&&c.status.type.shortDetail)||"";
-    var isCut=status==="STATUS_CUT"||shortDetail.toLowerCase().indexOf("cut")>=0||
-               (c.status&&c.status.displayValue&&c.status.displayValue.toLowerCase().indexOf("cut")>=0);
-    var isWD=status==="STATUS_WITHDRAWN"||shortDetail.toLowerCase().indexOf("wd")>=0;
+    var isCut=status==="STATUS_CUT"||displayValue.toLowerCase().indexOf("cut")>=0||
+               shortDetail.toLowerCase().indexOf("cut")>=0;
+    var isWD=status==="STATUS_WITHDRAWN"||displayValue.toLowerCase().indexOf("wd")>=0||
+               shortDetail.toLowerCase().indexOf("wd")>=0;
 
     var pos=c.order?String(c.order):"";
-    // Use ESPN shortDetail as primary thru source ("Thru 9", "F", "Thru F", etc.)
+    // Use c.status.displayValue — this is PER-PLAYER ("Thru 9", "F", "E4", "1:05 PM")
+    // shortDetail is competition-level and will be "F" for everyone once R1 ends
     var thru="";
-    if(shortDetail&&shortDetail!=="Scheduled"&&shortDetail!=="Tee Time"){
-      // Normalise: "F" | "Thru 9" | "* F" etc.
-      thru=shortDetail.replace(/^\*/,"").trim();
+    var dv=displayValue.trim();
+    if(dv&&dv!=="Scheduled"&&dv.indexOf(":")< 0&&dv!==""){
+      // Strip leading * or T
+      thru=dv.replace(/^[*T]\s*/,"").trim();
     }
-    // Fallback: count holes with actual scores in nested linescores
+    // Fallback to shortDetail if no per-player value
+    if(!thru&&shortDetail&&shortDetail!=="Scheduled"&&shortDetail.indexOf(":")<0){
+      thru=shortDetail.replace(/^[*T]\s*/,"").trim();
+    }
+    // Last fallback: count played holes from linescores
     if(!thru){
       var linescores=c.linescores||[];
       if(linescores.length){
         var lastRd=linescores[linescores.length-1];
         var lastRdHoles=0;
         if(lastRd&&lastRd.linescores){
-          // Count only holes that have a real score value (non-null, non-zero or par)
           for(var lh=0;lh<lastRd.linescores.length;lh++){
             var hv=lastRd.linescores[lh];
-            if(hv&&(hv.value!==null&&hv.value!==undefined&&hv.displayValue&&hv.displayValue!=="-")) lastRdHoles++;
+            if(hv&&hv.displayValue&&hv.displayValue!=="-"&&hv.displayValue!=="") lastRdHoles++;
           }
         }
-        var lastRdVal=lastRd?(lastRd.value||0):0;
-        if(lastRdHoles>=18||(lastRdHoles===0&&lastRdVal!==0&&Math.abs(lastRdVal)<100)){
-          thru="F";
-        } else if(lastRdHoles>0){
-          thru="Thru "+lastRdHoles;
-        } else {
-          thru=(linescores.length>1)?"F":"";
-        }
+        if(lastRdHoles>=18) thru="F";
+        else if(lastRdHoles>0) thru="Thru "+lastRdHoles;
+        else if(linescores.length>1) thru="F";
       }
     }
 
@@ -1007,8 +1012,10 @@ function renderLive(){
 
 function startLiveRefresh(){
   clearInterval(_liveTimer);
-  fetchLiveScores();
-  _liveTimer=setInterval(function(){if(ST.page==="live")fetchLiveScores();},60000);
+  _liveTimer=null;
+  // Only fetch if we don't have recent data (within 5 min)
+  if(!_liveData||Date.now()-_liveLastFetch>300000) fetchLiveScores();
+  else renderLiveInto();
 }
 function stopLiveRefresh(){clearInterval(_liveTimer);_liveTimer=null;}
 
@@ -1237,6 +1244,23 @@ function loadData(){
 }
 
 loadData();
+// Pull-to-refresh
+(function(){
+  var startY=0,pulling=false;
+  document.addEventListener("touchstart",function(e){
+    startY=e.touches[0].clientY;
+    pulling=window.scrollY===0;
+  },{passive:true});
+  document.addEventListener("touchend",function(e){
+    if(!pulling)return;
+    var dy=e.changedTouches[0].clientY-startY;
+    if(dy>60&&ST.page==="live"){
+      fetchLiveScores();
+    }
+    pulling=false;
+  },{passive:true});
+})();
+
 </script>
 </body>
 </html>
