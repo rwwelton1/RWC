@@ -567,7 +567,7 @@ function renderPicks(){
     var cls="slot-card"+(name?" filled":isActive?" active-slot":"")+(over&&name?" over":"");
     h+='<div class="'+cls+'" data-slot="'+i+'">';
     if(name){
-      h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
+      if(!ST.locked)h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
       h+='<div class="slot-label filled">Slot '+(i+1)+'</div>';
       h+='<div class="slot-name">'+x(name)+'</div>';
       h+='<div class="slot-salary">'+(g?fmt(g.salary):"")+'</div>';
@@ -856,30 +856,34 @@ function parseLiveScores(data){
     var isWD=status==="STATUS_WITHDRAWN"||shortDetail.toLowerCase().indexOf("wd")>=0;
 
     var pos=c.order?String(c.order):"";
-    // Parse thru/round from linescores
+    // Use ESPN shortDetail as primary thru source ("Thru 9", "F", "Thru F", etc.)
     var thru="";
-    var linescores=c.linescores||[];
-    if(linescores.length){
-      var lastRd=linescores[linescores.length-1];
-      var lastRdHoles=(lastRd&&lastRd.linescores)?lastRd.linescores.length:0;
-      var lastRdVal=lastRd?(lastRd.value||0):0;
-      // A round is "complete" if its nested linescores has 18 holes OR the value is a real score
-      var lastRdComplete=(lastRdHoles>=18)||(lastRdHoles===0&&lastRdVal>50);
-      if(lastRdComplete){
-        // All rounds done
-        thru="F";
-      } else if(lastRdHoles>0){
-        // Mid-round
-        thru="Thru "+lastRdHoles;
-      } else {
-        // Round started but no holes yet — treat as not started for this round
-        // Show previous round completed or just R#
-        thru=(linescores.length>1)?"F":"";
-      }
+    if(shortDetail&&shortDetail!=="Scheduled"&&shortDetail!=="Tee Time"){
+      // Normalise: "F" | "Thru 9" | "* F" etc.
+      thru=shortDetail.replace(/^\*/,"").trim();
     }
-    // Use status shortDetail as fallback (e.g. "Thru 9", "F")
-    if(!thru&&shortDetail&&shortDetail!=="Scheduled"){
-      thru=shortDetail;
+    // Fallback: count holes with actual scores in nested linescores
+    if(!thru){
+      var linescores=c.linescores||[];
+      if(linescores.length){
+        var lastRd=linescores[linescores.length-1];
+        var lastRdHoles=0;
+        if(lastRd&&lastRd.linescores){
+          // Count only holes that have a real score value (non-null, non-zero or par)
+          for(var lh=0;lh<lastRd.linescores.length;lh++){
+            var hv=lastRd.linescores[lh];
+            if(hv&&(hv.value!==null&&hv.value!==undefined&&hv.displayValue&&hv.displayValue!=="-")) lastRdHoles++;
+          }
+        }
+        var lastRdVal=lastRd?(lastRd.value||0):0;
+        if(lastRdHoles>=18||(lastRdHoles===0&&lastRdVal!==0&&Math.abs(lastRdVal)<100)){
+          thru="F";
+        } else if(lastRdHoles>0){
+          thru="Thru "+lastRdHoles;
+        } else {
+          thru=(linescores.length>1)?"F":"";
+        }
+      }
     }
 
     var key=normName(fullName);
