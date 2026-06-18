@@ -1918,6 +1918,14 @@ function renderTrophyCase() {
   h += '<div class="trophy-stat"><div class="trophy-stat-val" id="tc-podiums">—</div><div class="trophy-stat-label">Podiums</div></div>';
   h += '<div class="trophy-stat"><div class="trophy-stat-val blue" id="tc-entered">—</div><div class="trophy-stat-label">Entered</div></div>';
   h += '</div>';
+  h += '<div style="margin-top:16px;padding:12px 16px;background:rgba(255,255,255,.07);border-radius:12px;border:1px solid rgba(255,255,255,.12)">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+  h += '<div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.5);text-transform:uppercase;letter-spacing:.1em">Scorecery Rating</div>';
+  h += '<div style="font-size:22px;font-weight:900;color:#fbbf24;letter-spacing:-.5px" id="tc-rating">—</div>';
+  h += '</div>';
+  h += '<div style="height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden"><div id="tc-rating-bar" style="height:100%;border-radius:3px;background:linear-gradient(90deg,#f59e0b,#fbbf24);width:0%;transition:width .8s ease"></div></div>';
+  h += '<div style="font-size:8px;font-weight:700;color:rgba(255,255,255,.35);margin-top:5px;text-align:right" id="tc-rating-sub">—</div>';
+  h += '</div>';
   h += '</div>';
 
   h += '<div class="trophy-section">';
@@ -2012,6 +2020,14 @@ function renderTrophyCase() {
           DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
         } else if(isActive){
           sportMap[sid].groups.push({ name:g.name, finish:null, pts:0, active:true });
+          sportMap[sid].hasActive = true;
+          sportMap[sid].activeStatus = st; // "locked" or "open"
+        } else {
+          // coming-soon — track but don't count
+          if(!sportMap[sid].groups.length){
+            sportMap[sid].hasComingSoon = true;
+            sportMap[sid].activeStatus = st;
+          }
         }
       });
     });
@@ -2058,12 +2074,47 @@ function renderTrophyCase() {
         el.textContent = [totalWins, totalPodiums, totalEntered][idx];
       });
 
+      // ── Scorecery Rating — combined power across all pools ────────────────
+      // Sum power ratings from all finished pool entries
+      var _totalPower=0, _ratedPools=0;
+      Object.keys(sportMap).forEach(function(sid){
+        var s=sportMap[sid];
+        var _finCount=s.groups.filter(function(ge){return !ge.active;}).length;
+        if(_finCount===0) return; // skip active/unfinished pools
+        var _raw=(s.wins*500)+(s.seconds*175)+(s.thirds*75)+(_finCount-s.wins-s.seconds-s.thirds)*20;
+        if(_finCount>=3&&s.wins/_finCount>=0.4) _raw+=75;
+        var _poolPower=Math.max(10,Math.min(999,Math.round(_raw/1.1)));
+        _totalPower+=_poolPower;
+        _ratedPools++;
+      });
+      // Final rating: weighted average boosted by breadth (more sports = bonus)
+      var _scRating=0;
+      if(_ratedPools>0){
+        var _avg=Math.round(_totalPower/_ratedPools);
+        var _breadthBonus=Math.min(100,(_ratedPools-1)*25); // +25 per additional sport, max +100
+        _scRating=Math.min(9999,_avg+_breadthBonus);
+      }
+      (function(){
+        var rEl=document.getElementById("tc-rating");
+        var rBar=document.getElementById("tc-rating-bar");
+        var rSub=document.getElementById("tc-rating-sub");
+        if(rEl) rEl.textContent=_scRating>0?_scRating:"—";
+        if(rBar) setTimeout(function(){ rBar.style.width=(_scRating/9999*100)+"%"; },100);
+        if(rSub){
+          var tier=_scRating>=800?"Elite":_scRating>=600?"All-Star":_scRating>=400?"Veteran":_scRating>=200?"Amateur":"Rookie";
+          rSub.textContent=_ratedPools>0?tier+" · "+_ratedPools+" pool"+ (_ratedPools!==1?"s":"")+" rated":"Compete to earn a rating";
+        }
+      })();
+
       // ── Group pools by sport category ────────────────────────────────────────
       var sportIds = Object.keys(sportMap);
       // Only finished pools (no active flag)
-      sportIds = sportIds.filter(function(sid){ return sportMap[sid].entries>0 && !sportMap[sid].active; });
+      sportIds = sportIds.filter(function(sid){ return sportMap[sid].entries>0; });
       sportIds.sort(function(a,b){
         var sa=sportMap[a],sb=sportMap[b];
+        // Finished pools first, then active
+        var aFinished=!sa.hasActive&&!sa.hasComingSoon, bFinished=!sb.hasActive&&!sb.hasComingSoon;
+        if(aFinished!==bFinished) return bFinished?1:-1;
         if(sb.wins!==sa.wins) return sb.wins-sa.wins;
         if((sb.seconds+sb.thirds)!==(sa.seconds+sa.thirds)) return (sb.seconds+sb.thirds)-(sa.seconds+sa.thirds);
         return sa.pool.name.localeCompare(sb.pool.name);
@@ -2096,26 +2147,56 @@ function renderTrophyCase() {
             deckHtml+='</div>';
             sg.pools.forEach(function(sid){
               var s=sportMap[sid], pool=s.pool;
-              var bestFinish=s.wins>0?1:s.seconds>0?2:s.thirds>0?3:s.entries>0?99:null;
-              var badgeCls=bestFinish===1?"badge-gold":bestFinish===2?"badge-silver":bestFinish===3?"badge-bronze":bestFinish===99?"badge-played":"badge-none";
-              var badgeTxt=bestFinish===1?"🥇 Won":bestFinish===2?"🥈 2nd":bestFinish===3?"🥉 3rd":bestFinish===99?"Competed":"—";
+              var _poolIsActive = s.hasActive||s.hasComingSoon;
+              var bestFinish=_poolIsActive?null:(s.wins>0?1:s.seconds>0?2:s.thirds>0?3:s.entries>0?99:null);
+              var _statusLbl = s.activeStatus==="locked"?"Live":s.activeStatus==="open"?"Open":"Soon";
+              var badgeCls=_poolIsActive?"badge-played":bestFinish===1?"badge-gold":bestFinish===2?"badge-silver":bestFinish===3?"badge-bronze":bestFinish===99?"badge-played":"badge-none";
+              var badgeTxt=_poolIsActive?_statusLbl:bestFinish===1?"Won":bestFinish===2?"2nd":bestFinish===3?"3rd":bestFinish===99?"Competed":"—";
+              // Only count finished entries in record
+              var _finEntries=s.groups.filter(function(ge){return !ge.active;});
               var record=[];
               if(s.wins) record.push(s.wins+"W");
               if(s.seconds) record.push(s.seconds+" 2nd");
               if(s.thirds) record.push(s.thirds+" 3rd");
-              var recordStr=record.length?record.join(" · "):"No podiums";
-              var pct=Math.round((s.wins/s.entries)*100);
+              var _finCount=_finEntries.length;
+              var recordStr=_poolIsActive?"In progress":record.length?record.join(" · "):"No podiums";
+              var pct=_finCount>0?Math.round((s.wins/_finCount)*100):0;
               deckHtml+='<div class="sport-card">';
               deckHtml+='<div class="sport-card-head">';
               deckHtml+='<div class="sport-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
               deckHtml+='<div class="sport-info">';
               deckHtml+='<div class="sport-name">'+x(pool.name)+'</div>';
-              deckHtml+='<div class="sport-meta">'+s.entries+' group'+(s.entries!==1?'s':'')+' entered · '+recordStr+'</div>';
-              if(s.entries>0) deckHtml+='<div class="winrate-bar"><div class="winrate-fill" style="width:'+pct+'%"></div></div>';
+              var _dispCount=_poolIsActive?s.entries:_finCount;
+              // Power rating out of 1000
+              var _raw=(s.wins*500)+(s.seconds*175)+(s.thirds*75)+(_finCount-s.wins-s.seconds-s.thirds)*20;
+              if(_finCount>=3&&s.wins/_finCount>=0.4) _raw+=75;
+              var _power=Math.max(10,Math.min(999,Math.round(_raw/1.1)));
+              deckHtml+='<div class="sport-meta">'+_dispCount+' group'+(_dispCount!==1?'s':'')+' entered · '+recordStr+'</div>';
+              if(!_poolIsActive&&_finCount>0){
+                deckHtml+='<div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 2px">';
+                deckHtml+='<div style="font-size:8px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Power</div>';
+                deckHtml+='<div style="font-size:12px;font-weight:900;color:var(--gold-dark)">'+_power+'<span style="font-size:8px;font-weight:700;color:var(--muted)"> / 1000</span></div>';
+                deckHtml+='</div>';
+                deckHtml+='<div class="winrate-bar"><div class="winrate-fill" style="width:'+(_power/10)+'%"></div></div>';
+              }
               deckHtml+='</div>';
               deckHtml+='<span class="sport-badge '+badgeCls+'">'+badgeTxt+'</span>';
               deckHtml+='</div>';
-              var groupEntries=s.groups.filter(function(ge){ return ge.finish!==null&&ge.finish!==undefined&&!ge.active; });
+              var groupEntries=s.groups.filter(function(ge){ return !ge.active; });
+              var activeGroupEntries=s.groups.filter(function(ge){ return ge.active; });
+              if(activeGroupEntries.length){
+                deckHtml+='<div style="border-top:1px solid var(--border2)">';
+                activeGroupEntries.forEach(function(ge){
+                  var _stLbl=s.activeStatus==="locked"?"Live":s.activeStatus==="open"?"Open":"Soon";
+                  var _stCol=s.activeStatus==="locked"?"var(--red2)":s.activeStatus==="open"?"var(--green)":"var(--muted)";
+                  deckHtml+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border2)">';
+                  deckHtml+='<div style="font-size:15px;flex-shrink:0">⏳</div>';
+                  deckHtml+='<div style="flex:1;font-size:11px;font-weight:700;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(ge.name||'—')+'</div>';
+                  deckHtml+='<div style="font-size:11px;font-weight:900;color:'+_stCol+'">'+_stLbl+'</div>';
+                  deckHtml+='</div>';
+                });
+                deckHtml+='</div>';
+              }
               if(groupEntries.length){
                 deckHtml+='<div style="border-top:1px solid var(--border2)">';
                 groupEntries.forEach(function(ge){
