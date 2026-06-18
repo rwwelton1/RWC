@@ -1647,10 +1647,15 @@ function joinGroupSilent(groupId) {
 function openInviteModal() {
   var g = SC.group;
   if(!g) return;
-  var msg = "Hey! Join my Scorecery group 🏆\n\n"
-    + "Group: " + g.name + "\n"
-    + "Password: " + (g.adminPw || "ask me") + "\n\n"
-    + "Search for the group name after signing up at:\nhttps://scorecery.vercel.app";
+  var sender = (SC.currentUser && SC.currentUser.username) ? SC.currentUser.username : "A colleague";
+  var msg = "I hope this message finds you well.\n\n"
+    + "I am reaching out to extend a formal invitation to join my Scorecery group for the upcoming competition.\n\n"
+    + "Please find the enclosed access credentials:\n"
+    + "  Group Name: " + g.name + "\n"
+    + "  Password: " + (g.adminPw || "available upon request") + "\n\n"
+    + "To proceed, kindly register at scorecery.net and search for the above group name at your earliest convenience.\n\n"
+    + "Should you have any questions or require further assistance, please do not hesitate to reach out.\n\n"
+    + "Best regards,\n" + sender;
 
   var preview = document.getElementById("invite-msg-preview");
   if(preview) preview.textContent = msg;
@@ -1864,11 +1869,26 @@ function renderTrophyCase() {
         sportMap[sid].entries++;
         totalEntered++;
         var finish=null, pts=0;
-        if(r){
+        if(r && (r.first||r.second||r.third)){
           if(r.first===u.username)       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
           else if(r.second===u.username) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
           else if(r.third===u.username)  { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
           else if(r.first||r.second)     { finish=99; }
+        } else {
+          // Fallback: compute from live group scores when globalSettings/results not set
+          var poolScores2 = (g.data && g.data[pool.id] && g.data[pool.id].scores) ? g.data[pool.id].scores : null;
+          var status2 = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+          if(poolScores2 && (status2==="complete"||status2==="locked")){
+            var sorted2 = (g.players||[]).slice().sort(function(a,b){
+              var ak=a.toLowerCase().replace(/[^a-z0-9_]/g,""), bk=b.toLowerCase().replace(/[^a-z0-9_]/g,"");
+              return (Number(poolScores2[bk])||0)-(Number(poolScores2[ak])||0);
+            });
+            var myIdx2 = sorted2.indexOf(u.username);
+            if(myIdx2===0)      { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
+            else if(myIdx2===1) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
+            else if(myIdx2===2) { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
+            else if(myIdx2>2)   { finish=99; }
+          }
         }
         sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts });
         if(r && (r.first||r.second||r.third)){
@@ -2954,7 +2974,10 @@ function renderAdmin() {
   h += '<div class="section-label">Set Results</div>';
   h += '<div class="admin-panel"><div style="font-size:10px;color:#475569;margin-bottom:12px">Results are saved globally across all groups.</div>';
   h += '<div id="admin-results-area"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
-  h += '<button class="save-results-btn" id="save-admin-results-btn" style="margin-top:12px">Save Results</button>';
+  h += '<div style="display:flex;gap:8px;margin-top:12px">';
+  h += '<button class="save-results-btn" id="save-admin-results-btn" style="flex:1">Save Results</button>';
+  h += '<button class="btn btn-green" id="btn-auto-compute-results" style="font-size:11px;padding:8px 14px">&#9889; Auto-compute</button>';
+  h += '</div>';
   h += '</div>';
 
   h += '<div class="section-label">Daily Trivia</div>';
@@ -3836,6 +3859,80 @@ function buildResultsForm(players, globalResults) {
   });
   var srb = document.getElementById("save-admin-results-btn");
   if(srb) srb.addEventListener("click", saveAdminResults);
+  var acb = document.getElementById("btn-auto-compute-results");
+  if(acb) acb.addEventListener("click", autoComputeResults);
+}
+
+function autoComputeResults() {
+  if(!DB){ toast("Firebase unavailable","err"); return; }
+  var btn = document.getElementById("btn-auto-compute-results");
+  if(btn){ btn.disabled=true; btn.textContent="Computing…"; }
+
+  DB.ref("groups").once("value", function(gsn){
+    var allGroups = gsn.val() || {};
+    // Aggregate scores per pool: {poolId: {playerName: totalPts}}
+    var poolTotals = {};
+
+    Object.keys(allGroups).forEach(function(gid){
+      var g = allGroups[gid];
+      var data = g.data || {};
+      POOL_LIBRARY.forEach(function(pool){
+        var scores = (data[pool.id] && data[pool.id].scores) ? data[pool.id].scores : null;
+        if(!scores) return;
+        if(!poolTotals[pool.id]) poolTotals[pool.id] = {};
+        Object.keys(scores).forEach(function(ukey){
+          var pts = Number(scores[ukey]) || 0;
+          if(pts <= 0) return;
+          // Match ukey back to a player name in this group
+          var players = g.players || [];
+          var matched = null;
+          for(var pi=0; pi<players.length; pi++){
+            var pk = players[pi].toLowerCase().replace(/[^a-z0-9_]/g,"");
+            if(pk === ukey){ matched = players[pi]; break; }
+          }
+          if(!matched) matched = ukey; // fallback
+          if(!poolTotals[pool.id][matched]) poolTotals[pool.id][matched] = 0;
+          poolTotals[pool.id][matched] += pts;
+        });
+      });
+    });
+
+    // Build new results from top 3 per pool
+    var newResults = {};
+    POOL_LIBRARY.forEach(function(pool){
+      var totals = poolTotals[pool.id];
+      if(!totals || !Object.keys(totals).length) return;
+      var sorted = Object.keys(totals).sort(function(a,b){ return totals[b]-totals[a]; });
+      var r = {};
+      if(sorted[0]) r.first  = sorted[0];
+      if(sorted[1]) r.second = sorted[1];
+      if(sorted[2]) r.third  = sorted[2];
+      newResults[pool.id] = r;
+    });
+
+    // Merge with existing results (don't overwrite pools with no live data)
+    DB.ref("globalSettings/results").once("value", function(sn){
+      var existing = sn.val() || {};
+      var merged = {};
+      // Start with existing
+      Object.keys(existing).forEach(function(k){ merged[k] = existing[k]; });
+      // Overwrite with computed where we have data
+      Object.keys(newResults).forEach(function(k){ merged[k] = newResults[k]; });
+
+      // Update the form dropdowns
+      POOL_LIBRARY.forEach(function(pool){
+        var r = (merged[pool.id]) || {};
+        ["first","second","third"].forEach(function(place){
+          var el = document.getElementById("admin-res-"+pool.id+"-"+place);
+          if(el && r[place]) el.value = r[place];
+          else if(el) el.value = "";
+        });
+      });
+
+      if(btn){ btn.disabled=false; btn.textContent="✓ Done — review & save"; }
+      toast("Auto-computed from scores — review then save", "ok");
+    });
+  });
 }
 
 function saveAdminResults() {
