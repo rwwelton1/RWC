@@ -1925,19 +1925,14 @@ function renderTrophyCase() {
   h += '<div id="tc-sports-wrap"><div class="sport-deck-wrap" id="tc-sports-deck-wrap"><div class="sport-deck" id="tc-sports"><div style="text-align:center;padding:20px;color:var(--muted);font-size:11px">Loading...</div></div></div><div class="sport-deck-dots" id="tc-sports-dots"></div></div>';
   h += '</div>';
 
-  h += '<div class="trophy-section">';
-  h += '<div class="trophy-section-title">Pool History</div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><div id="tc-history"><div style="text-align:center;padding:20px;color:var(--muted);font-size:11px">Loading...</div></div></div>';
-  h += '</div>';
+
 
   h += '</div>';
   render(h);
 
   if(!DB || !u.groups || !u.groups.length) {
     var sEl = document.getElementById("tc-sports");
-    var hEl = document.getElementById("tc-history");
     if(sEl) sEl.innerHTML = '<div class="home-empty" style="margin-bottom:0"><div class="home-empty-icon">🏆</div><div class="home-empty-txt">No pool history yet — join a group to get started!</div></div>';
-    if(hEl) hEl.innerHTML = '';
     ["tc-wins","tc-podiums","tc-entered"].forEach(function(id){ var el=document.getElementById(id); if(el) el.textContent="0"; });
     var wr = document.getElementById("tc-winrate"); if(wr) wr.textContent="0%";
     return;
@@ -1971,21 +1966,29 @@ function renderTrophyCase() {
       pools.forEach(function(pool){
         var r = globalResults[pool.id];
         var sid = pool.id;
+        var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+        var isFinished = st==="complete";
+        var isActive = st==="locked"||st==="open";
         livePoolIds[sid] = true;
-        if(!sportMap[sid]) sportMap[sid] = { pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
+
+        if(!sportMap[sid]) sportMap[sid]={ pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
+
+        // Only count as entered if the pool is finished or active
+        if(!isFinished && !isActive) return;
         sportMap[sid].entries++;
         totalEntered++;
+
         var finish=null, pts=0;
         if(r && (r.first||r.second||r.third)){
           if(r.first===u.username)       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
           else if(r.second===u.username) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
           else if(r.third===u.username)  { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
           else if(r.first||r.second)     { finish=99; }
-        } else {
-          // Fallback: compute from live group scores when globalSettings/results not set
-          var poolScores2 = (g.data && g.data[pool.id] && g.data[pool.id].scores) ? g.data[pool.id].scores : null;
-          var status2 = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(poolScores2 && (status2==="complete"||status2==="locked")){
+        } else if(isFinished) {
+          // Fallback: compute from live group scores
+          var _dataKey = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dataKey="cws2026";
+          var poolScores2 = (g.data&&g.data[_dataKey]&&g.data[_dataKey].scores)||null;
+          if(poolScores2){
             var sorted2 = (g.players||[]).slice().sort(function(a,b){
               var ak=a.toLowerCase().replace(/[^a-z0-9_]/g,""), bk=b.toLowerCase().replace(/[^a-z0-9_]/g,"");
               return (Number(poolScores2[bk])||0)-(Number(poolScores2[ak])||0);
@@ -1997,26 +2000,34 @@ function renderTrophyCase() {
             else if(myIdx2>2)   { finish=99; }
           }
         }
-        sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts });
-        if(r && (r.first||r.second||r.third)){
-          var yr = new Date().getFullYear();
-          historyEntries.push({ pool:pool, group:g.name, finish:finish, pts:pts, year:yr, ts:Date.now() });
-          // Write-through: always snapshot current win with full data (group name + year)
-          if(finish && finish < 4) {
-            var yr = new Date().getFullYear();
-            var archiveKey = pool.id + "_" + yr;
-            var snap = { poolId:pool.id, poolName:pool.name, poolIcon:pool.icon, finish:finish, pts:pts, groupName:g.name, year:yr, ts:Date.now() };
-            DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
-          }
-        } else if(!r){
-          var st3=(SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(st3==="locked"||st3==="complete"){
-            if(!sportMap[sid]) sportMap[sid]={pool:pool,wins:0,seconds:0,thirds:0,entries:0,groups:[],active:true};
-            sportMap[sid].entries++;
-            sportMap[sid].groups.push({name:g.name,finish:null,pts:0,active:true});
-          }
+
+        // Determine display state
+        if(isFinished){
+          sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts });
+          // Permanently write to trophies (all competed entries, not just podiums)
+          var archiveKey = pool.id + "_" + new Date().getFullYear() + "_" + g.id;
+          var snap = { poolId:pool.id, poolName:pool.name, poolIcon:pool.icon,
+            poolSport:(pool.sport||pool.name), poolSportIcon:(pool.sportIcon||pool.icon),
+            finish:finish, pts:pts, groupName:g.name, year:new Date().getFullYear(), ts:Date.now() };
+          DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
+        } else if(isActive){
+          sportMap[sid].groups.push({ name:g.name, finish:null, pts:0, active:true });
         }
       });
+    });
+
+    // ── Remove trophies for pools that are no longer complete ──────────────
+    // If admin un-finals a pool (sets it back to locked/open), remove those trophy entries
+    Object.keys(archivedTrophies).forEach(function(archiveKey){
+      var t = archivedTrophies[archiveKey];
+      var poolId = t.poolId;
+      if(!poolId) return;
+      var currentStatus = (SC.globalStatuses||{})[poolId]||"coming-soon";
+      // If the pool that produced this trophy is no longer complete AND still exists in live groups
+      if(livePoolIds[poolId] && currentStatus !== "complete"){
+        DB.ref("users/"+ukey+"/trophies/"+archiveKey).remove();
+        delete archivedTrophies[archiveKey];
+      }
     });
 
     // ── Archived trophies for deleted groups ─────────────────────────────────
@@ -2164,42 +2175,7 @@ function renderTrophyCase() {
         }
       }
 
-      var histEl=document.getElementById("tc-history");
-      if(histEl){
-        // Split into finished vs active
-        var finishedEntries = historyEntries.filter(function(e){ return !e.active && e.finish !== null; });
-        var activeEntries = historyEntries.filter(function(e){ return e.active; });
-        finishedEntries.sort(function(a,b){
-          var ya = a.year || (a.ts ? new Date(a.ts).getFullYear() : 0);
-          var yb = b.year || (b.ts ? new Date(b.ts).getFullYear() : 0);
-          if(yb!==ya) return yb-ya;
-          var fa=a.finish||99,fb=b.finish||99;
-          if(fa!==fb) return fa-fb;
-          return a.pool.name.localeCompare(b.pool.name);
-        });
-        historyEntries = finishedEntries; // only show finished in pool history
-        if(!historyEntries.length){
-          histEl.innerHTML='<div style="text-align:center;padding:20px;color:var(--muted);font-size:11px">No history yet</div>';
-        } else {
-          var hh="";
-          historyEntries.forEach(function(e){
-            var finIcon=e.active?"⏳":e.finish===1?"🥇":e.finish===2?"🥈":e.finish===3?"🥉":e.finish===99?"🏁":"🔵";
-            var finTxt=e.active?"Active":e.finish===1?"1st":e.finish===2?"2nd":e.finish===3?"3rd":e.finish===99?"Competed":"—";
-            var finCol=e.active?"var(--green)":e.finish===1?"var(--gold-dark)":e.finish===2?"#666":e.finish===3?"#b45309":e.finish===99?"var(--blue)":"var(--muted)";
-            var yearStr=e.year?String(e.year):(e.ts?String(new Date(e.ts).getFullYear()):"");
-            var subLine=[yearStr, x(e.group||"—")].filter(Boolean).join(" · ");
-            hh+='<div class="history-row">';
-            hh+='<div class="history-icon">'+finIcon+'</div>';
-            hh+='<div class="history-info">';
-            hh+='<div class="history-pool">'+e.pool.icon+' '+x(e.pool.name)+'</div>';
-            hh+='<div class="history-group">'+subLine+'</div>';
-            hh+='</div>';
-            hh+='<div class="history-result" style="color:'+finCol+'">'+finTxt+'</div>';
-            hh+='</div>';
-          });
-          histEl.innerHTML=hh;
-        }
-      }
+      
     });
 }
 
