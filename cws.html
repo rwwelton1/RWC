@@ -237,6 +237,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 // =====================================================
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
+var PUBLIC_VIEW=(function(){ return /[?&]public=1/.test(location.search); })();
 var GROUP_ADMIN_PW=null;
 var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cws2026":"cws2026";
 var MASTER_PW="Sloop"; // default, overwritten by Firebase on load
@@ -334,7 +335,7 @@ GAME_PTS[CHAMP_PICK_ID]=CHAMP_PTS;
 
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
-var ST={page:"bracket",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{}};
+var ST={page:(PUBLIC_VIEW?"leaderboard":"bracket"),user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{}};
 var DB=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
@@ -540,14 +541,15 @@ function renderScoresInto(){
   if(live.length) h+=section(live,"🔴 In Progress");
   h+=section(pre,"🕐 Upcoming");
   h+=section(done,"✓ Final");
-  h+='<div style="text-align:center;padding:10px 0 4px;font-size:7px;color:var(--dim)">Updated '+ago+'s ago &middot; auto-refreshes every 60s &middot; via ESPN</div>';
+  h+='<div style="text-align:center;padding:10px 0 4px;font-size:7px;color:var(--dim)">Updated '+ago+'s ago &middot; pull to refresh &middot; via ESPN</div>';
   el.innerHTML=h;
 }
 
 function startScoreRefresh(){
   clearInterval(_scTimer);
-  fetchScoreboard();
-  _scTimer=setInterval(function(){if(ST.page==="scores")fetchScoreboard();},60000);
+  // Only fetch if no recent data
+  if(!_scData||Date.now()-_scLastFetch>300000) fetchScoreboard();
+  else renderScoreboard();
 }
 function stopScoreRefresh(){clearInterval(_scTimer);_scTimer=null;}
 function tsHTML(name, seed, rec, gid, canPick){
@@ -1118,6 +1120,7 @@ function draw(){
   var isViewingOther=!!(ST.viewUser&&ST.user&&ST.viewUser!==ST.user);
   var canPick=!!(ST.user&&!locked&&!isViewingOther);
   var h='';
+  if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
 
   // Topbar
   h+='<div class="topbar">';
@@ -1133,8 +1136,10 @@ function draw(){
     h+='<span class="tag'+(locked?" locked":"")+'">'+pem(ST.user)+x(ST.user)+(locked?"&nbsp;&#128274;":"")+'</span>';
     if(!URL_USER)h+='<button class="btn btn-ghost" id="b-switch">&#8646;</button>';
   }
-  h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
-  if(ST.admin)h+='<button class="btn btn-red" id="b-reset">&#8635;</button>';
+  if(!PUBLIC_VIEW){
+    h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
+    if(ST.admin)h+='<button class="btn btn-red" id="b-reset">&#8635;</button>';
+  }
   h+='</div></div>';
 
   // Tabs
@@ -1145,7 +1150,7 @@ function draw(){
   h+='</div>';
 
   // User select — only block bracket page when no user and not admin
-  if(!ST.user&&!ST.admin&&(ST.page==="bracket"||ST.page==="scores"||ST.page==="leaderboard")){
+  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&(ST.page==="bracket"||ST.page==="scores"||ST.page==="leaderboard")){
     h+='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
     PARTS.forEach(function(p){
       var lk=ST.locked[ukey(p)],tp=totalPicks(p);
@@ -1335,6 +1340,21 @@ function setGroupPublic(val){
 }
 
 loadData();
+// Pull-to-refresh for scores tab
+(function(){
+  var _ptrStartY=0,_ptrActive=false;
+  document.addEventListener("touchstart",function(e){
+    _ptrStartY=e.touches[0].clientY;
+    _ptrActive=(window.scrollY===0&&ST.page==="scores");
+  },{passive:true});
+  document.addEventListener("touchend",function(e){
+    if(!_ptrActive)return;
+    var dy=e.changedTouches[0].clientY-_ptrStartY;
+    if(dy>60) fetchScoreboard();
+    _ptrActive=false;
+  },{passive:true});
+})();
+
 </script>
 </body>
 </html>
