@@ -314,7 +314,7 @@ button,input,select{font-family:'Nunito',sans-serif}
 .emoji-sheet{background:#ffffff;border:3px solid var(--border);border-radius:14px 14px 0 0;width:100%;max-width:480px;padding:20px 16px 44px;box-shadow:0 -4px 0 var(--border)}
 .emoji-handle{width:36px;height:4px;background:var(--border2);border-radius:2px;margin:0 auto 14px}
 .emoji-title{font-size:14px;font-weight:900;color:var(--text);margin-bottom:14px;text-align:center}
-.emoji-grid{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-height:280px;overflow-y:auto}
+.emoji-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;max-height:340px;overflow-y:auto;padding:4px 2px}
 .emoji-opt{width:46px;height:46px;border-radius:8px;font-size:24px;background:var(--cream);border:2px solid var(--border2);cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:2px 2px 0 var(--border2)}
 .emoji-opt:active{transform:translate(2px,2px);box-shadow:none;border-color:var(--border)}
 /* AUTH MODAL */
@@ -1488,7 +1488,7 @@ function renderProfile() {
   h += '</div>';
   render(h);
 
-  document.getElementById("btn-edit-emoji").addEventListener("click", function(){ if(requireAuth())return; openEmojiPicker(); });
+  document.getElementById("btn-edit-emoji").addEventListener("click", function(){ if(requireAuth())return; openEmojiPickerWithBadges(); });
   var trophyBtn = document.getElementById("btn-trophy-case");
   if(trophyBtn) trophyBtn.addEventListener("click", function(){ SC.screen="trophy"; draw(); });
   var poolLink = document.getElementById("public-pool-link");
@@ -1972,20 +1972,21 @@ function checkAndRenderBadges(ctx) {
     // ── Render badge grid ─────────────────────────────────────────────────
     var gridEl = document.getElementById("tc-badges");
     if(!gridEl) return;
-    var gh = "";
+    gridEl.innerHTML = "";
     BADGE_LIST.forEach(function(b){
       var isUnlocked = !!earned[b.id];
       var earnedAt = earned[b.id] ? earned[b.id].earnedAt : null;
       var rc = RARITY_COLOR[b.rarity] || RARITY_COLOR.common;
       var wrapCls = "badge-icon-wrap " + b.rarity + (isUnlocked ? "" : " locked");
-      gh += '<div class="badge-cell" onclick="openBadgeSheet('
-          + JSON.stringify(b.id) + ',' + (isUnlocked?'true':'false') + ','
-          + (earnedAt||'null') + ')">'
-          + '<div class="' + wrapCls + '">' + b.icon + '</div>'
-          + '<div class="badge-label" style="color:' + (isUnlocked?rc.text:'var(--dim)') + '">' + x(b.name) + '</div>'
-          + '</div>';
+      var cell = document.createElement("div");
+      cell.className = "badge-cell";
+      cell.innerHTML = '<div class="' + wrapCls + '">' + b.icon + '</div>'
+        + '<div class="badge-label" style="color:' + (isUnlocked?rc.text:'var(--dim)') + '">' + x(b.name) + '</div>';
+      (function(_id, _unlocked, _at){
+        cell.addEventListener("click", function(){ openBadgeSheet(_id, _unlocked, _at); });
+      })(b.id, isUnlocked, earnedAt);
+      gridEl.appendChild(cell);
     });
-    gridEl.innerHTML = gh;
   });
 }
 
@@ -2510,7 +2511,7 @@ function renderTrophyCase() {
 }
 
 // ── EMOJI PICKER ──────────────────────────────────────────────────────────────
-function openEmojiPicker() {
+function openEmojiPickerWithBadges() {
   document.getElementById("emoji-modal").classList.add("open");
 }
 function closeEmojiPicker() {
@@ -5036,24 +5037,76 @@ function executeCopy(targetUser){
 <script>
 // ── EMOJI PICKER BINDINGS ─────────────────────────────────────────────────────
 (function(){
-  var EMOJIS = ["🍺","💩","🤡","🦆","🐸","🍔","🌮","🍕","🏈","⚽","🎳","🎯","🪃","🏒","🎰","🃏","🎲","🧨","💣","🔫","🪓","⚔️","🤘","🤙","👊","🌭","🍟","🧀","🥩","🍗","🍻","🥃","🍾","☕","🎸","🥁","🪗","🎺","🏆","💰","🐉","🦁","🐺","🦅","🦈","🏄","🚀","🎮","💎","🏋️"];
-  var grid = document.getElementById("emoji-grid");
-  EMOJIS.forEach(function(em){
-    var btn = document.createElement("button");
-    btn.className = "emoji-opt";
-    btn.textContent = em;
-    btn.addEventListener("click", function(){
-      saveUserEmoji(em);
-      closeEmojiPicker();
-      // Update the avatar in place if still on profile
-      if(SC.screen === "profile") draw();
-    });
-    grid.appendChild(btn);
-  });
   document.getElementById("emoji-modal").addEventListener("click", function(e){
     if(e.target === this) closeEmojiPicker();
   });
 })();
+
+function openEmojiPickerWithBadges() {
+  var grid = document.getElementById("emoji-grid");
+  grid.innerHTML = '<div style="text-align:center;padding:20px;font-size:11px;color:var(--muted)">Loading...</div>';
+  openEmojiPickerWithBadges();
+
+  var u = SC.currentUser;
+  if(!u || !DB) {
+    // No auth — just show the default set unlocked
+    renderEmojiGrid({});
+    return;
+  }
+  var _uk = u.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+  DB.ref("users/"+_uk+"/badges").once("value", function(sn){
+    renderEmojiGrid(sn.val()||{});
+  });
+}
+
+function renderEmojiGrid(unlockedBadges) {
+  var grid = document.getElementById("emoji-grid");
+  grid.innerHTML = "";
+  // Current selected emoji
+  var currentEmoji = (SC.currentUser && SC.currentUser.emoji) || "🎯";
+
+  BADGE_LIST.forEach(function(b){
+    var isUnlocked = !!unlockedBadges[b.id];
+    var rc = RARITY_COLOR[b.rarity] || RARITY_COLOR.common;
+
+    var wrap = document.createElement("div");
+    wrap.style.cssText = "position:relative;display:inline-flex;flex-direction:column;align-items:center;gap:3px;cursor:" + (isUnlocked?"pointer":"default");
+
+    var btn = document.createElement("button");
+    btn.style.cssText = "width:52px;height:52px;border-radius:12px;border:2px solid " +
+      (isUnlocked ? rc.border : "var(--border2)") +
+      ";background:" + (isUnlocked ? rc.bg : "var(--cream)") +
+      ";font-size:24px;display:flex;align-items:center;justify-content:center;cursor:" +
+      (isUnlocked?"pointer":"default") +
+      ";position:relative;outline:none;" +
+      (b.icon === currentEmoji && isUnlocked ? "box-shadow:0 0 0 3px "+rc.border+";" : "") +
+      (isUnlocked ? "" : "filter:grayscale(1);opacity:.3;");
+    btn.textContent = b.icon;
+
+    if(isUnlocked){
+      btn.addEventListener("click", function(){
+        saveUserEmoji(b.icon);
+        closeEmojiPicker();
+        if(SC.screen==="profile") draw();
+      });
+    } else {
+      // Tap locked badge — show unlock hint
+      btn.addEventListener("click", function(){
+        toast("🔒 " + b.name + " — " + b.desc, "");
+      });
+    }
+
+    var label = document.createElement("div");
+    label.style.cssText = "font-size:7px;font-weight:800;color:" +
+      (isUnlocked ? rc.text : "var(--dim)") +
+      ";width:52px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:Nunito,sans-serif";
+    label.textContent = b.name;
+
+    wrap.appendChild(btn);
+    wrap.appendChild(label);
+    grid.appendChild(wrap);
+  });
+}
 </script>
 
 <div id="invite-modal">
