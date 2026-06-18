@@ -1548,7 +1548,25 @@ function renderProfile() {
           gh += '<div style="font-size:12px;font-weight:'+(isMe?'900':'800')+';color:'+(isMe?'var(--blue)':'var(--text)')+';flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
           if(isMe) gh += '<div style="font-size:8px;font-weight:800;background:var(--gold);border:2px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text);flex-shrink:0">YOU</div>';
           gh += mvBadge;
-          gh += '<div style="font-size:12px;font-weight:900;color:'+(p.pts>0?rankColor2:'var(--dim)')+';flex-shrink:0">'+p.pts+'<span style="font-size:8px;font-weight:700;color:var(--muted)"> pts</span></div>';
+          // Check if this is a golf group (usopen) — display golf score format
+          var _isGolf = pools.length===1 && pools[0].id==="usopen";
+          var _ptsHtml = "";
+          if(_isGolf && p.golfScores && p.golfScores["usopen"] && p.golfScores["usopen"][p.name]) {
+            var _gs = p.golfScores["usopen"][p.name];
+            if(_gs.cut) {
+              _ptsHtml = '<div style="font-size:11px;font-weight:800;color:var(--muted);flex-shrink:0">CUT</div>';
+            } else if(_gs.score !== undefined) {
+              var _sc = _gs.score;
+              var _scStr = _sc === 0 ? "E" : _sc > 0 ? "+"+_sc : String(_sc);
+              var _scCol = _sc < 0 ? "var(--green)" : _sc > 0 ? "var(--red2)" : "var(--muted)";
+              _ptsHtml = '<div style="font-size:13px;font-weight:900;color:'+_scCol+';flex-shrink:0">'+_scStr+'</div>';
+            } else {
+              _ptsHtml = '<div style="font-size:11px;font-weight:700;color:var(--dim);flex-shrink:0">&mdash;</div>';
+            }
+          } else {
+            _ptsHtml = '<div style="font-size:12px;font-weight:900;color:'+(p.pts>0?rankColor2:'var(--dim)')+';flex-shrink:0">'+p.pts+'<span style="font-size:8px;font-weight:700;color:var(--muted)"> pts</span></div>';
+          }
+          gh += _ptsHtml;
           gh += '</div>';
         });
       } else {
@@ -4150,20 +4168,33 @@ function calcStandings(g, data) {
   var players = g.players||[];
   players.forEach(function(p){ scores[p]=0; finishes[p]={}; });
   var pools = groupPools(g);
+  var golfScores = {}; // pool.id -> {playerName -> {score, cut}} for golf pools
   pools.forEach(function(pool){
-    // Some pools store data under a different key (e.g. cws stores under "cws2026")
     var _poolDataKey = pool.id;
     if(pool.id==="cws" && data["cws2026"]) _poolDataKey="cws2026";
     var poolScores = (data[_poolDataKey]||{}).scores||{};
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
-      // Use live scores written by the pool file
-      players.forEach(function(p){
-        var pts = poolScores[ukey(p)];
-        if(pts !== undefined && pts > 0) scores[p] += pts;
-      });
+      // Detect golf pool (usopen): scores are {score:N, cut:bool} objects
+      var isGolf = pool.id==="usopen";
+      if(isGolf) {
+        golfScores[pool.id] = {};
+        players.forEach(function(p){
+          var raw = poolScores[ukey(p)];
+          if(raw && typeof raw === "object") {
+            golfScores[pool.id][p] = raw;
+            // For ranking: lower golf score = better; invert for standings sort
+            // Use a large offset so cut players go to bottom
+            if(!raw.cut && raw.score !== undefined) scores[p] += (100 - raw.score);
+          }
+        });
+      } else {
+        players.forEach(function(p){
+          var pts = poolScores[ukey(p)];
+          if(pts !== undefined && pts > 0) scores[p] += pts;
+        });
+      }
     } else {
-      // Fall back to manual results-based scoring
       var r=(data.results||{})[pool.id]; if(!r) return;
       if(r.first&&scores[r.first]!==undefined){scores[r.first]+=4;finishes[r.first][pool.id]=1;}
       if(r.second&&scores[r.second]!==undefined){scores[r.second]+=2;finishes[r.second][pool.id]=2;}
@@ -4171,7 +4202,7 @@ function calcStandings(g, data) {
     }
   });
   return players.slice().sort(function(a,b){return scores[b]-scores[a];})
-    .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p]};});
+    .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p],golfScores:golfScores};});
 }
 
 function deleteGroup(groupId) {
