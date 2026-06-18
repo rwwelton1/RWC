@@ -1590,12 +1590,17 @@ function renderProfile() {
       // ── Share button ──
       var snapshotKeyShare = g.id+"_season";
       var prevRanksShare = loadRankSnapshot(snapshotKeyShare);
+      var _sharePoolId = activePool ? activePool.id : null;
       var shareStandingsData = standings.length > 0
-        ? encodeURIComponent(JSON.stringify(standings.map(function(s,i){
-            var prev = prevRanksShare && prevRanksShare[s.name] !== undefined ? prevRanksShare[s.name] : null;
-            var mv = prev !== null ? prev - (i+1) : 0;
-            return {name:s.name, pts:s.pts, mv:mv};
-          })))
+        ? encodeURIComponent(JSON.stringify({
+            poolId: _sharePoolId,
+            entries: standings.map(function(s,i){
+              var prev = prevRanksShare && prevRanksShare[s.name] !== undefined ? prevRanksShare[s.name] : null;
+              var mv = prev !== null ? prev - (i+1) : 0;
+              var gs = s.golfScores && _sharePoolId && s.golfScores[_sharePoolId] ? s.golfScores[_sharePoolId][s.name] : null;
+              return {name:s.name, pts:s.pts, mv:mv, golfScore: gs ? gs.score : null, golfCut: gs ? gs.cut : false};
+            })
+          }))
         : "";
       gh += '<div style="padding:10px 14px 12px;border-top:1px solid var(--border2);display:flex;gap:8px">';
       gh += '<button class="gcard-share-btn" data-gname="'+x(g.name)+'" data-standings="'+shareStandingsData+'" style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:var(--cream);border:2px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:800;color:var(--muted);cursor:pointer;font-family:inherit;box-shadow:2px 2px 0 var(--border2)">📤 Share Standings</button>';
@@ -1620,9 +1625,15 @@ function renderProfile() {
         e.stopPropagation();
         var gname = this.getAttribute("data-gname");
         var raw = this.getAttribute("data-standings");
-        var standings = [];
-        try{ if(raw) standings = JSON.parse(decodeURIComponent(raw)); }catch(ex){}
-        openStandingsShareModal(gname, standings);
+        var standings = [], poolId = null;
+        try{
+          if(raw){
+            var parsed = JSON.parse(decodeURIComponent(raw));
+            if(parsed && parsed.entries){ standings = parsed.entries; poolId = parsed.poolId; }
+            else standings = parsed; // legacy format
+          }
+        }catch(ex){}
+        openStandingsShareModal(gname, standings, poolId);
       });
     });
     container.querySelectorAll(".gcard-invite-btn").forEach(function(btn){
@@ -1775,16 +1786,27 @@ function closeInviteModal() {
 }
 
 // ── STANDINGS SHARE MODAL ─────────────────────────────────────────────────────
-function openStandingsShareModal(groupName, standings) {
+function openStandingsShareModal(groupName, standings, poolId) {
   var top5 = standings.slice(0, 5);
   var medals = ["🥇","🥈","🥉","4️⃣","5️⃣"];
+  var isGolf = poolId === "usopen";
+
+  function fmtPts(p) {
+    if(isGolf) {
+      if(p.golfCut) return "CUT";
+      if(p.golfScore === null || p.golfScore === undefined) return "E";
+      return p.golfScore === 0 ? "E" : p.golfScore > 0 ? "+"+p.golfScore : ""+p.golfScore;
+    }
+    return p.pts + " pts";
+  }
 
   function buildShareText(list) {
-    var lines = ["🏆 " + groupName + " — Top " + list.length];
+    var lines = ["⛳ " + groupName + " — US Open" + (isGolf ? " Salary Pool" : "")];
+    if(!isGolf) lines = ["🏆 " + groupName + " — Top " + list.length];
     if(list.length > 0) {
       list.forEach(function(p, i){
         var arrow = p.mv > 0 ? " ▲"+p.mv : p.mv < 0 ? " ▼"+Math.abs(p.mv) : "";
-        lines.push(medals[i] + " " + p.name + " — " + p.pts + " pts" + arrow);
+        lines.push(medals[i] + " " + p.name + " — " + fmtPts(p) + arrow);
       });
     } else {
       lines.push("No scores yet — picks still open!");
@@ -1812,7 +1834,7 @@ function openStandingsShareModal(groupName, standings) {
           : p.mv < 0
           ? '<span style="color:var(--red);font-size:9px;font-weight:900"> ▼'+Math.abs(p.mv)+'</span>'
           : '<span style="color:var(--dim);font-size:9px"> —</span>';
-        html += medals[i]+" "+x(p.name)+" — "+p.pts+" pts"+arrowHtml+"\n";
+        html += medals[i]+" "+x(p.name)+" — "+fmtPts(p)+arrowHtml+"\n";
       });
     } else {
       html = "No scores yet — picks still open!\n";
