@@ -2076,22 +2076,44 @@ function renderTrophyCase() {
 
       // ── Scorecery Rating — combined power across all pools ────────────────
       // Sum power ratings from all finished pool entries
-      var _totalPower=0, _ratedPools=0;
+      // ── Scorecery Rating — use livePoolIds only to avoid archive duplicates ─
+      var _totalPower=0, _ratedPools=0, _ratedSports={};
       Object.keys(sportMap).forEach(function(sid){
+        // Only use pools we computed live (not duplicated from archive)
+        if(!livePoolIds[sid]) return;
         var s=sportMap[sid];
-        var _finCount=s.groups.filter(function(ge){return !ge.active;}).length;
-        if(_finCount===0) return; // skip active/unfinished pools
-        var _raw=(s.wins*500)+(s.seconds*175)+(s.thirds*75)+(_finCount-s.wins-s.seconds-s.thirds)*20;
-        if(_finCount>=3&&s.wins/_finCount>=0.4) _raw+=75;
+        // Dedupe groups by name to avoid archive double-counting
+        var _seenGroups={};
+        var _finGroups=s.groups.filter(function(ge){
+          if(ge.active) return false;
+          if(_seenGroups[ge.name]) return false;
+          _seenGroups[ge.name]=true;
+          return true;
+        });
+        var _finCount=_finGroups.length;
+        if(_finCount===0) return;
+        // Recount wins/seconds/thirds from deduped groups
+        var _w=0,_s2=0,_t=0;
+        _finGroups.forEach(function(ge){
+          if(ge.finish===1)_w++;
+          else if(ge.finish===2)_s2++;
+          else if(ge.finish===3)_t++;
+        });
+        var _raw=(_w*500)+(_s2*175)+(_t*75)+(_finCount-_w-_s2-_t)*20;
+        if(_finCount>=3&&_w/_finCount>=0.4) _raw+=75;
         var _poolPower=Math.max(10,Math.min(999,Math.round(_raw/1.1)));
         _totalPower+=_poolPower;
         _ratedPools++;
+        // Track unique sports for breadth bonus
+        var _spt=(s.pool.sport)||sid;
+        _ratedSports[_spt]=true;
       });
-      // Final rating: weighted average boosted by breadth (more sports = bonus)
+      // Final rating: average of pool powers + breadth bonus per unique sport
       var _scRating=0;
       if(_ratedPools>0){
         var _avg=Math.round(_totalPower/_ratedPools);
-        var _breadthBonus=Math.min(100,(_ratedPools-1)*25); // +25 per additional sport, max +100
+        var _sportCount=Object.keys(_ratedSports).length;
+        var _breadthBonus=Math.min(100,(_sportCount-1)*25);
         _scRating=Math.min(9999,_avg+_breadthBonus);
       }
       (function(){
@@ -2102,7 +2124,8 @@ function renderTrophyCase() {
         if(rBar) setTimeout(function(){ rBar.style.width=(_scRating/9999*100)+"%"; },100);
         if(rSub){
           var tier=_scRating>=800?"Elite":_scRating>=600?"All-Star":_scRating>=400?"Veteran":_scRating>=200?"Amateur":"Rookie";
-          rSub.textContent=_ratedPools>0?tier+" · "+_ratedPools+" pool"+ (_ratedPools!==1?"s":"")+" rated":"Compete to earn a rating";
+          var _sportCount2=Object.keys(_ratedSports).length;
+          rSub.textContent=_ratedPools>0?tier+" · "+_ratedPools+" pool"+(_ratedPools!==1?"s":"")+" · "+_sportCount2+" sport"+(_sportCount2!==1?"s":""):"Compete to earn a rating";
         }
       })();
 
