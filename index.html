@@ -913,6 +913,41 @@ function render(h) {
 
 // ── SCREENS ───────────────────────────────────────────────────────────────────
 function draw() {
+  // Handle pending deep-link join after auth
+  if(SC._pendingJoin && SC.currentUser){
+    var _pj = SC._pendingJoin;
+    SC._pendingJoin = null;
+    loadGroup(_pj.id, function(group, err){
+      if(err||!group){ SC.screen="profile"; draw(); return; }
+      var alreadyMember = (group.players||[]).indexOf(SC.currentUser.username)>=0;
+      SC.joinTarget = {
+        group: group,
+        prefillPw: _pj.pw||"",
+        onSuccess: function(){
+          var un = SC.currentUser.username;
+          if(!alreadyMember){
+            var np=(group.players||[]).slice(); if(np.indexOf(un)<0)np.push(un);
+            group.players=np; if(DB)DB.ref("groups/"+group.id+"/players").set(np);
+            addGroupToUser(un, group.id);
+          }
+          SC.group=group; SC.group.data=group.data||{};
+          saveLastGroup(group.id); subscribeGroup(group.id); subscribeGroupPlayers(group.id);
+          var pools=groupPools(group), statuses=SC.globalStatuses||{}, destPool=null;
+          for(var _i=0;_i<pools.length;_i++){ var _st=statuses[pools[_i].id]||"coming-soon"; if(_st==="open"||_st==="locked"){destPool=pools[_i];break;} }
+          if(!destPool&&pools.length)destPool=pools[0];
+          if(destPool&&un) window.location.href=destPool.url+"?group="+encodeURIComponent(group.id)+"&user="+encodeURIComponent(un);
+          else{SC.screen="hub";draw();}
+        }
+      };
+      // Auto-join if password matches, otherwise show pw screen
+      if(_pj.pw&&(_pj.pw===group.adminPw||_pj.pw===MASTER_PW)){
+        SC.joinTarget.onSuccess();
+      } else {
+        SC.screen="join-pw"; SC.error=""; draw();
+      }
+    });
+    return;
+  }
   var s = SC.screen;
   try{ if(s==="hub"||s==="profile") localStorage.setItem("pp_last_screen", s); }catch(e){}
   if(s==="auth")     renderAuth();
@@ -1429,7 +1464,8 @@ function renderProfile() {
       // Live pool rank from scores
       var liveRankHtml = "";
       if(activePool && u && u.username) {
-        var poolScoresG = ((data[activePool.id]||{}).scores)||{};
+        var _apKey = activePool.id; if(activePool.id==="cws"&&data["cws2026"]) _apKey="cws2026";
+        var poolScoresG = ((data[_apKey]||{}).scores)||{};
         if(Object.keys(poolScoresG).length > 0) {
           var rankedG = (g.players||[]).slice().sort(function(a,b){ return (poolScoresG[ukey(b)]||0)-(poolScoresG[ukey(a)]||0); });
           var myPoolRankG = rankedG.indexOf(u.username);
@@ -1545,7 +1581,10 @@ function renderProfile() {
         : "";
       gh += '<div style="padding:10px 14px 12px;border-top:1px solid var(--border2);display:flex;gap:8px">';
       gh += '<button class="gcard-share-btn" data-gname="'+x(g.name)+'" data-standings="'+shareStandingsData+'" style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:var(--cream);border:2px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:800;color:var(--muted);cursor:pointer;font-family:inherit;box-shadow:2px 2px 0 var(--border2)">📤 Share Standings</button>';
-      gh += '<button class="gcard-invite-btn" data-gid="'+x(g.id)+'" style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:var(--green-bg);border:2px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:800;color:var(--green);cursor:pointer;font-family:inherit;box-shadow:2px 2px 0 var(--border2)">🔗 Invite</button>';
+      // Only show Invite when no pool is live or final yet
+      var _inviteStatus = activePool ? (statuses[activePool.id]||"coming-soon") : "coming-soon";
+      var _showInvite = (_inviteStatus==="coming-soon"||_inviteStatus==="open");
+      if(_showInvite) gh += '<button class="gcard-invite-btn" data-gid="'+x(g.id)+'" style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:var(--green-bg);border:2px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:800;color:var(--green);cursor:pointer;font-family:inherit;box-shadow:2px 2px 0 var(--border2)">🔗 Invite</button>';
       gh += '</div>';
 
       gh += '</div>'; // end gcard
@@ -1668,13 +1707,12 @@ function openInviteModal() {
   var g = SC.group;
   if(!g) return;
   var sender = (SC.currentUser && SC.currentUser.username) ? SC.currentUser.username : "A colleague";
+  var deepLink = "https://scorecery.net?join="+encodeURIComponent(g.id)+"&pw="+encodeURIComponent(g.adminPw||"");
   var msg = "I hope this message finds you well.\n\n"
-    + "I am reaching out to extend a formal invitation to join my Scorecery group for the upcoming competition.\n\n"
-    + "Please find the enclosed access credentials:\n"
-    + "  Group Name: " + g.name + "\n"
-    + "  Password: " + (g.adminPw || "available upon request") + "\n\n"
-    + "To proceed, kindly register at scorecery.net and search for the above group name at your earliest convenience.\n\n"
-    + "Should you have any questions or require further assistance, please do not hesitate to reach out.\n\n"
+    + "I would like to formally invite you to join my Scorecery group \"" + g.name + "\"\n"
+    + "Password: " + (g.adminPw || "available upon request") + "\n\n"
+    + "Click the link below to join instantly:\n"
+    + deepLink + "\n\n"
     + "Best regards,\n" + sender;
 
   var preview = document.getElementById("invite-msg-preview");
@@ -2226,7 +2264,7 @@ function renderJoinPw() {
   h += '<div class="card-title">'+x(g.name)+'</div>';
   h += '<div class="card-sub">Enter the group password to join</div>';
   h += '<div class="form-group" style="margin-top:4px"><label class="form-label">Password</label>';
-  h += '<input class="form-input" id="join-pw-input" type="password" placeholder="Group password" autocomplete="off" autofocus></div>';
+  h += '<input class="form-input" id="join-pw-input" type="password" placeholder="Group password" autocomplete="off" autofocus value="'+(target.prefillPw||"")+'"></div>';
   h += '<div class="error-msg" id="join-pw-err">'+x(SC.error||"")+'</div>';
   h += '<button class="btn btn-gold" style="width:100%;padding:12px;font-size:13px" id="btn-join-pw-go">Join Group →</button>';
   h += '</div></div>';
@@ -2553,7 +2591,8 @@ function renderHub() {
     var myName = SC.currentUser ? SC.currentUser.username : null;
     // Compute per-pool ranking from picks scores stored in data
     var poolPicksData = (data[pool.id]||{}).picks || {};
-    var poolScoresData = (data[pool.id]||{}).scores || {};
+    var _pdKey = pool.id; if(pool.id==="cws"&&data["cws2026"]) _pdKey="cws2026";
+    var poolScoresData = (data[_pdKey]||{}).scores || {};
     
     // Debug: ensure we're reading pool scores correctly
     if(!poolScoresData || Object.keys(poolScoresData).length === 0) {
@@ -4104,7 +4143,10 @@ function calcStandings(g, data) {
   players.forEach(function(p){ scores[p]=0; finishes[p]={}; });
   var pools = groupPools(g);
   pools.forEach(function(pool){
-    var poolScores = (data[pool.id]||{}).scores||{};
+    // Some pools store data under a different key (e.g. cws stores under "cws2026")
+    var _poolDataKey = pool.id;
+    if(pool.id==="cws" && data["cws2026"]) _poolDataKey="cws2026";
+    var poolScores = (data[_poolDataKey]||{}).scores||{};
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
       // Use live scores written by the pool file
@@ -4284,16 +4326,86 @@ function purgeInactiveGuests() {
 (function(){
   if(DB) subscribeGlobalStatuses();
 
+  // Parse deep-link invite params
+  var _params = new URLSearchParams(window.location.search);
+  var _joinId = _params.get("join");
+  var _joinPw = _params.get("pw");
+  // Clean URL immediately so refresh doesn't re-trigger
+  if(_joinId) window.history.replaceState({}, document.title, window.location.pathname);
+
   // Evict any legacy guest session — guests no longer get auto-loaded
   if(isGuest()) {
     clearSession();
+  }
+
+  function _handleDeepJoin() {
+    if(!_joinId) return;
+    loadGroup(_joinId, function(group, err){
+      if(err || !group) { toast("Group not found","err"); return; }
+      // Check password
+      if(_joinPw && (_joinPw === group.adminPw || _joinPw === MASTER_PW)) {
+        // Password matches — join silently and navigate to pool
+        var alreadyMember = SC.currentUser && (group.players||[]).indexOf(SC.currentUser.username) >= 0;
+        function _doEnter(){
+          if(!alreadyMember && SC.currentUser) {
+            var np = (group.players||[]).slice();
+            if(np.indexOf(SC.currentUser.username)<0){ np.push(SC.currentUser.username); group.players=np; }
+            if(DB) DB.ref("groups/"+group.id+"/players").set(group.players);
+            addGroupToUser(SC.currentUser.username, group.id);
+          }
+          SC.group = group;
+          SC.group.data = group.data || {};
+          saveLastGroup(group.id);
+          subscribeGroup(group.id);
+          subscribeGroupPlayers(group.id);
+          // Navigate to the active pool immediately
+          var username = SC.currentUser ? SC.currentUser.username : "";
+          var pools = groupPools(group);
+          var statuses = SC.globalStatuses || {};
+          var destPool = null;
+          for(var _i=0;_i<pools.length;_i++){
+            var _st = statuses[pools[_i].id]||"coming-soon";
+            if(_st==="open"||_st==="locked"){ destPool=pools[_i]; break; }
+          }
+          if(!destPool && pools.length) destPool=pools[0];
+          if(destPool && username){
+            window.location.href = destPool.url+"?group="+encodeURIComponent(group.id)+"&user="+encodeURIComponent(username);
+          } else {
+            SC.screen="hub"; draw();
+          }
+        }
+        _doEnter();
+      } else {
+        // Password needed — show join-pw screen with password pre-filled
+        SC.joinTarget = { group: group, onSuccess: function(){
+          var username = SC.currentUser ? SC.currentUser.username : "";
+          var pools = groupPools(group);
+          var statuses = SC.globalStatuses || {};
+          var destPool = null;
+          for(var _i=0;_i<pools.length;_i++){
+            var _st = statuses[pools[_i].id]||"coming-soon";
+            if(_st==="open"||_st==="locked"){ destPool=pools[_i]; break; }
+          }
+          if(!destPool && pools.length) destPool=pools[0];
+          if(destPool && username){
+            window.location.href = destPool.url+"?group="+encodeURIComponent(group.id)+"&user="+encodeURIComponent(username);
+          } else {
+            SC.screen="hub"; draw();
+          }
+        }};
+        SC.screen="join-pw";
+        SC.error="";
+        draw();
+        // Pre-fill password if provided but wrong
+        if(_joinPw){ var el=document.getElementById("join-pw-input"); if(el){ el.value=_joinPw; } }
+      }
+    });
   }
 
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
 
   if(savedUser) {
-    // Returning user — load from Firebase
     SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji };
     SC.screen = "profile";
     document.getElementById("root").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:80vh"><div style="font-size:13px;color:#334155">Loading...</div></div>';
@@ -4304,20 +4416,25 @@ function purgeInactiveGuests() {
         if(u) {
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
         } else {
-          // Session references a user that no longer exists — clear and go to landing
           clearSession();
           SC.currentUser = null;
           SC.screen = "landing";
         }
-        draw();
+        if(_joinId) _handleDeepJoin(); else draw();
       });
-    } else { draw(); }
+    } else { if(_joinId) _handleDeepJoin(); else draw(); }
   } else {
-    // New visitor — no auto-created guest account. Show the splash, then the
-    // Hub as a browsable (read-only) screen. Any interaction prompts login/signup.
     SC.currentUser = null;
-    SC.screen = "home";
-    draw();
+    if(_joinId){
+      // Not logged in — show auth, then deep-join after
+      SC.screen = "home";
+      draw();
+      // Store pending join for after auth
+      SC._pendingJoin = { id: _joinId, pw: _joinPw };
+    } else {
+      SC.screen = "home";
+      draw();
+    }
   }
 })();
 </script>
