@@ -227,6 +227,15 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .ptr-indicator{display:none;text-align:center;padding:10px;font-size:11px;font-weight:800;color:var(--muted);background:var(--cream)}
 .ptr-indicator.visible{display:block}
 .live-footer{text-align:center;font-size:8px;font-weight:700;color:var(--dim);padding:10px 0 4px}
+.my-team-ribbon{background:var(--gold-bg);border-bottom:2px solid var(--border);padding:10px 14px 12px;margin-bottom:0}
+.my-team-title{font-size:9px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.my-team-total{font-size:16px;font-weight:900}
+.my-team-picks{display:flex;flex-wrap:wrap;gap:5px}
+.my-team-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:2px solid var(--border2);background:#ffffff;font-size:10px;font-weight:800;color:var(--text);box-shadow:1px 1px 0 var(--border2)}
+.my-team-chip.under{border-color:#86efac;background:#f0fdf4;color:var(--green)}
+.my-team-chip.over{border-color:#fca5a5;background:#fef2f2;color:var(--red2)}
+.my-team-chip.cut{border-color:var(--border2);background:var(--cream);color:var(--dim);text-decoration:line-through}
+.my-team-chip .chip-score{font-size:9px;font-weight:900}
 
 </style>
 </head>
@@ -747,7 +756,11 @@ function renderLeaderboard(){
     entries.push({name:p.name,picks:p.picks||[],cap:p.cap||0,uk:uk,total:entryTotal(p.picks||[])});
   }
   entries.sort(function(a,b){return a.total-b.total;});
-  var hasScores=Object.keys(ST.scores).length>0||Object.keys(liveScores).length>0;
+  var hasLive=Object.keys(liveScores).length>0;
+  var hasAdminScores=Object.keys(ST.scores).length>0;
+  var hasScores=hasLive||hasAdminScores;
+  // Always show score (E when no data yet — tournament hasn't started)
+  var showScore=ST.locked||hasScores||entries.length>0;
   var h='<div class="lb-wrap">';
   if(!entries.length){
     h+='<div style="padding:60px 20px;text-align:center;color:var(--dim);font-size:12px;font-weight:800">No picks submitted yet</div>';
@@ -755,13 +768,15 @@ function renderLeaderboard(){
     return h;
   }
   h+='<div class="lb-card">';
-  h+='<div class="lb-head"><span class="lb-title">&#127954; Leaderboard</span><span class="lb-sub">'+entries.length+' entr'+(entries.length===1?"y":"ies")+(hasScores?" \u00b7 Live":"")+" \u00b7 $50K Cap"+'</span></div>';
+  var liveLabel=hasLive?" \u00b7 Live":"";
+  h+='<div class="lb-head"><span class="lb-title">&#127954; Leaderboard</span><span class="lb-sub">'+entries.length+' entr'+(entries.length===1?"y":"ies")+liveLabel+" \u00b7 $50K Cap"+'</span></div>';
   for(var i=0;i<entries.length;i++){
     var e=entries[i];
     var rn=i+1;
     var rankCls=rn===1?"r1":rn===2?"r2":rn===3?"r3":"rn";
     var isMe=ST.user&&ukey(ST.user)===e.uk;
-    var scoreStr=hasScores?fmtScore(e.total):"--";
+    // Show E when picks exist but no scores yet; show -- only before picks close
+    var scoreStr=showScore?fmtScore(e.total):"--";
     var scoreCls=e.total<0?"under":e.total>0?"over":"even";
     h+='<div class="lb-row'+(isMe?" me":"")+'">';
     h+='<div class="lb-rank '+rankCls+'">'+rn+'</div>';
@@ -773,7 +788,7 @@ function renderLeaderboard(){
       var live=getLiveForGolfer(pname);
       var psc=live||ST.scores[pname]||{};
       var chipCls="lb-chip"+(psc.cut?" cut":psc.score!==null&&psc.score!==undefined&&Number(psc.score)<0?" scored":psc.score!==null&&psc.score!==undefined&&Number(psc.score)>0?" over":"");
-      var pscore=psc.cut?"CUT":(psc.score!==null&&psc.score!==undefined?fmtScore(Number(psc.score)):"");
+      var pscore=psc.cut?"CUT":(psc.score!==null&&psc.score!==undefined?fmtScore(Number(psc.score)):(showScore?"E":""));
       h+='<span class="'+chipCls+'">'+x(pname)+(pscore?" ("+pscore+")":"")+"</span>";
     }
     h+='</div>';
@@ -990,6 +1005,32 @@ function renderLiveInto(){
   var ago=_liveLastFetch?Math.round((Date.now()-_liveLastFetch)/1000):0;
   var agoStr=ago<60?ago+"s ago":Math.floor(ago/60)+"m ago";
 
+  // ── My Team ribbon ───────────────────────────────────────
+  var ribbonHtml='';
+  if(ST.user){
+    var myRosterPicks=(ST.picks[ukey(ST.user)]&&ST.picks[ukey(ST.user)].picks)||draftPicks;
+    if(myRosterPicks.length){
+      var myTotal=entryTotal(myRosterPicks);
+      var myTotalStr=myTotal===0?"E":myTotal>0?"+"+myTotal:""+myTotal;
+      var myTotalCls=myTotal<0?"under":myTotal>0?"over":"even";
+      var myTotalColor=myTotal<0?"var(--green)":myTotal>0?"var(--red2)":"var(--muted)";
+      ribbonHtml+='<div class="my-team-ribbon">';
+      ribbonHtml+='<div class="my-team-title"><span>&#9733; My Team</span><span class="my-team-total" style="color:'+myTotalColor+'">'+myTotalStr+'</span></div>';
+      ribbonHtml+='<div class="my-team-picks">';
+      for(var ri=0;ri<myRosterPicks.length;ri++){
+        var rname=myRosterPicks[ri];
+        var rlive=getLiveForGolfer(rname);
+        var rsc=rlive||ST.scores[rname]||{};
+        var rscore=rsc.cut?null:(rsc.score!==undefined&&rsc.score!==null?Number(rsc.score):null);
+        var rscoreStr=rsc.cut?"CUT":(rscore===null?"E":(rscore===0?"E":rscore>0?"+"+rscore:""+rscore));
+        var rscoreCls=rsc.cut?"cut":rscore!==null&&rscore<0?"under":rscore!==null&&rscore>0?"over":"";
+        var rthru=rlive?rlive.thru:"";
+        ribbonHtml+='<span class="my-team-chip '+rscoreCls+'">'+x(rname)+'<span class="chip-score">'+rscoreStr+(rthru&&rthru!=="F"?' <span style="color:var(--muted);font-weight:700">'+x(rthru)+'</span>':'')+'</span></span>';
+      }
+      ribbonHtml+='</div></div>';
+    }
+  }
+
   var h='';
   var pos=0;
   for(var li=0;li<allLive.length;li++){
@@ -1019,8 +1060,8 @@ function renderLiveInto(){
     h='<div class="live-empty">&#9968;<br>Tournament hasn’t started yet.<br><span style="font-size:9px;color:var(--dim)">Scores will appear here once play begins</span></div>';
   }
 
-  h+='<div class="live-footer">via ESPN · updated '+agoStr+' · auto-refreshes every 60s</div>';
-  el.innerHTML=h;
+  h+='<div class="live-footer">via ESPN · updated '+agoStr+'</div>';
+  el.innerHTML=ribbonHtml+h;
 }
 
 function renderLive(){
