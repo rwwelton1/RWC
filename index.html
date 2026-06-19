@@ -2051,18 +2051,20 @@ function renderProfile() {
       _allGroupsCache = groups;
       // Persist to sessionStorage so returning from pool pages is instant
       try{ sessionStorage.setItem("sc_groups_cache", JSON.stringify(groups)); }catch(e){}
-      // Write max group size stat for Circus badge
+      // Render activity feed immediately (read-only, single query per group, not blocking)
+      renderActivityFeed(groups);
+      // Defer all write-side badge/stat tracking — these are background bookkeeping
+      // and must never block the visible UI. Runs after the page has painted.
       if(SC.currentUser && DB){
         var _gu = SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-        var _maxSize = 0;
-        groups.forEach(function(g){ if(g&&g.players) _maxSize=Math.max(_maxSize,(g.players||[]).length); });
-        if(_maxSize > 0) DB.ref("users/"+_gu+"/stats/maxGroupSize").once("value",function(sn){
-          if(!sn.val()||_maxSize>sn.val()) DB.ref("users/"+_gu+"/stats/maxGroupSize").set(_maxSize);
-        });
-        // Write rich pool result stats for badge detection
-        computeAndWritePoolResults(groups, _gu);
-        // Render activity feed
-        renderActivityFeed(groups);
+        setTimeout(function(){
+          var _maxSize = 0;
+          groups.forEach(function(g){ if(g&&g.players) _maxSize=Math.max(_maxSize,(g.players||[]).length); });
+          if(_maxSize > 0) DB.ref("users/"+_gu+"/stats/maxGroupSize").once("value",function(sn){
+            if(!sn.val()||_maxSize>sn.val()) DB.ref("users/"+_gu+"/stats/maxGroupSize").set(_maxSize);
+          });
+          computeAndWritePoolResults(groups, _gu);
+        }, 1200);
       }
       var container = document.getElementById("profile-groups");
       if(!container) return;
