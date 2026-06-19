@@ -632,7 +632,7 @@ var BADGE_LIST = [
   {id:"hat_trick",   icon:"🎩", name:"Hat Trick",        rarity:"epic",      desc:"Win 3 pools in the same sport.",                                       category:"Placement"},
   {id:"crown",       icon:"👑", name:"Crown",            rarity:"legendary", desc:"Win 5 pools total.",                                                   category:"Placement"},
   {id:"trophy2",     icon:"🎖️", name:"Gold Standard",   rarity:"legendary", desc:"Win 10 pools total.",                                                  category:"Placement"},
-  {id:"oracle",      icon:"🔮", name:"The Oracle",       rarity:"oracle",    desc:"Win 3 pools with a perfect score.",                                    category:"Placement"},
+  {id:"oracle",      icon:"🔮", name:"The Oracle",       rarity:"oracle",    desc:"Win 3 pools each with 80% or more picks correct.",                                    category:"Placement"},
 
   // ── Sport Wins ───────────────────────────────────────────────────────────
   {id:"win_baseball",icon:"⚾", name:"The Commissioner", rarity:"uncommon",  desc:"Win a baseball pool.",                                                 category:"Sport"},
@@ -1888,14 +1888,16 @@ function renderProfile() {
         var _hasLockedPool = false;
         pools.forEach(function(pool){
           var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(st === "locked") _hasLockedPool = true;
+          if(st === "locked" || st === "complete") _hasLockedPool = true;
           if(st !== "locked" && st !== "complete") return;
           var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
           var _picks = (g.data&&g.data[_dk]&&g.data[_dk].picks)||{};
           Object.keys(_picks).forEach(function(uk){ _submittedPlayers[uk]=true; });
-          // Also check locked path for WC (players who locked picks)
+          // Also check locked path (WC players who explicitly locked)
           var _locked = (g.data&&g.data[_dk]&&g.data[_dk].locked)||{};
           Object.keys(_locked).forEach(function(uk){ _submittedPlayers[uk]=true; });
+          // For WC: picks[ukey] has nested {groups,wildcards} — any content = submitted
+          // Already handled above since Object.keys(picks) returns ukeys with any picks
         });
 
         standings.forEach(function(p, i){
@@ -2438,6 +2440,20 @@ function computeAndWritePoolResults(groups, ukey) {
       // Cap remaining (for salary cap pools)
       var capRemaining = isGolf ? Math.max(0, CAP_LIMIT - myCapUsed) : null;
 
+      // Count picks under par for golf oracle detection
+      var picksUnderPar = null;
+      if(isGolf && myPicks.length>0){
+        picksUnderPar = 0;
+        myPicks.forEach(function(pname){
+          var nk = pname.toLowerCase().replace(/[^a-z]/g,"");
+          var ls = (liveScores||{})[nk]||null;
+          var as = (adminScores||{})[nk.replace(/[^a-z0-9_]/g,"")] || null;
+          var sc = (ls&&!ls.cut&&ls.score!==undefined) ? Number(ls.score) :
+                   (as&&!as.cut&&as.score!==undefined) ? Number(as.score) : null;
+          if(sc!==null && sc<0) picksUnderPar++;
+        });
+      }
+
       var resultData = {
         poolId:       pool.id,
         poolName:     pool.name,
@@ -2449,25 +2465,37 @@ function computeAndWritePoolResults(groups, ukey) {
         myRank:       myRank,
         totalPlayers: ranked.length,
         myScore:      myScoreNum,
-        margin:       margin,          // points between me and 2nd (if I won)
+        margin:       margin,
         isGolf:       isGolf,
         admin:        admin,
         adminRank:    adminRank,
         capRemaining: capRemaining,
         allVAL:       allVAL,
         allCut:       allCut,
-        pickCount:    myPicks.length
+        pickCount:    myPicks.length,
+        picksUnderPar: picksUnderPar,
+        correctPct:   null
       };
 
       writePoolResultStats(ukey, pool.id, g.id, resultData);
-      // Track perfect wins — rank=1 and won every pick (golf: no cuts, margin generous)
-      var isPerfect = resultData.myRank===1 && (
-        (resultData.isGolf && !resultData.allCut && resultData.margin!==null && resultData.margin>=2) ||
-        (!resultData.isGolf && resultData.margin!==null && resultData.margin>=(resultData.totalPlayers-1))
-      );
+      // Oracle win = won the pool AND 80%+ picks correct
+      // For golf: 5+ of 6 picks under par (stored in resultData.picksUnderPar)
+      // For pick-em: correctPct stored when written from pool file (future)
+      // Current best proxy: golf win with 5+ under par picks, or pick-em win with correctPct >= 0.8
+      var _oracleGolf = resultData.isGolf && resultData.myRank===1 &&
+        resultData.picksUnderPar!==null && resultData.picksUnderPar>=5;
+      var _oraclePickem = !resultData.isGolf && resultData.myRank===1 &&
+        resultData.correctPct!==null && resultData.correctPct>=0.8;
+      var isPerfect = _oracleGolf || _oraclePickem;
       if(isPerfect){
-        DB.ref("users/"+ukey+"/stats/perfectWins").once("value",function(pwSn){
-          DB.ref("users/"+ukey+"/stats/perfectWins").set((pwSn.val()||0)+1);
+        // Write a keyed entry so we only count each pool-group once
+        var _pfKey = "pf_"+(resultData.poolId||"")+"_"+(resultData.groupId||"").replace(/[^a-z0-9_]/gi,"");
+        DB.ref("users/"+ukey+"/stats/perfectKeys/"+_pfKey).once("value",function(pfSn){
+          if(pfSn.val()) return; // already counted
+          DB.ref("users/"+ukey+"/stats/perfectKeys/"+_pfKey).set(true);
+          DB.ref("users/"+ukey+"/stats/perfectWins").once("value",function(pwSn){
+            DB.ref("users/"+ukey+"/stats/perfectWins").set((pwSn.val()||0)+1);
+          });
         });
       }
 
@@ -2749,10 +2777,15 @@ function checkAndRenderBadges(ctx) {
     });
     Object.keys(_sportWins).forEach(function(sp){ if(_sportWins[sp]>=3) unlock("hat_trick"); });
 
-    // Oracle — 3 perfect pool wins (rank=1 with margin >= totalPlayers-1, or all picks correct)
-    // Counted from poolResults perfect wins, stored in stats
+    // Oracle — 3 wins each with 80%+ picks correct
     DB.ref("users/"+_uk+"/stats/perfectWins").once("value",function(pwSn){
-      if((pwSn.val()||0)>=3) unlock("oracle");
+      var _pw = pwSn.val()||0;
+      if(_pw>=3) unlock("oracle");
+      else if(earned["oracle"]){
+        // Remove oracle if it was falsely unlocked
+        delete earned["oracle"];
+        DB.ref("users/"+_uk+"/badges/oracle").remove();
+      }
     });
 
     // ── Sport wins ────────────────────────────────────────────────────────
