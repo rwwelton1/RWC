@@ -2488,26 +2488,8 @@ function computeAndWritePoolResults(groups, ukey) {
       };
 
       writePoolResultStats(ukey, pool.id, g.id, resultData);
-      // Oracle win = won the pool AND 80%+ picks correct
-      // For golf: 5+ of 6 picks under par (stored in resultData.picksUnderPar)
-      // For pick-em: correctPct stored when written from pool file (future)
-      // Current best proxy: golf win with 5+ under par picks, or pick-em win with correctPct >= 0.8
-      var _oracleGolf = resultData.isGolf && resultData.myRank===1 &&
-        resultData.picksUnderPar!==null && resultData.picksUnderPar>=5;
-      var _oraclePickem = !resultData.isGolf && resultData.myRank===1 &&
-        resultData.correctPct!==null && resultData.correctPct>=0.8;
-      var isPerfect = _oracleGolf || _oraclePickem;
-      if(isPerfect){
-        // Write a keyed entry so we only count each pool-group once
-        var _pfKey = "pf_"+(resultData.poolId||"")+"_"+(resultData.groupId||"").replace(/[^a-z0-9_]/gi,"");
-        DB.ref("users/"+ukey+"/stats/perfectKeys/"+_pfKey).once("value",function(pfSn){
-          if(pfSn.val()) return; // already counted
-          DB.ref("users/"+ukey+"/stats/perfectKeys/"+_pfKey).set(true);
-          DB.ref("users/"+ukey+"/stats/perfectWins").once("value",function(pwSn){
-            DB.ref("users/"+ukey+"/stats/perfectWins").set((pwSn.val()||0)+1);
-          });
-        });
-      }
+      // Oracle perfect-win detection now happens entirely in checkAndRenderBadges,
+      // recomputed fresh from poolResults each time (no separate counter to drift out of sync)
 
       // Also write a round snapshot for active/live pools so Wings/Melting can detect
       if(st==="locked"||st==="open"){
@@ -2779,7 +2761,17 @@ function checkAndRenderBadges(ctx) {
     Object.keys(_sportWins).forEach(function(sp){ if(_sportWins[sp]>=3) unlock("hat_trick"); });
 
     // Oracle — 3 wins each with 80%+ picks correct
-    var _pw = _stats.perfectWins||0;
+    // Recompute fresh from poolResultsData each time (don't trust accumulated counter,
+    // which may contain stale counts from an earlier, looser definition)
+    var _pw = 0;
+    Object.values(_poolResultsData).forEach(function(r){
+      if(!r) return;
+      var _isGolfPerfect = r.isGolf && r.myRank===1 && r.picksUnderPar!==null && r.picksUnderPar!==undefined && r.picksUnderPar>=5;
+      var _isPickemPerfect = !r.isGolf && r.myRank===1 && r.correctPct!==null && r.correctPct!==undefined && r.correctPct>=0.8;
+      if(_isGolfPerfect || _isPickemPerfect) _pw++;
+    });
+    // Sync the corrected count back to stats so other reads (e.g. progress bar) are accurate
+    if(_pw !== (_stats.perfectWins||0)) DB.ref("users/"+_uk+"/stats/perfectWins").set(_pw);
     if(_pw>=3) unlock("oracle");
     else if(earned["oracle"]){
       delete earned["oracle"];
