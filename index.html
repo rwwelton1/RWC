@@ -2307,11 +2307,9 @@ function writeRoundSnapshot(ukey, poolId, groupId, rank, totalPlayers, score) {
   });
 }
 
-// Check round-based badges from snapshot history
-function checkRoundBadges(ukey, unlockFn) {
-  if(!DB||!ukey) return;
-  DB.ref("users/"+ukey+"/stats/roundSnapshots").once("value", function(sn){
-    var snaps = sn.val()||{};
+// Check round-based badges from snapshot history (sync version — data already fetched)
+function checkRoundBadgesSync(snaps, unlockFn) {
+    snaps = snaps||{};
     // Group by pool-group
     var byGroup = {};
     Object.values(snaps).forEach(function(s){
@@ -2358,7 +2356,6 @@ function checkRoundBadges(ukey, unlockFn) {
       // Crab: was rank=1 at some point, finished rank=2
       if(rounds.some(function(r){ return r.rank===1; }) && last.rank===2) unlockFn("crab");
     });
-  });
 }
 
 function writePoolResultStats(ukey, poolId, groupId, resultData) {
@@ -2717,14 +2714,20 @@ function checkAndRenderBadges(ctx) {
   var u = SC.currentUser; if(!u||!DB) return;
   var _uk = ctx.ukey;
 
-  // Load badges AND stats together
+  // Load EVERYTHING in one parallel batch — no nested/sequential reads
   Promise.all([
     DB.ref("users/"+_uk+"/badges").once("value"),
-    DB.ref("users/"+_uk+"/stats").once("value")
+    DB.ref("users/"+_uk+"/stats").once("value"),
+    DB.ref("users/"+_uk+"/trophies").once("value"),
+    DB.ref("users/"+_uk+"/stats/poolResults").once("value"),
+    DB.ref("users/"+_uk+"/stats/roundSnapshots").once("value")
   ]).then(function(snaps){
-    var sn = snaps[0]; var statsSn = snaps[1];
+    var sn = snaps[0], statsSn = snaps[1], trophiesSn = snaps[2], poolResultsSn = snaps[3], roundSn = snaps[4];
     var _stats = statsSn.val() || {};
     var existing = sn.val() || {};
+    var _trophiesData = trophiesSn.val() || {};
+    var _poolResultsData = poolResultsSn.val() || {};
+    var _roundSnapData = roundSn.val() || {};
 
     // ── Recount from FINALIZED pools only ────────────────────────────────
     var _finalWins=0, _finalPodiums=0, _finalEntered=0;
@@ -2776,15 +2779,12 @@ function checkAndRenderBadges(ctx) {
     Object.keys(_sportWins).forEach(function(sp){ if(_sportWins[sp]>=3) unlock("hat_trick"); });
 
     // Oracle — 3 wins each with 80%+ picks correct
-    DB.ref("users/"+_uk+"/stats/perfectWins").once("value",function(pwSn){
-      var _pw = pwSn.val()||0;
-      if(_pw>=3) unlock("oracle");
-      else if(earned["oracle"]){
-        // Remove oracle if it was falsely unlocked
-        delete earned["oracle"];
-        DB.ref("users/"+_uk+"/badges/oracle").remove();
-      }
-    });
+    var _pw = _stats.perfectWins||0;
+    if(_pw>=3) unlock("oracle");
+    else if(earned["oracle"]){
+      delete earned["oracle"];
+      DB.ref("users/"+_uk+"/badges/oracle").remove();
+    }
 
     // ── Sport wins ────────────────────────────────────────────────────────
     Object.keys(ctx.sportMap).forEach(function(sid){
@@ -2835,16 +2835,10 @@ function checkAndRenderBadges(ctx) {
     if(_stats.hasSeal)  unlock("seal");
     if(_stats.hasBison) unlock("bison");
 
-    // On Fire — 3 wins in a row (check trophy order by ts)
+    // On Fire — 3 wins in a row
     if(_finalWins>=3){
-      DB.ref("users/"+_uk+"/trophies").once("value",function(tsn){
-        var trophies=Object.values(tsn.val()||{}).filter(function(t){return t.finish===1&&t.ts;});
-        trophies.sort(function(a,b){return a.ts-b.ts;});
-        var consec=0;
-        trophies.forEach(function(t){ consec++; }); // every win is consecutive until a non-win breaks it
-        // Since trophies only stores wins, 3+ entries = 3 consecutive wins
-        if(trophies.length>=3) unlock("fire");
-      });
+      var _fireTrophies=Object.values(_trophiesData).filter(function(t){return t.finish===1&&t.ts;});
+      if(_fireTrophies.length>=3) unlock("fire");
     }
 
     // Raw deal — 2nd 3 times, never won
@@ -2852,40 +2846,31 @@ function checkAndRenderBadges(ctx) {
     if(_seconds2>=3&&_finalWins===0) unlock("raw_deal");
 
     // ── Pool result stats — margin, golf, troll, etc ──────────────────────
-    DB.ref("users/"+_uk+"/stats/poolResults").once("value",function(prSn){
-      var poolResults=prSn.val()||{};
-      Object.values(poolResults).forEach(function(r){
-        if(!r) return;
-        // Margin badges
-        if(r.myRank===1&&r.margin===1)                          unlock("paperclip");
-        if(r.myRank===1&&r.margin!==null&&r.margin>=8)          unlock("hammer");
-        if(r.myRank===1&&r.margin===0)                          unlock("disco");
-        if(r.myRank===2&&r.margin===1)                          unlock("tissue");
-        // Troll
-        if(r.myRank===1&&r.admin&&r.admin!==SC.currentUser.username&&r.adminRank>1) unlock("troll");
-        // Golf specific
-        if(r.myRank===1&&r.isGolf)                              unlock("cap_win");
-        if(r.myRank===1&&r.isGolf&&r.capRemaining!==null&&r.capRemaining<500) unlock("bag_man");
-        if(r.allCut&&r.isGolf&&r.pickCount>=6)                  unlock("on_beach");
-        if(r.allVAL&&r.myRank<=3&&r.isGolf)                     unlock("degenerate");
-        if(r.myRank===1&&r.isGolf&&r.totalPlayers>=3)           unlock("birdie");
-        // General
-        if(r.myRank===1&&r.totalPlayers>=5)                     unlock("octopus");
-      });
-
-      // Committed — 10+ pools with picks submitted
-      if(_careerEntered>=10) unlock("committed");
-
-      // Going Viral
-      DB.ref("users/"+_uk+"/stats/inviteAccepted").once("value",function(ivSn){
-        if((ivSn.val()||0)>=3) unlock("viral");
-      });
-
-      // Round-based badges
-      checkRoundBadges(_uk, unlock);
+    Object.values(_poolResultsData).forEach(function(r){
+      if(!r) return;
+      if(r.myRank===1&&r.margin===1)                          unlock("paperclip");
+      if(r.myRank===1&&r.margin!==null&&r.margin>=8)          unlock("hammer");
+      if(r.myRank===1&&r.margin===0)                          unlock("disco");
+      if(r.myRank===2&&r.margin===1)                          unlock("tissue");
+      if(r.myRank===1&&r.admin&&r.admin!==SC.currentUser.username&&r.adminRank>1) unlock("troll");
+      if(r.myRank===1&&r.isGolf)                              unlock("cap_win");
+      if(r.myRank===1&&r.isGolf&&r.capRemaining!==null&&r.capRemaining<500) unlock("bag_man");
+      if(r.allCut&&r.isGolf&&r.pickCount>=6)                  unlock("on_beach");
+      if(r.allVAL&&r.myRank<=3&&r.isGolf)                     unlock("degenerate");
+      if(r.myRank===1&&r.isGolf&&r.totalPlayers>=3)           unlock("birdie");
+      if(r.myRank===1&&r.totalPlayers>=5)                     unlock("octopus");
     });
 
-        // ── Render badge grid ─────────────────────────────────────────────────
+    // Committed — 10+ pools with picks submitted
+    if(_careerEntered>=10) unlock("committed");
+
+    // Going Viral
+    if((_stats.inviteAccepted||0)>=3) unlock("viral");
+
+    // Round-based badges — using already-fetched _roundSnapData
+    checkRoundBadgesSync(_roundSnapData, unlock);
+
+    // ── Render badge grid ─────────────────────────────────────────────────
     var gridEl = document.getElementById("tc-badges");
     if(!gridEl) return;
     gridEl.innerHTML = "";
