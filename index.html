@@ -1035,8 +1035,14 @@ function createGroup(name, adminPw, pools, cb) {
   };
   if(DB) {
     DB.ref("groups/"+id).set(group, function(err){
-      if(err) cb(null, "Failed to save. Check connection.");
-      else cb(group, null);
+      if(err) { cb(null, "Failed to save. Check connection."); return; }
+      // Activity event: group created
+      writeActivityEvent(id, {
+        type:"group_created", actor: group.createdBy||"Someone",
+        text:"<strong>"+x(group.createdBy||"Someone")+"</strong> created the group",
+        icon:"🪄"
+      });
+      cb(group, null);
     });
   } else {
     cb(null, "No database connection.");
@@ -1765,7 +1771,7 @@ function renderProfile() {
       return bestStatus(a) - bestStatus(b);
     });
 
-    var gh = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch;margin-bottom:14px">';
+    var gh = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 10px;align-items:stretch;margin-bottom:24px">';
     groups.forEach(function(g){
       var pools = groupPools(g);
       var data = g.data || {};
@@ -2593,24 +2599,9 @@ function buildActivityFeed(groups, callback) {
         if(ev&&ev.ts) events.push(Object.assign({}, ev, {groupName:g.name, groupId:g.id}));
       });
 
-      // Also derive events from existing data (picks submissions)
+      // Derive pool finalized events from globalResults (picks_submitted removed per request)
       var gPools = groupPools(g);
       gPools.forEach(function(pool){
-        var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
-        var picks = (g.data&&g.data[_dk]&&g.data[_dk].picks)||{};
-        Object.values(picks).forEach(function(p){
-          if(p&&p.ts&&p.name){
-            events.push({
-              type:"picks_submitted", actor:p.name,
-              text:"<strong>"+p.name+"</strong> locked in their picks",
-              icon:"🔒", ts:p.ts,
-              poolId:pool.id, poolName:pool.shortName||pool.name,
-              groupName:g.name, groupId:g.id
-            });
-          }
-        });
-
-        // Pool finalized event from globalResults
         var result = (SC.globalResults||{})[pool.id];
         var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
         if(result&&result.first&&st==="complete"){
@@ -5452,9 +5443,29 @@ function archiveTrophiesFromResults(results) {
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────
 function setStatus(poolId, status) {
+  var _prevStatus = SC.globalStatuses[poolId];
   SC.globalStatuses[poolId] = status;
   if(DB) {
     DB.ref("globalSettings/statuses/"+poolId).set(status, function(){ toast("Status updated &#10003;"); });
+    // Activity event: broadcast status change to every group using this pool
+    if(_prevStatus !== status && status !== "complete"){
+      var _pool = poolById(poolId);
+      var _stLbl = status==="open"?"opened for picks":status==="locked"?"is now live":"is coming soon";
+      var _stIcon = status==="open"?"🟢":status==="locked"?"🔴":"🔜";
+      DB.ref("groups").once("value", function(gsn){
+        var _allGroups = gsn.val()||{};
+        Object.keys(_allGroups).forEach(function(gid){
+          var _g = _allGroups[gid];
+          if(_g&&_g.pools&&_g.pools.indexOf(poolId)>=0){
+            writeActivityEvent(gid, {
+              type:"status_changed", actor:"",
+              text:"<strong>"+x((_pool&&_pool.shortName)||poolId)+"</strong> "+_stLbl,
+              icon:_stIcon, poolId:poolId
+            });
+          }
+        });
+      });
+    }
     if(status === "complete") {
       var now = Date.now();
       SC.completedAt = SC.completedAt || {};
@@ -5834,23 +5845,31 @@ function purgeInactiveGuests() {
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
 
   if(savedUser) {
-    SC.currentUser = { username: savedUser, groups: [], emoji: _cachedEmoji };
+    // Restore cached groups list from localStorage for instant render — refined below
+    var _cachedUserGroups = [];
+    try{ var _cg = localStorage.getItem("pp_user_groups_"+savedUser); if(_cg) _cachedUserGroups = JSON.parse(_cg); }catch(e){}
+    SC.currentUser = { username: savedUser, groups: _cachedUserGroups, emoji: _cachedEmoji };
     SC.screen = "profile";
-    document.getElementById("root").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:80vh"><div style="font-size:13px;color:#334155">Loading...</div></div>';
+    // Render immediately with cached data — no blocking "Loading..." splash
+    if(_joinId) _handleDeepJoin(); else draw();
     var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
     if(DB) {
       DB.ref("users/"+key).once("value", function(sn){
         var u = sn.val();
         if(u) {
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
+          try{ localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[])); }catch(e){}
+          // Re-render only if groups list actually changed from cache
+          var _changed = JSON.stringify(u.groups||[]) !== JSON.stringify(_cachedUserGroups);
+          if(_changed) draw();
         } else {
           clearSession();
           SC.currentUser = null;
           SC.screen = "landing";
+          draw();
         }
-        if(_joinId) _handleDeepJoin(); else draw();
       });
-    } else { if(_joinId) _handleDeepJoin(); else draw(); }
+    }
   } else {
     SC.currentUser = null;
     if(_joinId){
