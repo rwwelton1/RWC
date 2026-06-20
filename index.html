@@ -1517,6 +1517,7 @@ function userKey(uname){ return (uname||"").toLowerCase().replace(/\s+/g,"_").re
 function saveUserEmoji(emoji) {
   if(!SC.currentUser || !DB) return;
   SC.currentUser.emoji = emoji;
+  try{ localStorage.setItem("pp_emoji", emoji); }catch(e){}
   DB.ref("users/"+userKey(SC.currentUser.username)+"/emoji").set(emoji);
 }
 
@@ -5836,11 +5837,34 @@ function purgeInactiveGuests() {
       DB.ref("users/"+key).once("value", function(sn){
         var u = sn.val();
         if(u) {
-          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: u.emoji||"🎯" };
-          try{ localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[])); }catch(e){}
-          // Re-render only if groups list actually changed from cache
-          var _changed = JSON.stringify(u.groups||[]) !== JSON.stringify(_cachedUserGroups);
-          if(_changed) draw();
+          var _newEmoji = u.emoji||"🎯";
+          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji };
+          try{
+            localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[]));
+            localStorage.setItem("pp_emoji", _newEmoji);
+          }catch(e){}
+          // Re-render if groups OR emoji changed from cache
+          var _groupsChanged = JSON.stringify(u.groups||[]) !== JSON.stringify(_cachedUserGroups);
+          var _emojiChanged = _newEmoji !== _cachedEmoji;
+          if(_groupsChanged || _emojiChanged) draw();
+
+          // ── Avatar integrity check ──────────────────────────────────────
+          // If the current avatar emoji doesn't match an actually-unlocked badge
+          // (e.g. stale test data), reset it back to the default 🎯
+          if(_newEmoji !== "🎯"){
+            DB.ref("users/"+key+"/badges").once("value", function(bsn){
+              var _badges = bsn.val()||{};
+              var _matchingBadge = null;
+              for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
+                if(BADGE_LIST[_bi].icon===_newEmoji){ _matchingBadge=BADGE_LIST[_bi]; break; }
+              }
+              var _stillValid = _matchingBadge && _badges[_matchingBadge.id];
+              if(!_stillValid){
+                saveUserEmoji("🎯");
+                draw();
+              }
+            });
+          }
         } else {
           clearSession();
           SC.currentUser = null;
