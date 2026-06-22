@@ -1801,9 +1801,15 @@ function renderProfile() {
       var liveRankHtml = "";
       if(activePool && u && u.username) {
         var _apKey = activePool.id; if(activePool.id==="cws"&&data["cws2026"]) _apKey="cws2026";
-        var poolScoresG = ((data[_apKey]||{}).scores)||{};
+        var _apData = data[_apKey]||{};
+        // Prefer pre-computed playerTotals; fall back to flat scores map
+        var poolScoresG = _apData.playerTotals || _apData.scores || {};
+        var lowerBetterG = activePool.scoringDirection === "lower-better";
         if(Object.keys(poolScoresG).length > 0) {
-          var rankedG = (g.players||[]).slice().sort(function(a,b){ return (poolScoresG[ukey(b)]||0)-(poolScoresG[ukey(a)]||0); });
+          var rankedG = (g.players||[]).slice().sort(function(a,b){
+            var av=Number(poolScoresG[ukey(a)])||0, bv=Number(poolScoresG[ukey(b)])||0;
+            return lowerBetterG ? av-bv : bv-av;
+          });
           var myPoolRankG = rankedG.indexOf(u.username);
           var myPoolPtsG = poolScoresG[ukey(u.username)] !== undefined ? poolScoresG[ukey(u.username)] : null;
           if(myPoolRankG >= 0) {
@@ -3134,23 +3140,19 @@ function renderTrophyCase() {
           // Fallback: compute from live group scores
           var _dataKey = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dataKey="cws2026";
           var poolData2 = (g.data&&g.data[_dataKey])||null;
+          // Prefer pre-computed playerTotals (written by usopen/salary pool admin actions)
+          var playerTotals2 = poolData2 ? (poolData2.playerTotals||null) : null;
           var poolScores2 = poolData2 ? (poolData2.scores||null) : null;
-          if(poolScores2){
+          if(playerTotals2 || poolScores2){
             var lowerBetter = pool.scoringDirection === "lower-better";
-            var poolPicks2 = poolData2 ? (poolData2.picks||{}) : {};
-
-            // poolScores2 may be flat {playerKey: number} (cfb-style)
-            // or {golferKey: {score, cut}} (usopen-style)
-            // Detect: if any value is an object with a 'score' property → golfer-keyed
-            var firstVal = poolScores2[Object.keys(poolScores2)[0]];
-            var isGolferKeyed = firstVal && typeof firstVal === 'object' && ('score' in firstVal || 'cut' in firstVal);
 
             function salaryTotal(playerKey){
-              if(!isGolferKeyed){
-                // Flat map: value is the total directly
-                return Number(poolScores2[playerKey])||0;
-              }
-              // Golfer-keyed: player's picks list → sum their golfers' scores
+              // Use pre-computed totals if available
+              if(playerTotals2) return Number(playerTotals2[playerKey])||0;
+              // Flat scores map
+              if(typeof poolScores2[playerKey] === 'number') return Number(poolScores2[playerKey])||0;
+              // Golfer-keyed: compute from picks + golfer scores
+              var poolPicks2 = poolData2 ? (poolData2.picks||{}) : {};
               var picksEntry = poolPicks2[playerKey];
               var pickedGolfers = picksEntry ? (picksEntry.picks||picksEntry||[]) : [];
               if(!Array.isArray(pickedGolfers)) pickedGolfers = [];

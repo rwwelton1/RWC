@@ -223,19 +223,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .live-score.even{color:var(--blue)}
 .live-score.cut-score{color:var(--dim);font-size:11px}
 .live-empty{padding:60px 20px;text-align:center;color:var(--dim);font-size:12px;font-weight:800;line-height:2}
-/* Pull to refresh */
-.ptr-indicator{display:none;text-align:center;padding:10px;font-size:11px;font-weight:800;color:var(--muted);background:var(--cream)}
-.ptr-indicator.visible{display:block}
 .live-footer{text-align:center;font-size:8px;font-weight:700;color:var(--dim);padding:10px 0 4px}
-.my-team-ribbon{background:var(--gold-bg);border-bottom:2px solid var(--border);padding:10px 14px 12px;margin-bottom:0}
-.my-team-title{font-size:9px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
-.my-team-total{font-size:16px;font-weight:900}
-.my-team-picks{display:flex;flex-wrap:wrap;gap:5px}
-.my-team-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;border:2px solid var(--border2);background:#ffffff;font-size:10px;font-weight:800;color:var(--text);box-shadow:1px 1px 0 var(--border2)}
-.my-team-chip.under{border-color:#86efac;background:#f0fdf4;color:var(--green)}
-.my-team-chip.over{border-color:#fca5a5;background:#fef2f2;color:var(--red2)}
-.my-team-chip.cut{border-color:var(--border2);background:var(--cream);color:var(--dim);text-decoration:line-through}
-.my-team-chip .chip-score{font-size:9px;font-weight:900}
 
 </style>
 </head>
@@ -539,22 +527,6 @@ function normName(n){
   return String(n||"").toLowerCase().replace(/[^a-z]/g,"");
 }
 
-function syncPlayerScoresToGroup(){
-  if(!DB||!GROUP_ID)return;
-  var scores={};
-  // For each player who has submitted picks, compute their entry total
-  for(var uk in ST.picks){
-    var p=ST.picks[uk];
-    if(!p||!p.name)continue;
-    var total=entryTotal(p.picks||[]);
-    scores[ukey(p.name)]=total;
-  }
-  if(Object.keys(scores).length>0){
-    DB.ref("groups/"+GROUP_ID+"/data/usopen/playerscores").set(scores);
-  }
-}
-
-
 // ── Renderers ─────────────────────────────────────────
 function renderPicks(){
   var used=draftCapUsed();
@@ -595,7 +567,7 @@ function renderPicks(){
     var cls="slot-card"+(name?" filled":isActive?" active-slot":"")+(over&&name?" over":"");
     h+='<div class="'+cls+'" data-slot="'+i+'">';
     if(name){
-      if(!ST.locked)h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
+      h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
       h+='<div class="slot-label filled">Slot '+(i+1)+'</div>';
       h+='<div class="slot-name">'+x(name)+'</div>';
       h+='<div class="slot-salary">'+(g?fmt(g.salary):"")+'</div>';
@@ -756,11 +728,7 @@ function renderLeaderboard(){
     entries.push({name:p.name,picks:p.picks||[],cap:p.cap||0,uk:uk,total:entryTotal(p.picks||[])});
   }
   entries.sort(function(a,b){return a.total-b.total;});
-  var hasLive=Object.keys(liveScores).length>0;
-  var hasAdminScores=Object.keys(ST.scores).length>0;
-  var hasScores=hasLive||hasAdminScores;
-  // Always show score (E when no data yet — tournament hasn't started)
-  var showScore=ST.locked||hasScores||entries.length>0;
+  var hasScores=Object.keys(ST.scores).length>0||Object.keys(liveScores).length>0;
   var h='<div class="lb-wrap">';
   if(!entries.length){
     h+='<div style="padding:60px 20px;text-align:center;color:var(--dim);font-size:12px;font-weight:800">No picks submitted yet</div>';
@@ -768,15 +736,13 @@ function renderLeaderboard(){
     return h;
   }
   h+='<div class="lb-card">';
-  var liveLabel=hasLive?" \u00b7 Live":"";
-  h+='<div class="lb-head"><span class="lb-title">&#127954; Leaderboard</span><span class="lb-sub">'+entries.length+' entr'+(entries.length===1?"y":"ies")+liveLabel+" \u00b7 $50K Cap"+'</span></div>';
+  h+='<div class="lb-head"><span class="lb-title">&#127954; Leaderboard</span><span class="lb-sub">'+entries.length+' entr'+(entries.length===1?"y":"ies")+(hasScores?" \u00b7 Live":"")+" \u00b7 $50K Cap"+'</span></div>';
   for(var i=0;i<entries.length;i++){
     var e=entries[i];
     var rn=i+1;
     var rankCls=rn===1?"r1":rn===2?"r2":rn===3?"r3":"rn";
     var isMe=ST.user&&ukey(ST.user)===e.uk;
-    // Show E when picks exist but no scores yet; show -- only before picks close
-    var scoreStr=showScore?fmtScore(e.total):"--";
+    var scoreStr=hasScores?fmtScore(e.total):"--";
     var scoreCls=e.total<0?"under":e.total>0?"over":"even";
     h+='<div class="lb-row'+(isMe?" me":"")+'">';
     h+='<div class="lb-rank '+rankCls+'">'+rn+'</div>';
@@ -788,7 +754,7 @@ function renderLeaderboard(){
       var live=getLiveForGolfer(pname);
       var psc=live||ST.scores[pname]||{};
       var chipCls="lb-chip"+(psc.cut?" cut":psc.score!==null&&psc.score!==undefined&&Number(psc.score)<0?" scored":psc.score!==null&&psc.score!==undefined&&Number(psc.score)>0?" over":"");
-      var pscore=psc.cut?"CUT":(psc.score!==null&&psc.score!==undefined?fmtScore(Number(psc.score)):(showScore?"E":""));
+      var pscore=psc.cut?"CUT":(psc.score!==null&&psc.score!==undefined?fmtScore(Number(psc.score)):"");
       h+='<span class="'+chipCls+'">'+x(pname)+(pscore?" ("+pscore+")":"")+"</span>";
     }
     h+='</div>';
@@ -845,16 +811,6 @@ function fetchLiveScores(){
     .then(function(data){
       _liveLoading=false;_liveLastFetch=Date.now();_liveData=data;
       parseLiveScores(data);
-      // Persist live scores to Firebase so other users get them immediately
-      if(DB&&Object.keys(liveScores).length){
-        var _lsWrite={};
-        for(var _lk in liveScores){
-          var _ls=liveScores[_lk];
-          _lsWrite[_lk]={name:_ls.name,score:_ls.score,thru:_ls.thru||"",pos:_ls.pos||"",cut:_ls.cut||false};
-        }
-        DB.ref(BASE+"/livescores").set(_lsWrite);
-      }
-      syncPlayerScoresToGroup();
       if(ST.page==="live")renderLiveInto();
       if(ST.page==="leaderboard")draw();
     })
@@ -894,63 +850,36 @@ function parseLiveScores(data){
     else scoreNum=parseInt(scoreRaw)||0;
 
     var status=(c.status&&c.status.type&&c.status.type.name)||"";
-    var displayValue=(c.status&&c.status.displayValue)||"";
     var shortDetail=(c.status&&c.status.type&&c.status.type.shortDetail)||"";
-    var isCut=status==="STATUS_CUT"||displayValue.toLowerCase().indexOf("cut")>=0||
-               shortDetail.toLowerCase().indexOf("cut")>=0;
-    var isWD=status==="STATUS_WITHDRAWN"||displayValue.toLowerCase().indexOf("wd")>=0||
-               shortDetail.toLowerCase().indexOf("wd")>=0;
+    var isCut=status==="STATUS_CUT"||shortDetail.toLowerCase().indexOf("cut")>=0||
+               (c.status&&c.status.displayValue&&c.status.displayValue.toLowerCase().indexOf("cut")>=0);
+    var isWD=status==="STATUS_WITHDRAWN"||shortDetail.toLowerCase().indexOf("wd")>=0;
 
     var pos=c.order?String(c.order):"";
-    // Extract thru from multiple ESPN fields — priority order:
-    // 1. c.today holes played (ESPN app shows "Today: -1(4)" — the (4) is holesPlayed)
-    // 2. c.status.displayValue per-player (e.g. "Thru 9", "F")
-    // 3. Count non-null linescores holes
+    // Parse thru/round from linescores
     var thru="";
-    var holesPlayed=0;
-    var isFinished=false;
-
-    // Method 1: c.today — ESPN stores {score, period/holesPlayed}
-    var todayObj=c.today||null;
-    if(todayObj){
-      // today can be a string like "-1(4)" or object with holesPlayed
-      if(typeof todayObj==="object"){
-        holesPlayed=todayObj.holesPlayed||todayObj.period||0;
-      } else if(typeof todayObj==="string"){
-        var tm=todayObj.match(/\((\d+)\)/);
-        if(tm) holesPlayed=parseInt(tm[1]);
+    var linescores=c.linescores||[];
+    if(linescores.length){
+      var lastRd=linescores[linescores.length-1];
+      var lastRdHoles=(lastRd&&lastRd.linescores)?lastRd.linescores.length:0;
+      var lastRdVal=lastRd?(lastRd.value||0):0;
+      // A round is "complete" if its nested linescores has 18 holes OR the value is a real score
+      var lastRdComplete=(lastRdHoles>=18)||(lastRdHoles===0&&lastRdVal>50);
+      if(lastRdComplete){
+        // All rounds done
+        thru="F";
+      } else if(lastRdHoles>0){
+        // Mid-round
+        thru="Thru "+lastRdHoles;
+      } else {
+        // Round started but no holes yet — treat as not started for this round
+        // Show previous round completed or just R#
+        thru=(linescores.length>1)?"F":"";
       }
     }
-
-    // Method 2: linescores last round — count holes with real scores
-    if(!holesPlayed){
-      var linescores=c.linescores||[];
-      if(linescores.length){
-        var lastRd=linescores[linescores.length-1];
-        if(lastRd&&lastRd.linescores){
-          for(var lh=0;lh<lastRd.linescores.length;lh++){
-            var hv=lastRd.linescores[lh];
-            // Count holes that have a numeric value (par/birdie/bogey etc)
-            if(hv&&hv.value!==null&&hv.value!==undefined&&hv.value!==0&&hv.displayValue&&hv.displayValue!=="-"&&hv.displayValue!=="") holesPlayed++;
-          }
-        }
-      }
-    }
-
-    // Determine finish/in-progress
-    if(status==="STATUS_FINISHED"||status==="STATUS_PLAY_COMPLETE") isFinished=true;
-    var dv=displayValue.trim();
-    if(dv==="F"||dv==="Final") isFinished=true;
-
-    if(isFinished||holesPlayed>=18){
-      thru="F";
-    } else if(holesPlayed>0){
-      thru="Thru "+holesPlayed;
-    } else {
-      // Method 3: displayValue per-player (may be tee time or "Thru X")
-      if(dv&&dv!=="Scheduled"&&dv.indexOf(":")<0){
-        thru=dv.replace(/^[*T]\s*/,"").trim();
-      }
+    // Use status shortDetail as fallback (e.g. "Thru 9", "F")
+    if(!thru&&shortDetail&&shortDetail!=="Scheduled"){
+      thru=shortDetail;
     }
 
     var key=normName(fullName);
@@ -1014,32 +943,6 @@ function renderLiveInto(){
   var ago=_liveLastFetch?Math.round((Date.now()-_liveLastFetch)/1000):0;
   var agoStr=ago<60?ago+"s ago":Math.floor(ago/60)+"m ago";
 
-  // ── My Team ribbon ───────────────────────────────────────
-  var ribbonHtml='';
-  if(ST.user){
-    var myRosterPicks=(ST.picks[ukey(ST.user)]&&ST.picks[ukey(ST.user)].picks)||draftPicks;
-    if(myRosterPicks.length){
-      var myTotal=entryTotal(myRosterPicks);
-      var myTotalStr=myTotal===0?"E":myTotal>0?"+"+myTotal:""+myTotal;
-      var myTotalCls=myTotal<0?"under":myTotal>0?"over":"even";
-      var myTotalColor=myTotal<0?"var(--green)":myTotal>0?"var(--red2)":"var(--muted)";
-      ribbonHtml+='<div class="my-team-ribbon">';
-      ribbonHtml+='<div class="my-team-title"><span>&#9733; My Team</span><span class="my-team-total" style="color:'+myTotalColor+'">'+myTotalStr+'</span></div>';
-      ribbonHtml+='<div class="my-team-picks">';
-      for(var ri=0;ri<myRosterPicks.length;ri++){
-        var rname=myRosterPicks[ri];
-        var rlive=getLiveForGolfer(rname);
-        var rsc=rlive||ST.scores[rname]||{};
-        var rscore=rsc.cut?null:(rsc.score!==undefined&&rsc.score!==null?Number(rsc.score):null);
-        var rscoreStr=rsc.cut?"CUT":(rscore===null?"E":(rscore===0?"E":rscore>0?"+"+rscore:""+rscore));
-        var rscoreCls=rsc.cut?"cut":rscore!==null&&rscore<0?"under":rscore!==null&&rscore>0?"over":"";
-        var rthru=rlive?rlive.thru:"";
-        ribbonHtml+='<span class="my-team-chip '+rscoreCls+'">'+x(rname)+'<span class="chip-score">'+rscoreStr+(rthru&&rthru!=="F"?' <span style="color:var(--muted);font-weight:700">'+x(rthru)+'</span>':'')+'</span></span>';
-      }
-      ribbonHtml+='</div></div>';
-    }
-  }
-
   var h='';
   var pos=0;
   for(var li=0;li<allLive.length;li++){
@@ -1069,8 +972,8 @@ function renderLiveInto(){
     h='<div class="live-empty">&#9968;<br>Tournament hasn’t started yet.<br><span style="font-size:9px;color:var(--dim)">Scores will appear here once play begins</span></div>';
   }
 
-  h+='<div class="live-footer">via ESPN · updated '+agoStr+'</div>';
-  el.innerHTML=ribbonHtml+h;
+  h+='<div class="live-footer">via ESPN · updated '+agoStr+' · auto-refreshes every 60s</div>';
+  el.innerHTML=h;
 }
 
 function renderLive(){
@@ -1100,10 +1003,8 @@ function renderLive(){
 
 function startLiveRefresh(){
   clearInterval(_liveTimer);
-  _liveTimer=null;
-  // Only fetch if we don't have recent data (within 5 min)
-  if(!_liveData||Date.now()-_liveLastFetch>300000) fetchLiveScores();
-  else renderLiveInto();
+  fetchLiveScores();
+  _liveTimer=setInterval(function(){if(ST.page==="live")fetchLiveScores();},60000);
 }
 function stopLiveRefresh(){clearInterval(_liveTimer);_liveTimer=null;}
 
@@ -1126,7 +1027,7 @@ function draw(){
   // Topbar
   h+='<div class="topbar">';
   h+='<div class="topbar-left"><a href="index.html" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
-  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">US Open &bull; Salary Pool</div></div>';
+  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">2026 US Open &bull; Shinnecock Hills &bull; $50K Cap</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
     h+='<span class="tag">'+x(ST.user)+'</span>';
@@ -1136,7 +1037,7 @@ function draw(){
   h+='</div></div>';
 
   // Page tabs
-  var tabs=[{id:"picks",lbl:"⛳ Picks"},{id:"live",lbl:"&#128308; Live"},{id:"leaderboard",lbl:"&#128202; Pool"}];
+  var tabs=[{id:"picks",lbl:"&#9968; Picks"},{id:"live",lbl:"&#128308; Live"},{id:"leaderboard",lbl:"&#128202; Pool"}];
   if(ST.admin) tabs.push({id:"admin",lbl:"&#9881; Admin"});
   h+='<div class="page-bar">';
   for(var t=0;t<tabs.length;t++){h+='<button class="ptab'+(ST.page===tabs[t].id?" active":"")+'" data-page="'+tabs[t].id+'">'+tabs[t].lbl+'</button>';}
@@ -1270,12 +1171,29 @@ function bind(){
 }
 
 // ── Admin actions ─────────────────────────────────────
+function writePlayerTotals(){
+  if(!DB||!GROUP_ID) return;
+  var totals={};
+  PARTS.forEach(function(name){
+    var pk=ST.picks[ukey(name)]||{};
+    var picks=pk.picks||[];
+    var t=0;
+    for(var i=0;i<picks.length;i++){
+      var sc=ST.scores[picks[i]]||{};
+      if(sc.cut) continue;
+      if(sc.score!==undefined&&sc.score!==null) t+=Number(sc.score);
+    }
+    totals[ukey(name)]=t;
+  });
+  DB.ref(BASE+"/playerTotals").set(totals);
+}
+
 function saveScore(name,val){
   var sc=ST.scores[name]||{};
   if(val===""||val===null){delete sc.score;}
   else{sc.score=Number(val);}
   ST.scores[name]=sc;
-  if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc);
+  if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc,function(){ writePlayerTotals(); });
 }
 
 function toggleCut(name){
@@ -1283,7 +1201,7 @@ function toggleCut(name){
   sc.cut=!sc.cut;
   if(sc.cut) delete sc.score;
   ST.scores[name]=sc;
-  if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc,function(){draw();});
+  if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc,function(){ writePlayerTotals(); draw(); });
   else draw();
 }
 
@@ -1307,7 +1225,7 @@ function loadData(){
       draw();
     });
     DB.ref(BASE+"/picks").on("value",function(sn){
-      ST.picks=sn.val()||{};setTimeout(syncPlayerScoresToGroup,800);
+      ST.picks=sn.val()||{};
       // If user already selected, sync draft with saved picks
       if(ST.user&&!draftPicks.length){
         var saved=ST.picks[ukey(ST.user)];
@@ -1325,16 +1243,6 @@ function loadData(){
       }
       draw();
     });
-    // Load cached live scores from Firebase (written by whoever last refreshed)
-    DB.ref(BASE+"/livescores").once("value",function(sn){
-      var raw=sn.val()||{};
-      if(Object.keys(raw).length){
-        for(var _k in raw) liveScores[_k]=raw[_k];
-        _liveLastFetch=Date.now(); // mark as "have data" so leaderboard shows scores
-        if(ST.page==="live") renderLiveInto();
-        else draw();
-      }
-    });
     draw();
   }
 
@@ -1342,23 +1250,6 @@ function loadData(){
 }
 
 loadData();
-// Pull-to-refresh
-(function(){
-  var startY=0,pulling=false;
-  document.addEventListener("touchstart",function(e){
-    startY=e.touches[0].clientY;
-    pulling=window.scrollY===0;
-  },{passive:true});
-  document.addEventListener("touchend",function(e){
-    if(!pulling)return;
-    var dy=e.changedTouches[0].clientY-startY;
-    if(dy>60&&ST.page==="live"){
-      fetchLiveScores();
-    }
-    pulling=false;
-  },{passive:true});
-})();
-
 </script>
 </body>
 </html>
