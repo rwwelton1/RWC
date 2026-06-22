@@ -5507,6 +5507,37 @@ function setStatus(poolId, status) {
       SC.completedAt = SC.completedAt || {};
       SC.completedAt[poolId] = now;
       DB.ref("globalSettings/completedAt/"+poolId).set(now);
+      // Auto-rank salary pools from playerTotals if results not yet set
+      var _pool2 = poolById(poolId);
+      if(_pool2 && _pool2.hasSalary) {
+        DB.ref("globalSettings/results/"+poolId).once("value", function(rsn){
+          var existing = rsn.val()||{};
+          if(existing.first) return; // already set manually
+          // Find a group using this pool to read playerTotals
+          DB.ref("groups").once("value", function(gsn){
+            var allGroups = gsn.val()||{};
+            Object.keys(allGroups).forEach(function(gid){
+              var g = allGroups[gid];
+              if(!g||!g.pools||(g.pools||[]).indexOf(poolId)<0) return;
+              DB.ref("groups/"+gid+"/data/"+poolId+"/playerTotals").once("value",function(tsn){
+                var totals = tsn.val()||{};
+                if(!Object.keys(totals).length) return;
+                var lowerBetter = _pool2.scoringDirection === "lower-better";
+                var players = Object.keys(totals).map(function(k){ return {key:k,val:Number(totals[k])||0}; });
+                players.sort(function(a,b){ return lowerBetter ? a.val-b.val : b.val-a.val; });
+                // Reverse-map keys to player names from group
+                var keyToName={};
+                (g.players||[]).forEach(function(p){ keyToName[p.toLowerCase().replace(/[^a-z0-9_]/g,"")] = p; });
+                var res={};
+                if(players[0]) res.first  = keyToName[players[0].key]||players[0].key;
+                if(players[1]) res.second = keyToName[players[1].key]||players[1].key;
+                if(players[2]) res.third  = keyToName[players[2].key]||players[2].key;
+                if(res.first) DB.ref("globalSettings/results/"+poolId).set(res);
+              });
+            });
+          });
+        });
+      }
     }
   }
   draw();

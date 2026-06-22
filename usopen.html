@@ -419,6 +419,7 @@ var ST={
   locked:false,
   picks:{},    // ukey -> {name, picks:[], cap}
   scores:{},   // golfer name -> {score, cut}
+  poolResults:{}, // {first, second, third}
   search:"",
   filterAffordable:false,
   activeSlot:null,
@@ -567,7 +568,7 @@ function renderPicks(){
     var cls="slot-card"+(name?" filled":isActive?" active-slot":"")+(over&&name?" over":"");
     h+='<div class="'+cls+'" data-slot="'+i+'">';
     if(name){
-      h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
+      if(!ST.locked) h+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
       h+='<div class="slot-label filled">Slot '+(i+1)+'</div>';
       h+='<div class="slot-name">'+x(name)+'</div>';
       h+='<div class="slot-salary">'+(g?fmt(g.salary):"")+'</div>';
@@ -797,11 +798,30 @@ function renderAdmin(){
     h+='</div>';
   }
   h+='</div>';
+  h+='<div class="section-label">Pool Results</div>';
+  h+='<div class="adm-card">';
+  h+='<div class="adm-title">Set Final Standings</div>';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:12px">Positions auto-populate from scores when you hit "Set Final". You can override manually then save.</div>';
+  var res=ST.poolResults||{};
+  ['first','second','third'].forEach(function(place,idx){
+    var icons=['🥇','🥈','🥉'];
+    h+='<div class="adm-row" style="margin-bottom:8px">';
+    h+='<span style="font-size:14px;width:24px;flex-shrink:0">'+icons[idx]+'</span>';
+    h+='<select id="res-'+place+'" style="flex:1;padding:7px 10px;border:2px solid var(--border);border-radius:8px;font-size:11px;font-weight:800;font-family:Nunito,sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
+    h+='<option value="">— None —</option>';
+    PARTS.forEach(function(p){ h+='<option value="'+x(p)+'"'+(res[place]===p?' selected':'')+'>'+x(p)+'</option>'; });
+    h+='</select>';
+    h+='</div>';
+  });
+  h+='<div style="display:flex;gap:8px;margin-top:4px">';
+  h+='<button class="btn btn-gold" id="b-save-results" style="flex:1">Save Results</button>';
+  h+='<button class="btn btn-green" id="b-set-final" style="flex:1">&#127942; Set Final</button>';
+  h+='</div>';
+  if(res.first) h+='<div style="font-size:9px;color:var(--green);margin-top:8px;font-weight:700">&#10003; Results saved &mdash; '+x(res.first)+' won</div>';
+  h+='</div>';
   h+='</div>';
   return h;
 }
-
-// ── Live ESPN scoring ─────────────────────────────────
 function fetchLiveScores(){
   if(_liveLoading)return;
   _liveLoading=true;
@@ -1101,6 +1121,11 @@ function bind(){
     draw();
   });
 
+  el=document.getElementById("b-save-results"); if(el) el.addEventListener("click",savePoolResults);
+  el=document.getElementById("b-set-final"); if(el) el.addEventListener("click",function(){
+    if(confirm("Auto-rank players by score and set pool to Final?")) autoRankAndSetFinal();
+  });
+
   el=document.getElementById("b-submit"); if(el) el.addEventListener("click",submitPicks);
 
   el=document.getElementById("b-filter"); if(el) el.addEventListener("click",function(){
@@ -1243,10 +1268,68 @@ function loadData(){
       }
       draw();
     });
+    DB.ref("globalSettings/results/usopen").on("value",function(sn){
+      ST.poolResults=sn.val()||{};
+      draw();
+    });
     draw();
   }
 
   loadGroup();
+}
+
+function autoRankAndSetFinal(){
+  // Compute rankings from current scores
+  var entries=[];
+  PARTS.forEach(function(name){
+    var pk=ST.picks[ukey(name)]||{};
+    var picks=pk.picks||[];
+    var t=0;
+    for(var i=0;i<picks.length;i++){
+      var sc=ST.scores[picks[i]]||{};
+      if(sc.cut) continue;
+      if(sc.score!==undefined&&sc.score!==null) t+=Number(sc.score);
+    }
+    entries.push({name:name,total:t});
+  });
+  // Lower = better for golf
+  entries.sort(function(a,b){return a.total-b.total;});
+  var res={};
+  if(entries[0]) res.first=entries[0].name;
+  if(entries[1]) res.second=entries[1].name;
+  if(entries[2]) res.third=entries[2].name;
+  if(!DB){toast("Not connected");return;}
+  // Write results
+  DB.ref("globalSettings/results/usopen").set(res,function(err){
+    if(err){toast("Error saving results");return;}
+    ST.poolResults=res;
+    writePlayerTotals();
+    // Set pool status to complete
+    DB.ref("globalSettings/statuses/usopen").set("complete",function(){
+      DB.ref("globalSettings/completedAt/usopen").set(Date.now());
+      toast("&#127942; Pool set to Final &mdash; "+x(res.first)+" wins!");
+      draw();
+    });
+  });
+}
+
+function savePoolResults(){
+  var first=document.getElementById("res-first");
+  var second=document.getElementById("res-second");
+  var third=document.getElementById("res-third");
+  var res={};
+  if(first&&first.value) res.first=first.value;
+  if(second&&second.value) res.second=second.value;
+  if(third&&third.value) res.third=third.value;
+  if(!DB){toast("Not connected");return;}
+  DB.ref("globalSettings/results/usopen").set(res,function(err){
+    if(err){toast("Error saving");return;}
+    ST.poolResults=res;
+    // Also write playerTotals so trophy case ranking is accurate
+    writePlayerTotals();
+    toast("&#10003; Results saved");
+    draw();
+  });
 }
 
 loadData();
