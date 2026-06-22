@@ -3133,12 +3133,41 @@ function renderTrophyCase() {
         } else if(isFinished) {
           // Fallback: compute from live group scores
           var _dataKey = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dataKey="cws2026";
-          var poolScores2 = (g.data&&g.data[_dataKey]&&g.data[_dataKey].scores)||null;
+          var poolData2 = (g.data&&g.data[_dataKey])||null;
+          var poolScores2 = poolData2 ? (poolData2.scores||null) : null;
           if(poolScores2){
             var lowerBetter = pool.scoringDirection === "lower-better";
+            var poolPicks2 = poolData2 ? (poolData2.picks||{}) : {};
+
+            // poolScores2 may be flat {playerKey: number} (cfb-style)
+            // or {golferKey: {score, cut}} (usopen-style)
+            // Detect: if any value is an object with a 'score' property → golfer-keyed
+            var firstVal = poolScores2[Object.keys(poolScores2)[0]];
+            var isGolferKeyed = firstVal && typeof firstVal === 'object' && ('score' in firstVal || 'cut' in firstVal);
+
+            function salaryTotal(playerKey){
+              if(!isGolferKeyed){
+                // Flat map: value is the total directly
+                return Number(poolScores2[playerKey])||0;
+              }
+              // Golfer-keyed: player's picks list → sum their golfers' scores
+              var picksEntry = poolPicks2[playerKey];
+              var pickedGolfers = picksEntry ? (picksEntry.picks||picksEntry||[]) : [];
+              if(!Array.isArray(pickedGolfers)) pickedGolfers = [];
+              var total = 0;
+              pickedGolfers.forEach(function(gname){
+                var gkey = String(gname||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+                var gs = poolScores2[gkey];
+                if(!gs||gs.cut) return;
+                if(gs.score!==null&&gs.score!==undefined) total+=Number(gs.score)||0;
+              });
+              return total;
+            }
+
             var sorted2 = (g.players||[]).slice().sort(function(a,b){
               var ak=a.toLowerCase().replace(/[^a-z0-9_]/g,""), bk=b.toLowerCase().replace(/[^a-z0-9_]/g,"");
-              var diff = (Number(poolScores2[bk])||0)-(Number(poolScores2[ak])||0);
+              var av=salaryTotal(ak), bv=salaryTotal(bk);
+              var diff = bv - av;
               return lowerBetter ? -diff : diff;
             });
             var myIdx2 = sorted2.indexOf(u.username);
