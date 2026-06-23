@@ -384,7 +384,7 @@ var CONSENSUS_BOARD = ALL_PROSPECTS.slice(0, 30);  // first 30
 var BENCH_POOL      = ALL_PROSPECTS.slice(30);       // remaining 30
 
 var PARTS = [];
-var BASE = GROUP_ID ? "groups/"+GROUP_ID+"/data/nbadraft2026" : "nbadraft2026";
+var BASE = "pools/"+POOL_ID;
 var DB = null;
 try{ firebase.initializeApp(FIREBASE_CONFIG); DB=firebase.database(); }catch(e){}
 
@@ -1029,8 +1029,7 @@ function doRemove(){
 function saveBoard(){
   if(!ST.user){ toast("Please select a user first"); return; }
   if(ST.locked){ toast("Picks are locked"); return; }
-  var btn=document.getElementById("b-submit");
-  if(btn){ btn.textContent="Saving…"; btn.disabled=true; }
+  if(!DB){ toast("No database connection"); return; }
 
   var guesses=boardToGuesses(board);
   if(tiebreakers[0]) guesses.__tb1={key:tiebreakers[0].key, pick:tiebreakers[0].pick};
@@ -1038,23 +1037,15 @@ function saveBoard(){
   var uk=ukey(ST.user);
   var obj={name:ST.user, guesses:guesses, ts:Date.now()};
 
-  function onFail(msg){
-    if(btn){ btn.textContent="Save Board"; btn.disabled=false; }
-    toast(msg||"Error saving — try again");
-  }
-
-  if(!DB){ onFail("No database connection"); return; }
-
-  // Safety timeout — unstick button if Firebase hangs
-  var saveTimer=setTimeout(function(){ onFail("Save timed out — check connection"); }, 8000);
+  var btn=document.getElementById("b-submit");
+  if(btn){ btn.textContent="Saving…"; btn.disabled=true; }
 
   DB.ref(BASE+"/picks/"+uk).set(obj, function(err){
-    clearTimeout(saveTimer);
-    if(err){ onFail("Error saving"); return; }
+    if(err){ toast("Error saving &#10007;"); var b=document.getElementById("b-submit"); if(b){b.textContent="Save Board";b.disabled=false;} return; }
     ST.picks[uk]=obj;
     boardDirty=false;
-    draw();
     toast("&#10003; Board saved!");
+    draw();
   });
 }
 
@@ -1480,13 +1471,9 @@ function loadData(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){ if(sn.val()) MASTER_PW=sn.val(); });
     DB.ref(BASE+"/meta/locked").on("value",function(sn){ ST.locked=!!sn.val(); draw(); });
     DB.ref(BASE+"/picks").on("value",function(sn){
-      var fresh=sn.val()||{};
-      // Don't overwrite ST.picks while a save is in flight (button disabled)
-      var btn=document.getElementById("b-submit");
-      var saving=btn&&btn.disabled&&btn.textContent.indexOf("Saving")>=0;
-      if(!saving) ST.picks=fresh;
-      if(ST.user&&!saving) initBoard();
-      if(!saving) draw();
+      ST.picks=sn.val()||{};
+      if(ST.user) initBoard();
+      draw();
     });
     DB.ref(BASE+"/results").on("value",function(sn){ ST.results=sn.val()||{}; draw(); });
     if(URL_USER&&PARTS.indexOf(URL_USER)>=0){ ST.user=URL_USER; initBoard(); }
