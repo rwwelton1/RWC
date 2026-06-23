@@ -604,15 +604,15 @@ function renderBoard(){
   var h='';
   if(ST.locked) h+='<div class="lock-note">&#128274; Picks are locked</div>';
 
-  // Scoring legend — single compact strip
-  h+='<div style="background:var(--cream);border-bottom:1px solid var(--border2);padding:6px 14px;display:flex;align-items:center;gap:10px;overflow-x:auto;flex-wrap:nowrap">';
-  h+='<span style="font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);flex-shrink:0">Pick proximity:</span>';
+  // Scoring legend — wrapping grid
+  h+='<div style="background:var(--cream);border-bottom:1px solid var(--border2);padding:7px 14px;display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap">';
+  h+='<span style="font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);width:100%">Pick proximity scoring:</span>';
   SCORING.forEach(function(s){
     if(s.pts===0) return;
     var col=s.cls==="pts-exact"?"#b89a00":s.cls==="pts-close"?"#5dba4a":s.cls==="pts-near"?"#5590e8":"#aaaaaa";
-    h+='<span style="font-size:9px;font-weight:800;color:'+col+';white-space:nowrap;flex-shrink:0">'+s.label+' = <b>'+s.pts+'pts</b></span>';
+    h+='<span style="font-size:9px;font-weight:800;color:'+col+';white-space:nowrap">'+s.label+' = <b>'+s.pts+'pts</b></span>';
   });
-  h+='<span style="font-size:9px;font-weight:800;color:var(--dim);white-space:nowrap;flex-shrink:0">&#177;20+ = <b>0</b></span>';
+  h+='<span style="font-size:9px;font-weight:800;color:var(--dim);white-space:nowrap">&#177;20+ = <b>0pts</b></span>';
   h+='</div>';
 
   h+='<div class="board-wrap">';
@@ -689,7 +689,16 @@ function renderBoard(){
     h+='</div>';
 
     // ── Right col: Player + dual rankings ──
-    h+='<div class="slot-col slot-col-right">';
+    // Tint background when result is in based on score proximity
+    var rightBg = "#ffffff", rightBorder = "var(--border)";
+    if(sc){
+      if(sc.cls==="pts-exact"){  rightBg="#fffbe8"; rightBorder="#b89a00"; }
+      else if(sc.cls==="pts-close"){ rightBg="#edfae8"; rightBorder="#5dba4a"; }
+      else if(sc.cls==="pts-near"){  rightBg="#e8f0ff"; rightBorder="#5590e8"; }
+      else if(sc.pts===0){           rightBg="#ffe8e8"; rightBorder="#e85555"; }
+      else {                         rightBg="#f5f5f5"; rightBorder="#aaaaaa"; }
+    }
+    h+='<div class="slot-col slot-col-right" style="background:'+rightBg+';border-color:'+rightBorder+'">';
     if(p){
       var reach=isReach(pkey(p));
       h+='<div>';
@@ -1077,8 +1086,13 @@ var drag = {
   fromSlot: null,
   ghost: null,
   startY: 0,
-  lastOverSlot: null
+  lastOverSlot: null,
+  moved: false,
+  scrollRaf: null
 };
+
+var SCROLL_ZONE = 80;   // px from top/bottom edge to trigger scroll
+var SCROLL_SPEED = 10;  // px per frame
 
 function initDrag(){
   var handles = document.querySelectorAll("[data-drag-handle]");
@@ -1096,17 +1110,47 @@ function onDragStart(e){
   if(!row) return;
 
   e.preventDefault();
-  drag.active   = true;
-  drag.fromSlot = slot;
+  drag.active      = true;
+  drag.fromSlot    = slot;
   drag.lastOverSlot = slot;
-  drag.startY   = (e.touches ? e.touches[0].clientY : e.clientY);
-  drag.moved    = false;
+  drag.startY      = (e.touches ? e.touches[0].clientY : e.clientY);
+  drag.moved       = false;
 
-  // Ghost — minimal name pill, hidden until first movement
+  // Ghost — styled to match the right (player) pill
   var p = board[slot] ? prospectByKey(board[slot]) : null;
   var ghost = document.createElement("div");
-  ghost.style.cssText = "position:fixed;left:50%;transform:translateX(-50%) translateY(-50%);z-index:200;opacity:0;pointer-events:none;transition:opacity .1s;background:#111;color:#fff;font-family:'Nunito',sans-serif;font-size:13px;font-weight:900;padding:8px 18px;border-radius:30px;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.35)";
-  ghost.textContent = p ? p.name : "Pick #"+(slot+1);
+  ghost.style.cssText = [
+    "position:fixed",
+    "left:50%",
+    "transform:translateX(-50%) translateY(-50%)",
+    "z-index:200",
+    "opacity:0",
+    "pointer-events:none",
+    "transition:opacity .12s",
+    "background:#ffffff",
+    "border:2px solid #111111",
+    "border-radius:10px",
+    "box-shadow:3px 3px 0 #111111,0 8px 24px rgba(0,0,0,.22)",
+    "padding:9px 14px",
+    "min-width:160px",
+    "max-width:240px",
+    "font-family:'Nunito',sans-serif"
+  ].join(";");
+  if(p){
+    var posCls = posClass(p.pos);
+    var posColor = posCls==="pos-c"?"#b89a00":posCls==="pos-lw"?"#5dba4a":posCls==="pos-rw"?"#5590e8":posCls==="pos-d"?"#e85555":posCls==="pos-g"?"#9955e8":"#b45309";
+    var posBg   = posCls==="pos-c"?"#fffbe8":posCls==="pos-lw"?"#edfae8":posCls==="pos-rw"?"#e8f0ff":posCls==="pos-d"?"#ffe8e8":posCls==="pos-g"?"#f5e8ff":"#fff5e8";
+    ghost.innerHTML =
+      '<div style="font-size:12px;font-weight:900;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+x(p.name)+'</div>'+
+      '<div style="font-size:8px;font-weight:700;color:#777;margin-top:2px;white-space:nowrap">'+x(p.school)+'</div>'+
+      '<div style="margin-top:6px;display:flex;align-items:center;gap:4px">'+
+        '<span style="font-size:8px;font-weight:900;padding:1px 5px;border-radius:5px;border:1px solid '+posColor+';background:'+posBg+';color:'+posColor+'">'+x(p.pos)+'</span>'+
+        (p.nba?'<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#17408b;color:#fff">NBA '+p.nba+'</span>':'')+
+        (p.espn?'<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#cc0000;color:#fff">ESPN '+p.espn+'</span>':'')+
+      '</div>';
+  } else {
+    ghost.innerHTML = '<div style="font-size:12px;font-weight:900;color:#111">Pick #'+(slot+1)+'</div>';
+  }
   document.body.appendChild(ghost);
   drag.ghost = ghost;
 
@@ -1129,6 +1173,25 @@ function onDragMove(e){
     if(drag.ghost) drag.ghost.style.opacity = "1";
   }
   if(drag.ghost) drag.ghost.style.top = clientY + "px";
+
+  // Edge auto-scroll
+  cancelAnimationFrame(drag.scrollRaf);
+  var vh = window.innerHeight;
+  if(clientY < SCROLL_ZONE){
+    var speed = SCROLL_SPEED * (1 - clientY / SCROLL_ZONE);
+    drag.scrollRaf = requestAnimationFrame(function scroll(){
+      if(!drag.active) return;
+      window.scrollBy(0, -speed);
+      drag.scrollRaf = requestAnimationFrame(scroll);
+    });
+  } else if(clientY > vh - SCROLL_ZONE){
+    var speed2 = SCROLL_SPEED * ((clientY - (vh - SCROLL_ZONE)) / SCROLL_ZONE);
+    drag.scrollRaf = requestAnimationFrame(function scroll2(){
+      if(!drag.active) return;
+      window.scrollBy(0, speed2);
+      drag.scrollRaf = requestAnimationFrame(scroll2);
+    });
+  }
 
   // Find which slot we're over
   var rows = document.querySelectorAll(".board-slot[data-slot]");
@@ -1157,6 +1220,7 @@ function onDragMove(e){
 function onDragEnd(e){
   if(!drag.active) return;
   drag.active = false;
+  cancelAnimationFrame(drag.scrollRaf);
 
   document.removeEventListener("touchmove",  onDragMove);
   document.removeEventListener("touchend",   onDragEnd);
