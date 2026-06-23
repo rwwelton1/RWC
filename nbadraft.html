@@ -201,7 +201,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 </head>
 <body>
 <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-size:13px;font-weight:800">Loading&#8230;</div></div>
-<div id="sheet-overlay" class="sheet-overlay" onclick="closeSwapSheet()"></div>
+<div id="sheet-overlay" class="sheet-overlay" onclick="closeSwapSheet();closeTbSheet();closeTbPickSheet()"></div>
 
 <!-- Swap sheet -->
 <div id="swap-sheet" class="swap-sheet">
@@ -402,6 +402,10 @@ var board = [];          // active working board (not yet saved)
 var boardDirty = false;
 var boardHistory = [];   // stack of previous board states for undo (max 20)
 
+// Tiebreakers: two extra prospect guesses with pick number
+// { key: prospectKey, pick: number } or null
+var tiebreakers = [null, null];
+
 var GROUP_ID       = (new URLSearchParams(location.search)).get("group") || null;
 var URL_USER       = (new URLSearchParams(location.search)).get("user")  || null;
 var GROUP_ADMIN_PW = null;
@@ -491,7 +495,7 @@ function initBoard(){
     b.forEach(function(k){ if(k) used[k]=true; });
     var benchFill=CONSENSUS_BOARD.filter(function(p){ return !used[pkey(p)]; }).map(pkey);
     var fi=0;
-    for(var i=0;i<32;i++){
+    for(var i=0;i<30;i++){
       if(!b[i]&&fi<benchFill.length){ b[i]=benchFill[fi++]; }
     }
     board=b;
@@ -500,6 +504,12 @@ function initBoard(){
     board=CONSENSUS_BOARD.map(pkey);
   }
   boardDirty=false;
+  // Load tiebreakers from saved data
+  var saved2=savedGuesses();
+  tiebreakers=[
+    (saved2&&saved2.__tb1) ? {key:saved2.__tb1.key, pick:saved2.__tb1.pick} : null,
+    (saved2&&saved2.__tb2) ? {key:saved2.__tb2.key, pick:saved2.__tb2.pick} : null
+  ];
 }
 
 // Push current board state onto undo stack
@@ -634,7 +644,7 @@ function renderBoard(){
   h+='</div>';
 
   // Board slots
-  for(var i=0;i<32;i++){
+  for(var i=0;i<30;i++){
     var k=board[i]||null;
     var p=k?prospectByKey(k):null;
     var actual=k?ST.results[k]:null;
@@ -737,7 +747,57 @@ function renderBoard(){
 
     h+='</div>'; // board-slot
   }
-  h+='</div>';
+
+  // ── Tiebreaker slots ──
+  h+='<div style="margin-top:10px;margin-bottom:4px;font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Tiebreakers &mdash; pick a player &amp; guess their slot</div>';
+  for(var tb=0;tb<2;tb++){
+    var tbData=tiebreakers[tb];
+    var tbP=tbData?prospectByKey(tbData.key):null;
+    var tbActual=tbData?ST.results[tbData.key]:null;
+    var tbSc=(tbData&&tbActual)?scoreGuess(tbData.pick,tbActual):null;
+    var tbRightBg="#ffffff", tbRightBorder="var(--border)";
+    if(tbSc){
+      if(tbSc.cls==="pts-exact"){      tbRightBg="#fffbe8"; tbRightBorder="#b89a00"; }
+      else if(tbSc.cls==="pts-close"){ tbRightBg="#edfae8"; tbRightBorder="#5dba4a"; }
+      else if(tbSc.cls==="pts-near"){  tbRightBg="#e8f0ff"; tbRightBorder="#5590e8"; }
+      else if(tbSc.pts===0){           tbRightBg="#ffe8e8"; tbRightBorder="#e85555"; }
+      else {                           tbRightBg="#f5f5f5"; tbRightBorder="#aaaaaa"; }
+    }
+    h+='<div class="board-slot" data-tb="'+tb+'" style="cursor:'+(ST.locked?"default":"pointer")+'">';
+    // Left col — tiebreaker label
+    h+='<div class="slot-cols">';
+    h+='<div class="slot-col" style="background:#1a1a2e;border-color:#1a1a2e;box-shadow:3px 3px 0 var(--border)">';
+    h+='<div><div style="display:flex;align-items:baseline;gap:5px">';
+    h+='<span style="font-size:10px;font-weight:900;opacity:.6;color:#fff">'+(tb===0?"A":"B")+'</span>';
+    h+='<span style="font-size:12px;font-weight:900;color:#fff">Tiebreaker</span>';
+    h+='</div>';
+    h+='<div style="font-size:8px;font-weight:700;color:#fff;opacity:.6;margin-top:1px">+'+(tb===0?"15":"10")+' pts if exact</div>';
+    h+='</div>';
+    if(tbData){
+      h+='<div style="font-size:9px;font-weight:800;color:#fff;opacity:.8;margin-top:5px">Guess: #'+tbData.pick+'</div>';
+    }
+    h+='</div>';
+    // Right col — player
+    h+='<div class="slot-col" style="background:'+tbRightBg+';border-color:'+tbRightBorder+'">';
+    if(tbP){
+      h+='<div><div class="slot-col-name">'+x(tbP.name)+'</div>';
+      h+='<div class="slot-col-sub">'+x(tbP.school)+'</div></div>';
+      h+='<div class="slot-col-badges">';
+      h+='<span class="pr-pos '+posClass(tbP.pos)+'">'+x(tbP.pos)+'</span>';
+      if(tbP.nba) h+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#17408b;color:#fff">NBA '+tbP.nba+'</span>';
+      if(tbP.espn) h+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#cc0000;color:#fff">ESPN '+tbP.espn+'</span>';
+      h+='</div>';
+      if(tbSc) h+='<div style="font-size:9px;font-weight:900;margin-top:3px" class="'+tbSc.cls+'">'+(tbActual?'Actual #'+tbActual:'')+(tbSc.pts>0?' &middot; +'+tbSc.pts+' pts':' &middot; 0 pts')+'</div>';
+    } else {
+      h+='<div class="slot-col-name" style="color:var(--dim)">Tap to pick</div>';
+      h+='<div class="slot-col-badges"></div>';
+    }
+    h+='</div>';
+    h+='</div>'; // slot-cols
+    h+='</div>'; // board-slot
+  }
+
+  h+='</div>'; // board-wrap
 
   // Submit bar
   var guesses=boardToGuesses(board);
@@ -1065,6 +1125,13 @@ function attachListeners(){
     openSwapSheet(Number(this.getAttribute("data-slot")));
   });
 
+  // Tiebreaker taps
+  els=document.querySelectorAll("[data-tb]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    if(ST.locked) return;
+    openTiebreakerSheet(Number(this.getAttribute("data-tb")));
+  });
+
   // Init drag-to-reorder
   initDrag();
 }
@@ -1253,6 +1320,114 @@ function onDragEnd(e){
   drag.lastOverSlot = null;
 }
 
+// ── TIEBREAKER ─────────────────────────────────────────
+var activeTb = null;      // 0 or 1
+var tbPickNum = null;
+var tbPickingKey = null;  // prospect key selected in tb sheet
+
+function openTiebreakerSheet(idx){
+  activeTb = idx;
+  var tbData = tiebreakers[idx];
+  document.getElementById("tb-sheet-title").textContent = "Tiebreaker "+(idx===0?"A":"B");
+  var cur = document.getElementById("tb-current-row");
+  if(tbData){
+    var p=prospectByKey(tbData.key);
+    cur.innerHTML='<span class="swap-current-label">Current:</span><span class="swap-current-name">'+(p?x(p.name):"?")+'</span><button class="swap-remove-btn" id="tb-remove-btn">Remove</button>';
+  } else {
+    cur.innerHTML='<span class="swap-current-label">Pick a prospect</span>';
+  }
+  var si=document.getElementById("tb-search"); if(si) si.value="";
+  renderTbList();
+  document.getElementById("tb-sheet").classList.add("open");
+  document.getElementById("sheet-overlay").classList.add("visible");
+  // Bind remove
+  var rb=document.getElementById("tb-remove-btn");
+  if(rb) rb.addEventListener("click",function(e){ e.stopPropagation(); tiebreakers[activeTb]=null; closeTbSheet(); draw(); toast("Tiebreaker cleared"); });
+}
+
+function closeTbSheet(){
+  document.getElementById("tb-sheet").classList.remove("open");
+  document.getElementById("sheet-overlay").classList.remove("visible");
+  activeTb=null;
+}
+
+function renderTbList(){
+  var si=document.getElementById("tb-search");
+  var q=(si?si.value:"").trim().toLowerCase();
+  var el=document.getElementById("tb-list"); if(!el) return;
+  // Show all 60 prospects (they can pick anyone including bench)
+  var filtered=ALL_PROSPECTS.filter(function(p){
+    if(!q) return true;
+    return p.name.toLowerCase().indexOf(q)>=0||p.pos.toLowerCase().indexOf(q)>=0||p.school.toLowerCase().indexOf(q)>=0;
+  });
+  var html="";
+  filtered.forEach(function(p){
+    var pk=pkey(p), cr=ALL_PROSPECTS.indexOf(p)+1;
+    var isCurrent=tiebreakers[activeTb]&&tiebreakers[activeTb].key===pk;
+    html+='<div class="swap-row" data-tb-key="'+pk+'">';
+    html+='<div class="swap-rank">'+(cr<=30?cr:"")+'</div>';
+    html+='<div class="pr-pos '+posClass(p.pos)+'">'+x(p.pos)+'</div>';
+    var rankTags="";
+    if(p.nba) rankTags+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#17408b;color:#fff">NBA '+p.nba+'</span> ';
+    if(p.espn) rankTags+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#cc0000;color:#fff">ESPN '+p.espn+'</span>';
+    html+='<div class="swap-row-info"><div class="swap-row-name">'+x(p.name)+'</div><div class="swap-row-meta">'+x(p.school)+(rankTags?' &middot; '+rankTags:'')+'</div></div>';
+    html+='<div class="swap-row-action">'+(isCurrent?"&#10003; Current":"+ Select")+'</div>';
+    html+='</div>';
+  });
+  el.innerHTML=html;
+  var rows=el.querySelectorAll("[data-tb-key]");
+  for(var i=0;i<rows.length;i++) rows[i].addEventListener("click",function(){
+    tbPickingKey=this.getAttribute("data-tb-key");
+    closeTbSheet();
+    openTbPickSheet(tbPickingKey);
+  });
+}
+
+function openTbPickSheet(pk){
+  var p=prospectByKey(pk); if(!p) return;
+  var existing=tiebreakers[activeTb!==null?activeTb:0];
+  tbPickNum=(existing&&existing.key===pk)?existing.pick:null;
+  document.getElementById("tb-pick-title").textContent="Tiebreaker "+(activeTb===0?"A":"B")+" — Guess their pick";
+  document.getElementById("tb-pick-info").innerHTML='<div class="sp-name">'+x(p.name)+'</div><div class="sp-meta">'+x(p.pos)+' &middot; '+x(p.school)+'</div>';
+  updateTbPickDisplay();
+  document.getElementById("tb-pick-sheet").classList.add("open");
+  document.getElementById("sheet-overlay").classList.add("visible");
+}
+
+function closeTbPickSheet(){
+  document.getElementById("tb-pick-sheet").classList.remove("open");
+  document.getElementById("sheet-overlay").classList.remove("visible");
+  tbPickingKey=null;
+}
+
+function updateTbPickDisplay(){
+  var d=document.getElementById("tb-pick-display"), btn=document.getElementById("tb-pick-save");
+  if(tbPickNum){ d.textContent="#"+tbPickNum; d.classList.remove("unset"); btn.disabled=false; }
+  else { d.innerHTML="&#8211;"; d.classList.add("unset"); btn.disabled=true; }
+}
+
+function stepTbPick(dir){
+  var cur=tbPickNum||0;
+  if(!tbPickNum&&dir>0) cur=0;
+  if(!tbPickNum&&dir<0) cur=61;
+  tbPickNum=Math.max(1,Math.min(60,cur+dir));
+  updateTbPickDisplay();
+}
+
+function saveTbPick(){
+  if(!tbPickingKey||!tbPickNum) return;
+  var idx=activeTb!==null?activeTb:0;
+  tiebreakers[idx]={key:tbPickingKey, pick:tbPickNum};
+  closeTbPickSheet();
+  // Persist via guesses using __tb1/__tb2 keys
+  if(DB&&ST.user){
+    var tbKey="__tb"+(idx+1);
+    DB.ref(BASE+"/picks/"+ukey(ST.user)+"/guesses/"+tbKey).set({key:tbPickingKey,pick:tbPickNum});
+  }
+  draw();
+  toast("Tiebreaker saved &#10003;");
+}
+
 // ── FIREBASE LOAD ──────────────────────────────────────
 function loadData(){
   if(!DB){ draw(); return; }
@@ -1281,5 +1456,38 @@ function loadData(){
 }
 loadData();
 </script>
+<!-- Tiebreaker sheet -->
+<div id="tb-sheet" class="swap-sheet">
+  <span class="sheet-handle"></span>
+  <div class="swap-header">
+    <div class="swap-header-top">
+      <div class="swap-title" id="tb-sheet-title">Tiebreaker</div>
+      <button class="swap-close" onclick="closeTbSheet()">&#10005;</button>
+    </div>
+    <div id="tb-current-row" class="swap-current"></div>
+  </div>
+  <div class="swap-search-wrap">
+    <input class="swap-search" id="tb-search" placeholder="Search prospects&#8230;" autocomplete="off" oninput="renderTbList()">
+  </div>
+  <div class="swap-list" id="tb-list"></div>
+</div>
+<!-- Tiebreaker pick sheet -->
+<div id="tb-pick-sheet" class="swap-sheet">
+  <span class="sheet-handle"></span>
+  <div class="sheet-title" id="tb-pick-title">Guess the Pick</div>
+  <div id="tb-pick-info" class="sheet-prospect"></div>
+  <div class="pick-input-wrap">
+    <div class="pick-input-label">Guess their pick number (1–60)</div>
+    <div class="pick-number-row">
+      <div class="pick-stepper" onclick="stepTbPick(-1)">&#8722;</div>
+      <div class="pick-num-display unset" id="tb-pick-display">&#8211;</div>
+      <div class="pick-stepper" onclick="stepTbPick(1)">+</div>
+    </div>
+  </div>
+  <div class="sheet-actions">
+    <button class="sheet-btn sheet-btn-cancel" onclick="closeTbPickSheet()">Cancel</button>
+    <button class="sheet-btn sheet-btn-save" id="tb-pick-save" disabled onclick="saveTbPick()">Save</button>
+  </div>
+</div>
 </body>
 </html>
