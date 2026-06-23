@@ -399,8 +399,9 @@ var ST = {
 
 // board = array of 32 prospect keys representing the user's predicted pick order
 // board[0] = their predicted pick #1, board[1] = pick #2, etc.
-var board = [];   // active working board (not yet saved)
+var board = [];          // active working board (not yet saved)
 var boardDirty = false;
+var boardHistory = [];   // stack of previous board states for undo (max 20)
 
 var GROUP_ID       = (new URLSearchParams(location.search)).get("group") || null;
 var URL_USER       = (new URLSearchParams(location.search)).get("user")  || null;
@@ -502,8 +503,28 @@ function initBoard(){
   boardDirty=false;
 }
 
-// Keys currently on the board
-function boardKeys(){ return board.filter(Boolean); }
+// Push current board state onto undo stack
+function pushHistory(){
+  boardHistory.push(board.slice());
+  if(boardHistory.length > 20) boardHistory.shift();
+}
+
+function resetBoard(){
+  if(!confirm("Reset board to consensus order?")) return;
+  pushHistory();
+  board = CONSENSUS_BOARD.map(pkey);
+  boardDirty = true;
+  draw();
+  toast("Board reset to consensus");
+}
+
+function undoBoard(){
+  if(!boardHistory.length){ toast("Nothing to undo"); return; }
+  board = boardHistory.pop();
+  boardDirty = true;
+  draw();
+  toast("Undone");
+}{ return board.filter(Boolean); }
 
 // Keys on the bench (all 60 minus board)
 function benchKeys(){
@@ -596,16 +617,18 @@ function renderBoard(){
 
   // Toolbar
   h+='<div class="board-toolbar">';
-  h+='<div class="board-toolbar-left">';
+  h+='<div style="display:flex;gap:5px;align-items:center">';
+  h+='<button class="bench-open-btn" id="b-bench">+ Bench <span class="bench-badge">'+BENCH_POOL.length+'</span></button>';
+  if(boardHistory.length>0) h+='<button class="bench-open-btn" id="b-undo" style="gap:3px">&#8630; Undo</button>';
+  if(modCount>0||reachCount>0) h+='<button class="bench-open-btn" id="b-reset" style="color:var(--red2)">&#8635; Reset</button>';
+  h+='</div>';
+  h+='<div class="board-toolbar-left" style="text-align:right;margin-left:auto">';
   if(modCount>0||reachCount>0){
-    h+=(modCount>0?modCount+' change'+(modCount>1?'s':''):'');
+    h+=(modCount>0?'<span style="color:var(--muted)">'+modCount+' change'+(modCount>1?'s':'')+'</span>':'');
     h+=(modCount>0&&reachCount>0?' &middot; ':'');
     h+=(reachCount>0?'<span style="color:var(--purple);font-weight:800">'+reachCount+' reach'+(reachCount>1?'es':'')+'</span>':'');
-  } else {
-    h+='Consensus board &mdash; tap to edit';
   }
   h+='</div>';
-  h+='<button class="bench-open-btn" id="b-bench">&#43; Bench <span class="bench-badge">'+BENCH_POOL.length+'</span></button>';
   h+='</div>';
 
   // Board slots
@@ -627,12 +650,6 @@ function renderBoard(){
     var draftTeam=DRAFT_ORDER[i]||null;
 
     h+='<div class="'+slotCls+'" data-slot="'+i+'"'+(ST.locked?'':' style="cursor:default"')+'>';
-    // Drag handle
-    if(!ST.locked){
-      h+='<div class="drag-handle" data-drag-handle="'+i+'" title="Drag to reorder">';
-      h+='<svg width="12" height="18" viewBox="0 0 12 18" fill="none"><circle cx="4" cy="3" r="1.5" fill="#111"/><circle cx="4" cy="9" r="1.5" fill="#111"/><circle cx="4" cy="15" r="1.5" fill="#111"/><circle cx="8" cy="3" r="1.5" fill="#111"/><circle cx="8" cy="9" r="1.5" fill="#111"/><circle cx="8" cy="15" r="1.5" fill="#111"/></svg>';
-      h+='</div>';
-    }
 
     h+='<div class="slot-cols">';
 
@@ -697,6 +714,13 @@ function renderBoard(){
       h+='<div class="slot-actual">#'+actual+'</div>';
       h+='<div class="slot-actual-label">actual</div>';
       if(sc) h+='<div class="slot-pts '+sc.cls+'">'+( sc.pts>0?'+'+sc.pts+' pts':'0 pts')+'</div>';
+      h+='</div>';
+    }
+
+    // Drag handle — right side
+    if(!ST.locked){
+      h+='<div class="drag-handle" data-drag-handle="'+i+'">';
+      h+='<svg width="12" height="18" viewBox="0 0 12 18" fill="none"><circle cx="4" cy="3" r="1.5" fill="#111"/><circle cx="4" cy="9" r="1.5" fill="#111"/><circle cx="4" cy="15" r="1.5" fill="#111"/><circle cx="8" cy="3" r="1.5" fill="#111"/><circle cx="8" cy="9" r="1.5" fill="#111"/><circle cx="8" cy="15" r="1.5" fill="#111"/></svg>';
       h+='</div>';
     }
 
@@ -878,6 +902,7 @@ function renderSwapList(){
 
 function doSwap(incomingKey){
   if(swapSlot===null) return;
+  pushHistory();
   var onBoard={}; board.forEach(function(k,i){ if(k) onBoard[k]=i; });
 
   if(onBoard.hasOwnProperty(incomingKey)){
@@ -898,6 +923,7 @@ function doSwap(incomingKey){
 
 function doRemove(){
   if(swapSlot===null) return;
+  pushHistory();
   // Auto-fill with first bench prospect not already on board
   var onBoard={}; board.forEach(function(k){ if(k) onBoard[k]=true; });
   var fill=ALL_PROSPECTS.find(function(p){ return !onBoard[pkey(p)]&&pkey(p)!==board[swapSlot]; });
@@ -1012,6 +1038,8 @@ function attachListeners(){
   el=document.getElementById("b-admin");  if(el) el.addEventListener("click",function(){ if(ST.admin){ ST.admin=false; if(ST.page==="results") ST.page="picks"; draw(); } else showAdminPrompt(); });
   el=document.getElementById("b-submit"); if(el) el.addEventListener("click",saveBoard);
   el=document.getElementById("b-bench");  if(el) el.addEventListener("click", openBenchMode);
+  el=document.getElementById("b-undo");   if(el) el.addEventListener("click", undoBoard);
+  el=document.getElementById("b-reset");  if(el) el.addEventListener("click", resetBoard);
   el=document.getElementById("b-lock");   if(el) el.addEventListener("click",toggleLock);
   el=document.getElementById("b-save-results"); if(el) el.addEventListener("click",saveResults);
 
@@ -1070,11 +1098,13 @@ function onDragStart(e){
   drag.fromSlot = slot;
   drag.lastOverSlot = slot;
   drag.startY   = (e.touches ? e.touches[0].clientY : e.clientY);
+  drag.moved    = false;
 
-  // Build ghost
-  var ghost = row.cloneNode(true);
-  ghost.style.cssText = "position:fixed;left:12px;right:12px;z-index:200;opacity:.92;pointer-events:none;transition:none;transform:scale(1.02);box-shadow:0 8px 24px rgba(0,0,0,.25);border-radius:10px";
-  ghost.style.top = row.getBoundingClientRect().top + "px";
+  // Ghost — minimal name pill, hidden until first movement
+  var p = board[slot] ? prospectByKey(board[slot]) : null;
+  var ghost = document.createElement("div");
+  ghost.style.cssText = "position:fixed;left:50%;transform:translateX(-50%) translateY(-50%);z-index:200;opacity:0;pointer-events:none;transition:opacity .1s;background:#111;color:#fff;font-family:'Nunito',sans-serif;font-size:13px;font-weight:900;padding:8px 18px;border-radius:30px;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.35)";
+  ghost.textContent = p ? p.name : "Pick #"+(slot+1);
   document.body.appendChild(ghost);
   drag.ghost = ghost;
 
@@ -1090,7 +1120,13 @@ function onDragMove(e){
   if(!drag.active) return;
   e.preventDefault();
   var clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  if(drag.ghost) drag.ghost.style.top = (clientY - 40) + "px";
+
+  // Show ghost on first movement
+  if(!drag.moved && Math.abs(clientY - drag.startY) > 6){
+    drag.moved = true;
+    if(drag.ghost) drag.ghost.style.opacity = "1";
+  }
+  if(drag.ghost) drag.ghost.style.top = clientY + "px";
 
   // Find which slot we're over
   var rows = document.querySelectorAll(".board-slot[data-slot]");
@@ -1138,6 +1174,7 @@ function onDragEnd(e){
   var to   = drag.lastOverSlot;
 
   if(to !== null && to !== from && to >= 0 && to < board.length){
+    pushHistory();
     // Reorder: move item from `from` to `to`, shifting others
     var moved = board.splice(from, 1)[0];
     board.splice(to, 0, moved);
