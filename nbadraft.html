@@ -1027,21 +1027,35 @@ function doRemove(){
 
 // ── SAVE BOARD ─────────────────────────────────────────
 function saveBoard(){
-  if(!ST.user||ST.locked) return;
+  if(!ST.user){ toast("Please select a user first"); return; }
+  if(ST.locked){ toast("Picks are locked"); return; }
   var btn=document.getElementById("b-submit");
   if(btn){ btn.textContent="Saving…"; btn.disabled=true; }
+
   var guesses=boardToGuesses(board);
   if(tiebreakers[0]) guesses.__tb1={key:tiebreakers[0].key, pick:tiebreakers[0].pick};
   if(tiebreakers[1]) guesses.__tb2={key:tiebreakers[1].key, pick:tiebreakers[1].pick};
   var uk=ukey(ST.user);
   var obj={name:ST.user, guesses:guesses, ts:Date.now()};
-  if(DB){ DB.ref(BASE+"/picks/"+uk).set(obj, function(err){
-    if(err){ toast("Error saving"); if(btn){btn.textContent="Save Board";btn.disabled=false;} return; }
+
+  function onFail(msg){
+    if(btn){ btn.textContent="Save Board"; btn.disabled=false; }
+    toast(msg||"Error saving — try again");
+  }
+
+  if(!DB){ onFail("No database connection"); return; }
+
+  // Safety timeout — unstick button if Firebase hangs
+  var saveTimer=setTimeout(function(){ onFail("Save timed out — check connection"); }, 8000);
+
+  DB.ref(BASE+"/picks/"+uk).set(obj, function(err){
+    clearTimeout(saveTimer);
+    if(err){ onFail("Error saving"); return; }
     ST.picks[uk]=obj;
     boardDirty=false;
-    draw(); // redraws button as green ✓ Saved
+    draw();
     toast("&#10003; Board saved!");
-  }); } else toast("No database connection");
+  });
 }
 
 // ── ADMIN ──────────────────────────────────────────────
@@ -1444,13 +1458,10 @@ function saveTbPick(){
   var idx=activeTb!==null?activeTb:0;
   tiebreakers[idx]={key:tbPickingKey, pick:tbPickNum};
   closeTbPickSheet();
-  // Persist via guesses using __tb1/__tb2 keys
-  if(DB&&ST.user){
-    var tbKey="__tb"+(idx+1);
-    DB.ref(BASE+"/picks/"+ukey(ST.user)+"/guesses/"+tbKey).set({key:tbPickingKey,pick:tbPickNum});
-  }
+  // Tiebreakers persist when user hits Save Board — no separate write needed
+  boardDirty=true;
   draw();
-  toast("Tiebreaker saved &#10003;");
+  toast("Tiebreaker set — tap Save Board to save");
 }
 
 // ── FIREBASE LOAD ──────────────────────────────────────
@@ -1469,9 +1480,13 @@ function loadData(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){ if(sn.val()) MASTER_PW=sn.val(); });
     DB.ref(BASE+"/meta/locked").on("value",function(sn){ ST.locked=!!sn.val(); draw(); });
     DB.ref(BASE+"/picks").on("value",function(sn){
-      ST.picks=sn.val()||{};
-      if(ST.user) initBoard();
-      draw();
+      var fresh=sn.val()||{};
+      // Don't overwrite ST.picks while a save is in flight (button disabled)
+      var btn=document.getElementById("b-submit");
+      var saving=btn&&btn.disabled&&btn.textContent.indexOf("Saving")>=0;
+      if(!saving) ST.picks=fresh;
+      if(ST.user&&!saving) initBoard();
+      if(!saving) draw();
     });
     DB.ref(BASE+"/results").on("value",function(sn){ ST.results=sn.val()||{}; draw(); });
     if(URL_USER&&PARTS.indexOf(URL_USER)>=0){ ST.user=URL_USER; initBoard(); }
