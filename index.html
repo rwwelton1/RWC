@@ -599,21 +599,6 @@ var POOL_LIBRARY = [
     maxPicks:32,          capAmount:null,        entryCount:32,
     live:false,           liveSource:"manual",   recurring:true,
     tiebreaker:false,     year:2026
-  },
-  {
-    id:"nbadraft",    name:"NBA Draft Pool",           shortName:"NBA Draft",
-    openDate:"2026-06-22", lockDate:"2026-06-23",
-    icon:"&#127936;", bg:"linear-gradient(135deg,#17408b,#c9082a)",
-    url:"nbadraft.html",
-    desc:"Guess the Pick Order",
-    sport:"Basketball",   sportIcon:"🏀",
-    league:"NBA",         region:"domestic",    gender:"mens",
-    format:["draft-order"], duration:"single-day", picks:"prospect", scoring:"proximity",
-    scoringDirection:"higher-better",
-    hasCut:false,         hasSalary:false,       teamSport:false,
-    maxPicks:30,          capAmount:null,        entryCount:30,
-    live:false,           liveSource:"manual",   recurring:true,
-    tiebreaker:false,     year:2026
   }
 ];
 
@@ -1708,9 +1693,7 @@ function renderProfile() {
   (function(){
     if(!SC.currentUser||!DB) return;
     var _uk2=SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-    DB.ref("users/"+_uk2+"/badges").once("value",function(sn){
-      var _badges=sn.val()||{};
-      // Use the rarity of the currently selected emoji
+    function applyBadgeColor(_badges){
       var _curEmoji=(SC.currentUser&&SC.currentUser.emoji)||"🎯";
       var _curBadge=null;
       for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
@@ -1720,23 +1703,29 @@ function renderProfile() {
       if(!_best) return;
       var _rc=RARITY_COLOR[_best];
       if(!_rc) return;
-      // Color the avatar square border
       var _av=document.getElementById("btn-edit-emoji");
       if(_av){
         _av.style.borderColor=_rc.border;
         _av.style.boxShadow="2px 2px 0 "+_rc.border;
         if(_best==="mythic") _av.style.background="linear-gradient(135deg,#fef9c3,#fde68a)";
       }
-      // Color the name in the greeting
       var _nm=document.querySelector(".home-greeting span");
       if(_nm) _nm.style.color=_rc.border;
-      // Also color profile button border
       var _pb=document.getElementById("btn-profile");
       if(_pb){
         _pb.style.borderColor=_rc.border;
         _pb.style.boxShadow="3px 3px 0 "+_rc.border;
       }
-    });
+    }
+    // Use already-fetched badges if available, otherwise fetch once
+    if(SC._cachedBadges){
+      applyBadgeColor(SC._cachedBadges);
+    } else {
+      DB.ref("users/"+_uk2+"/badges").once("value",function(sn){
+        SC._cachedBadges=sn.val()||{};
+        applyBadgeColor(SC._cachedBadges);
+      });
+    }
   })();
   var trophyBtn = document.getElementById("btn-trophy-case");
   if(trophyBtn) trophyBtn.addEventListener("click", function(){ SC.screen="trophy"; draw(); });
@@ -2742,8 +2731,13 @@ function checkAndRenderBadges(ctx) {
   var _uk = ctx.ukey;
 
   // Load EVERYTHING in one parallel batch — no nested/sequential reads
+  // Use SC._cachedBadges if already fetched this session to avoid a redundant read
+  var badgesPromise = SC._cachedBadges
+    ? Promise.resolve({ val: function(){ return SC._cachedBadges; } })
+    : DB.ref("users/"+_uk+"/badges").once("value");
+
   Promise.all([
-    DB.ref("users/"+_uk+"/badges").once("value"),
+    badgesPromise,
     DB.ref("users/"+_uk+"/stats").once("value"),
     DB.ref("users/"+_uk+"/trophies").once("value"),
     DB.ref("users/"+_uk+"/stats/poolResults").once("value"),
@@ -2773,7 +2767,7 @@ function checkAndRenderBadges(ctx) {
     var earned = {};
     Object.keys(existing).forEach(function(k){ earned[k] = existing[k]; });
 
-    function unlock(id){ if(!earned[id]){ earned[id]={ earnedAt:Date.now() }; DB.ref("users/"+_uk+"/badges/"+id).set({ earnedAt:Date.now() }); } }
+    function unlock(id){ if(!earned[id]){ earned[id]={ earnedAt:Date.now() }; DB.ref("users/"+_uk+"/badges/"+id).set({ earnedAt:Date.now() }); SC._cachedBadges=earned; } }
 
     // ── General ──────────────────────────────────────────────────────────
     unlock("default");
@@ -5963,11 +5957,18 @@ function purgeInactiveGuests() {
     if(_joinId) _handleDeepJoin(); else draw();
     var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
     if(DB) {
-      DB.ref("users/"+key).once("value", function(sn){
+      // Fetch user record AND badges in one parallel batch
+      Promise.all([
+        DB.ref("users/"+key).once("value"),
+        DB.ref("users/"+key+"/badges").once("value")
+      ]).then(function(snaps){
+        var sn = snaps[0], bsn = snaps[1];
         var u = sn.val();
         if(u) {
           var _newEmoji = u.emoji||"🎯";
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji };
+          // Cache badges snapshot for downstream use
+          SC._cachedBadges = bsn.val()||{};
           try{
             localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[]));
             localStorage.setItem("pp_emoji", _newEmoji);
@@ -5977,22 +5978,18 @@ function purgeInactiveGuests() {
           var _emojiChanged = _newEmoji !== _cachedEmoji;
           if(_groupsChanged || _emojiChanged) draw();
 
-          // ── Avatar integrity check ──────────────────────────────────────
-          // If the current avatar emoji doesn't match an actually-unlocked badge
-          // (e.g. stale test data), reset it back to the default 🎯
+          // ── Avatar integrity check — uses already-fetched badges, no extra read ──
           if(_newEmoji !== "🎯"){
-            DB.ref("users/"+key+"/badges").once("value", function(bsn){
-              var _badges = bsn.val()||{};
-              var _matchingBadge = null;
-              for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
-                if(BADGE_LIST[_bi].icon===_newEmoji){ _matchingBadge=BADGE_LIST[_bi]; break; }
-              }
-              var _stillValid = _matchingBadge && _badges[_matchingBadge.id];
-              if(!_stillValid){
-                saveUserEmoji("🎯");
-                draw();
-              }
-            });
+            var _badges = SC._cachedBadges;
+            var _matchingBadge = null;
+            for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
+              if(BADGE_LIST[_bi].icon===_newEmoji){ _matchingBadge=BADGE_LIST[_bi]; break; }
+            }
+            var _stillValid = _matchingBadge && _badges[_matchingBadge.id];
+            if(!_stillValid){
+              saveUserEmoji("🎯");
+              draw();
+            }
           }
         } else {
           clearSession();
@@ -6000,7 +5997,7 @@ function purgeInactiveGuests() {
           SC.screen = "landing";
           draw();
         }
-      });
+      }); // end Promise.all.then
     }
   } else {
     SC.currentUser = null;
