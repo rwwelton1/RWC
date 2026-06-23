@@ -73,11 +73,15 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .picks-progress{font-size:9px;font-weight:700;color:var(--muted);text-align:center;margin-top:5px}
 
 /* Board slot — two-column pill layout */
-.board-slot{background:transparent;border:none;border-radius:0;padding:3px 0;margin-bottom:5px;display:flex;align-items:stretch;gap:6px;cursor:pointer}
+.board-slot{background:transparent;border:none;border-radius:0;padding:3px 0;margin-bottom:5px;display:flex;align-items:stretch;gap:6px;cursor:pointer;transition:opacity .15s}
+.board-slot.dragging{opacity:.35;pointer-events:none}
+.board-slot.drag-over .slot-cols{outline:2px dashed var(--blue);border-radius:10px;outline-offset:1px}
 .board-slot:active .slot-col{opacity:.8;transform:translate(2px,2px)}
 .board-slot.is-reach .slot-col-right{background:#ede9fe;border-color:var(--purple)}
 .board-slot.is-modified .slot-col-right{background:var(--blue-bg);border-color:var(--blue)}
 .board-slot.has-result .slot-col-right{border-color:var(--green)}
+.drag-handle{width:18px;flex-shrink:0;display:flex;align-items:center;justify-content:center;opacity:.3;touch-action:none;cursor:grab;padding:0 2px}
+.drag-handle:active{opacity:.7;cursor:grabbing}
 /* two column pill area */
 .slot-cols{flex:1;min-width:0;display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .slot-col{border-radius:10px;padding:9px 11px;min-width:0;min-height:72px;display:flex;flex-direction:column;justify-content:space-between;border:2px solid var(--border);box-shadow:3px 3px 0 var(--border)}
@@ -622,7 +626,13 @@ function renderBoard(){
 
     var draftTeam=DRAFT_ORDER[i]||null;
 
-    h+='<div class="'+slotCls+'" data-slot="'+i+'"'+(ST.locked?'':' style="cursor:pointer"')+'>';
+    h+='<div class="'+slotCls+'" data-slot="'+i+'"'+(ST.locked?'':' style="cursor:default"')+'>';
+    // Drag handle
+    if(!ST.locked){
+      h+='<div class="drag-handle" data-drag-handle="'+i+'" title="Drag to reorder">';
+      h+='<svg width="12" height="18" viewBox="0 0 12 18" fill="none"><circle cx="4" cy="3" r="1.5" fill="#111"/><circle cx="4" cy="9" r="1.5" fill="#111"/><circle cx="4" cy="15" r="1.5" fill="#111"/><circle cx="8" cy="3" r="1.5" fill="#111"/><circle cx="8" cy="9" r="1.5" fill="#111"/><circle cx="8" cy="15" r="1.5" fill="#111"/></svg>';
+      h+='</div>';
+    }
 
     h+='<div class="slot-cols">';
 
@@ -1008,12 +1018,16 @@ function attachListeners(){
   els=document.querySelectorAll("[data-lb]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ var uk=this.getAttribute("data-lb"); ST.expandedLb=ST.expandedLb===uk?null:uk; draw(); });
 
-  // Board slot taps
+  // Board slot taps — skip if the tap originated on the drag handle
   els=document.querySelectorAll(".board-slot[data-slot]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
     if(ST.locked) return;
+    if(e.target && e.target.closest && e.target.closest("[data-drag-handle]")) return;
     openSwapSheet(Number(this.getAttribute("data-slot")));
   });
+
+  // Init drag-to-reorder
+  initDrag();
 }
 
 // Open bench mode: open swap sheet so user can browse extended pool
@@ -1025,6 +1039,115 @@ function openBenchMode(){
   // Pre-clear search so the extended section is visible
   var si=document.getElementById("swap-search");
   if(si){ si.value="reach "; renderSwapList(); si.value=""; renderSwapList(); }
+}
+
+// ── DRAG AND DROP ──────────────────────────────────────
+var drag = {
+  active: false,
+  fromSlot: null,
+  ghost: null,
+  startY: 0,
+  lastOverSlot: null
+};
+
+function initDrag(){
+  var handles = document.querySelectorAll("[data-drag-handle]");
+  for(var i=0;i<handles.length;i++){
+    handles[i].addEventListener("touchstart", onDragStart, {passive:false});
+    handles[i].addEventListener("mousedown",  onDragStart);
+  }
+}
+
+function onDragStart(e){
+  if(ST.locked) return;
+  var handle = e.currentTarget;
+  var slot = Number(handle.getAttribute("data-drag-handle"));
+  var row = handle.parentElement;
+  if(!row) return;
+
+  e.preventDefault();
+  drag.active   = true;
+  drag.fromSlot = slot;
+  drag.lastOverSlot = slot;
+  drag.startY   = (e.touches ? e.touches[0].clientY : e.clientY);
+
+  // Build ghost
+  var ghost = row.cloneNode(true);
+  ghost.style.cssText = "position:fixed;left:12px;right:12px;z-index:200;opacity:.92;pointer-events:none;transition:none;transform:scale(1.02);box-shadow:0 8px 24px rgba(0,0,0,.25);border-radius:10px";
+  ghost.style.top = row.getBoundingClientRect().top + "px";
+  document.body.appendChild(ghost);
+  drag.ghost = ghost;
+
+  row.classList.add("dragging");
+
+  document.addEventListener("touchmove",  onDragMove, {passive:false});
+  document.addEventListener("touchend",   onDragEnd);
+  document.addEventListener("mousemove",  onDragMove);
+  document.addEventListener("mouseup",    onDragEnd);
+}
+
+function onDragMove(e){
+  if(!drag.active) return;
+  e.preventDefault();
+  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  if(drag.ghost) drag.ghost.style.top = (clientY - 40) + "px";
+
+  // Find which slot we're over
+  var rows = document.querySelectorAll(".board-slot[data-slot]");
+  var overSlot = null;
+  for(var i=0;i<rows.length;i++){
+    var r = rows[i];
+    var rect = r.getBoundingClientRect();
+    if(clientY >= rect.top && clientY <= rect.bottom){
+      overSlot = Number(r.getAttribute("data-slot"));
+      break;
+    }
+  }
+
+  // Update drag-over highlight
+  if(overSlot !== null && overSlot !== drag.lastOverSlot){
+    if(drag.lastOverSlot !== null){
+      var prev = document.querySelector(".board-slot[data-slot='"+drag.lastOverSlot+"']");
+      if(prev) prev.classList.remove("drag-over");
+    }
+    var cur = document.querySelector(".board-slot[data-slot='"+overSlot+"']");
+    if(cur) cur.classList.add("drag-over");
+    drag.lastOverSlot = overSlot;
+  }
+}
+
+function onDragEnd(e){
+  if(!drag.active) return;
+  drag.active = false;
+
+  document.removeEventListener("touchmove",  onDragMove);
+  document.removeEventListener("touchend",   onDragEnd);
+  document.removeEventListener("mousemove",  onDragMove);
+  document.removeEventListener("mouseup",    onDragEnd);
+
+  // Remove ghost
+  if(drag.ghost){ drag.ghost.remove(); drag.ghost = null; }
+
+  // Remove visual states
+  var rows = document.querySelectorAll(".board-slot");
+  for(var i=0;i<rows.length;i++){
+    rows[i].classList.remove("dragging","drag-over");
+  }
+
+  var from = drag.fromSlot;
+  var to   = drag.lastOverSlot;
+
+  if(to !== null && to !== from && to >= 0 && to < board.length){
+    // Reorder: move item from `from` to `to`, shifting others
+    var moved = board.splice(from, 1)[0];
+    board.splice(to, 0, moved);
+    boardDirty = true;
+    draw();
+    toast("Moved to pick #"+(to+1));
+  }
+
+  drag.fromSlot    = null;
+  drag.lastOverSlot = null;
 }
 
 // ── FIREBASE LOAD ──────────────────────────────────────
