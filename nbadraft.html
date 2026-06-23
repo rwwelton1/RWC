@@ -201,7 +201,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 </head>
 <body>
 <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-size:13px;font-weight:800">Loading&#8230;</div></div>
-<div id="sheet-overlay" class="sheet-overlay" onclick="closeSwapSheet();closeTbSheet();closeTbPickSheet()"></div>
+<div id="sheet-overlay" class="sheet-overlay" onclick="closeSwapSheet()"></div>
 
 <!-- Swap sheet -->
 <div id="swap-sheet" class="swap-sheet">
@@ -395,7 +395,7 @@ var ALL_PROSPECTS = [
   {name:"Bassala Bagayoko",        pos:"C", school:"Bilbao Basket",                   espn:60, yahoo:null, tank:null}
 ];
 
-var CONSENSUS_BOARD = ALL_PROSPECTS.slice(0, 30);  // first 30
+var CONSENSUS_BOARD = ALL_PROSPECTS.slice(0, 32);  // first 32 (30 + 2 tiebreakers)
 var BENCH_POOL      = ALL_PROSPECTS.slice(30);       // remaining 30
 
 var PARTS = [];
@@ -419,9 +419,6 @@ var board = [];          // active working board (not yet saved)
 var boardDirty = false;
 var boardHistory = [];   // stack of previous board states for undo (max 20)
 
-// Tiebreakers: two extra prospect guesses with pick number
-// { key: prospectKey, pick: number } or null
-var tiebreakers = [null, null];
 
 var GROUP_ID       = (new URLSearchParams(location.search)).get("group") || null;
 var URL_USER       = (new URLSearchParams(location.search)).get("user")  || null;
@@ -500,20 +497,22 @@ function savedGuesses(){
 // Initialize board from saved guesses, or default to consensus
 function initBoard(){
   var saved=savedGuesses();
-  if(saved && Object.keys(saved).filter(function(k){ return k.indexOf('__')<0; }).length>0){
-    // Rebuild board array from saved guesses (ignore __tb1/__tb2 keys)
-    var b=new Array(30).fill(null);
+  if(saved && Object.keys(saved).filter(function(k){ return !k.startsWith('__'); }).length>0){
+    var b=new Array(32).fill(null);
     Object.keys(saved).forEach(function(pk){
-      if(pk.indexOf('__')===0) return; // skip tiebreaker keys
+      if(pk.startsWith('__')) return; // skip legacy tiebreaker keys
       var slot=Number(saved[pk])-1;
-      if(slot>=0&&slot<30) b[slot]=pk;
+      if(slot>=0&&slot<32) b[slot]=pk;
     });
+    // Migrate legacy __tb1/__tb2 into slots 30/31
+    if(saved.__tb1&&saved.__tb1.key&&!b[30]) b[30]=saved.__tb1.key;
+    if(saved.__tb2&&saved.__tb2.key&&!b[31]) b[31]=saved.__tb2.key;
     // Fill any empty slots from consensus
     var used={};
     b.forEach(function(k){ if(k) used[k]=true; });
     var benchFill=CONSENSUS_BOARD.filter(function(p){ return !used[pkey(p)]; }).map(pkey);
     var fi=0;
-    for(var i=0;i<30;i++){
+    for(var i=0;i<32;i++){
       if(!b[i]&&fi<benchFill.length){ b[i]=benchFill[fi++]; }
     }
     board=b;
@@ -521,11 +520,6 @@ function initBoard(){
     board=CONSENSUS_BOARD.map(pkey);
   }
   boardDirty=false;
-  // Load tiebreakers from saved data, or pre-fill with picks 31/32 consensus
-  tiebreakers=[
-    (saved&&saved.__tb1) ? {key:saved.__tb1.key, pick:saved.__tb1.pick} : {key:pkey({name:"Sergio de Larrea"}), pick:31},
-    (saved&&saved.__tb2) ? {key:saved.__tb2.key, pick:saved.__tb2.pick} : {key:pkey({name:"Zuby Ejiofor"}),     pick:32}
-  ];
 }
 
 // Push current board state onto undo stack
@@ -662,7 +656,7 @@ function renderBoard(){
   h+='</div>';
 
   // Board slots
-  for(var i=0;i<30;i++){
+  for(var i=0;i<32;i++){
     var k=board[i]||null;
     var p=k?prospectByKey(k):null;
     var actual=k?ST.results[k]:null;
@@ -684,7 +678,9 @@ function renderBoard(){
     h+='<div class="slot-cols">';
 
     // ── Left col: pick# + Team + needs (team-colored pill) ──
-    var tc=draftTeam?teamColor(draftTeam.abbr):{bg:"#334155",text:"#ffffff"};
+    // Slots 30-31 are tiebreakers — use purple regardless of team color
+    var isTiebreaker = i >= 30;
+    var tc = isTiebreaker ? {bg:"#4c1d95",text:"#ffffff"} : (draftTeam?teamColor(draftTeam.abbr):{bg:"#334155",text:"#ffffff"});
     // Split "Toronto Maple Leafs" → city="Toronto" sub="Maple Leafs"
     var cityName=draftTeam?draftTeam.team:"TBD";
     var nickName="";
@@ -764,70 +760,6 @@ function renderBoard(){
       h+='</div>';
     }
 
-    h+='</div>'; // board-slot
-  }
-
-  // ── Tiebreaker slots (31 & 32) ──
-  for(var tb=0;tb<2;tb++){
-    var tbData=tiebreakers[tb];
-    var tbP=tbData?prospectByKey(tbData.key):null;
-    var tbActual=tbData?ST.results[tbData.key]:null;
-    var tbSc=(tbData&&tbActual)?scoreGuess(tbData.pick,tbActual):null;
-    var tbRightBg="#ffffff", tbRightBorder="var(--border)";
-    if(tbSc){
-      if(tbSc.cls==="pts-exact"){      tbRightBg="#fffbe8"; tbRightBorder="#b89a00"; }
-      else if(tbSc.cls==="pts-close"){ tbRightBg="#edfae8"; tbRightBorder="#5dba4a"; }
-      else if(tbSc.cls==="pts-near"){  tbRightBg="#e8f0ff"; tbRightBorder="#5590e8"; }
-      else if(tbSc.pts===0){           tbRightBg="#ffe8e8"; tbRightBorder="#e85555"; }
-      else {                           tbRightBg="#f5f5f5"; tbRightBorder="#aaaaaa"; }
-    }
-    h+='<div class="board-slot" data-tb="'+tb+'" style="cursor:'+(ST.locked?"default":"pointer")+'">';
-    h+='<div class="slot-cols">';
-    var draftTeam=DRAFT_ORDER[30+tb]||null;
-    var tc={bg:"#4c1d95",text:"#ffffff"};
-    var cityName=(30+tb+1)+"", nickName="Tiebreaker";
-    if(draftTeam){
-      var parts=draftTeam.team.split(" ");
-      var twoCities=["New","San","St.","Los","Las","Tampa"];
-      if(parts.length>2&&twoCities.indexOf(parts[0])>=0){ cityName=parts[0]+" "+parts[1]; nickName=parts.slice(2).join(" "); }
-      else { cityName=parts[0]; nickName=parts.slice(1).join(" "); }
-    }
-    h+='<div class="slot-col" style="background:'+tc.bg+';border-color:'+tc.bg+';box-shadow:3px 3px 0 var(--border)">';
-    h+='<div>';
-    h+='<div style="display:flex;align-items:baseline;gap:5px">';
-    h+='<span style="font-size:10px;font-weight:900;opacity:.6;color:'+tc.text+'">'+(30+tb+1)+'</span>';
-    h+='<span style="font-size:12px;font-weight:900;color:'+tc.text+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+x(cityName)+'</span>';
-    h+='</div>';
-    h+='<div style="font-size:8px;font-weight:700;color:'+tc.text+';opacity:.7;margin-top:1px;white-space:nowrap">'+x(nickName)+'</div>';
-    h+='</div>';
-    h+='<div style="display:flex;align-items:center;gap:3px;margin-top:6px;flex-wrap:wrap">';
-    h+='<span style="font-size:7px;font-weight:900;padding:1px 5px;border-radius:4px;border:1px solid rgba(255,255,255,.4);color:rgba(255,255,255,.8);white-space:nowrap">'+(tb===0?"15 pts if exact":"10 pts if exact")+'</span>';
-    h+='</div>';
-    h+='</div>';
-    // Right col — player
-    h+='<div class="slot-col slot-col-right" style="background:'+tbRightBg+';border-color:'+tbRightBorder+'">';
-    if(tbP){
-      h+='<div>';
-      h+='<div class="slot-col-name">'+x(tbP.name)+'</div>';
-      h+='<div class="slot-col-sub">'+x(tbP.school)+'</div>';
-      h+='</div>';
-      h+='<div class="slot-col-badges">';
-      h+='<span class="pr-pos '+posClass(tbP.pos)+'">'+x(tbP.pos)+'</span>';
-      if(tbP.espn) h+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#cc0000;color:#fff">ESPN '+tbP.espn+'</span>';
-      if(tbP.yahoo) h+='<span style="font-size:7px;font-weight:900;padding:1px 4px;border-radius:3px;background:#7c3aed;color:#fff">YHO '+tbP.yahoo+'</span>';
-      h+='</div>';
-      if(tbSc) h+='<div style="font-size:9px;font-weight:900;margin-top:3px" class="'+tbSc.cls+'">'+(tbActual?'Actual #'+tbActual:'')+(tbSc.pts>0?' &middot; +'+tbSc.pts+' pts':' &middot; 0 pts')+'</div>';
-    } else {
-      h+='<div class="slot-col-name" style="color:var(--dim)">Tap to pick</div>';
-      h+='<div class="slot-col-badges"></div>';
-    }
-    h+='</div>';
-    h+='</div>'; // slot-cols
-    if(!ST.locked){
-      h+='<div class="drag-handle" style="opacity:0;pointer-events:none">';
-      h+='<svg width="12" height="18" viewBox="0 0 12 18" fill="none"></svg>';
-      h+='</div>';
-    }
     h+='</div>'; // board-slot
   }
 
@@ -1046,8 +978,6 @@ function doRemove(){
 function saveBoard(){
   if(!ST.user||ST.locked) return;
   var guesses=boardToGuesses(board);
-  if(tiebreakers[0]) guesses.__tb1={key:tiebreakers[0].key, pick:tiebreakers[0].pick};
-  if(tiebreakers[1]) guesses.__tb2={key:tiebreakers[1].key, pick:tiebreakers[1].pick};
   var uk=ukey(ST.user);
   var obj={name:ST.user, guesses:guesses, ts:Date.now()};
   if(DB){ DB.ref(BASE+"/picks/"+uk).set(obj, function(err){
@@ -1163,13 +1093,6 @@ function attachListeners(){
     if(ST.locked) return;
     if(e.target && e.target.closest && e.target.closest("[data-drag-handle]")) return;
     openSwapSheet(Number(this.getAttribute("data-slot")));
-  });
-
-  // Tiebreaker taps
-  els=document.querySelectorAll("[data-tb]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    if(ST.locked) return;
-    openTiebreakerSheet(Number(this.getAttribute("data-tb")));
   });
 
   // Init drag-to-reorder
