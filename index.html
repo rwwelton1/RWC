@@ -4432,13 +4432,6 @@ function renderAdmin() {
   h += '<div id="admin-public-pool-players"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Loading players...</div></div>';
   h += '</div>';
 
-  h += '<div class="section-label">Maintenance</div>';
-  h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Guest accounts (no password) inactive for 30+ days are automatically purged. You can also run it manually.</div>';
-  h += '<button class="btn btn-ghost" id="btn-purge-guests" style="padding:8px 14px;font-size:12px;border-color:rgba(239,68,68,.3);color:#fca5a5">&#128465; Purge Inactive Guests</button>';
-  h += '<div id="purge-msg" style="font-size:11px;min-height:16px;margin-top:8px;color:#6ee7b7"></div>';
-  h += '</div>';
-
   h += '<div class="section-label">Master Password</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Change the master password used across Scorecery and picks.html. Enter current password to confirm.</div>';
@@ -4453,7 +4446,7 @@ function renderAdmin() {
 
   h += '<div class="section-label">Users</div>';
   h += '<div class="admin-panel">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All Scorecery users. Accounts without a password are guests. Delete removes permanently.</div>';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All Scorecery users. Google badge = signed in with Google. Delete removes permanently.</div>';
   h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
   h += '<input class="search-input" id="user-search" placeholder="Search users..." autocomplete="off">';
   h += '</div>';
@@ -4608,52 +4601,6 @@ function renderAdmin() {
           else if(el) el.value = "";
         });
         toast("Auto-computed — review then save","ok");
-      });
-    });
-  });
-
-  // Purge inactive guests
-  var purgeBtn = document.getElementById("btn-purge-guests");
-  if(purgeBtn) purgeBtn.addEventListener("click", function(){
-    var msgEl = document.getElementById("purge-msg");
-    msgEl.style.color="#94a3b8";
-    msgEl.textContent="Scanning...";
-    purgeBtn.disabled = true;
-    if(!DB){ msgEl.style.color="#fca5a5"; msgEl.textContent="Firebase unavailable."; purgeBtn.disabled=false; return; }
-    var cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    DB.ref("users").once("value", function(sn){
-      var all = sn.val()||{};
-      var toDelete = [];
-      Object.keys(all).forEach(function(k){
-        var u = all[k];
-        if(!u || u.password) return;
-        var lastActive = u.lastActive || u.createdAt || 0;
-        if(lastActive < cutoff) toDelete.push({ key: k, username: u.username||k });
-      });
-      if(!toDelete.length){ msgEl.style.color="#6ee7b7"; msgEl.textContent="No inactive guests found."; purgeBtn.disabled=false; return; }
-      var done = 0;
-      toDelete.forEach(function(entry){
-        DB.ref("groups").once("value", function(gsn){
-          var groups = gsn.val()||{};
-          var updates = {};
-          Object.values(groups).forEach(function(g){
-            if(!g||!g.players) return;
-            var filtered = g.players.filter(function(p){ return p!==entry.username; });
-            if(filtered.length !== g.players.length) updates["groups/"+g.id+"/players"] = filtered;
-          });
-          var finish = function(){
-            DB.ref("users/"+entry.key).remove(function(){
-              done++;
-              if(done===toDelete.length){
-                msgEl.style.color="#6ee7b7";
-                msgEl.textContent="Deleted "+toDelete.length+" inactive guest"+(toDelete.length!==1?"s":"")+" ✓";
-                purgeBtn.disabled=false;
-                loadAdminUsers((document.getElementById("user-search")||{}).value||"");
-              }
-            });
-          };
-          if(Object.keys(updates).length) DB.ref().update(updates, finish); else finish();
-        });
       });
     });
   });
@@ -5042,10 +4989,8 @@ function loadAdminUsers(q) {
         });
       });
       if(q) users = users.filter(function(u){ return (u.username||u._key||"").toLowerCase().indexOf(q.toLowerCase())>=0; });
-    // Sort: guests (no password) first, then alphabetical
+    // Sort alphabetical
     users.sort(function(a,b){
-      var ag = !a.password, bg = !b.password;
-      if(ag && !bg) return -1; if(!ag && bg) return 1;
       return (a.username||a._key||"").localeCompare(b.username||b._key||"");
     });
     if(!users.length){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">No users found.</div>'; return; }
@@ -5053,22 +4998,24 @@ function loadAdminUsers(q) {
     h+='<thead><tr>';
     h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">User</th>';
     h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>';
-    h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Password</th>';
     h+='<th></th>';
     h+='</tr></thead><tbody>';
     users.forEach(function(u){
       var em = u.emoji||"🍺";
-      var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
-      // Use username if set, otherwise fall back to the Firebase key (which IS the username for guests)
       var displayName = u.username || u._key;
       var isMissing = !u.username;
-      var isGuestAcct = !u.password || u._orphan;
+      // Google users (googleUid present) and password users are registered accounts
+      // Only flag as guest if no password AND no googleUid AND not an orphan with groups
+      var isGuestAcct = !u.password && !u.googleUid && !u._orphan;
       var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
+      var authBadge = u.googleUid
+        ? '<span style="font-size:8px;font-weight:700;color:#4285F4;background:rgba(66,133,244,.1);border:1px solid rgba(66,133,244,.3);border-radius:4px;padding:1px 5px">Google</span>'
+        : '';
       var safeKey = x(u._key);
       h+='<tr style="border-top:1px solid #0f1923">';
       h+='<td style="padding:7px 6px">';
       h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
-      h+='<span style="color:'+(isMissing?'#fbbf24':'#f1f5f9')+';font-weight:600">'+em+' '+x(displayName)+'</span>'+(isGuestAcct?'<span style="font-size:8px;font-weight:700;color:#475569;background:#0d1117;border:1px solid #1e2a3a;border-radius:4px;padding:1px 5px">GUEST</span>':'');
+      h+='<span style="color:'+(isMissing?'#fbbf24':'#f1f5f9')+';font-weight:600">'+em+' '+x(displayName)+'</span>'+authBadge;
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:transparent;color:#64748b;cursor:pointer;font-family:inherit">Rename</button>';
       h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:transparent;color:#6ee7b7;cursor:pointer;font-family:inherit">Merge</button>';
       if(isGuestAcct) h+='<button data-setpw-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit">Set PW</button>';
@@ -5081,12 +5028,11 @@ function loadAdminUsers(q) {
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New username" maxlength="30" id="rename-input-'+safeKey+'" value="'+x(displayName)+'"><button data-confirm-rename="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.15);color:#a5b4fc;cursor:pointer;font-family:inherit;white-space:nowrap">Save</button></div>';
       h+='</div>';
       h+='<div id="merge-area-'+safeKey+'" style="display:none;margin-top:5px">';
-      h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Merge this account into a registered user. Guest groups &amp; picks transfer over, guest account is deleted.</div>';
-      h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="Registered username to merge into" maxlength="30" id="merge-input-'+safeKey+'"><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
+      h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Merge this account into another user. Groups &amp; picks transfer over, this account is deleted.</div>';
+      h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="Username to merge into" maxlength="30" id="merge-input-'+safeKey+'"><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
       h+='</div>';
       h+='</td>';
-      h+='<td style="padding:7px 6px;color:#475569">'+grpCount+' group'+(grpCount!==1?"s":"")+'</td>';
-      h+='<td style="padding:7px 6px;color:#334155;font-family:monospace;font-size:10px">'+x(u.password||"")+'</td>';
+      h+='<td style="padding:7px 6px;color:#475569">'+grpCount+(grpCount===1?' group':' groups')+'</td>';
       h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-user="'+x(u.username||u._key)+'">Delete</button></td>';
       h+='</tr>';
     });
