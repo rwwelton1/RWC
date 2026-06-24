@@ -275,8 +275,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var PUBLIC_VIEW=(function(){ return /[?&]public=1/.test(location.search); })();
+var SEASON_YEAR=(function(){var m=location.search.match(/[?&]year=(\d{4})/);return m?m[1]:null;})();
 var GROUP_ADMIN_PW=null;
-var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cfbpool":"cfbpool";
+var BASE=(function(){
+  var root=GROUP_ID?"groups/"+GROUP_ID+"/data/cfbpool":"cfbpool";
+  return SEASON_YEAR?root+"/seasons/"+SEASON_YEAR:root;
+})();
 var MASTER_PW="Sloop"; // default, overwritten by Firebase on load
 
 var PARTS=["Player1","Player2","Player3","Player4"];
@@ -322,7 +326,7 @@ try{
 function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&lt;");t=t.replace(/>/g,"&gt;");t=t.replace(/'/g,"&#39;");return t;}
 var _tt;
 function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2500);}
-function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
+function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[.'&]/g,"");}
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
 
 // ── Helpers ──────────────────────────────────────────────
@@ -385,30 +389,29 @@ function seasonScore(user){
   return total;
 }
 
-// ── Firebase load ────────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
-  function s1(){
-    if(!GROUP_ID){s2();return;}
-    DB.ref("groups/"+GROUP_ID).once("value",function(sn){
-      var g=sn.val()||{};
-      if(g&&g.players&&g.players.length)PARTS=g.players;
-      GROUP_ADMIN_PW=(g&&g.groupAdminPw)||"password";
-      ST.groupPublic=!!(g&&g.public);
-      s2();
-    },function(){s2();});
-  }
-  function s2(){
-    var done=0,total=PARTS.length;
-    if(!total){s3();return;}
-    PARTS.forEach(function(p){
-      DB.ref("users/"+ukey(p)+"/emoji").once("value",
-        function(sn){if(sn.val())_EM[p]=sn.val();done++;if(done===total)s3();},
-        function(){done++;if(done===total)s3();});
+  // Fetch group info, player emojis, and master pw in parallel with pool data
+  var groupPromise = GROUP_ID
+    ? DB.ref("groups/"+GROUP_ID).once("value").then(function(sn){
+        var g=sn.val()||{};
+        if(g&&g.players&&g.players.length) PARTS=g.players;
+        GROUP_ADMIN_PW=(g&&g.groupAdminPw)||"password";
+        ST.groupPublic=!!(g&&g.public);
+      }).catch(function(){})
+    : Promise.resolve();
+
+  groupPromise.then(function(){
+    // Now load emojis and pool data in parallel
+    var emojiPromises=PARTS.map(function(p){
+      return DB.ref("users/"+ukey(p)+"/emoji").once("value").then(function(sn){
+        if(sn.val()) _EM[p]=sn.val();
+      }).catch(function(){});
     });
-  }
-  function s3(){
+
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+
+    // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
       DB.ref(BASE+"/meta").on("value",function(sn){
@@ -418,19 +421,95 @@ function loadData(){
         if(!ST._weekInit&&ST.weekIds.length){ ST.curWeek=currentWeekId(); ST._weekInit=true; }
         else if(ST.curWeek&&ST.weekIds.indexOf(ST.curWeek)===-1){ ST.curWeek=currentWeekId(); }
         else if(!ST.curWeek&&ST.weekIds.length){ ST.curWeek=currentWeekId(); }
-        draw();
+        scheduleDraw();
       });
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};draw();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();});
-      DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();});
-      DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};draw();});
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
     });
-  }
-  s1();
+
+    // Start auto-result fetch schedule
+    Promise.all(emojiPromises).then(function(){
+      scheduleDraw();
+      var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
+      if(anyLocked) startResultSchedule();
+    });
+  });
 }
 
-// ── ESPN LIVE SCOREBOARD (College Football) ───────────────
+// ── AUTO-RESULT FETCH SCHEDULE ────────────────────────────
+// Fetches results only during scheduled windows (ET):
+// Thu 11 PM, Fri 11 PM, Sat 12 PM / 4 PM / 8 PM / 11 PM, Sun 9 AM
+// Runs a 5-min ticker that checks if we're in a window before firing.
+
+var _resultScheduleTimer = null;
+var _lastAutoResultFetch = 0; // ts of last auto fetch, to avoid duplicate fires per window
+
+// Fetch windows: [dayOfWeek (0=Sun), hourET]
+var RESULT_FETCH_WINDOWS = [
+  [4, 23], // Thursday  11 PM
+  [5, 23], // Friday    11 PM
+  [6, 12], // Saturday  12 PM
+  [6, 16], // Saturday   4 PM
+  [6, 20], // Saturday   8 PM
+  [6, 23], // Saturday  11 PM
+  [0,  9]  // Sunday     9 AM
+];
+var RESULT_FETCH_WINDOW_MINUTES = 30; // fire within 30 min of each window start
+
+function _nowET() {
+  var n = new Date();
+  var jan = new Date(n.getFullYear(), 0, 1);
+  var jul = new Date(n.getFullYear(), 6, 1);
+  var isDST = n.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
+  return new Date(n.getTime() + n.getTimezoneOffset() * 60000 + (isDST ? -4 : -5) * 3600000);
+}
+
+function _inResultFetchWindow() {
+  var et = _nowET();
+  var day = et.getDay(), hour = et.getHours(), min = et.getMinutes();
+  var totalMin = hour * 60 + min;
+  for (var i = 0; i < RESULT_FETCH_WINDOWS.length; i++) {
+    var wd = RESULT_FETCH_WINDOWS[i][0];
+    var wh = RESULT_FETCH_WINDOWS[i][1];
+    var windowStart = wh * 60;
+    if (day === wd && totalMin >= windowStart && totalMin < windowStart + RESULT_FETCH_WINDOW_MINUTES) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function startResultSchedule() {
+  stopResultSchedule();
+  // Don't start if no weeks are currently locked
+  var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
+  if(!anyLocked) return;
+
+  function tick() {
+    if (!_inResultFetchWindow()) return;
+    // Don't fire more than once per hour
+    if (Date.now() - _lastAutoResultFetch < 60 * 60 * 1000) return;
+    var weekId = currentWeekId();
+    if (!weekId || !ST.locked[weekId]) return;
+    // Don't auto-fetch if all results already filled
+    var games = ST.games[weekId] || {};
+    var active = GAME_IDS.filter(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
+    var missing = active.filter(function(gid){ return !(ST.results[weekId]||{})[gid]; });
+    if (!missing.length) { stopResultSchedule(); return; } // all done — stop
+    _lastAutoResultFetch = Date.now();
+    fetchAllResults(weekId);
+  }
+  tick(); // check immediately on start
+  _resultScheduleTimer = setInterval(tick, 5 * 60 * 1000); // every 5 min
+}
+
+function stopResultSchedule() {
+  clearInterval(_resultScheduleTimer);
+  _resultScheduleTimer = null;
+}
 var _scTimer=null, _scData=null, _scLoading=false, _scLastFetch=0;
 
 function fetchScoreboard(){
@@ -710,6 +789,25 @@ function addImportedGames(weekId){
   ST.importSelected={};
   if(selected.length>n) toast("Added "+n+" games &mdash; "+(selected.length-n)+" more selected but no empty slots left");
   else toast("&#10003; Added "+n+" game"+(n!==1?"s":""));
+  // Suggest lockDate: use the earliest kickoff from imported games
+  var firstKickoff=null;
+  for(var si=0;si<n;si++){
+    var sg=selected[si];
+    if(sg.kickoffTs&&(firstKickoff===null||sg.kickoffTs<firstKickoff)) firstKickoff=sg.kickoffTs;
+  }
+  if(firstKickoff&&DB){
+    var _kd=new Date(firstKickoff);
+    var _kdStr=_kd.getFullYear()+"-"+("0"+(_kd.getMonth()+1)).slice(-2)+"-"+("0"+_kd.getDate()).slice(-2);
+    DB.ref("globalSettings/poolDates/cfb/lockDate").once("value",function(sn){
+      var existing=sn.val()||"";
+      if(existing!==_kdStr){
+        if(confirm("First game is "+_kdStr+" — update CFB lock date to match?")){
+          DB.ref("globalSettings/poolDates/cfb/lockDate").set(_kdStr);
+          toast("&#10003; Lock date updated to "+_kdStr);
+        }
+      }
+    });
+  }
   draw();
 }
 
@@ -789,27 +887,42 @@ function setConf(weekId,gid,confRaw){
 
 // ── Admin actions ────────────────────────────────────────
 function addWeek(){
-  var label=prompt("Week label (e.g. 'Week 1' or 'Bowl Season'):");
-  if(!label)return;
+  var label=document.getElementById("new-week-label");
+  var val=label?label.value.trim():"";
+  if(!val){toast("Enter a week label first");if(label)label.focus();return;}
   var id="w"+Date.now();
   var emptyGames={};
   GAME_IDS.forEach(function(gid){emptyGames[gid]={away:"",home:"",favSide:"home",spread:0,kickoff:""};});
   var weekIds=ST.weekIds.concat([id]);
   var weekLabels={}; for(var k in ST.weekLabels) weekLabels[k]=ST.weekLabels[k];
-  weekLabels[id]=label;
+  weekLabels[id]=val;
   ST.weekIds=weekIds; ST.weekLabels=weekLabels; ST.curWeek=id;
   if(DB){
     DB.ref(BASE+"/meta/weekIds").set(weekIds);
     DB.ref(BASE+"/meta/weekLabels").set(weekLabels);
     DB.ref(BASE+"/games/"+id).set(emptyGames);
-    // New week loaded — auto-open CFB picks globally
-    DB.ref("globalSettings/statuses/cfb").set("open");
   }
+  if(label) label.value="";
   draw();
   toast("Week added");
 }
+function copyWeekGames(fromWeekId, toWeekId){
+  if(!fromWeekId||!toWeekId||fromWeekId===toWeekId) return;
+  var srcGames=ST.games[fromWeekId]||{};
+  var label=ST.weekLabels[fromWeekId]||fromWeekId;
+  if(!confirm("Copy game matchups from "+label+" to this week? Existing games will be overwritten.")) return;
+  GAME_IDS.forEach(function(gid){
+    var g=srcGames[gid]||{};
+    // Copy teams, spread, favSide but clear results and kickoff
+    setGameField(toWeekId,gid,"away",g.away||"");
+    setGameField(toWeekId,gid,"home",g.home||"");
+    setGameField(toWeekId,gid,"favSide",g.favSide||"home");
+    setGameField(toWeekId,gid,"spread",g.spread||0);
+    setGameField(toWeekId,gid,"kickoff","");
+    if(DB) DB.ref(BASE+"/games/"+toWeekId+"/"+gid+"/kickoffTs").remove();
+  });
+}
 function removeWeek(weekId){
-  if(!weekId)return;
   if(!confirm("Delete \""+(ST.weekLabels[weekId]||weekId)+"\" and all its games, picks, and results?"))return;
   var weekIds=ST.weekIds.filter(function(w){return w!==weekId;});
   ST.weekIds=weekIds;
@@ -848,10 +961,99 @@ function toggleLock(weekId){
   ST.locked[weekId]=newVal;
   if(DB){
     DB.ref(BASE+"/locked/"+weekId).set(newVal);
-    // Sync global pool status: locking → Live, unlocking → Open
-    DB.ref("globalSettings/statuses/cfb").set(newVal ? "locked" : "open");
   }
   draw();
+  if(newVal){
+    // Week locked — auto-fetch results and start schedule
+    fetchAllResults(weekId);
+    startResultSchedule();
+  } else {
+    // Week unlocked — stop schedule if no other weeks still locked
+    var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
+    if(!anyLocked) stopResultSchedule();
+  }
+}
+
+function fetchAllResults(weekId){
+  var weekLabel=ST.weekLabels[weekId]||"";
+  var year=ST.importYear||new Date().getFullYear();
+  var week=ST.importWeek||guessWeekNumber(weekLabel);
+  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
+  var btn=document.getElementById("b-fetch-all-results");
+  if(btn){btn.textContent="Fetching…";btn.disabled=true;}
+  fetch(url)
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(btn){btn.textContent="&#128202; Fetch All Results";btn.disabled=false;}
+      var events=(data&&data.events)||[];
+      var games=ST.games[weekId]||{};
+      var found=0;
+      GAME_IDS.forEach(function(gid){
+        var g=games[gid];
+        if(!g||!g.away||!g.home) return;
+        var normAway=normalizeTeamName(g.away);
+        var normHome=normalizeTeamName(g.home);
+        events.forEach(function(ev){
+          var comp=(ev.competitions||[])[0]||{};
+          var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+          if(state!=="post") return;
+          var comps=comp.competitors||[];
+          var awayC=comps.find(function(c){return c.homeAway==="away";})||{};
+          var homeC=comps.find(function(c){return c.homeAway==="home";})||{};
+          var an=normalizeTeamName((awayC.team&&(awayC.team.shortDisplayName||awayC.team.displayName))||"");
+          var hn=normalizeTeamName((homeC.team&&(homeC.team.shortDisplayName||homeC.team.displayName))||"");
+          var awayMatch=(an===normAway||an.indexOf(normAway)>=0||normAway.indexOf(an)>=0)&&an.length>2&&normAway.length>2;
+          var homeMatch=(hn===normHome||hn.indexOf(normHome)>=0||normHome.indexOf(hn)>=0)&&hn.length>2&&normHome.length>2;
+          if(!awayMatch||!homeMatch) return;
+          var aScore=parseInt(awayC.score)||0;
+          var hScore=parseInt(homeC.score)||0;
+          // Determine spread result
+          var sp=parseFloat(g.spread)||0;
+          var result;
+          if(!sp||g.favSide==="even"){
+            result=aScore>hScore?"away":hScore>aScore?"home":"push";
+          } else {
+            var favored=g.favSide==="away"?aScore:hScore;
+            var underdog=g.favSide==="away"?hScore:aScore;
+            var margin=favored-underdog;
+            if(Math.abs(margin-sp)<0.01) result="push";
+            else result=margin>sp?g.favSide:(g.favSide==="away"?"home":"away");
+          }
+          var existing=(ST.results[weekId]||{})[gid];
+          if(!existing){
+            setResult(weekId,gid,result);
+            found++;
+          }
+        });
+      });
+      // Also check tiebreaker
+      var tb=ST.tiebreaker[weekId]||{};
+      if(tb.away&&tb.home&&tb.actual==null){
+        var normTbA=normalizeTeamName(tb.away), normTbH=normalizeTeamName(tb.home);
+        events.forEach(function(ev){
+          var comp=(ev.competitions||[])[0]||{};
+          if((comp.status&&comp.status.type&&comp.status.type.state)!=="post") return;
+          var comps=comp.competitors||[];
+          var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+          var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+          var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
+          var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
+          if((an===normTbA||an.indexOf(normTbA)>=0||normTbA.indexOf(an)>=0)&&
+             (hn===normTbH||hn.indexOf(normTbH)>=0||normTbH.indexOf(hn)>=0)){
+            var total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
+            setTiebreakerField(weekId,"actual",total);
+            found++;
+          }
+        });
+      }
+      if(found>0) toast("&#10003; Auto-filled "+found+" result"+(found!==1?"s":""));
+      else toast("No final results found yet — try again after games complete");
+      draw();
+    })
+    .catch(function(){
+      if(btn){btn.textContent="&#128202; Fetch All Results";btn.disabled=false;}
+      toast("Could not reach ESPN");
+    });
 }
 
 function setGroupPublic(val){
@@ -971,14 +1173,16 @@ function renderPicks(){
     h+='<div class="lock-info">&#128274; Locked &middot; '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+' pts</div>';
   } else {
     var made=0,confs={};
+    var gamesLocked=0;
     active.forEach(function(gid){
       var p=viewerPicks[gid];
       if(p&&p.side)made++;
       if(p&&p.conf)confs[p.conf]=(confs[p.conf]||0)+1;
+      if(isGameLocked(weekId,gid)) gamesLocked++;
     });
     var dupes=Object.keys(confs).filter(function(k){return confs[k]>1;}).length;
-    h+='<div class="lock-info">&#9998; '+made+'/'+N+' picked'+(dupes?' &middot; &#9888; duplicate confidence':'')+'</div>';
-    // Inline countdown between pick count and reset button
+    var lockMsg=gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274; '+gamesLocked+' kicked off</span>':'';
+    h+='<div class="lock-info">&#9998; '+made+'/'+N+' picked'+(dupes?' &middot; &#9888; duplicate confidence':'')+lockMsg+'</div>';
     var firstTs=getFirstKickoff(weekId);
     if(firstTs){
       var remaining=firstTs-Date.now();
@@ -1048,8 +1252,13 @@ function renderPicks(){
 }
 
 function renderStandings(){
-  var SEASON_WEEKS=15; // total weeks in a CFB season
-  var MAX_PTS_PER_WEEK=55; // max confidence pts with 10 games (1+2+...+10)
+  var SEASON_WEEKS=ST.weekIds.length||15;
+  // Max pts = N*(N+1)/2 where N = games that week; use the max across all weeks
+  var MAX_PTS_PER_WEEK=(function(){
+    var max=55; // fallback
+    ST.weekIds.forEach(function(w){ var n=activeGames(w).length; if(n>0) max=Math.max(max,n*(n+1)/2); });
+    return max;
+  })();
 
   var h='<div class="lb-wrap" style="padding:0">';
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
@@ -1270,8 +1479,11 @@ function renderAdmin(){
     h+='</div>';
   }
   h+='<div class="adm-sec-label">Weeks</div>';
-  var addWeekBtn='<button class="wtab add" id="b-addweek" style="flex-shrink:0;white-space:nowrap">+ Add</button>';
-  h+=weekDropdown(ST.curWeek, addWeekBtn);
+  h+='<div style="display:flex;gap:6px;padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);align-items:center">';
+  h+='<input class="adm-input" id="new-week-label" placeholder="Week label (e.g. Week 1)" style="flex:1;margin:0">';
+  h+='<button class="wtab add" id="b-addweek" style="flex-shrink:0;white-space:nowrap;height:36px">+ Add Week</button>';
+  h+='</div>';
+  h+=weekDropdown(ST.curWeek);
 
   if(!ST.curWeek){h+='<div class="lb-note">Add a week to start entering matchups.</div></div>';return h;}
 
@@ -1280,10 +1492,27 @@ function renderAdmin(){
   h+='<div class="adm-head-row">';
   h+='<div class="lb-name">'+x(ST.weekLabels[weekId]||weekId)+'</div>';
   h+='<div style="display:flex;gap:5px;flex-wrap:wrap"><button class="btn '+(locked?"btn-red":"btn-green")+'" id="b-lockweek">'+(locked?"&#128274; Locked &mdash; Unlock":"&#128275; Unlocked &mdash; Lock")+'</button>';
+  if(locked) h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px">&#128202; Fetch All Results</button>';
+  if(ST.weekIds.length>1) h+='<select class="adm-btn" id="b-copy-week" style="padding:5px 8px"><option value="">&#128196; Copy from…</option>'+ST.weekIds.filter(function(w){return w!==weekId;}).map(function(w){return'<option value="'+w+'">'+x(ST.weekLabels[w]||w)+'</option>';}).join("")+'</select>';
   h+='<button class="btn btn-red" id="b-delweek">Delete Week</button></div>';
   h+='</div>';
 
-  h+='<div class="adm-head-row" style="margin-top:0">';
+  if(locked){
+    // Show next scheduled auto-fetch window
+    var _days=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    var _et=_nowET();
+    var _etDay=_et.getDay(), _etHour=_et.getHours(), _etMin=_et.getMinutes();
+    var _etTotalMin=_etDay*1440+_etHour*60+_etMin;
+    var _nextWindow=null;
+    for(var _wi=0;_wi<RESULT_FETCH_WINDOWS.length*2;_wi++){
+      var _w=RESULT_FETCH_WINDOWS[_wi%RESULT_FETCH_WINDOWS.length];
+      var _wDay=_w[0]+(_wi>=RESULT_FETCH_WINDOWS.length?7:0);
+      var _wMin=_wDay*1440+_w[1]*60;
+      if(_wMin>_etTotalMin){_nextWindow=_w;break;}
+    }
+    var _nextLabel=_nextWindow?_days[_nextWindow[0]]+" "+(_nextWindow[1]>12?(_nextWindow[1]-12)+"PM":_nextWindow[1]+"AM")+" ET":"—";
+    h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">&#128337; Next auto-fetch: '+_nextLabel+'</div>';
+  }
   h+='<button class="btn btn-ghost" id="b-import-toggle">'+(ST.showImport?"&#128229; Hide ESPN Import":"&#128225; Import Games from ESPN")+'</button>';
   h+='</div>';
   if(ST.showImport) h+=renderImportPanel(weekId);
@@ -1530,13 +1759,15 @@ function renderGroupPicks(){
   return h;
 }
 
-// ── Main draw ────────────────────────────────────────────
+var _drawPending=false;
+function scheduleDraw(){if(_drawPending)return;_drawPending=true;setTimeout(function(){_drawPending=false;draw();},0);}
+
 function draw(){
   var h='';
   if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
   h+='<div class="topbar-left"><a href="index.html" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
-  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">College Football &middot; Confidence Pool</div></div>';
+  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">College Football &middot; Confidence Pool'+(SEASON_YEAR?' &middot; '+SEASON_YEAR:'')+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
     h+='<span class="tag">'+pem(ST.user)+x(ST.user)+'</span>';
@@ -1546,7 +1777,20 @@ function draw(){
   h+='</div></div>';
 
   var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"group",lbl:"&#128101; Group"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
-  if(ST.admin) tabs.push({id:"admin",lbl:"&#9881; Admin"});
+  // Missing picks badge on Group tab
+  if(ST.weekIds.length){
+    var _cw=currentWeekId();
+    if(_cw&&!ST.locked[_cw]){
+      var _active=activeGames(_cw);
+      var _missing=PARTS.filter(function(p){
+        var pk=((ST.picks[_cw]||{})[ukey(p)])||{};
+        var made=_active.filter(function(gid){return pk[gid]&&pk[gid].side;}).length;
+        return made<_active.length;
+      }).length;
+      if(_missing>0) tabs[1].lbl='&#128101; Group <span style="background:var(--red2);color:#fff;border-radius:8px;font-size:8px;padding:1px 5px;margin-left:3px;vertical-align:middle">'+_missing+'</span>';
+    }
+  }
+  if(ST.admin&&!PUBLIC_VIEW) tabs.push({id:"admin",lbl:"&#9881; Admin"});
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
@@ -1584,7 +1828,11 @@ function draw(){
 function bind(){
   var els,i,el;
   els=document.querySelectorAll(".ptab");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.page=this.getAttribute("data-page");draw();});
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    ST.page=this.getAttribute("data-page");
+    if(ST.page==="admin") fetchRankings();
+    draw();
+  });
 
   els=document.querySelectorAll(".user-btn");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");ST.viewUser=null;draw();});
@@ -1833,8 +2081,9 @@ function bind(){
     });
   });
 
+  el=document.getElementById("b-fetch-all-results"); if(el) el.addEventListener("click",function(){ fetchAllResults(ST.curWeek); });
+  el=document.getElementById("b-copy-week"); if(el) el.addEventListener("change",function(){ if(this.value) copyWeekGames(this.value, ST.curWeek); this.value=""; });
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){
-    ST.showImport=!ST.showImport;
     if(ST.showImport&&!ST.importWeek) ST.importWeek=guessWeekNumber(ST.weekLabels[ST.curWeek]);
     if(ST.showImport&&!ST.importYear) ST.importYear=2026;
     draw();
