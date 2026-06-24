@@ -927,7 +927,9 @@ function resetAllConf(weekId){
       if(DB) DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
     }
   });
-  draw();
+  _savePickCache(weekId, uk, ST.picks[weekId][uk]);
+  _updateConfChipsDom(weekId, ST.picks[weekId][uk]);
+  _updateProgressBar(weekId);
   toast("Confidence reset");
 }
 function setConf(weekId,gid,confRaw){
@@ -949,12 +951,64 @@ function setConf(weekId,gid,confRaw){
   if(!picks[gid])picks[gid]={};
   if(conf)picks[gid].conf=conf; else delete picks[gid].conf;
   _savePickCache(weekId, ukey(ST.user), picks);
-  draw();
+  // Update chips in-place — no full redraw, no flash
+  _updateConfChipsDom(weekId, picks);
+  // Update progress bar pick/conf counts
+  _updateProgressBar(weekId);
   if(DB){
     var _confCb=function(err){ if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } } };
     if(conf)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").set(conf,_confCb);
     else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
   }
+}
+
+// Update all confidence chip buttons in the DOM without re-rendering the page
+function _updateConfChipsDom(weekId, picks){
+  var active=activeGames(weekId);
+  var N=active.length;
+  // Build used map
+  var used={};
+  active.forEach(function(gid){
+    var c=Number((picks[gid]||{}).conf)||null;
+    if(c) used[c]=gid; // maps conf value → which gid owns it
+  });
+  active.forEach(function(gid){
+    var myConf=Number((picks[gid]||{}).conf)||null;
+    // Find all chip buttons for this game
+    for(var i=1;i<=N;i++){
+      var btn=document.querySelector('[data-conf-week="'+weekId+'"][data-conf-gid="'+gid+'"][data-conf-val="'+i+'"]');
+      if(!btn) continue;
+      var isSel=myConf===i;
+      var isTakenByOther=!isSel&&used[i]&&used[i]!==gid;
+      btn.className='conf-chip'+(isSel?' sel':isTakenByOther?' used':'');
+      btn.disabled=isTakenByOther;
+    }
+  });
+}
+
+// Update the progress bar pick/conf counts without full redraw
+function _updateProgressBar(weekId){
+  var picks=((ST.picks[weekId]||{})[ukey(ST.user)])||{};
+  var active=activeGames(weekId);
+  var N=active.length;
+  var made=0,confsMade=0,confs={},dupes=false;
+  active.forEach(function(gid){
+    var p=picks[gid];
+    if(p&&p.side) made++;
+    if(p&&p.conf){ var c=Number(p.conf); confs[c]=(confs[c]||0)+1; confsMade++; }
+  });
+  Object.keys(confs).forEach(function(k){ if(confs[k]>1) dupes=true; });
+  var pickPct=N>0?Math.round(made/N*100):0;
+  var confPct=N>0?Math.round(confsMade/N*100):0;
+  var allDone=made===N&&confsMade===N&&!dupes&&N>0;
+  var barColor=allDone?'var(--green)':made===N?'var(--gold)':'var(--blue)';
+  // Update fill bars
+  var bars=document.querySelectorAll('.lock-bar [style*="position:absolute"]');
+  if(bars[0]) bars[0].style.width=confPct+'%';
+  if(bars[1]){ bars[1].style.width=pickPct+'%'; bars[1].style.background=barColor; }
+  // Update text
+  var info=document.querySelector('.lock-bar .lock-info');
+  if(info) info.innerHTML='&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'');
 }
 
 // ── Admin actions ────────────────────────────────────────
