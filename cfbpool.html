@@ -878,6 +878,9 @@ function setPickSide(weekId,gid,side){
   else cur.side=side;
   ST.picks[weekId][uk][gid]=cur;
   _savePickCache(weekId, uk, cur);
+  // Remove unpicked accent border immediately
+  var _wrap=document.querySelector('.unpicked-wrap[data-gid="'+gid+'"]');
+  if(_wrap&&cur.side) _wrap.style.borderLeftColor="transparent";
   draw();
   // Undo toast for 3 seconds before committing to Firebase
   if(_undoTimer){ clearTimeout(_undoTimer); }
@@ -1272,27 +1275,43 @@ function renderPicks(){
     var ws=weekScore(weekId,viewer);
     h+='<div class="lock-info">&#128274; Locked &middot; '+ws.correct+'-'+ws.wrong+' &middot; '+ws.total+' pts</div>';
   } else {
-    var made=0,confs={};
-    var gamesLocked=0;
+    var made=0, confsMade=0, confs={}, gamesLocked=0;
     active.forEach(function(gid){
       var p=viewerPicks[gid];
-      if(p&&p.side)made++;
-      if(p&&p.conf)confs[p.conf]=(confs[p.conf]||0)+1;
+      if(p&&p.side) made++;
+      if(p&&p.conf){ confs[p.conf]=(confs[p.conf]||0)+1; confsMade++; }
       if(isGameLocked(weekId,gid)) gamesLocked++;
     });
     var dupes=Object.keys(confs).filter(function(k){return confs[k]>1;}).length;
-    var lockMsg=gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274; '+gamesLocked+' kicked off</span>':'';
-    h+='<div class="lock-info">&#9998; '+made+'/'+N+' picked'+(dupes?' &middot; &#9888; duplicate confidence':'')+lockMsg+'</div>';
+    var allDone=ST.user&&made===N&&confsMade===N&&!dupes&&N>0;
+
+    // Progress bar
+    var pickPct=N>0?Math.round(made/N*100):0;
+    var confPct=N>0?Math.round(confsMade/N*100):0;
+    var barColor=allDone?'var(--green)':made===N?'var(--gold)':'var(--blue)';
+    h+='<div style="flex:1;min-width:0">';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
+    h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
+    // Sort button
+    if(ST.user&&made>0) h+='<button id="b-sort-picks" style="font-size:8px;font-weight:800;padding:2px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap">&#8645; Sort</button>';
+    h+='</div>';
+    // Dual progress bar: picks (solid) + conf (lighter track behind)
+    h+='<div style="height:5px;background:var(--border2);border-radius:3px;overflow:hidden;position:relative">';
+    h+='<div style="position:absolute;left:0;top:0;height:100%;width:'+confPct+'%;background:rgba(93,186,74,.2);transition:width .3s"></div>';
+    h+='<div style="position:absolute;left:0;top:0;height:100%;width:'+pickPct+'%;background:'+barColor+';transition:width .3s;border-radius:3px"></div>';
+    h+='</div>';
+    h+='</div>';
+
     var firstTs=getFirstKickoff(weekId);
     if(firstTs){
       var remaining=firstTs-Date.now();
       if(remaining>0){
-        h+='<span id="countdown-display" style="font-size:9px;font-weight:800;color:var(--gold-dark);flex:1;text-align:center;white-space:nowrap">--</span>';
+        h+='<span id="countdown-display" style="font-size:9px;font-weight:800;color:var(--gold-dark);flex-shrink:0;text-align:center;white-space:nowrap;padding-left:8px">--</span>';
       } else {
-        h+='<span style="font-size:9px;font-weight:800;color:var(--red2);flex:1;text-align:center;white-space:nowrap">&#128274; Locked</span>';
+        h+='<span style="font-size:9px;font-weight:800;color:var(--red2);flex-shrink:0;text-align:right;white-space:nowrap;padding-left:8px">&#128274; Live</span>';
       }
     }
-    if(ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-reset-conf" style="font-size:9px;padding:3px 9px">&#8635; Reset Conf</button></div>';
+    if(ST.user) h+='<button class="btn btn-ghost" id="b-reset-conf" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#8635;</button>';
     if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
   h+='</div>';
@@ -1302,7 +1321,21 @@ function renderPicks(){
     return h;
   }
 
-  h+='<div class="games-wrap">';
+  // Onboarding tip — shown once, dismissed to localStorage
+  if(ST.user&&!locked){
+    var _tipKey="cfb_tip_seen_"+(GROUP_ID||"g");
+    var _tipSeen=false;
+    try{ _tipSeen=!!localStorage.getItem(_tipKey); }catch(e){}
+    if(!_tipSeen){
+      h+='<div id="cfb-tip-banner" style="background:var(--blue-bg);border-bottom:2px solid var(--border2);padding:8px 12px;display:flex;align-items:flex-start;gap:8px">';
+      h+='<span style="font-size:14px;flex-shrink:0">&#128218;</span>';
+      h+='<div style="flex:1;font-size:10px;font-weight:700;color:var(--blue);line-height:1.6">Tap a team to pick it. Then assign a <strong>confidence</strong> number (1–'+N+') — higher = more confident. If correct, you earn that many points. Each number can only be used once.</div>';
+      h+='<button id="b-dismiss-tip" style="font-size:11px;font-weight:800;color:var(--muted);background:none;border:none;cursor:pointer;flex-shrink:0;padding:0 0 0 4px">&#10005;</button>';
+      h+='</div>';
+    }
+  }
+
+  h+='<div class="games-wrap" id="games-wrap">';
   // Pre-compute which confidence values are already used by other games
   var allUsedConfs={};
   active.forEach(function(gid){
@@ -1312,11 +1345,20 @@ function renderPicks(){
   active.forEach(function(gid){
     var g=ST.games[weekId][gid];
     var result=(ST.results[weekId]||{})[gid];
+    var isPicked=!!(viewerPicks[gid]&&viewerPicks[gid].side);
     // usedConfs for this game = all used EXCEPT this game's own pick
     var thisConf=Number((viewerPicks[gid]||{}).conf)||null;
     var usedConfs={};
     for(var k in allUsedConfs){ if(Number(k)!==thisConf) usedConfs[k]=true; }
-    h+=renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs);
+    var cardHtml=renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs);
+    // Wrap unpicked games with a subtle left accent
+    if(!locked&&!isPicked&&ST.user&&!isGameLocked(weekId,gid)){
+      h+='<div style="border-left:3px solid var(--border2);margin-bottom:10px;border-radius:12px" class="unpicked-wrap" data-gid="'+gid+'">';
+      h+=cardHtml.replace('class="game-card"','class="game-card" style="margin-bottom:0"');
+      h+='</div>';
+    } else {
+      h+=cardHtml;
+    }
   });
   h+='</div>';
 
@@ -1346,6 +1388,21 @@ function renderPicks(){
     }
     h+='</div>';
     h+='</div></div>';
+  }
+
+  // All-picked celebration
+  if(ST.user&&!locked&&N>0&&made===N&&confsMade===N&&!dupes){
+    var _celebKey="cfb_celeb_"+weekId+"_"+ukey(ST.user);
+    var _celebSeen=false;
+    try{ _celebSeen=!!sessionStorage.getItem(_celebKey); }catch(e){}
+    if(!_celebSeen){
+      try{ sessionStorage.setItem(_celebKey,"1"); }catch(e){}
+      h+='<div style="background:var(--green-bg);border-top:2px solid var(--border2);padding:12px 16px;text-align:center">';
+      h+='<div style="font-size:20px;margin-bottom:4px">&#127881;</div>';
+      h+='<div style="font-size:12px;font-weight:900;color:var(--green);margin-bottom:2px">All picks submitted!</div>';
+      h+='<div style="font-size:10px;font-weight:700;color:var(--muted)">'+N+' picks &middot; confidence 1–'+N+' assigned &middot; you\'re locked in</div>';
+      h+='</div>';
+    }
   }
 
   return h;
@@ -1882,17 +1939,21 @@ function draw(){
   h+='</div></div>';
 
   var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"group",lbl:"&#128101; Group"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
-  // Missing picks badge on Group tab
-  if(ST.weekIds.length){
+  // Missing picks badge — only show to the current user if THEY haven't finished, within 4h of kickoff
+  if(ST.weekIds.length&&ST.user){
     var _cw=currentWeekId();
     if(_cw&&!ST.locked[_cw]){
-      var _active=activeGames(_cw);
-      var _missing=PARTS.filter(function(p){
-        var pk=((ST.picks[_cw]||{})[ukey(p)])||{};
-        var made=_active.filter(function(gid){return pk[gid]&&pk[gid].side;}).length;
-        return made<_active.length;
-      }).length;
-      if(_missing>0) tabs[1].lbl='&#128101; Group <span style="background:var(--red2);color:#fff;border-radius:8px;font-size:8px;padding:1px 5px;margin-left:3px;vertical-align:middle">'+_missing+'</span>';
+      var _firstKick=getFirstKickoff(_cw);
+      var _hoursToKick=_firstKick?(_firstKick-Date.now())/(1000*60*60):null;
+      if(_firstKick&&_hoursToKick!==null&&_hoursToKick<=4&&_hoursToKick>0){
+        var _active=activeGames(_cw);
+        var _myPk=((ST.picks[_cw]||{})[ukey(ST.user)])||{};
+        var _made=_active.filter(function(gid){return _myPk[gid]&&_myPk[gid].side;}).length;
+        if(_made<_active.length){
+          var _left=_active.length-_made;
+          tabs[1].lbl='&#128101; Group <span style="background:var(--red2);color:#fff;border-radius:8px;font-size:8px;padding:1px 5px;margin-left:3px;vertical-align:middle">'+_left+'</span>';
+        }
+      }
     }
   }
   if(ST.admin&&!PUBLIC_VIEW) tabs.push({id:"admin",lbl:"&#9881; Admin"});
@@ -1950,6 +2011,39 @@ function bind(){
       if(!ST.picks[ST.curWeek]) ST._subscribePicksForWeek(ST.curWeek);
     }
     draw();
+  });
+
+  // Dismiss onboarding tip
+  el=document.getElementById("b-dismiss-tip"); if(el) el.addEventListener("click",function(){
+    var _tipKey="cfb_tip_seen_"+(GROUP_ID||"g");
+    try{ localStorage.setItem(_tipKey,"1"); }catch(e){}
+    var banner=document.getElementById("cfb-tip-banner");
+    if(banner) banner.style.display="none";
+  });
+
+  // Sort picks by confidence (desc) — unpicked games float to top
+  el=document.getElementById("b-sort-picks"); if(el) el.addEventListener("click",function(){
+    var wrap=document.getElementById("games-wrap");
+    if(!wrap) return;
+    var cards=Array.prototype.slice.call(wrap.children);
+    cards.sort(function(a,b){
+      // Get conf value from data-gid attribute
+      var aGid=a.getAttribute("data-gid")||(a.querySelector("[data-pick-gid]")||{}).getAttribute&&a.querySelector("[data-pick-gid]").getAttribute("data-pick-gid")||"";
+      var bGid=b.getAttribute("data-gid")||(b.querySelector("[data-pick-gid]")||{}).getAttribute&&b.querySelector("[data-pick-gid]").getAttribute("data-pick-gid")||"";
+      var weekId=ST.curWeek||currentWeekId();
+      var uk=ukey(ST.user);
+      var aConf=Number(((ST.picks[weekId]||{})[uk]||{})[aGid]&&((ST.picks[weekId]||{})[uk]||{})[aGid].conf)||0;
+      var bConf=Number(((ST.picks[weekId]||{})[uk]||{})[bGid]&&((ST.picks[weekId]||{})[uk]||{})[bGid].conf)||0;
+      var aPicked=!!(((ST.picks[weekId]||{})[uk]||{})[aGid]&&((ST.picks[weekId]||{})[uk]||{})[aGid].side);
+      var bPicked=!!(((ST.picks[weekId]||{})[uk]||{})[bGid]&&((ST.picks[weekId]||{})[uk]||{})[bGid].side);
+      // Unpicked floats to top, then sort by conf desc
+      if(!aPicked&&bPicked) return -1;
+      if(aPicked&&!bPicked) return 1;
+      return bConf-aConf;
+    });
+    cards.forEach(function(c){ wrap.appendChild(c); });
+    this.textContent="&#8645; Sorted";
+    this.style.color="var(--green)";
   });
 
   // Undo pick
