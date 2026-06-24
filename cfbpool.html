@@ -896,10 +896,25 @@ function setPickSide(weekId,gid,side){
   _undoTimer=setTimeout(function(){
     undoEl.classList.remove("show"); _undoPick=null; _undoTimer=null;
     if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
-      if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
+      if(!err){
+        var t=document.getElementById("tick-"+gid);
+        if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
+      }
     });
   },3000);
 }
+
+// Guard: re-apply DOM pick state after any scheduleDraw that fires while undo is pending
+var _origScheduleDraw=scheduleDraw;
+scheduleDraw=function(){
+  _origScheduleDraw();
+  // After the draw settles, re-apply any pending in-flight pick state
+  if(_undoPick){
+    setTimeout(function(){
+      if(_undoPick) _updatePickDom(_undoPick.weekId, _undoPick.gid, _undoPick.cur.side||null);
+    },0);
+  }
+};
 function setTiebreakerField(weekId,field,value){
   if(!ST.tiebreaker[weekId]) ST.tiebreaker[weekId]={};
   ST.tiebreaker[weekId][field]=value;
@@ -966,18 +981,17 @@ function setConf(weekId,gid,confRaw){
 
 // Update pick row highlighting in-place for a single game
 function _updatePickDom(weekId, gid, side){
-  // Find the two team-pick rows for this game
   var rows=document.querySelectorAll('[data-pick-week="'+weekId+'"][data-pick-gid="'+gid+'"]');
   rows.forEach(function(row){
     var rowSide=row.getAttribute("data-pick-side");
     var base="team-pick clickable";
-    if(side===rowSide){
+    var nm=row.querySelector(".tp-name");
+    if(side&&side===rowSide){
       row.className=base+" mypick";
-      var nm=row.querySelector(".tp-name");
       if(nm) nm.style.color="var(--gold-dark)";
     } else {
+      // Explicitly clear — covers switching from one team to the other
       row.className=base;
-      var nm=row.querySelector(".tp-name");
       if(nm) nm.style.color="";
     }
   });
