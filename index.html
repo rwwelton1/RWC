@@ -57,6 +57,16 @@ button,input,select{font-family:'Nunito',sans-serif}
 .pcr-btn.sel-locked{background:var(--red-bg);color:var(--red);border-color:var(--border)}
 .pcr-btn.sel-soon{background:var(--gold-bg);color:var(--gold-dark);border-color:var(--border)}
 .pcr-btn.sel-complete{background:var(--blue-bg);color:var(--blue);border-color:var(--border)}
+/* Compact pool status+date rows */
+.psd-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid var(--border2)}
+.psd-row:last-child{border-bottom:none;padding-bottom:0}
+.psd-name{font-size:11px;font-weight:800;color:var(--text);display:flex;align-items:center;gap:5px;min-width:80px;flex-shrink:0}
+.psd-controls{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;flex-wrap:nowrap}
+.psd-select{font-size:10px;font-weight:800;padding:4px 6px;border-radius:7px;border:2px solid var(--border);background:#fff;cursor:pointer;font-family:'Nunito',sans-serif;min-width:58px}
+.psd-date-wrap{display:flex;align-items:center;gap:4px}
+.psd-date-lbl{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.psd-date-input{font-size:10px;padding:3px 6px;border-radius:6px;border:1.5px solid var(--border);background:#fff;font-family:'Nunito',sans-serif;color:var(--text);max-width:120px}
+.psd-hint{font-size:9px;font-weight:700;color:var(--muted);white-space:nowrap}
 .btn-sm{padding:0 9px;font-size:10px;height:26px;line-height:26px;display:inline-flex;align-items:center;justify-content:center}
 .main{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:20px 14px 60px}
 /* AUTH */
@@ -4373,69 +4383,52 @@ function renderAdmin() {
   h += '<button class="btn btn-ghost btn-sm" id="btn-admin-back">&#8592; Back</button>';
   h += '</div>';
 
-  h += '<div class="section-label">Competition States</div>';
+  h += '<div class="section-label">Pool Status &amp; Dates</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">These states apply to every group.</div>';
-  h += '<div class="pool-controls">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Status auto-snaps at saved dates. Soon→Open at open date, Open→Live at lock date. Final never auto-snaps.</div>';
+  h += '<div style="display:flex;flex-direction:column;gap:0">';
   POOL_LIBRARY.forEach(function(pool){
     var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-    var now = Date.now();
-
-    // Use Firebase-stored dates if available, fall back to pool library defaults
     var _poolDates = (SC._poolDates && SC._poolDates[pool.id]) || {};
-    var _openDate = _poolDates.openDate || pool.openDate;
-    var _lockDate = _poolDates.lockDate || pool.lockDate;
-
-    // Build timing hint based on status + pool dates
-    var timingHtml = "";
-    function _parseDate(ds){ var d=new Date(ds+"T12:00:00"); return isNaN(d)?null:d.getTime(); }
-    function _fmtCountdown(ms){
-      var s=Math.floor(ms/1000), m=Math.floor(s/60), hr=Math.floor(m/60), d=Math.floor(hr/24);
-      if(d>=1) return d+"d "+(hr%24>0?(hr%24)+"h":"");
-      if(hr>=1) return hr+"h "+(m%60>0?(m%60)+"m":"");
-      return m+"m";
-    }
-    function _fmtDate(ts){
-      return new Date(ts).toLocaleDateString("en-US",{month:"short",day:"numeric"});
-    }
-
-    if(st==="open" && _lockDate){
-      var lockTs = _parseDate(_lockDate);
-      if(lockTs){
-        var diff = lockTs - now;
-        var lbl = diff > 0 ? "Locks in "+_fmtCountdown(diff).trim() : "Locked "+_fmtDate(lockTs);
-        timingHtml = '<span style="font-size:9px;font-weight:700;color:var(--green);margin-left:6px">'+lbl+'</span>';
-      }
-    } else if(st==="coming-soon" && _openDate){
-      var openTs = _parseDate(_openDate);
-      if(openTs){
-        var diff = openTs - now;
-        var _30days = 30*24*60*60*1000;
-        if(diff > 0){
-          var lbl = diff > _30days ? "Opens "+_fmtDate(openTs) : "Opens in "+_fmtCountdown(diff).trim();
-          timingHtml = '<span style="font-size:9px;font-weight:700;color:var(--muted);margin-left:6px">'+lbl+'</span>';
-        }
+    var openVal = _poolDates.openDate || pool.openDate || "";
+    var lockVal = _poolDates.lockDate || pool.lockDate || "";
+    // Which date is contextual for current status
+    var dateLabel = st==="open" ? "Locks" : st==="coming-soon" ? "Opens" : "";
+    var dateVal   = st==="open" ? lockVal : st==="coming-soon" ? openVal : "";
+    // Countdown hint
+    var hint = "";
+    if(dateVal){
+      var _ts = new Date(dateVal+"T12:00:00").getTime();
+      var _diff = _ts - Date.now();
+      if(!isNaN(_ts) && _diff > 0){
+        var _d=Math.floor(_diff/86400000), _h=Math.floor((_diff%86400000)/3600000);
+        hint = _d>0?_d+"d "+(_h>0?_h+"h":""):_h+"h";
       }
     }
-
-    h += '<div class="pool-control-row" style="flex-direction:column;align-items:flex-start;gap:6px">';
-    h += '<div class="pcr-name">'+pool.icon+' '+x(pool.shortName||pool.name)+timingHtml+'</div>';
-    h += '<div class="pcr-btns">';
-    [["open","Open"],["locked","Live"],["coming-soon","Soon"],["complete","Final"]].forEach(function(pair){
-      var cls="";
-      if(st===pair[0]){ if(pair[0]==="open")cls="sel-open"; else if(pair[0]==="locked")cls="sel-locked"; else if(pair[0]==="coming-soon")cls="sel-soon"; else cls="sel-complete"; }
-      h += '<button class="pcr-btn '+cls+'" id="pcr-'+pool.id+'-'+pair[0]+'">'+pair[1]+'</button>';
+    h += '<div class="psd-row" id="psd-row-'+pool.id+'">';
+    h += '<div class="psd-name">'+pool.icon+' <span>'+x(pool.shortName||pool.name)+'</span></div>';
+    h += '<div class="psd-controls">';
+    // Status dropdown
+    var stColors = {open:"var(--green)","locked":"var(--red)","coming-soon":"var(--gold-dark)",complete:"var(--blue)"};
+    h += '<select class="psd-select" id="psd-status-'+pool.id+'" style="color:'+( stColors[st]||"var(--muted)")+'">';
+    [["coming-soon","Soon"],["open","Open"],["locked","Live"],["complete","Final"]].forEach(function(pair){
+      h += '<option value="'+pair[0]+'"'+(st===pair[0]?" selected":"")+'>'+pair[1]+'</option>';
     });
+    h += '</select>';
+    // Date input — shown for soon/open, hidden for live/final
+    var showDate = (st==="coming-soon"||st==="open");
+    h += '<div class="psd-date-wrap" id="psd-datewrap-'+pool.id+'" style="'+(showDate?"":"display:none")+'">';
+    h += '<span class="psd-date-lbl" id="psd-datelbl-'+pool.id+'">'+dateLabel+'</span>';
+    h += '<input type="date" class="psd-date-input" id="psd-date-'+pool.id+'" value="'+x(dateVal)+'">';
+    h += hint ? '<span class="psd-hint" id="psd-hint-'+pool.id+'">'+hint+'</span>' : '<span class="psd-hint" id="psd-hint-'+pool.id+'"></span>';
+    h += '</div>';
     h += '</div></div>';
   });
-  h += '</div></div>';
-
-  h += '<div class="section-label">Pool Dates</div>';
-  h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Set open and lock dates per pool. Status will auto-snap: Soon→Open at openDate, Open→Live at lockDate.</div>';
-  h += '<div id="admin-pool-dates-area"><div style="font-size:11px;color:#475569;text-align:center;padding:12px">Loading dates...</div></div>';
-  h += '<button class="btn btn-gold btn-sm" id="btn-save-pool-dates" style="margin-top:12px;padding:8px 18px;font-size:11px">Save Dates</button>';
-  h += '<span id="pool-dates-msg" style="font-size:10px;margin-left:10px;color:#6ee7b7"></span>';
+  h += '</div>';
+  h += '<div style="display:flex;align-items:center;gap:10px;margin-top:14px">';
+  h += '<button class="btn btn-gold btn-sm" id="btn-save-pool-status-dates" style="padding:8px 18px;font-size:11px">Save All</button>';
+  h += '<span id="psd-save-msg" style="font-size:10px;color:#6ee7b7"></span>';
+  h += '</div>';
   h += '</div>';
 
   h += '<div class="section-label">Public Pools</div>';
@@ -4518,66 +4511,95 @@ function renderAdmin() {
     SC.screen = SC.group ? "hub" : "profile"; draw();
   });
 
-  POOL_LIBRARY.forEach(function(pool){
-    [["open","Open"],["locked","Live"],["coming-soon","Soon"],["complete","Final"]].forEach(function(pair){
-      var btn = document.getElementById("pcr-"+pool.id+"-"+pair[0]);
-      if(btn) btn.addEventListener("click", function(){ setStatus(pool.id, pair[0]); });
-    });
-  });
-
   var wcgpBtn = document.getElementById("pcr-public-wcgamepicks-toggle");
   if(wcgpBtn) wcgpBtn.addEventListener("click", function(){
     setPublicPool("wcGamePicks", !(SC.publicPools && SC.publicPools.wcGamePicks));
   });
 
-  // Pool Dates — load from Firebase, render date inputs, save back
-  if(DB) {
-    DB.ref("globalSettings/poolDates").once("value", function(sn){
-      var savedDates = sn.val() || {};
-      var datesArea = document.getElementById("admin-pool-dates-area");
-      if(!datesArea) return;
-      var dh = '<div style="display:flex;flex-direction:column;gap:0">';
-      POOL_LIBRARY.forEach(function(pool){
-        var saved = savedDates[pool.id] || {};
-        var openVal  = saved.openDate  || pool.openDate  || "";
-        var lockVal  = saved.lockDate  || pool.lockDate  || "";
-        dh += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border2);flex-wrap:wrap">';
-        dh += '<div style="font-size:11px;font-weight:800;width:90px;flex-shrink:0">'+pool.icon+' '+x(pool.shortName||pool.name)+'</div>';
-        dh += '<div style="display:flex;gap:6px;flex:1;flex-wrap:wrap">';
-        dh += '<div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:120px">';
-        dh += '<label style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Opens</label>';
-        dh += '<input type="date" class="form-input" id="pdate-open-'+pool.id+'" value="'+x(openVal)+'" style="padding:5px 8px;font-size:11px">';
-        dh += '</div>';
-        dh += '<div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:120px">';
-        dh += '<label style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Locks</label>';
-        dh += '<input type="date" class="form-input" id="pdate-lock-'+pool.id+'" value="'+x(lockVal)+'" style="padding:5px 8px;font-size:11px">';
-        dh += '</div>';
-        dh += '</div></div>';
-      });
-      dh += '</div>';
-      datesArea.innerHTML = dh;
-    });
-  }
+  // Pool Status & Dates — unified wiring
+  var stColors = {open:"var(--green)","locked":"var(--red)","coming-soon":"var(--gold-dark)",complete:"var(--blue)"};
+  POOL_LIBRARY.forEach(function(pool){
+    var sel = document.getElementById("psd-status-"+pool.id);
+    var dateWrap = document.getElementById("psd-datewrap-"+pool.id);
+    var dateLbl  = document.getElementById("psd-datelbl-"+pool.id);
+    var dateInput= document.getElementById("psd-date-"+pool.id);
+    var hint     = document.getElementById("psd-hint-"+pool.id);
 
-  var saveDatesBtn = document.getElementById("btn-save-pool-dates");
-  if(saveDatesBtn) saveDatesBtn.addEventListener("click", function(){
-    if(!DB) return;
-    var msgEl = document.getElementById("pool-dates-msg");
-    var updates = {};
-    POOL_LIBRARY.forEach(function(pool){
-      var openEl = document.getElementById("pdate-open-"+pool.id);
-      var lockEl = document.getElementById("pdate-lock-"+pool.id);
-      updates[pool.id] = {
-        openDate: openEl ? openEl.value : "",
-        lockDate: lockEl ? lockEl.value : ""
-      };
+    if(!sel) return;
+
+    function _updateDateContext(st) {
+      sel.style.color = stColors[st]||"var(--muted)";
+      var showDate = st==="coming-soon"||st==="open";
+      dateWrap.style.display = showDate ? "" : "none";
+      if(showDate){
+        dateLbl.textContent = st==="open" ? "Locks" : "Opens";
+        // Swap value to the right date field
+        var _pd = (SC._poolDates && SC._poolDates[pool.id]) || {};
+        dateInput.value = st==="open" ? (_pd.lockDate||pool.lockDate||"") : (_pd.openDate||pool.openDate||"");
+      }
+    }
+
+    sel.addEventListener("change", function(){
+      _updateDateContext(this.value);
     });
-    DB.ref("globalSettings/poolDates").set(updates, function(err){
-      if(err){ if(msgEl){ msgEl.style.color="#fca5a5"; msgEl.textContent="Save failed"; } return; }
-      SC._poolDates = updates;
-      if(msgEl){ msgEl.style.color="#6ee7b7"; msgEl.textContent="Dates saved ✓"; setTimeout(function(){ msgEl.textContent=""; },3000); }
-      // Run auto-snap after saving dates
-      autoSnapStatuses();
+
+    if(dateInput) dateInput.addEventListener("change", function(){
+      // Update countdown hint live
+      var _ts = new Date(this.value+"T12:00:00").getTime();
+      var _diff = _ts - Date.now();
+      if(!isNaN(_ts) && _diff > 0){
+        var _d=Math.floor(_diff/86400000), _h=Math.floor((_diff%86400000)/3600000);
+        hint.textContent = _d>0?_d+"d "+(_h>0?_h+"h":""):_h+"h";
+      } else {
+        hint.textContent = "";
+      }
+    });
+  });
+
+  var saveAllBtn = document.getElementById("btn-save-pool-status-dates");
+  if(saveAllBtn) saveAllBtn.addEventListener("click", function(){
+    if(!DB) return;
+    var msgEl = document.getElementById("psd-save-msg");
+    var dateUpdates = {};
+    var statusUpdates = {};
+    POOL_LIBRARY.forEach(function(pool){
+      var sel = document.getElementById("psd-status-"+pool.id);
+      var dateInput = document.getElementById("psd-date-"+pool.id);
+      if(!sel) return;
+      var newSt = sel.value;
+      var prevSt = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+      if(newSt !== prevSt) statusUpdates[pool.id] = newSt;
+
+      // Store the date in the right slot based on status
+      if(dateInput && dateInput.value){
+        var _pd = Object.assign({}, (SC._poolDates && SC._poolDates[pool.id])||{},
+          {openDate: pool.openDate||"", lockDate: pool.lockDate||""});
+        if(newSt==="open")         _pd.lockDate = dateInput.value;
+        else if(newSt==="coming-soon") _pd.openDate = dateInput.value;
+        dateUpdates[pool.id] = _pd;
+      } else {
+        dateUpdates[pool.id] = (SC._poolDates && SC._poolDates[pool.id]) ||
+          {openDate: pool.openDate||"", lockDate: pool.lockDate||""};
+      }
+    });
+
+    var dbWrites = [DB.ref("globalSettings/poolDates").set(dateUpdates)];
+    var statusPaths = {};
+    Object.keys(statusUpdates).forEach(function(pid){
+      statusPaths["globalSettings/statuses/"+pid] = statusUpdates[pid];
+    });
+    if(Object.keys(statusPaths).length) dbWrites.push(DB.ref().update(statusPaths));
+
+    Promise.all(dbWrites).then(function(){
+      SC._poolDates = dateUpdates;
+      Object.keys(statusUpdates).forEach(function(pid){
+        var prev = SC.globalStatuses[pid];
+        SC.globalStatuses[pid] = statusUpdates[pid];
+        setStatus(pid, statusUpdates[pid]); // triggers activity events
+      });
+      if(msgEl){ msgEl.style.color="#6ee7b7"; msgEl.textContent="Saved ✓"; setTimeout(function(){ msgEl.textContent=""; },3000); }
+    }).catch(function(){
+      if(msgEl){ msgEl.style.color="#fca5a5"; msgEl.textContent="Save failed"; }
     });
   });
 
