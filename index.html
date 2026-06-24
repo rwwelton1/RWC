@@ -548,6 +548,7 @@ var POOL_LIBRARY = [
     hasCut:false,         hasSalary:false,       teamSport:true,
     maxPicks:10,          capAmount:null,        entryCount:null,
     live:false,           liveSource:"manual",   recurring:true,
+    weeklyReopenDay:3,    weeklyReopenHour:12,   // 3=Wednesday, 12=noon ET
     tiebreaker:false,     year:2026
   },
   {
@@ -4385,7 +4386,7 @@ function renderAdmin() {
 
   h += '<div class="section-label">Pool Status &amp; Dates</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Status auto-snaps at saved dates. Soon→Open at open date, Open→Live at lock date. Final never auto-snaps.</div>';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Status auto-snaps at saved dates. Soon→Open at open date, Open→Live at lock date, Live→Final at end date. CFB auto-reopens every Wednesday at noon ET.</div>';
   h += '<div style="display:flex;flex-direction:column;gap:0">';
   POOL_LIBRARY.forEach(function(pool){
     var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
@@ -5833,6 +5834,24 @@ function autoSnapStatuses() {
     if(endDate){
       var endTs = _ts(endDate);
       if(endTs && now >= endTs) newSt = "complete";
+    }
+
+    // Weekly reopen pools (e.g. CFB): if locked and today is the reopen day/hour, flip to open
+    // Only if status hasn't already been manually set to complete
+    if(newSt === "locked" && pool.weeklyReopenDay !== undefined && st !== "complete"){
+      var _nowEt = (function(){
+        // Approximate ET offset: UTC-5 (EST) or UTC-4 (EDT)
+        var _jan = new Date(new Date().getFullYear(),0,1);
+        var _jul = new Date(new Date().getFullYear(),6,1);
+        var _isDST = new Date().getTimezoneOffset() < Math.max(_jan.getTimezoneOffset(), _jul.getTimezoneOffset());
+        return new Date(now + new Date().getTimezoneOffset()*60000 + (_isDST ? -4 : -5)*3600000);
+      })();
+      var _day  = _nowEt.getDay();   // 0=Sun
+      var _hour = _nowEt.getHours();
+      if(_day === pool.weeklyReopenDay && _hour >= pool.weeklyReopenHour){
+        // Only reopen if lock date is in the past (i.e. this isn't the same day as locking)
+        if(lockTs && now >= lockTs) newSt = "open";
+      }
     }
 
     if(newSt !== st) dbUpdates["globalSettings/statuses/"+pool.id] = newSt;
