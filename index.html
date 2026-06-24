@@ -4398,11 +4398,16 @@ function renderAdmin() {
   h += '</div>';
 
   h += '<div class="section-label">Set Results</div>';
-  h += '<div class="admin-panel"><div style="font-size:10px;color:#475569;margin-bottom:12px">Results are saved globally across all groups.</div>';
-  h += '<div id="admin-results-area"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
-  h += '<div style="display:flex;gap:8px;margin-top:12px">';
-  h += '<button class="save-results-btn" id="save-admin-results-btn" style="flex:1">Save Results</button>';
-  h += '<button class="btn btn-green" id="btn-auto-compute-results" style="font-size:11px;padding:8px 14px">&#9889; Auto-compute</button>';
+  h += '<div class="admin-panel" style="margin-bottom:16px">';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Select a group and pool to set winners. Results are saved per-group and globally for trophies.</div>';
+  h += '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
+  h += '<select id="res-group-select" class="form-input" style="flex:1;padding:8px 10px;font-size:12px"><option value="">— Select a group —</option></select>';
+  h += '<select id="res-pool-select" class="form-input" style="flex:1;padding:8px 10px;font-size:12px" disabled><option value="">— Select a pool —</option></select>';
+  h += '</div>';
+  h += '<div id="admin-results-area"></div>';
+  h += '<div style="display:flex;gap:8px;margin-top:12px" id="admin-results-btns" style="display:none">';
+  h += '<button class="save-results-btn" id="save-admin-results-btn" style="flex:1;display:none">Save Results</button>';
+  h += '<button class="btn btn-green" id="btn-auto-compute-results" style="font-size:11px;padding:8px 14px;display:none">&#9889; Auto-compute</button>';
   h += '</div>';
   h += '</div>';
 
@@ -4482,16 +4487,129 @@ function renderAdmin() {
     setPublicPool("wcGamePicks", !(SC.publicPools && SC.publicPools.wcGamePicks));
   });
 
-  loadAllGroups(function(groups){
-    var allPlayers = [];
+  // Results — group → pool cascade
+  loadAllGroups(function(groups) {
+    groups.sort(function(a,b){ return (a.name||"").localeCompare(b.name||""); });
+    var groupSel = document.getElementById("res-group-select");
+    var poolSel  = document.getElementById("res-pool-select");
+    var area     = document.getElementById("admin-results-area");
+    var saveBtnWrap = document.getElementById("admin-results-btns");
+    var saveBtn  = document.getElementById("save-admin-results-btn");
+    var autoBtn  = document.getElementById("btn-auto-compute-results");
+
     groups.forEach(function(g){
-      (g.players||[]).forEach(function(p){ if(p && allPlayers.indexOf(p)<0) allPlayers.push(p); });
+      var opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = (g.name||g.id) + " (" + g.id + ")";
+      groupSel.appendChild(opt);
     });
-    if(DB) {
-      DB.ref("globalSettings/results").once("value", function(sn){
-        buildResultsForm(allPlayers, sn.val()||{});
+
+    groupSel.addEventListener("change", function(){
+      var gid = this.value;
+      poolSel.innerHTML = '<option value="">— Select a pool —</option>';
+      poolSel.disabled = !gid;
+      area.innerHTML = "";
+      if(saveBtn) saveBtn.style.display = "none";
+      if(autoBtn) autoBtn.style.display = "none";
+      if(!gid) return;
+
+      var g = groups.find(function(g){ return g.id === gid; });
+      if(!g) return;
+      (g.pools||[]).forEach(function(pid){
+        var pool = poolById(pid);
+        if(!pool) return;
+        var opt = document.createElement("option");
+        opt.value = pid;
+        opt.textContent = pool.icon + " " + pool.name;
+        poolSel.appendChild(opt);
       });
-    } else buildResultsForm(allPlayers, {});
+    });
+
+    poolSel.addEventListener("change", function(){
+      var gid = groupSel.value;
+      var pid = this.value;
+      area.innerHTML = "";
+      if(saveBtn) saveBtn.style.display = "none";
+      if(autoBtn) autoBtn.style.display = "none";
+      if(!gid || !pid) return;
+
+      var g = groups.find(function(g){ return g.id === gid; });
+      var pool = poolById(pid);
+      if(!g || !pool) return;
+
+      var players = (g.players||[]).slice().sort();
+      var none = '<option value="">--</option>';
+      var opts = players.map(function(p){ return '<option value="'+x(p)+'">'+x(p)+'</option>'; }).join("");
+
+      // Load existing results for this group+pool
+      DB.ref("groups/"+gid+"/data/"+pid+"/results").once("value", function(sn){
+        var r = sn.val() || {};
+        var h = '<div style="margin-bottom:10px">';
+        h += '<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:8px">'+pool.icon+' '+x(pool.name)+' — '+x(g.name)+'</div>';
+        [["first","🥇 1st"],["second","🥈 2nd"],["third","🥉 3rd"]].forEach(function(pair){
+          h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+          h += '<div style="font-size:11px;font-weight:800;width:40px">'+pair[1]+'</div>';
+          h += '<select class="form-input" id="admin-res-'+pid+'-'+pair[0]+'" style="flex:1;padding:7px 10px;font-size:12px">'+none+opts+'</select>';
+          h += '</div>';
+        });
+        h += '</div>';
+        area.innerHTML = h;
+
+        // Pre-fill saved values
+        ["first","second","third"].forEach(function(place){
+          var el = document.getElementById("admin-res-"+pid+"-"+place);
+          if(el && r[place]) el.value = r[place];
+        });
+
+        if(saveBtn){ saveBtn.style.display = ""; saveBtn.setAttribute("data-gid", gid); saveBtn.setAttribute("data-pid", pid); }
+        if(autoBtn){ autoBtn.style.display = ""; autoBtn.setAttribute("data-gid", gid); autoBtn.setAttribute("data-pid", pid); }
+      });
+    });
+
+    if(saveBtn) saveBtn.addEventListener("click", function(){
+      var gid = this.getAttribute("data-gid");
+      var pid = this.getAttribute("data-pid");
+      if(!gid || !pid || !DB) return;
+      var r = {};
+      ["first","second","third"].forEach(function(place){
+        var el = document.getElementById("admin-res-"+pid+"-"+place);
+        if(el && el.value) r[place] = el.value;
+      });
+      // Write per-group result
+      DB.ref("groups/"+gid+"/data/"+pid+"/results").set(r, function(err){
+        if(err){ toast("Save failed","err"); return; }
+        // Also write to globalSettings/results for trophy/badge fanout
+        DB.ref("globalSettings/results/"+pid).set(r, function(){
+          toast("Results saved ✓","ok");
+          if(Object.keys(r).length) archiveTrophiesFromResults({[pid]: r});
+        });
+      });
+    });
+
+    if(autoBtn) autoBtn.addEventListener("click", function(){
+      var gid = this.getAttribute("data-gid");
+      var pid = this.getAttribute("data-pid");
+      if(!gid || !pid || !DB) return;
+      var btn = this; btn.disabled=true; btn.textContent="Computing…";
+      DB.ref("groups/"+gid+"/data/"+pid+"/scores").once("value", function(sn){
+        btn.disabled=false; btn.textContent="⚡ Auto-compute";
+        var scores = sn.val()||{};
+        if(!Object.keys(scores).length){ toast("No scores yet for this pool","err"); return; }
+        var g = groups.find(function(g){ return g.id === gid; });
+        var players = g ? (g.players||[]) : [];
+        var ranked = players.slice().sort(function(a,b){
+          var ak = a.toLowerCase().replace(/[^a-z0-9_]/g,"");
+          var bk = b.toLowerCase().replace(/[^a-z0-9_]/g,"");
+          return (scores[bk]||0) - (scores[ak]||0);
+        });
+        ["first","second","third"].forEach(function(place, i){
+          var el = document.getElementById("admin-res-"+pid+"-"+place);
+          if(el && ranked[i]) el.value = ranked[i];
+          else if(el) el.value = "";
+        });
+        toast("Auto-computed — review then save","ok");
+      });
+    });
   });
 
   // Purge inactive guests
@@ -5219,123 +5337,6 @@ function mergeGuestIntoUser(guestName, guestFbKey, targetUsername) {
         });
       });
     });
-  });
-}
-
-function buildResultsForm(players, globalResults) {
-  var area = document.getElementById("admin-results-area");
-  if(!area) return;
-  if(players.length===0){ area.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">No players found yet.</div>'; return; }
-  var none='<option value="">--</option>';
-  var opts=players.map(function(p){return'<option value="'+x(p)+'">'+x(p)+'</option>';}).join("");
-  var h="";
-  POOL_LIBRARY.forEach(function(pool){
-    h += '<div class="result-row"><div class="result-pool-name">'+pool.icon+' '+x(pool.name.split(" ")[0])+'</div><div class="result-selects">';
-    ["first","second","third"].forEach(function(place){
-      h += '<select class="result-select" id="admin-res-'+pool.id+'-'+place+'">'+none+opts+'</select>';
-    });
-    h += '</div></div>';
-  });
-  area.innerHTML = h;
-  POOL_LIBRARY.forEach(function(pool){
-    var r=(globalResults||{})[pool.id]||{};
-    ["first","second","third"].forEach(function(place){
-      var el=document.getElementById("admin-res-"+pool.id+"-"+place);
-      if(el && r[place]) el.value=r[place];
-    });
-  });
-  var srb = document.getElementById("save-admin-results-btn");
-  if(srb) srb.addEventListener("click", saveAdminResults);
-  var acb = document.getElementById("btn-auto-compute-results");
-  if(acb) acb.addEventListener("click", autoComputeResults);
-}
-
-function autoComputeResults() {
-  if(!DB){ toast("Firebase unavailable","err"); return; }
-  var btn = document.getElementById("btn-auto-compute-results");
-  if(btn){ btn.disabled=true; btn.textContent="Computing…"; }
-
-  DB.ref("groups").once("value", function(gsn){
-    var allGroups = gsn.val() || {};
-    // Aggregate scores per pool: {poolId: {playerName: totalPts}}
-    var poolTotals = {};
-
-    Object.keys(allGroups).forEach(function(gid){
-      var g = allGroups[gid];
-      var data = g.data || {};
-      POOL_LIBRARY.forEach(function(pool){
-        var scores = (data[pool.id] && data[pool.id].scores) ? data[pool.id].scores : null;
-        if(!scores) return;
-        if(!poolTotals[pool.id]) poolTotals[pool.id] = {};
-        Object.keys(scores).forEach(function(ukey){
-          var pts = Number(scores[ukey]) || 0;
-          if(pts <= 0) return;
-          // Match ukey back to a player name in this group
-          var players = g.players || [];
-          var matched = null;
-          for(var pi=0; pi<players.length; pi++){
-            var pk = players[pi].toLowerCase().replace(/[^a-z0-9_]/g,"");
-            if(pk === ukey){ matched = players[pi]; break; }
-          }
-          if(!matched) matched = ukey; // fallback
-          if(!poolTotals[pool.id][matched]) poolTotals[pool.id][matched] = 0;
-          poolTotals[pool.id][matched] += pts;
-        });
-      });
-    });
-
-    // Build new results from top 3 per pool
-    var newResults = {};
-    POOL_LIBRARY.forEach(function(pool){
-      var totals = poolTotals[pool.id];
-      if(!totals || !Object.keys(totals).length) return;
-      var sorted = Object.keys(totals).sort(function(a,b){ return totals[b]-totals[a]; });
-      var r = {};
-      if(sorted[0]) r.first  = sorted[0];
-      if(sorted[1]) r.second = sorted[1];
-      if(sorted[2]) r.third  = sorted[2];
-      newResults[pool.id] = r;
-    });
-
-    // Merge with existing results (don't overwrite pools with no live data)
-    DB.ref("globalSettings/results").once("value", function(sn){
-      var existing = sn.val() || {};
-      var merged = {};
-      // Start with existing
-      Object.keys(existing).forEach(function(k){ merged[k] = existing[k]; });
-      // Overwrite with computed where we have data
-      Object.keys(newResults).forEach(function(k){ merged[k] = newResults[k]; });
-
-      // Update the form dropdowns
-      POOL_LIBRARY.forEach(function(pool){
-        var r = (merged[pool.id]) || {};
-        ["first","second","third"].forEach(function(place){
-          var el = document.getElementById("admin-res-"+pool.id+"-"+place);
-          if(el && r[place]) el.value = r[place];
-          else if(el) el.value = "";
-        });
-      });
-
-      if(btn){ btn.disabled=false; btn.textContent="✓ Done — review & save"; }
-      toast("Auto-computed from scores — review then save", "ok");
-    });
-  });
-}
-
-function saveAdminResults() {
-  var newResults = {};
-  POOL_LIBRARY.forEach(function(pool){
-    var r={};
-    ["first","second","third"].forEach(function(place){
-      var el=document.getElementById("admin-res-"+pool.id+"-"+place);
-      if(el&&el.value) r[place]=el.value;
-    });
-    if(Object.keys(r).length>0) newResults[pool.id]=r;
-  });
-  if(DB) DB.ref("globalSettings/results").set(newResults, function(){
-    toast("Results saved &#10003;");
-    // Fan out trophy records to each affected user so they survive group deletion
-    archiveTrophiesFromResults(newResults);
   });
 }
 
