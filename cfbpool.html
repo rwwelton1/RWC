@@ -428,6 +428,9 @@ function loadData(){
     });
 
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+    DB.ref("globalSettings/statuses/cfb").on("value",function(sn){
+      window._cfbGlobalStatus=sn.val()||"coming-soon";
+    });
 
     // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
@@ -466,6 +469,7 @@ function loadData(){
         var meta=sn.val()||{};
         ST.weekIds=meta.weekIds||[];
         ST.weekLabels=meta.weekLabels||{};
+        ST._weekMeta=meta.weekMeta||{};
         if(!ST._weekInit&&ST.weekIds.length){
           ST.curWeek=currentWeekId(); ST._weekInit=true;
           // Pre-populate from cache for instant render
@@ -490,6 +494,47 @@ function loadData(){
       if(anyLocked) startResultSchedule();
     });
   });
+}
+
+// ── SEASON SETUP ──────────────────────────────────────────
+var SEASON_WEEK_DEFS = [
+  {label:"Week 1",           espnWeek:1,  seasontype:1},
+  {label:"Week 2",           espnWeek:2,  seasontype:2},
+  {label:"Week 3",           espnWeek:3,  seasontype:2},
+  {label:"Week 4",           espnWeek:4,  seasontype:2},
+  {label:"Week 5",           espnWeek:5,  seasontype:2},
+  {label:"Week 6",           espnWeek:6,  seasontype:2},
+  {label:"Week 7",           espnWeek:7,  seasontype:2},
+  {label:"Week 8",           espnWeek:8,  seasontype:2},
+  {label:"Week 9",           espnWeek:9,  seasontype:2},
+  {label:"Week 10",          espnWeek:10, seasontype:2},
+  {label:"Week 11",          espnWeek:11, seasontype:2},
+  {label:"Week 12",          espnWeek:12, seasontype:2},
+  {label:"Week 13",          espnWeek:13, seasontype:2},
+  {label:"Week 14",          espnWeek:14, seasontype:2},
+  {label:"Conf Championships",espnWeek:15,seasontype:2},
+  {label:"Bowl Season",      espnWeek:1,  seasontype:3},
+  {label:"Playoff",          espnWeek:5,  seasontype:3}
+];
+
+function setupSeason(year){
+  if(!DB||!year) return;
+  if(!confirm("Set up all "+SEASON_WEEK_DEFS.length+" weeks for "+year+"? Existing week structure will be replaced.")) return;
+  var weekIds=[], weekLabels={}, weekMeta={};
+  SEASON_WEEK_DEFS.forEach(function(def){
+    var id="w_"+def.label.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/g,"");
+    weekIds.push(id);
+    weekLabels[id]=def.label;
+    weekMeta[id]={espnWeek:def.espnWeek, espnYear:year, seasontype:def.seasontype};
+    var emptyGames={};
+    GAME_IDS.forEach(function(gid){ emptyGames[gid]={away:"",home:"",favSide:"home",spread:0,kickoff:""}; });
+    DB.ref(BASE+"/games/"+id).set(emptyGames);
+  });
+  ST.weekIds=weekIds; ST.weekLabels=weekLabels; ST.curWeek=weekIds[0]; ST._weekMeta=weekMeta;
+  DB.ref(BASE+"/meta").set({weekIds:weekIds, weekLabels:weekLabels, weekMeta:weekMeta});
+  DB.ref("globalSettings/statuses/cfb").set("coming-soon");
+  toast("✓ "+weekIds.length+" weeks ready. Weeks hidden until unlocked.");
+  draw();
 }
 
 // ── AUTO-RESULT FETCH SCHEDULE ────────────────────────────
@@ -537,9 +582,10 @@ function _inResultFetchWindow() {
 
 function startResultSchedule() {
   stopResultSchedule();
-  // Don't start if no weeks are currently locked
+  // Run if any week is locked OR global cfb status is locked
   var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
-  if(!anyLocked) return;
+  var globalLocked = (window._cfbGlobalStatus||"") === "locked";
+  if(!anyLocked && !globalLocked) return;
 
   function tick() {
     if (!_inResultFetchWindow()) return;
@@ -678,9 +724,10 @@ function startScoreRefresh(){
 function stopScoreRefresh(){clearInterval(_scTimer);_scTimer=null;}
 
 // ── ESPN SCHEDULE IMPORT (Admin) ───────────────────────────────────────────
-function fetchEspnSchedule(year,week){
+function fetchEspnSchedule(year,week,seasontype){
   ST.importLoading=true; ST.importError=""; draw();
-  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
+  var st=seasontype||2;
+  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype="+st+"&groups=80&limit=300";
   fetch(url)
     .then(function(r){return r.json();})
     .then(function(data){
@@ -689,12 +736,12 @@ function fetchEspnSchedule(year,week){
       ST.importSelected={};
       ST.importConf=null;
       ST.importTop25=false;
-      if(!ST.importGames.length) ST.importError="No games found for that week/year.";
+      if(!ST.importGames.length) ST.importError="No games found. Try a different week or year.";
       draw();
     })
     .catch(function(){
       ST.importLoading=false;
-      ST.importError="Could not reach ESPN. Check your connection and try again.";
+      ST.importError="Could not reach ESPN. Check your connection.";
       draw();
     });
 }
@@ -1170,93 +1217,95 @@ function toggleLock(weekId){
 
 function fetchAllResults(weekId){
   var weekLabel=ST.weekLabels[weekId]||"";
-  var year=ST.importYear||new Date().getFullYear();
-  var week=ST.importWeek||guessWeekNumber(weekLabel);
-  var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
+  var meta=(ST._weekMeta&&ST._weekMeta[weekId])||{};
+  var year=meta.espnYear||SEASON_YEAR||ST.importYear||new Date().getFullYear();
+  var week=meta.espnWeek||guessWeekNumber(weekLabel)||ST.importWeek||1;
+  var primaryType=meta.seasontype||2;
   var btn=document.getElementById("b-fetch-all-results");
   if(btn){btn.textContent="Fetching…";btn.disabled=true;}
-  fetch(url)
-    .then(function(r){return r.json();})
-    .then(function(data){
+
+  // Try stored seasontype first, then fall back through all others
+  var typesToTry=[primaryType];
+  [1,2,3].forEach(function(t){ if(t!==primaryType) typesToTry.push(t); });
+
+  function tryFetch(typeIdx){
+    if(typeIdx>=typesToTry.length){
       if(btn){btn.textContent="&#128202; Fetch All Results";btn.disabled=false;}
-      var events=(data&&data.events)||[];
-      var games=ST.games[weekId]||{};
-      var found=0;
-      GAME_IDS.forEach(function(gid){
-        var g=games[gid];
-        if(!g||!g.away||!g.home) return;
-        var normAway=normalizeTeamName(g.away);
-        var normHome=normalizeTeamName(g.home);
-        events.forEach(function(ev){
-          var comp=(ev.competitions||[])[0]||{};
-          var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
-          if(state!=="post") return;
-          var comps=comp.competitors||[];
-          var awayC=comps.find(function(c){return c.homeAway==="away";})||{};
-          var homeC=comps.find(function(c){return c.homeAway==="home";})||{};
-          var an=normalizeTeamName((awayC.team&&(awayC.team.shortDisplayName||awayC.team.displayName))||"");
-          var hn=normalizeTeamName((homeC.team&&(homeC.team.shortDisplayName||homeC.team.displayName))||"");
-        function nameMatch(espn, pool){
-          if(!espn||!pool||espn.length<3||pool.length<3) return false;
-          if(espn===pool) return true;
-          // Only use substring match if both strings are 4+ chars
-          if(espn.length>=4&&pool.length>=4){
-            return espn.indexOf(pool)>=0||pool.indexOf(espn)>=0;
-          }
-          return false;
+      toast("No final results found yet — try again after games complete");
+      return;
+    }
+    var st=typesToTry[typeIdx];
+    var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype="+st+"&groups=80&limit=300";
+    fetch(url)
+      .then(function(r){return r.json();})
+      .then(function(data){
+        var events=(data&&data.events)||[];
+        if(!events.length){ tryFetch(typeIdx+1); return; }
+        var games=ST.games[weekId]||{};
+        var found=0;
+        GAME_IDS.forEach(function(gid){
+          var g=games[gid];
+          if(!g||!g.away||!g.home) return;
+          var normAway=normalizeTeamName(g.away);
+          var normHome=normalizeTeamName(g.home);
+          events.forEach(function(ev){
+            var comp=(ev.competitions||[])[0]||{};
+            var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+            if(state!=="post") return;
+            var comps=comp.competitors||[];
+            var awayC=comps.find(function(c){return c.homeAway==="away";})||{};
+            var homeC=comps.find(function(c){return c.homeAway==="home";})||{};
+            var an=normalizeTeamName((awayC.team&&(awayC.team.shortDisplayName||awayC.team.displayName))||"");
+            var hn=normalizeTeamName((homeC.team&&(homeC.team.shortDisplayName||homeC.team.displayName))||"");
+            function nameMatch(espn,pool){
+              if(!espn||!pool||espn.length<3||pool.length<3) return false;
+              if(espn===pool) return true;
+              if(espn.length>=4&&pool.length>=4) return espn.indexOf(pool)>=0||pool.indexOf(espn)>=0;
+              return false;
+            }
+            if(!nameMatch(an,normAway)||!nameMatch(hn,normHome)) return;
+            var aScore=parseInt(awayC.score)||0;
+            var hScore=parseInt(homeC.score)||0;
+            var sp=parseFloat(g.spread)||0;
+            var result;
+            if(!sp||g.favSide==="even"){
+              result=aScore>hScore?"away":hScore>aScore?"home":"push";
+            } else {
+              var favored=g.favSide==="away"?aScore:hScore;
+              var underdog=g.favSide==="away"?hScore:aScore;
+              var margin=favored-underdog;
+              if(Math.abs(margin-sp)<0.01) result="push";
+              else result=margin>sp?g.favSide:(g.favSide==="away"?"home":"away");
+            }
+            if(!(ST.results[weekId]||{})[gid]){ setResult(weekId,gid,result); found++; }
+          });
+        });
+        // Tiebreaker
+        var tb=ST.tiebreaker[weekId]||{};
+        if(tb.away&&tb.home&&tb.actual==null){
+          var normTbA=normalizeTeamName(tb.away), normTbH=normalizeTeamName(tb.home);
+          events.forEach(function(ev){
+            var comp=(ev.competitions||[])[0]||{};
+            if((comp.status&&comp.status.type&&comp.status.type.state)!=="post") return;
+            var comps=comp.competitors||[];
+            var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+            var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+            var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
+            var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
+            function tbMatch(e,p){ return e&&p&&(e===p||(e.length>=4&&p.length>=4&&(e.indexOf(p)>=0||p.indexOf(e)>=0))); }
+            if(tbMatch(an,normTbA)&&tbMatch(hn,normTbH)){
+              setTiebreakerField(weekId,"actual",(parseInt(ac.score)||0)+(parseInt(hc.score)||0));
+              found++;
+            }
+          });
         }
-        var awayMatch=nameMatch(an,normAway);
-        var homeMatch=nameMatch(hn,normHome);
-          if(!awayMatch||!homeMatch) return;
-          var aScore=parseInt(awayC.score)||0;
-          var hScore=parseInt(homeC.score)||0;
-          // Determine spread result
-          var sp=parseFloat(g.spread)||0;
-          var result;
-          if(!sp||g.favSide==="even"){
-            result=aScore>hScore?"away":hScore>aScore?"home":"push";
-          } else {
-            var favored=g.favSide==="away"?aScore:hScore;
-            var underdog=g.favSide==="away"?hScore:aScore;
-            var margin=favored-underdog;
-            if(Math.abs(margin-sp)<0.01) result="push";
-            else result=margin>sp?g.favSide:(g.favSide==="away"?"home":"away");
-          }
-          var existing=(ST.results[weekId]||{})[gid];
-          if(!existing){
-            setResult(weekId,gid,result);
-            found++;
-          }
-        });
-      });
-      // Also check tiebreaker
-      var tb=ST.tiebreaker[weekId]||{};
-      if(tb.away&&tb.home&&tb.actual==null){
-        var normTbA=normalizeTeamName(tb.away), normTbH=normalizeTeamName(tb.home);
-        events.forEach(function(ev){
-          var comp=(ev.competitions||[])[0]||{};
-          if((comp.status&&comp.status.type&&comp.status.type.state)!=="post") return;
-          var comps=comp.competitors||[];
-          var ac=comps.find(function(c){return c.homeAway==="away";})||{};
-          var hc=comps.find(function(c){return c.homeAway==="home";})||{};
-          var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
-          var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
-          function tbMatch(e,p){ return e&&p&&(e===p||(e.length>=4&&p.length>=4&&(e.indexOf(p)>=0||p.indexOf(e)>=0))); }
-          if(tbMatch(an,normTbA)&&tbMatch(hn,normTbH)){
-            var total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
-            setTiebreakerField(weekId,"actual",total);
-            found++;
-          }
-        });
-      }
-      if(found>0) toast("&#10003; Auto-filled "+found+" result"+(found!==1?"s":""));
-      else toast("No final results found yet — try again after games complete");
-      draw();
-    })
-    .catch(function(){
-      if(btn){btn.textContent="&#128202; Fetch All Results";btn.disabled=false;}
-      toast("Could not reach ESPN");
-    });
+        if(btn){btn.textContent="&#128202; Fetch All Results";btn.disabled=false;}
+        if(found>0){ toast("&#10003; Auto-filled "+found+" result"+(found!==1?"s":"")); draw(); }
+        else tryFetch(typeIdx+1);
+      })
+      .catch(function(){ tryFetch(typeIdx+1); });
+  }
+  tryFetch(0);
 }
 
 function setGroupPublic(val){
@@ -1271,10 +1320,16 @@ function setGroupPublic(val){
 
 // ── Renderers ────────────────────────────────────────────
 function weekDropdown(curWeek, extraContent){
-  // Single dropdown showing all weeks, with optional extra content (like Compare button)
   var h='<div class="week-select-bar">';
   h+='<select class="week-select-main" id="week-dropdown">';
-  ST.weekIds.forEach(function(w){
+  // Build visible weeks: admin sees all, players see only open/completed weeks
+  var showWeeks=ST.admin?ST.weekIds:ST.weekIds.filter(function(w){
+    if(ST.locked[w]) return true;
+    if(w===currentWeekId()) return true;
+    var games=ST.games[w]||{};
+    return GAME_IDS.some(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
+  });
+  showWeeks.forEach(function(w){
     var lbl=ST.weekLabels[w]||w;
     var isCurrent=w===currentWeekId();
     var isLocked=!!ST.locked[w];
@@ -1368,9 +1423,18 @@ function renderPicks(){
     h+='<div class="lb-note" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:32px 16px"><span style="font-size:18px">&#127944;</span><span>Loading picks…</span></div>';
     return h;
   }
-  if(ST.weekIds.length===0){
-    h+='<div class="lb-note">No weeks have been set up yet. '+(ST.admin?'Head to the Admin tab to add Week 1 and its 10 games.':'Check back once your admin sets up Week 1.')+'</div>';
-    return h;
+  // Players only see weeks that have been opened (unlocked with games, or previously locked)
+  // Admin sees all weeks
+  var visibleWeekIds=ST.weekIds;
+  if(!ST.admin){
+    visibleWeekIds=ST.weekIds.filter(function(w){
+      if(ST.locked[w]) return true; // completed weeks always visible
+      if(w===currentWeekId()) return true; // current open week
+      // Has any games been filled in? If yes it's been opened
+      var games=ST.games[w]||{};
+      var hasGames=GAME_IDS.some(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
+      return hasGames;
+    });
   }
   var weekId=ST.curWeek||currentWeekId();
   // All weeks locked — show a clear message
@@ -1675,18 +1739,24 @@ function renderStandings(){
 }
 
 function renderImportPanel(weekId){
-  var year=ST.importYear||2026;
-  var week=ST.importWeek||guessWeekNumber(ST.weekLabels[weekId]);
+  var meta=(ST._weekMeta&&ST._weekMeta[weekId])||{};
+  var year=meta.espnYear||ST.importYear||new Date().getFullYear();
+  // Build week options from SEASON_WEEK_DEFS
+  var weekOpts=SEASON_WEEK_DEFS.map(function(def,i){
+    var sel=(meta.espnWeek===def.espnWeek&&meta.seasontype===def.seasontype)||
+            (!meta.espnWeek&&ST.importWeek===def.espnWeek&&(ST.importSeasontype||2)===def.seasontype);
+    return '<option value="'+i+'"'+(sel?" selected":"")+'>'+def.label+'</option>';
+  }).join("");
   var CONFS=[
     {v:"1",l:"ACC"},{v:"4",l:"Big 12"},{v:"5",l:"Big Ten"},{v:"9",l:"SEC"},
     {v:"17",l:"AAC"},{v:"8",l:"MWC"},{v:"151",l:"Sun Belt"},
     {v:"37",l:"CUSA"},{v:"18",l:"MAC"},{v:"48",l:"Ind"}
   ];
   var h='<div class="adm-game">';
-  h+='<div class="adm-game-title">College Football Schedule &mdash; FBS (via ESPN)</div>';
+  h+='<div class="adm-game-title">Import Games from ESPN</div>';
   h+='<div class="adm-row">';
   h+='<input class="adm-input" id="imp-year" type="number" placeholder="Year" value="'+year+'" style="max-width:80px">';
-  h+='<input class="adm-input" id="imp-week" type="number" placeholder="Week #" value="'+week+'" style="max-width:80px">';
+  h+='<select class="adm-input" id="imp-week-sel" style="flex:1">'+weekOpts+'</select>';
   h+='<button class="btn btn-gold" id="b-fetch-espn" style="flex-shrink:0">'+(ST.importLoading?"Loading\u2026":"Fetch Games")+'</button>';
   h+='</div>';
 
@@ -1766,6 +1836,13 @@ function renderAdmin(){
     h+='</div>';
     h+='</div>';
   }
+  h+='<div class="adm-sec-label">Season Setup</div>';
+  h+='<div class="adm-game">';
+  h+='<div class="adm-game-title">Pre-populate all weeks (1–14 + Conf Championships + Bowls + Playoff) at once. Games are hidden from players until you open each week.</div>';
+  h+='<div class="adm-row">';
+  h+='<input class="adm-input" id="setup-season-year" type="number" placeholder="Year e.g. 2026" value="'+(new Date().getFullYear())+'" style="max-width:100px">';
+  h+='<button class="btn btn-gold" id="b-setup-season">&#127944; Set Up Season</button>';
+  h+='</div></div>';
   h+='<div class="adm-sec-label">Weeks</div>';
   h+='<div style="display:flex;gap:6px;padding:8px 10px;background:var(--cream);border-bottom:2px solid var(--border2);align-items:center">';
   h+='<input class="adm-input" id="new-week-label" placeholder="Week label (e.g. Week 1)" style="flex:1;margin:0">';
@@ -2463,6 +2540,10 @@ function bind(){
     if(acc) acc.classList.toggle("open");
   });
 
+  el=document.getElementById("b-setup-season"); if(el) el.addEventListener("click",function(){
+    var y=parseInt((document.getElementById("setup-season-year")||{}).value)||new Date().getFullYear();
+    setupSeason(y);
+  });
   el=document.getElementById("b-addweek"); if(el) el.addEventListener("click",addWeek);
   el=document.getElementById("b-delweek"); if(el) el.addEventListener("click",function(){removeWeek(ST.curWeek);});
   el=document.getElementById("b-lockweek"); if(el) el.addEventListener("click",function(){toggleLock(ST.curWeek);});
@@ -2488,24 +2569,34 @@ function bind(){
   el=document.getElementById("b-fetch-all-results"); if(el) el.addEventListener("click",function(){ fetchAllResults(ST.curWeek); });
   el=document.getElementById("b-copy-week"); if(el) el.addEventListener("change",function(){ if(this.value) copyWeekGames(this.value, ST.curWeek); this.value=""; });
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){
-    if(ST.showImport&&!ST.importWeek) ST.importWeek=guessWeekNumber(ST.weekLabels[ST.curWeek]);
-    if(ST.showImport&&!ST.importYear) ST.importYear=2026;
-    draw();
+    ST.showImport=!ST.showImport; draw();
   });
-  el=document.getElementById("imp-year"); if(el) el.addEventListener("change",function(){ST.importYear=parseInt(this.value)||2026;});
-  el=document.getElementById("imp-week"); if(el) el.addEventListener("change",function(){ST.importWeek=parseInt(this.value)||1;});
+  el=document.getElementById("imp-year"); if(el) el.addEventListener("change",function(){ST.importYear=parseInt(this.value)||new Date().getFullYear();});
+  el=document.getElementById("imp-week-sel"); if(el) el.addEventListener("change",function(){
+    var def=SEASON_WEEK_DEFS[parseInt(this.value)];
+    if(def){ ST.importWeek=def.espnWeek; ST.importSeasontype=def.seasontype; }
+  });
   el=document.getElementById("b-imp-top25"); if(el) el.addEventListener("click",function(){ ST.importTop25=!ST.importTop25; draw(); });
   els=document.querySelectorAll(".imp-conf-pill[data-conf]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     var v=this.getAttribute("data-conf");
-    ST.importConf=(ST.importConf===v)?null:v; // toggle off if same
+    ST.importConf=(ST.importConf===v)?null:v;
     draw();
   });
   el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
-    var yEl=document.getElementById("imp-year"), wEl=document.getElementById("imp-week");
-    ST.importYear=parseInt(yEl.value)||2026;
-    ST.importWeek=parseInt(wEl.value)||1;
-    fetchEspnSchedule(ST.importYear,ST.importWeek);
+    var yEl=document.getElementById("imp-year");
+    var wIdx=parseInt((document.getElementById("imp-week-sel")||{}).value)||0;
+    var def=SEASON_WEEK_DEFS[wIdx]||SEASON_WEEK_DEFS[0];
+    ST.importYear=parseInt((yEl&&yEl.value))||new Date().getFullYear();
+    ST.importWeek=def.espnWeek;
+    ST.importSeasontype=def.seasontype;
+    // Save ESPN meta to this week so fetchAllResults always works
+    if(ST.curWeek&&DB){
+      if(!ST._weekMeta) ST._weekMeta={};
+      ST._weekMeta[ST.curWeek]={espnWeek:def.espnWeek, espnYear:ST.importYear, seasontype:def.seasontype};
+      DB.ref(BASE+"/meta/weekMeta/"+ST.curWeek).set(ST._weekMeta[ST.curWeek]);
+    }
+    fetchEspnSchedule(ST.importYear, ST.importWeek, def.seasontype);
   });
   els=document.querySelectorAll("[data-imp-idx]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
