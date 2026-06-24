@@ -291,7 +291,7 @@ for(var _gi=1;_gi<=10;_gi++) GAME_IDS.push("g"+_gi);
 
 var ST={
   page:(PUBLIC_VIEW?"standings":"picks"),
-  user:URL_USER||null,
+  user:(function(){ if(URL_USER) return URL_USER; try{ return localStorage.getItem("cfb_user_"+(GROUP_ID||"g"))||null; }catch(e){ return null; } })(),
   viewUser:null,
   admin:false,
   weekIds:[],
@@ -979,7 +979,36 @@ function setConf(weekId,gid,confRaw){
   }
 }
 
-// Update pick row highlighting in-place for a single game
+function shareMyPicks(weekId){
+  var uk=ukey(ST.user);
+  var picks=((ST.picks[weekId]||{})[uk])||{};
+  var games=ST.games[weekId]||{};
+  var active=activeGames(weekId);
+  var label=ST.weekLabels[weekId]||weekId;
+  var lines=["📋 "+x(ST.user)+" – "+label+" Picks"];
+  // Sort by conf desc
+  var sorted=active.slice().sort(function(a,b){
+    return (Number((picks[b]||{}).conf)||0)-(Number((picks[a]||{}).conf)||0);
+  });
+  sorted.forEach(function(gid){
+    var g=games[gid]||{};
+    var p=picks[gid]||{};
+    if(!p.side) return;
+    var team=p.side==="away"?g.away:g.home;
+    var spread=spreadLabel(g,p.side);
+    var conf=p.conf?"("+p.conf+")":"";
+    lines.push("  "+team+" "+spread+" "+conf);
+  });
+  var unpicked=active.filter(function(gid){ return !picks[gid]||!picks[gid].side; }).length;
+  if(unpicked) lines.push("  ⚠ "+unpicked+" unpicked");
+  var text=lines.join("\n");
+  if(navigator.share){
+    navigator.share({text:text}).catch(function(){});
+  } else {
+    try{ navigator.clipboard.writeText(text); toast("Picks copied to clipboard ✓"); }
+    catch(e){ toast(text.substring(0,80)+"…"); }
+  }
+}
 function _updatePickDom(weekId, gid, side){
   var rows=document.querySelectorAll('[data-pick-week="'+weekId+'"][data-pick-gid="'+gid+'"]');
   rows.forEach(function(row){
@@ -1401,6 +1430,7 @@ function renderPicks(){
       }
     }
     if(ST.user) h+='<button class="btn btn-ghost" id="b-reset-conf" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#8635;</button>';
+    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#128279;</button>';
     if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
   h+='</div>';
@@ -1499,9 +1529,8 @@ function renderPicks(){
 
 function renderStandings(){
   var SEASON_WEEKS=ST.weekIds.length||15;
-  // Max pts = N*(N+1)/2 where N = games that week; use the max across all weeks
   var MAX_PTS_PER_WEEK=(function(){
-    var max=55; // fallback
+    var max=55;
     ST.weekIds.forEach(function(w){ var n=activeGames(w).length; if(n>0) max=Math.max(max,n*(n+1)/2); });
     return max;
   })();
@@ -1515,20 +1544,31 @@ function renderStandings(){
   var weeksPlayed=completedWeeks.length;
   var weeksRemaining=Math.max(0, SEASON_WEEKS - weeksPlayed);
 
+  // Split completed weeks: show last 3, collapse the rest into "History"
+  var RECENT_COUNT=3;
+  var historyWeeks=completedWeeks.length>RECENT_COUNT?completedWeeks.slice(0,-RECENT_COUNT):[];
+  var recentWeeks=completedWeeks.length>RECENT_COUNT?completedWeeks.slice(-RECENT_COUNT):completedWeeks;
+  var showHistory=ST._standingsShowHistory||false;
+  var visibleWeeks=showHistory?completedWeeks:recentWeeks;
+
   var rows=PARTS.map(function(p){
     var total=seasonScore(p);
     var weekScores={};
     ST.weekIds.forEach(function(w){ weekScores[w]=weekScore(w,p); });
-    // Possible = total earned so far + max pts from all remaining weeks
     var possible=total + (weeksRemaining * MAX_PTS_PER_WEEK);
-    return {name:p,total:total,possible:possible,weekScores:weekScores};
+    // Best/worst week stats
+    var bestWk=null, bestPts=-1, worstWk=null, worstPts=999;
+    completedWeeks.forEach(function(w){
+      var ws=weekScores[w];
+      if(ws.total>bestPts){ bestPts=ws.total; bestWk=w; }
+      if(ws.total<worstPts){ worstPts=ws.total; worstWk=w; }
+    });
+    return {name:p,total:total,possible:possible,weekScores:weekScores,bestWk:bestWk,bestPts:bestPts,worstWk:worstWk,worstPts:worstPts};
   });
   rows.sort(function(a,b){return b.total-a.total;});
 
-  // Leader's current total — a player is eliminated if their possible < leader's total
   var leaderTotal=rows.length?rows[0].total:0;
 
-  // Per-week best/worst for color coding
   var weekBest={}, weekWorst={};
   completedWeeks.forEach(function(w){
     var scores=PARTS.map(function(p){ return weekScore(w,p).total; });
@@ -1536,18 +1576,26 @@ function renderStandings(){
     weekWorst[w]=Math.min.apply(null,scores);
   });
 
+  // Controls row above table
+  h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--cream);border-bottom:1px solid var(--border2)">';
+  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played &middot; '+weeksRemaining+' remaining</div>';
+  if(historyWeeks.length){
+    h+='<button id="b-toggle-history" style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif">'+(showHistory?'&#8249; Hide history':'&#128202; History ('+historyWeeks.length+')')+'</button>';
+  }
+  h+='</div>';
+
   h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
   h+='<th style="position:sticky;left:0;z-index:3;background:var(--cream);width:28px;min-width:28px;text-align:center;font-size:9px;padding:6px 4px;border-right:1px solid var(--border2)">#</th>';
   h+='<th data-sort-name="1" style="position:sticky;left:28px;z-index:3;background:var(--cream);min-width:100px;cursor:pointer;text-align:left;padding:6px 8px;border-right:2px solid var(--border)">Players</th>';
   h+='<th data-sort-total="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:9px">Pts</th>';
   h+='<th data-sort-possible="1" style="cursor:pointer;min-width:48px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
 
-  completedWeeks.forEach(function(w){
+  visibleWeeks.forEach(function(w){
     h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:58px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
   });
 
   if(curWeekId&&!curLocked){
-    h+='<th style="min-width:62px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'</th>';
+    h+='<th style="min-width:62px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'<div style="font-size:7px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">picks</div></th>';
   }
 
   h+='</tr></thead><tbody>';
@@ -1562,19 +1610,18 @@ function renderStandings(){
 
     h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(ukey(r.name))+'">';
 
-    // Rank
     var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
     h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+'</td>';
 
-    // Name
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+x(r.name)+'</td>';
+    // Name + best/worst week callout
+    var bestLabel=r.bestWk&&completedWeeks.length>1?'<span style="font-size:7px;color:var(--green);font-weight:700"> ▲'+r.bestPts+'</span>':'';
+    var worstLabel=r.worstWk&&completedWeeks.length>1&&r.worstWk!==r.bestWk?'<span style="font-size:7px;color:var(--red2);font-weight:700"> ▼'+r.worstPts+'</span>':'';
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+x(r.name)+bestLabel+worstLabel+'</td>';
 
-    // Points earned
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
     h+='</td>';
 
-    // Points possible
     var isEliminated=weeksRemaining>0&&r.possible<leaderTotal&&rank>1;
     h+='<td style="text-align:center;padding:7px 6px">';
     if(isEliminated){
@@ -1584,18 +1631,14 @@ function renderStandings(){
     }
     h+='</td>';
 
-    // Week score cells
-    completedWeeks.forEach(function(w){
+    visibleWeeks.forEach(function(w){
       var ws=r.weekScores[w];
       var isBest=ws.total>0&&ws.total===weekBest[w];
       var isWorst=ws.total===weekWorst[w]&&weekBest[w]!==weekWorst[w];
       var col=isBest?'var(--green)':isWorst?'var(--red2)':'var(--text)';
       var bg=isBest?'rgba(93,186,74,.1)':isWorst?'rgba(232,85,85,.1)':'';
       var weight=isBest||isWorst?'900':'700';
-      // Tiebreaker asterisk: week locked, tied for best, tiebreaker actual set
       var tbW=ST.tiebreaker[w]||{};
-      var tbDecided=tbW.actual!=null&&isBest&&weekBest[w]===weekWorst[w]===false;
-      // Check if any other player also has the best score (tied)
       var tiedForBest=isBest&&PARTS.filter(function(p){return weekScore(w,p).total===weekBest[w];}).length>1;
       var showAsterisk=tiedForBest&&tbW.actual!=null;
       h+='<td style="text-align:center;padding:7px 6px'+(bg?';background:'+bg:'')+'">';
@@ -1608,7 +1651,6 @@ function renderStandings(){
       h+='</td>';
     });
 
-    // Current open week progress
     if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
@@ -1781,12 +1823,32 @@ function renderAdmin(){
     h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even">Pick &#39;em</button>';
     h+='</div>';
     h+='<div class="adm-row">';
-    h+='<input class="adm-input" type="number" step="0.5" placeholder="e.g. -12.5" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
-    h+='<input class="adm-input" placeholder="Kickoff (e.g. Sat 3:30pm ET)" value="'+x(g.kickoff||"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoff">';
+    h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
+    h+='<input class="adm-input" placeholder="Kickoff e.g. Sat 3:30 PM ET" value="'+x(g.kickoff||"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoff">';
     h+='</div>';
     if(g.away&&g.home){
       var r=(ST.results[weekId]||{})[gid];
+      // Look up live/final score from scoreboard data
+      var _scoreStr="";
+      if(_scData&&_scData.events){
+        var nAway=normalizeTeamName(g.away), nHome=normalizeTeamName(g.home);
+        _scData.events.forEach(function(ev){
+          var comp=(ev.competitions||[])[0]||{};
+          var comps=comp.competitors||[];
+          var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+          var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+          var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
+          var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
+          function m(e,p){return e&&p&&e.length>=3&&p.length>=3&&(e===p||e.indexOf(p)>=0||p.indexOf(e)>=0);}
+          if(m(an,nAway)&&m(hn,nHome)){
+            var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+            var asc=ac.score!=null?ac.score:"–", hsc=hc.score!=null?hc.score:"–";
+            if(state==="in"||state==="post") _scoreStr=x(g.away)+' '+asc+' – '+hsc+' '+x(g.home)+(state==="in"?' 🔴':'');
+          }
+        });
+      }
       h+='<div class="adm-btns">';
+      if(_scoreStr) h+='<div style="font-size:9px;font-weight:800;color:var(--muted);width:100%;margin-bottom:4px">'+_scoreStr+'</div>';
       h+='<button class="adm-btn'+(r==="away"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-result="away">'+x(g.away)+' covers</button>';
       h+='<button class="adm-btn'+(r==="push"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-result="push">Push</button>';
       h+='<button class="adm-btn'+(r==="home"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-result="home">'+x(g.home)+' covers</button>';
@@ -2090,11 +2152,17 @@ function bind(){
   });
 
   els=document.querySelectorAll(".user-btn");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");ST.viewUser=null;draw();});
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    ST.user=this.getAttribute("data-user");
+    ST.viewUser=null;
+    try{ localStorage.setItem("cfb_user_"+(GROUP_ID||"g"),ST.user); }catch(e){}
+    draw();
+  });
 
   el=document.getElementById("week-dropdown"); if(el) el.addEventListener("change",function(){
     var prev=ST.curWeek;
     ST.curWeek=this.value;
+    _picksSorted=false; _picksOriginalOrder=null;
     // Re-subscribe picks for new week if not already loaded
     if(ST.curWeek!==prev&&ST._subscribePicksForWeek){
       if(!ST.picks[ST.curWeek]) ST._subscribePicksForWeek(ST.curWeek);
@@ -2110,29 +2178,43 @@ function bind(){
     if(banner) banner.style.display="none";
   });
 
-  // Sort picks by confidence (desc) — unpicked games float to top
+  // Sort picks by confidence (desc) — toggle between sorted and original order
+  var _picksSorted=false, _picksOriginalOrder=null;
   el=document.getElementById("b-sort-picks"); if(el) el.addEventListener("click",function(){
     var wrap=document.getElementById("games-wrap");
     if(!wrap) return;
-    var cards=Array.prototype.slice.call(wrap.children);
-    cards.sort(function(a,b){
-      // Get conf value from data-gid attribute
-      var aGid=a.getAttribute("data-gid")||(a.querySelector("[data-pick-gid]")||{}).getAttribute&&a.querySelector("[data-pick-gid]").getAttribute("data-pick-gid")||"";
-      var bGid=b.getAttribute("data-gid")||(b.querySelector("[data-pick-gid]")||{}).getAttribute&&b.querySelector("[data-pick-gid]").getAttribute("data-pick-gid")||"";
-      var weekId=ST.curWeek||currentWeekId();
-      var uk=ukey(ST.user);
-      var aConf=Number(((ST.picks[weekId]||{})[uk]||{})[aGid]&&((ST.picks[weekId]||{})[uk]||{})[aGid].conf)||0;
-      var bConf=Number(((ST.picks[weekId]||{})[uk]||{})[bGid]&&((ST.picks[weekId]||{})[uk]||{})[bGid].conf)||0;
-      var aPicked=!!(((ST.picks[weekId]||{})[uk]||{})[aGid]&&((ST.picks[weekId]||{})[uk]||{})[aGid].side);
-      var bPicked=!!(((ST.picks[weekId]||{})[uk]||{})[bGid]&&((ST.picks[weekId]||{})[uk]||{})[bGid].side);
-      // Unpicked floats to top, then sort by conf desc
-      if(!aPicked&&bPicked) return -1;
-      if(aPicked&&!bPicked) return 1;
-      return bConf-aConf;
-    });
-    cards.forEach(function(c){ wrap.appendChild(c); });
-    this.textContent="&#8645; Sorted";
-    this.style.color="var(--green)";
+    if(_picksSorted){
+      // Restore original order
+      if(_picksOriginalOrder){
+        _picksOriginalOrder.forEach(function(c){ wrap.appendChild(c); });
+      }
+      _picksSorted=false;
+      this.innerHTML="&#8645; Sort";
+      this.style.color="var(--muted)";
+    } else {
+      // Save original order before sorting
+      _picksOriginalOrder=Array.prototype.slice.call(wrap.children);
+      var cards=_picksOriginalOrder.slice();
+      cards.sort(function(a,b){
+        var aGid=a.getAttribute("data-gid")||"";
+        var bGid=b.getAttribute("data-gid")||"";
+        if(!aGid){ var aq=a.querySelector("[data-pick-gid]"); if(aq) aGid=aq.getAttribute("data-pick-gid"); }
+        if(!bGid){ var bq=b.querySelector("[data-pick-gid]"); if(bq) bGid=bq.getAttribute("data-pick-gid"); }
+        var weekId=ST.curWeek||currentWeekId();
+        var uk=ukey(ST.user);
+        var ap=((ST.picks[weekId]||{})[uk]||{})[aGid]||{};
+        var bp=((ST.picks[weekId]||{})[uk]||{})[bGid]||{};
+        var aConf=Number(ap.conf)||0, bConf=Number(bp.conf)||0;
+        var aPicked=!!ap.side, bPicked=!!bp.side;
+        if(!aPicked&&bPicked) return -1;
+        if(aPicked&&!bPicked) return 1;
+        return bConf-aConf;
+      });
+      cards.forEach(function(c){ wrap.appendChild(c); });
+      _picksSorted=true;
+      this.innerHTML="&#8645; Unsort";
+      this.style.color="var(--green)";
+    }
   });
 
   // Undo pick
@@ -2153,7 +2235,12 @@ function bind(){
     _updateProgressBar(u.weekId);
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
   });
-  el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
+  el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){
+    ST.user=null; ST.viewUser=null;
+    try{ localStorage.removeItem("cfb_user_"+(GROUP_ID||"g")); }catch(e){}
+    draw();
+  });
+  el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||currentWeekId()); });
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
 
   // Tiebreaker guess input (picks tab)
@@ -2310,8 +2397,9 @@ function bind(){
     });
     rows.forEach(function(r){ stTbody.appendChild(r); });
   }
-  el=document.querySelector("th[data-sort-total]");
-  if(el) el.addEventListener("click",function(){ stSortRows("data-total"); });
+  el=document.getElementById("b-toggle-history"); if(el) el.addEventListener("click",function(){
+    ST._standingsShowHistory=!ST._standingsShowHistory; draw();
+  });
   el=document.querySelector("th[data-sort-possible]");
   if(el) el.addEventListener("click",function(){ stSortRows("data-possible"); });
   els=document.querySelectorAll("th[data-sort-week]");
@@ -2458,8 +2546,22 @@ function bind(){
     label.addEventListener("mouseleave",cancelPress);
   })(els[i]);
 
+var _fieldDebounce={};
   els=document.querySelectorAll(".adm-input[data-field]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("input",function(){
+    var el=this;
+    var key=el.getAttribute("data-week")+"_"+el.getAttribute("data-gid")+"_"+el.getAttribute("data-field");
+    clearTimeout(_fieldDebounce[key]);
+    _fieldDebounce[key]=setTimeout(function(){
+      var v=el.value;
+      if(el.getAttribute("data-field")==="spread") v=Math.abs(parseFloat(v))||0;
+      setGameField(el.getAttribute("data-week"),el.getAttribute("data-gid"),el.getAttribute("data-field"),v);
+    },800);
+  });
+  // Keep change handler for blur/enter confirmation
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
+    var key=this.getAttribute("data-week")+"_"+this.getAttribute("data-gid")+"_"+this.getAttribute("data-field");
+    clearTimeout(_fieldDebounce[key]);
     var v=this.value;
     if(this.getAttribute("data-field")==="spread") v=Math.abs(parseFloat(v))||0;
     setGameField(this.getAttribute("data-week"),this.getAttribute("data-gid"),this.getAttribute("data-field"),v);
