@@ -1551,10 +1551,9 @@ function renderProfile() {
   h += '</div>';
 
   // My Groups section — cards with standings
-  h += '<div id="activity-feed-wrap" style="margin-top:16px">';
+  h += '<div id="activity-feed-wrap" style="margin-top:16px;display:none">';
   h += '<div class="feed-header"><span class="section-label" style="margin:0">Activity</span><button class="feed-dismiss-all" id="btn-dismiss-all-feed" onclick="dismissAllFeed()">Dismiss all</button></div>';
   h += '<div class="standings-card" style="margin-bottom:16px;padding:8px 14px" id="activity-feed">';
-  h += '<div style="text-align:center;padding:8px;font-size:11px;color:var(--muted)">Loading...</div>';
   h += '</div></div>';
   h += '<div class="section-label">My Groups</div>';
   h += '<button id="btn-create-profile" style="display:block;width:100%;padding:12px;margin-bottom:12px;border-radius:10px;border:2px solid var(--border);background:var(--gold-bg);color:var(--gold-dark);font-size:13px;font-weight:800;font-family:inherit;cursor:pointer;box-shadow:3px 3px 0 var(--border)">+ Create a Group</button>';
@@ -2503,16 +2502,19 @@ function buildActivityFeed(groups, callback) {
         if(ev&&ev.ts) events.push(Object.assign({}, ev, {groupName:g.name, groupId:g.id}));
       });
 
-      // Derive pool finalized events from globalResults (picks_submitted removed per request)
+      // Derive pool finalized events from globalResults
       var gPools = groupPools(g);
       gPools.forEach(function(pool){
         var result = (SC.globalResults||{})[pool.id];
         var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
         if(result&&result.first&&st==="complete"){
+          // Use completedAt timestamp if available; skip entirely if no valid ts
+          var cts = (SC.completedAt||{})[pool.id] || result.ts || null;
+          if(!cts) return; // don't show pool_finalized with no valid date
           events.push({
             type:"pool_finalized", actor:result.first,
             text:"<strong>"+result.first+"</strong> won the "+x(pool.shortName||pool.name)+" pool",
-            icon:"🏆", ts: result.ts || 0,
+            icon:"🏆", ts: cts,
             poolId:pool.id, poolName:pool.shortName||pool.name,
             groupName:g.name, groupId:g.id
           });
@@ -2521,14 +2523,18 @@ function buildActivityFeed(groups, callback) {
 
       pending--;
       if(pending===0){
-        // Sort by ts desc, dedupe, limit 30
         events.sort(function(a,b){ return b.ts-a.ts; });
-        // Dedupe by type+actor+groupId+poolId
+        // Dedupe: for group_created use type+groupId only (ignore actor/ts differences)
         var seen={}, deduped=[];
         events.forEach(function(ev){
-          var key=(ev.type||"")+"_"+(ev.actor||"")+"_"+(ev.groupId||"")+"_"+(ev.poolId||"");
+          var key = ev.type==="group_created"
+            ? "group_created_"+(ev.groupId||"")
+            : (ev.type||"")+"_"+(ev.actor||"")+"_"+(ev.groupId||"")+"_"+(ev.poolId||"");
           if(!seen[key]){ seen[key]=true; deduped.push(ev); }
         });
+        // Filter out anything older than user's feedSeenAt cutoff
+        var cutoff = SC._feedSeenAt || 0;
+        deduped = deduped.filter(function(ev){ return ev.ts > cutoff; });
         callback(deduped.slice(0,30));
       }
     });
@@ -2552,22 +2558,46 @@ function timeAgo(ts) {
 
 
 // ── FEED DISMISS ─────────────────────────────────────────────────────────────
-var _dismissedFeedKeys = [];
-try{ _dismissedFeedKeys = JSON.parse(localStorage.getItem("sc_dismissed_feed")||"[]"); }catch(e){}
+// Dismissals are stored as a cutoff timestamp in Firebase so they persist across devices/sessions.
+// SC._feedSeenAt is loaded at login and used to filter events in buildActivityFeed.
+
+function _feedUserKey() {
+  return SC.currentUser ? SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"") : null;
+}
+
+function loadFeedSeenAt(cb) {
+  var uk = _feedUserKey();
+  if(!uk || !DB) { cb && cb(); return; }
+  DB.ref("users/"+uk+"/feedSeenAt").once("value", function(sn){
+    SC._feedSeenAt = sn.val() || 0;
+    cb && cb();
+  });
+}
 
 function dismissFeedItem(idx, key) {
   var item = document.getElementById("feed-item-"+idx);
   if(item){ item.style.transition="opacity .2s"; item.style.opacity="0"; setTimeout(function(){ item.remove(); checkEmptyFeed(); },200); }
-  try{
+  // Write the ts of this event as the new seenAt if it's more recent
+  try {
     var dk = decodeURIComponent(key);
-    if(_dismissedFeedKeys.indexOf(dk)<0){ _dismissedFeedKeys.push(dk); localStorage.setItem("sc_dismissed_feed",JSON.stringify(_dismissedFeedKeys)); }
-  }catch(e){}
+    var parts = dk.split("_");
+    var ts = parseInt(parts[parts.length-1])||0;
+    if(ts > (SC._feedSeenAt||0)) {
+      SC._feedSeenAt = ts;
+      var uk = _feedUserKey();
+      if(uk && DB) DB.ref("users/"+uk+"/feedSeenAt").set(ts);
+    }
+  } catch(e){}
 }
 
 function dismissAllFeed() {
   var wrap = document.getElementById("activity-feed-wrap");
   if(wrap){ wrap.style.transition="opacity .2s"; wrap.style.opacity="0"; setTimeout(function(){ wrap.style.display="none"; },200); }
-  try{ localStorage.setItem("sc_feed_dismissed_all","1"); }catch(e){}
+  // Set feedSeenAt to now — hides all current events on any device
+  var now = Date.now();
+  SC._feedSeenAt = now;
+  var uk = _feedUserKey();
+  if(uk && DB) DB.ref("users/"+uk+"/feedSeenAt").set(now);
 }
 
 function checkEmptyFeed() {
@@ -2580,14 +2610,14 @@ function checkEmptyFeed() {
 
 function renderActivityFeed(groups) {
   // Check if user dismissed all this session
-  try{ if(localStorage.getItem("sc_feed_dismissed_all")==="1"){ var _fw=document.getElementById("activity-feed-wrap"); if(_fw) _fw.style.display="none"; return; } }catch(e){}
+  try{ if(localStorage.getItem("sc_feed_dismissed_all")==="1"){ return; } }catch(e){}
   var el = document.getElementById("activity-feed");
-  if(!el) return;
-  el.innerHTML = '<div style="text-align:center;padding:16px;font-size:11px;color:var(--muted)">Loading...</div>';
+  var wrap = document.getElementById("activity-feed-wrap");
+  if(!el || !wrap) return;
 
   buildActivityFeed(groups, function(events){
     if(!events.length){
-      el.innerHTML = '<div style="text-align:center;padding:16px;font-size:11px;color:var(--muted)">No activity yet — submit some picks!</div>';
+      // No events — keep wrap hidden, nothing to show
       return;
     }
     var fh = '<div class="feed-wrap">';
@@ -2606,6 +2636,7 @@ function renderActivityFeed(groups) {
     });
     fh += '</div>';
     el.innerHTML = fh;
+    wrap.style.display = '';
     // Wire dismiss buttons via delegation
     el.addEventListener("click", function(e){
       var btn = e.target.closest(".feed-dismiss");
@@ -5786,12 +5817,14 @@ function subscribeGlobalStatuses() {
     if(_joinId) _handleDeepJoin(); else draw();
     var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
     if(DB) {
-      // Fetch user record AND badges in one parallel batch
+      // Fetch user record, badges, and feedSeenAt in one parallel batch
       Promise.all([
         DB.ref("users/"+key).once("value"),
-        DB.ref("users/"+key+"/badges").once("value")
+        DB.ref("users/"+key+"/badges").once("value"),
+        DB.ref("users/"+key+"/feedSeenAt").once("value")
       ]).then(function(snaps){
-        var sn = snaps[0], bsn = snaps[1];
+        var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2];
+        SC._feedSeenAt = fsnap.val() || 0;
         var u = sn.val();
         if(u) {
           var _newEmoji = u.emoji||"🎯";
