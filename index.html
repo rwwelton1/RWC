@@ -5655,15 +5655,24 @@ function renderGroupsTable(groups, query) { renderGroupsTableTo("groups-tbody", 
 // ── GLOBAL STATUSES ───────────────────────────────────────────────────────────
 function subscribeGlobalStatuses() {
   if(!DB) return;
+  var _firstStatusFire = true;
+  var _firstPublicFire = true;
   DB.ref("globalSettings/statuses").on("value", function(sn){
+    var prev = JSON.stringify(SC.globalStatuses||{});
     SC.globalStatuses = sn.val() || {};
+    // Skip redraw on first fire (boot draw already pending) or if unchanged
+    if(_firstStatusFire){ _firstStatusFire=false; return; }
+    if(JSON.stringify(SC.globalStatuses) === prev) return;
     if(SC.screen==="hub"||SC.screen==="profile") scheduleDraw();
   });
   DB.ref("globalSettings/completedAt").once("value", function(sn){
     SC.completedAt = sn.val() || {};
   });
   DB.ref("globalSettings/publicPools").on("value", function(sn){
+    var prev = JSON.stringify(SC.publicPools||{});
     SC.publicPools = sn.val() || {};
+    if(_firstPublicFire){ _firstPublicFire=false; return; }
+    if(JSON.stringify(SC.publicPools) === prev) return;
     if(SC.screen==="hub"||SC.screen==="profile") scheduleDraw();
   });
   // Load master password from Firebase (falls back to hardcoded if not set)
@@ -5756,48 +5765,59 @@ function subscribeGlobalStatuses() {
 
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
+  // Restore cached badges for instant rarity styling on first paint
+  var _cachedBadges = (function(){ try{ var v=localStorage.getItem("pp_badges"); return v?JSON.parse(v):{}; }catch(e){ return {}; } })();
 
   if(savedUser) {
     // Restore cached groups list from localStorage for instant render — refined below
     var _cachedUserGroups = [];
     try{ var _cg = localStorage.getItem("pp_user_groups_"+savedUser); if(_cg) _cachedUserGroups = JSON.parse(_cg); }catch(e){}
+    // Restore cached statuses so pills render correctly on first paint
+    try{ var _cs=localStorage.getItem("pp_statuses"); if(_cs) SC.globalStatuses=JSON.parse(_cs); }catch(e){}
     SC.currentUser = { username: savedUser, groups: _cachedUserGroups, emoji: _cachedEmoji };
+    SC._cachedBadges = _cachedBadges; // available for rarity on first paint
     SC.screen = "profile";
     // Render immediately with cached data — no blocking "Loading..." splash
     if(_joinId) _handleDeepJoin(); else draw();
     var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
     if(DB) {
-      // Fetch user record, badges, and feedSeenAt in one parallel batch
+      // Fetch user record, badges, feedSeenAt, and statuses in one parallel batch
       Promise.all([
         DB.ref("users/"+key).once("value"),
         DB.ref("users/"+key+"/badges").once("value"),
-        DB.ref("users/"+key+"/feedSeenAt").once("value")
+        DB.ref("users/"+key+"/feedSeenAt").once("value"),
+        DB.ref("globalSettings/statuses").once("value")
       ]).then(function(snaps){
-        var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2];
+        var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2], statusSn = snaps[3];
         SC._feedSeenAt = fsnap.val() || 0;
+        var _newStatuses = statusSn.val() || {};
+        var _statusesChanged = JSON.stringify(_newStatuses) !== JSON.stringify(SC.globalStatuses||{});
+        SC.globalStatuses = _newStatuses;
+        try{ localStorage.setItem("pp_statuses", JSON.stringify(_newStatuses)); }catch(e){}
         var u = sn.val();
         if(u) {
           var _newEmoji = u.emoji||"🎯";
+          var _newBadges = bsn.val()||{};
           SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji };
-          // Cache badges snapshot for downstream use
-          SC._cachedBadges = bsn.val()||{};
+          SC._cachedBadges = _newBadges;
           try{
             localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[]));
             localStorage.setItem("pp_emoji", _newEmoji);
+            localStorage.setItem("pp_badges", JSON.stringify(_newBadges));
           }catch(e){}
-          // Re-render if groups OR emoji changed from cache
+          // Only re-render if something actually changed from what we painted
           var _groupsChanged = JSON.stringify(u.groups||[]) !== JSON.stringify(_cachedUserGroups);
           var _emojiChanged = _newEmoji !== _cachedEmoji;
-          if(_groupsChanged || _emojiChanged) draw();
+          var _badgesChanged = JSON.stringify(_newBadges) !== JSON.stringify(_cachedBadges);
+          if(_groupsChanged || _emojiChanged || _badgesChanged || _statusesChanged) draw();
 
           // ── Avatar integrity check — uses already-fetched badges, no extra read ──
           if(_newEmoji !== "🎯"){
-            var _badges = SC._cachedBadges;
             var _matchingBadge = null;
             for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
               if(BADGE_LIST[_bi].icon===_newEmoji){ _matchingBadge=BADGE_LIST[_bi]; break; }
             }
-            var _stillValid = _matchingBadge && _badges[_matchingBadge.id];
+            var _stillValid = _matchingBadge && _newBadges[_matchingBadge.id];
             if(!_stillValid){
               saveUserEmoji("🎯");
               draw();
