@@ -1910,18 +1910,11 @@ function renderAdmin(){
   var weekId=ST.curWeek||ST.weekIds[0]||null;
   var locked=!!(weekId&&ST.locked[weekId]);
   var weekMeta=(weekId&&ST._weekMeta&&ST._weekMeta[weekId])||{};
-  var defIdx=SEASON_WEEK_DEFS.findIndex(function(d){
-    return d.espnWeek===(weekMeta.espnWeek||1)&&d.seasontype===(weekMeta.seasontype||2);
-  });
-  if(defIdx<0) defIdx=0;
-  var weekOpts=SEASON_WEEK_DEFS.map(function(def,i){
-    return '<option value="'+i+'"'+(i===defIdx?" selected":"")+'>'+def.label+'</option>';
-  }).join("");
 
   // Single unified card
   h+='<div style="background:#fff;border:2px solid var(--border);border-radius:12px;box-shadow:4px 4px 0 var(--border);margin:8px 10px;overflow:hidden">';
 
-  // Row 1: week dropdown + ESPN week + controls
+  // Row 1: week dropdown + fetch + controls
   h+='<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border2)">';
   h+='<select class="week-select-main" id="week-dropdown" style="flex:1;min-width:0;border-radius:8px">';
   ST.weekIds.forEach(function(w){
@@ -1932,8 +1925,7 @@ function renderAdmin(){
     h+='<option value="'+w+'"'+(weekId===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
   });
   h+='</select>';
-  h+='<select class="adm-input" id="imp-week-sel" style="width:88px;flex-shrink:0;padding:6px 4px;font-size:10px;margin:0">'+weekOpts+'</select>';
-  h+='<button class="btn btn-gold" id="b-fetch-espn" style="font-size:10px;padding:5px 10px;flex-shrink:0">'+(ST.importLoading?"…":"Fetch")+'</button>';
+  h+='<button class="btn btn-gold" id="b-fetch-espn" style="font-size:10px;padding:5px 12px;flex-shrink:0">'+(ST.importLoading?"…":"Fetch")+'</button>';
   h+='</div>';
 
   // Row 2: action buttons
@@ -2692,29 +2684,23 @@ function bind(){
     draw();
   });
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){ ST.showImport=!ST.showImport; draw(); });
-  el=document.getElementById("imp-week-sel"); if(el) el.addEventListener("change",function(){
-    var def=SEASON_WEEK_DEFS[parseInt(this.value)];
-    if(def){ ST.importWeek=def.espnWeek; ST.importSeasontype=def.seasontype; }
+  el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
+    if(!ST.curWeek) return;
+    var meta=(ST._weekMeta&&ST._weekMeta[ST.curWeek])||{};
+    var espnWeek=meta.espnWeek||guessWeekNumber(ST.weekLabels[ST.curWeek])||1;
+    var seasontype=meta.seasontype||2;
+    var year=meta.espnYear||new Date().getFullYear();
+    if(!meta.espnWeek&&DB){
+      if(!ST._weekMeta) ST._weekMeta={};
+      ST._weekMeta[ST.curWeek]={espnWeek:espnWeek, espnYear:year, seasontype:seasontype};
+      DB.ref(BASE+"/meta/weekMeta/"+ST.curWeek).set(ST._weekMeta[ST.curWeek]);
+    }
+    fetchEspnSchedule(year, espnWeek, seasontype);
   });
   el=document.getElementById("b-imp-top25"); if(el) el.addEventListener("click",function(){ ST.importTop25=!ST.importTop25; draw(); });
   els=document.querySelectorAll(".imp-conf-pill[data-conf]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    var v=this.getAttribute("data-conf");
-    ST.importConf=(ST.importConf===v)?null:v;
-    draw();
-  });
-  el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
-    var wIdx=parseInt((document.getElementById("imp-week-sel")||{}).value)||0;
-    var def=SEASON_WEEK_DEFS[wIdx]||SEASON_WEEK_DEFS[0];
-    var year=(ST._weekMeta&&ST._weekMeta[ST.curWeek]&&ST._weekMeta[ST.curWeek].espnYear)||new Date().getFullYear();
-    ST.importWeek=def.espnWeek;
-    ST.importSeasontype=def.seasontype;
-    if(ST.curWeek&&DB){
-      if(!ST._weekMeta) ST._weekMeta={};
-      ST._weekMeta[ST.curWeek]={espnWeek:def.espnWeek, espnYear:year, seasontype:def.seasontype};
-      DB.ref(BASE+"/meta/weekMeta/"+ST.curWeek).set(ST._weekMeta[ST.curWeek]);
-    }
-    fetchEspnSchedule(year, def.espnWeek, def.seasontype);
+    ST.importConf=(ST.importConf===this.getAttribute("data-conf"))?null:this.getAttribute("data-conf"); draw();
   });
   els=document.querySelectorAll("[data-imp-idx]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
