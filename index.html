@@ -4392,9 +4392,10 @@ function renderAdmin() {
     var _poolDates = (SC._poolDates && SC._poolDates[pool.id]) || {};
     var openVal = _poolDates.openDate || pool.openDate || "";
     var lockVal = _poolDates.lockDate || pool.lockDate || "";
+    var endVal  = _poolDates.endDate  || "";
     // Which date is contextual for current status
-    var dateLabel = st==="open" ? "Locks" : st==="coming-soon" ? "Opens" : "";
-    var dateVal   = st==="open" ? lockVal : st==="coming-soon" ? openVal : "";
+    var dateLabel = st==="open" ? "Locks" : st==="coming-soon" ? "Opens" : st==="locked" ? "Ends" : "";
+    var dateVal   = st==="open" ? lockVal : st==="coming-soon" ? openVal : st==="locked" ? endVal : "";
     // Countdown hint
     var hint = "";
     if(dateVal){
@@ -4408,19 +4409,18 @@ function renderAdmin() {
     h += '<div class="psd-row" id="psd-row-'+pool.id+'">';
     h += '<div class="psd-name">'+pool.icon+' <span>'+x(pool.shortName||pool.name)+'</span></div>';
     h += '<div class="psd-controls">';
-    // Status dropdown
     var stColors = {open:"var(--green)","locked":"var(--red)","coming-soon":"var(--gold-dark)",complete:"var(--blue)"};
     h += '<select class="psd-select" id="psd-status-'+pool.id+'" style="color:'+( stColors[st]||"var(--muted)")+'">';
     [["coming-soon","Soon"],["open","Open"],["locked","Live"],["complete","Final"]].forEach(function(pair){
       h += '<option value="'+pair[0]+'"'+(st===pair[0]?" selected":"")+'>'+pair[1]+'</option>';
     });
     h += '</select>';
-    // Date input — shown for soon/open, hidden for live/final
-    var showDate = (st==="coming-soon"||st==="open");
+    // Date input — shown for soon/open/live, hidden for final
+    var showDate = (st==="coming-soon"||st==="open"||st==="locked");
     h += '<div class="psd-date-wrap" id="psd-datewrap-'+pool.id+'" style="'+(showDate?"":"display:none")+'">';
     h += '<span class="psd-date-lbl" id="psd-datelbl-'+pool.id+'">'+dateLabel+'</span>';
     h += '<input type="date" class="psd-date-input" id="psd-date-'+pool.id+'" value="'+x(dateVal)+'">';
-    h += hint ? '<span class="psd-hint" id="psd-hint-'+pool.id+'">'+hint+'</span>' : '<span class="psd-hint" id="psd-hint-'+pool.id+'"></span>';
+    h += '<span class="psd-hint" id="psd-hint-'+pool.id+'">'+hint+'</span>';
     h += '</div>';
     h += '</div></div>';
   });
@@ -4529,13 +4529,14 @@ function renderAdmin() {
 
     function _updateDateContext(st) {
       sel.style.color = stColors[st]||"var(--muted)";
-      var showDate = st==="coming-soon"||st==="open";
+      var showDate = st==="coming-soon"||st==="open"||st==="locked";
       dateWrap.style.display = showDate ? "" : "none";
       if(showDate){
-        dateLbl.textContent = st==="open" ? "Locks" : "Opens";
-        // Swap value to the right date field
+        dateLbl.textContent = st==="open" ? "Locks" : st==="locked" ? "Ends" : "Opens";
         var _pd = (SC._poolDates && SC._poolDates[pool.id]) || {};
-        dateInput.value = st==="open" ? (_pd.lockDate||pool.lockDate||"") : (_pd.openDate||pool.openDate||"");
+        if(st==="open")         dateInput.value = _pd.lockDate||pool.lockDate||"";
+        else if(st==="locked")  dateInput.value = _pd.endDate||"";
+        else                    dateInput.value = _pd.openDate||pool.openDate||"";
       }
     }
 
@@ -4571,16 +4572,14 @@ function renderAdmin() {
       if(newSt !== prevSt) statusUpdates[pool.id] = newSt;
 
       // Store the date in the right slot based on status
+      var _pd = Object.assign({}, (SC._poolDates && SC._poolDates[pool.id])||{},
+        {openDate: pool.openDate||"", lockDate: pool.lockDate||"", endDate: ""});
       if(dateInput && dateInput.value){
-        var _pd = Object.assign({}, (SC._poolDates && SC._poolDates[pool.id])||{},
-          {openDate: pool.openDate||"", lockDate: pool.lockDate||""});
-        if(newSt==="open")         _pd.lockDate = dateInput.value;
+        if(newSt==="open")             _pd.lockDate = dateInput.value;
         else if(newSt==="coming-soon") _pd.openDate = dateInput.value;
-        dateUpdates[pool.id] = _pd;
-      } else {
-        dateUpdates[pool.id] = (SC._poolDates && SC._poolDates[pool.id]) ||
-          {openDate: pool.openDate||"", lockDate: pool.lockDate||""};
+        else if(newSt==="locked")      _pd.endDate  = dateInput.value;
       }
+      dateUpdates[pool.id] = _pd;
     });
 
     var dbWrites = [DB.ref("globalSettings/poolDates").set(dateUpdates)];
@@ -5828,6 +5827,13 @@ function autoSnapStatuses() {
     if(lockTs && now >= lockTs)      newSt = "locked";
     else if(openTs && now >= openTs) newSt = "open";
     else                             newSt = "coming-soon";
+
+    // Check endDate for Live→Final auto-snap
+    var endDate = dates.endDate;
+    if(endDate){
+      var endTs = _ts(endDate);
+      if(endTs && now >= endTs) newSt = "complete";
+    }
 
     if(newSt !== st) dbUpdates["globalSettings/statuses/"+pool.id] = newSt;
   });
