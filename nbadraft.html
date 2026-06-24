@@ -843,7 +843,71 @@ function renderResultsAdmin(){
   });
   h+='<div style="padding-top:14px"><button class="btn btn-green" id="b-save-results" style="width:100%;padding:12px;font-size:12px">Save All Results</button></div>';
   h+='</div></div>';
+
+  // ── Admin: Override picks for any user ──────────────────
+  h+='<div class="adm-card"><div class="adm-title">&#128736; Override User Picks</div>';
+  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:10px">Directly write the current board as any user\'s saved picks. Use to fix corrupted saves.</div>';
+  h+='<div style="display:flex;flex-direction:column;gap:8px">';
+  PARTS.forEach(function(name){
+    var uk2=ukey(name);
+    var hasPicks=ST.picks[uk2]&&Object.keys(ST.picks[uk2].guesses||{}).length>0;
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--cream);border-radius:8px;border:1px solid var(--border2)">';
+    h+='<div>';
+    h+='<div style="font-size:11px;font-weight:900">'+x(name)+'</div>';
+    h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+(hasPicks?Object.keys(ST.picks[uk2].guesses||{}).filter(function(k){return !k.startsWith('__');}).length+' picks saved':'No picks yet')+'</div>';
+    h+='</div>';
+    h+='<div style="display:flex;gap:6px">';
+    h+='<button class="btn btn-ghost" style="font-size:9px;padding:4px 10px" onclick="adminLoadUser(\''+x(name)+'\')">&#128065; Load</button>';
+    h+='<button class="btn btn-red" style="font-size:9px;padding:4px 10px" onclick="adminWriteUser(\''+x(name)+'\')">&#9998; Write Board</button>';
+    h+='</div>';
+    h+='</div>';
+  });
+  h+='</div>';
+  h+='<div id="adm-picks-status" style="margin-top:10px;font-size:10px;font-weight:800;color:var(--green);min-height:18px"></div>';
+  h+='</div>';
+
   return h;
+}
+
+// ── ADMIN PICK OVERRIDES ───────────────────────────────
+function adminLoadUser(name){
+  // Load that user's saved picks onto the current board for inspection
+  var uk2=ukey(name);
+  var saved=ST.picks[uk2];
+  if(!saved||!saved.guesses){ toast("No saved picks for "+name); return; }
+  var g=saved.guesses;
+  var b=new Array(32).fill(null);
+  Object.keys(g).forEach(function(pk){
+    if(pk.startsWith('__')) return;
+    var slot=Number(g[pk])-1;
+    if(slot>=0&&slot<32) b[slot]=pk;
+  });
+  // Fill empty slots
+  var used={}; b.forEach(function(k){ if(k) used[k]=true; });
+  var fill=CONSENSUS_BOARD.filter(function(p){ return !used[pkey(p)]; }).map(pkey);
+  var fi=0;
+  for(var i=0;i<32;i++){ if(!b[i]&&fi<fill.length) b[i]=fill[fi++]; }
+  board=b;
+  boardDirty=false;
+  // Switch view to picks tab
+  ST.page="picks";
+  draw();
+  toast("Loaded "+name+"'s picks — now on My Board tab");
+}
+
+function adminWriteUser(name){
+  if(!confirm("Write current board as "+name+"'s picks? This overwrites their saved data.")) return;
+  if(!DB){ toast("No DB"); return; }
+  var uk2=ukey(name);
+  var guesses=boardToGuesses(board);
+  var obj={name:name, guesses:guesses, ts:Date.now(), adminOverride:true};
+  DB.ref(BASE+"/picks/"+uk2).set(obj, function(err){
+    if(err){ toast("Error: "+err.message); return; }
+    ST.picks[uk2]=obj;
+    var el=document.getElementById("adm-picks-status");
+    if(el) el.textContent="&#10003; Written "+Object.keys(guesses).length+" picks for "+name;
+    toast("&#10003; Wrote picks for "+name);
+  });
 }
 
 // ── SWAP SHEET ─────────────────────────────────────────
