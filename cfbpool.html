@@ -329,7 +329,13 @@ function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.clas
 function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[.'&]/g,"");}
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
 
-// ── Helpers ──────────────────────────────────────────────
+function _pickCacheKey(weekId){ return "cfbpicks_"+(GROUP_ID||"global")+"_"+weekId; }
+function _savePickCache(weekId, uk, picks){
+  try{ localStorage.setItem(_pickCacheKey(weekId), JSON.stringify(ST.picks[weekId]||{})); }catch(e){}
+}
+function _loadPickCache(weekId){
+  try{ var v=localStorage.getItem(_pickCacheKey(weekId)); return v?JSON.parse(v):null; }catch(e){ return null; }
+}
 function getLastKickoff(weekId){
   var games=ST.games[weekId]||{};
   var latest=null;
@@ -343,7 +349,7 @@ function getLastKickoff(weekId){
 }
 
 function currentWeekId(){
-  var EXPIRY_MS=60*60*1000; // 60 hours after last kickoff
+  var EXPIRY_MS=60*60*60*1000; // 60 hours after last kickoff
   for(var i=0;i<ST.weekIds.length;i++){
     var w=ST.weekIds[i];
     if(ST.locked[w]) continue; // skip fully locked weeks
@@ -368,9 +374,13 @@ function spreadLabel(g,side){
 }
 
 // ── Scoring ──────────────────────────────────────────────
+var _weekScoreCache={};
 function weekScore(weekId,user){
   var picks=((ST.picks[weekId]||{})[ukey(user)])||{};
   var results=ST.results[weekId]||{};
+  // Cache key: stringify only the relevant parts
+  var ck=weekId+"_"+ukey(user)+"_"+JSON.stringify(picks)+"_"+JSON.stringify(results);
+  if(_weekScoreCache[ck]) return _weekScoreCache[ck];
   var total=0,correct=0,wrong=0,pending=0;
   GAME_IDS.forEach(function(gid){
     var p=picks[gid],r=results[gid];
@@ -381,11 +391,19 @@ function weekScore(weekId,user){
       else wrong++;
     } else pending++;
   });
-  return {total:total,correct:correct,wrong:wrong,pending:pending};
+  var res={total:total,correct:correct,wrong:wrong,pending:pending};
+  _weekScoreCache[ck]=res;
+  // Prune cache if it grows large
+  var keys=Object.keys(_weekScoreCache);
+  if(keys.length>200) delete _weekScoreCache[keys[0]];
+  return res;
 }
 function seasonScore(user){
   var total=0;
-  ST.weekIds.forEach(function(w){total+=weekScore(w,user).total;});
+  ST.weekIds.forEach(function(w){
+    // Only count locked (completed) weeks in season total
+    if(ST.locked[w]) total+=weekScore(w,user).total;
+  });
   return total;
 }
 
@@ -396,7 +414,7 @@ function loadData(){
     ? DB.ref("groups/"+GROUP_ID).once("value").then(function(sn){
         var g=sn.val()||{};
         if(g&&g.players&&g.players.length) PARTS=g.players;
-        GROUP_ADMIN_PW=(g&&g.groupAdminPw)||"password";
+        GROUP_ADMIN_PW=(g&&(g.adminPw||g.groupAdminPw))||null;
         ST.groupPublic=!!(g&&g.public);
       }).catch(function(){})
     : Promise.resolve();
@@ -414,20 +432,55 @@ function loadData(){
     // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
+      // Picks: only listen to the current week — load others lazily on week change
+      var _picksRef=null;
+      function subscribePicksForWeek(wId){
+        if(_picksRef){ _picksRef.off(); _picksRef=null; }
+        if(!wId){ scheduleDraw(); return; }
+        _picksRef=DB.ref(BASE+"/picks/"+wId);
+        _picksRef.on("value",function(sn){
+          var prev=ST.picks[wId]||{};
+          ST.picks[wId]=sn.val()||{};
+          // If on group tab, flash a brief "player picked" indicator
+          if(ST.page==="group"&&ST.user){
+            var uk=ukey(ST.user);
+            Object.keys(ST.picks[wId]).forEach(function(puk){
+              if(puk===uk) return; // ignore own picks
+              var prevCount=Object.keys(prev[puk]||{}).filter(function(g){return (prev[puk]||{})[g]&&(prev[puk]||{})[g].side;}).length;
+              var newCount=Object.keys(ST.picks[wId][puk]||{}).filter(function(g){return ST.picks[wId][puk][g]&&ST.picks[wId][puk][g].side;}).length;
+              if(newCount>prevCount){
+                var pname=PARTS.find(function(p){return ukey(p)===puk;})||puk;
+                toast("&#9998; "+x(pname)+" just updated their picks");
+              }
+            });
+          }
+          scheduleDraw();
+        });
+      }
+      ST._subscribePicksForWeek=subscribePicksForWeek;
       DB.ref(BASE+"/meta").on("value",function(sn){
         var meta=sn.val()||{};
         ST.weekIds=meta.weekIds||[];
         ST.weekLabels=meta.weekLabels||{};
-        if(!ST._weekInit&&ST.weekIds.length){ ST.curWeek=currentWeekId(); ST._weekInit=true; }
-        else if(ST.curWeek&&ST.weekIds.indexOf(ST.curWeek)===-1){ ST.curWeek=currentWeekId(); }
-        else if(!ST.curWeek&&ST.weekIds.length){ ST.curWeek=currentWeekId(); }
+        if(!ST._weekInit&&ST.weekIds.length){
+          ST.curWeek=currentWeekId(); ST._weekInit=true;
+          // Pre-populate from cache for instant render
+          var cached=_loadPickCache(ST.curWeek);
+          if(cached&&!ST.picks[ST.curWeek]){ ST.picks[ST.curWeek]=cached; scheduleDraw(); }
+          subscribePicksForWeek(ST.curWeek);
+        } else if(ST.curWeek&&ST.weekIds.indexOf(ST.curWeek)===-1){
+          ST.curWeek=currentWeekId();
+          subscribePicksForWeek(ST.curWeek);
+        } else if(!ST.curWeek&&ST.weekIds.length){
+          ST.curWeek=currentWeekId();
+          subscribePicksForWeek(ST.curWeek);
+        }
         scheduleDraw();
       });
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
     });
 
     // Start auto-result fetch schedule
@@ -515,8 +568,8 @@ var _scTimer=null, _scData=null, _scLoading=false, _scLastFetch=0;
 function fetchScoreboard(){
   if(_scLoading) return;
   _scLoading=true;
-  var d=new Date();
-  var ds=d.getFullYear()+""+("0"+(d.getMonth()+1)).slice(-2)+""+("0"+d.getDate()).slice(-2);
+  var et=_nowET();
+  var ds=et.getFullYear()+""+("0"+(et.getMonth()+1)).slice(-2)+""+("0"+et.getDate()).slice(-2);
   fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates="+ds+"&limit=300&groups=80")
     .then(function(r){return r.json();})
     .then(function(data){
@@ -812,6 +865,7 @@ function addImportedGames(weekId){
 }
 
 // ── Pick actions ─────────────────────────────────────────
+var _undoTimer=null, _undoPick=null;
 function setPickSide(weekId,gid,side){
   if(!ST.user){toast("Select your name first");return;}
   if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
@@ -819,13 +873,27 @@ function setPickSide(weekId,gid,side){
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var cur=ST.picks[weekId][uk][gid]||{};
+  var prevSide=cur.side;
   if(cur.side===side) delete cur.side;
   else cur.side=side;
   ST.picks[weekId][uk][gid]=cur;
+  _savePickCache(weekId, uk, cur);
   draw();
-  if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
-    if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
-  });
+  // Undo toast for 3 seconds before committing to Firebase
+  if(_undoTimer){ clearTimeout(_undoTimer); }
+  var g=(ST.games[weekId]||{})[gid]||{};
+  var teamName=cur.side?(cur.side==="away"?g.away:g.home):"cleared";
+  _undoPick={weekId:weekId,gid:gid,prevSide:prevSide,cur:cur,uk:uk};
+  var undoEl=document.getElementById("toast");
+  undoEl.innerHTML=(cur.side?"&#10003; "+x(teamName):"Cleared")+'&nbsp;&nbsp;<span id="undo-pick-btn" style="text-decoration:underline;cursor:pointer">Undo</span>';
+  undoEl.classList.add("show");
+  clearTimeout(_tt);
+  _undoTimer=setTimeout(function(){
+    undoEl.classList.remove("show"); _undoPick=null; _undoTimer=null;
+    if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
+      if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
+    });
+  },3000);
 }
 function setTiebreakerField(weekId,field,value){
   if(!ST.tiebreaker[weekId]) ST.tiebreaker[weekId]={};
@@ -877,6 +945,7 @@ function setConf(weekId,gid,confRaw){
   }
   if(!picks[gid])picks[gid]={};
   if(conf)picks[gid].conf=conf; else delete picks[gid].conf;
+  _savePickCache(weekId, ukey(ST.user), picks);
   draw();
   if(DB){
     var _confCb=function(err){ if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } } };
@@ -906,8 +975,12 @@ function addWeek(){
   draw();
   toast("Week added");
 }
+function renameWeek(weekId, newLabel){
+  if(!newLabel||!weekId) return;
+  ST.weekLabels[weekId]=newLabel;
+  if(DB) DB.ref(BASE+"/meta/weekLabels/"+weekId).set(newLabel, function(){ toast("&#10003; Week renamed"); draw(); });
+}
 function copyWeekGames(fromWeekId, toWeekId){
-  if(!fromWeekId||!toWeekId||fromWeekId===toWeekId) return;
   var srcGames=ST.games[fromWeekId]||{};
   var label=ST.weekLabels[fromWeekId]||fromWeekId;
   if(!confirm("Copy game matchups from "+label+" to this week? Existing games will be overwritten.")) return;
@@ -1002,8 +1075,17 @@ function fetchAllResults(weekId){
           var homeC=comps.find(function(c){return c.homeAway==="home";})||{};
           var an=normalizeTeamName((awayC.team&&(awayC.team.shortDisplayName||awayC.team.displayName))||"");
           var hn=normalizeTeamName((homeC.team&&(homeC.team.shortDisplayName||homeC.team.displayName))||"");
-          var awayMatch=(an===normAway||an.indexOf(normAway)>=0||normAway.indexOf(an)>=0)&&an.length>2&&normAway.length>2;
-          var homeMatch=(hn===normHome||hn.indexOf(normHome)>=0||normHome.indexOf(hn)>=0)&&hn.length>2&&normHome.length>2;
+        function nameMatch(espn, pool){
+          if(!espn||!pool||espn.length<3||pool.length<3) return false;
+          if(espn===pool) return true;
+          // Only use substring match if both strings are 4+ chars
+          if(espn.length>=4&&pool.length>=4){
+            return espn.indexOf(pool)>=0||pool.indexOf(espn)>=0;
+          }
+          return false;
+        }
+        var awayMatch=nameMatch(an,normAway);
+        var homeMatch=nameMatch(hn,normHome);
           if(!awayMatch||!homeMatch) return;
           var aScore=parseInt(awayC.score)||0;
           var hScore=parseInt(homeC.score)||0;
@@ -1038,8 +1120,8 @@ function fetchAllResults(weekId){
           var hc=comps.find(function(c){return c.homeAway==="home";})||{};
           var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
           var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
-          if((an===normTbA||an.indexOf(normTbA)>=0||normTbA.indexOf(an)>=0)&&
-             (hn===normTbH||hn.indexOf(normTbH)>=0||normTbH.indexOf(hn)>=0)){
+          function tbMatch(e,p){ return e&&p&&(e===p||(e.length>=4&&p.length>=4&&(e.indexOf(p)>=0||p.indexOf(e)>=0))); }
+          if(tbMatch(an,normTbA)&&tbMatch(hn,normTbH)){
             var total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
             setTiebreakerField(weekId,"actual",total);
             found++;
@@ -1073,7 +1155,9 @@ function weekDropdown(curWeek, extraContent){
   h+='<select class="week-select-main" id="week-dropdown">';
   ST.weekIds.forEach(function(w){
     var lbl=ST.weekLabels[w]||w;
-    var suffix=ST.locked[w]?" · Final":w===currentWeekId()?" · Current":"";
+    var isCurrent=w===currentWeekId();
+    var isLocked=!!ST.locked[w];
+    var suffix=isLocked&&isCurrent?" · Current · Locked":isLocked?" · Final":isCurrent?" · Current":"";
     h+='<option value="'+w+'"'+(curWeek===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
   });
   h+='</select>';
@@ -1092,17 +1176,23 @@ function userSelectScreen(){
 
 function confChips(selected,weekId,gid,N,canPick,usedConfs){
   var used=usedConfs||{};
-  var h='<div class="conf-chips">';
-  for(var i=1;i<=N;i++){
-    var sel=Number(selected)===i;
-    var takenByOther=!sel&&used[i];
-    if(canPick){
-      var cls='conf-chip'+(sel?' sel':takenByOther?' used':'');
-      h+='<button class="'+cls+'"'+(takenByOther?' disabled':'')+(takenByOther?'':' data-conf-week="'+weekId+'" data-conf-gid="'+gid+'" data-conf-val="'+i+'"')+'>'+i+'</button>';
-    } else {
-      h+='<div class="conf-chip'+(sel?' sel':'')+'" style="cursor:default">'+i+'</div>';
+  // Split into two rows for N>5 to avoid cramping on mobile
+  var rows=N>5?[[1,Math.ceil(N/2)],[Math.ceil(N/2)+1,N]]:[[1,N]];
+  var h='<div class="conf-chips" style="flex-direction:column;gap:3px">';
+  rows.forEach(function(range){
+    h+='<div style="display:flex;gap:3px">';
+    for(var i=range[0];i<=range[1];i++){
+      var sel=Number(selected)===i;
+      var takenByOther=!sel&&used[i];
+      if(canPick){
+        var cls='conf-chip'+(sel?' sel':takenByOther?' used':'');
+        h+='<button class="'+cls+'"'+(takenByOther?' disabled':'')+(takenByOther?'':' data-conf-week="'+weekId+'" data-conf-gid="'+gid+'" data-conf-val="'+i+'"')+'>'+i+'</button>';
+      } else {
+        h+='<div class="conf-chip'+(sel?' sel':'')+'" style="cursor:default">'+i+'</div>';
+      }
     }
-  }
+    h+='</div>';
+  });
   h+='</div>';
   return h;
 }
@@ -1153,11 +1243,21 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
 
 function renderPicks(){
   var h='';
+  if(!ST._weekInit){
+    h+='<div class="lb-note" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:32px 16px"><span style="font-size:18px">&#127944;</span><span>Loading picks…</span></div>';
+    return h;
+  }
   if(ST.weekIds.length===0){
     h+='<div class="lb-note">No weeks have been set up yet. '+(ST.admin?'Head to the Admin tab to add Week 1 and its 10 games.':'Check back once your admin sets up Week 1.')+'</div>';
     return h;
   }
   var weekId=ST.curWeek||currentWeekId();
+  // All weeks locked — show a clear message
+  var allLocked=ST.weekIds.length>0&&ST.weekIds.every(function(w){return ST.locked[w];});
+  if(allLocked&&!weekId){
+    h+='<div class="lb-note">&#128274; All weeks are locked. Check back when the next week\'s games are posted.</div>';
+    return h;
+  }
   h+=weekDropdown(weekId);
 
   var locked=!!ST.locked[weekId];
@@ -1490,7 +1590,11 @@ function renderAdmin(){
   var weekId=ST.curWeek;
   var locked=!!ST.locked[weekId];
   h+='<div class="adm-head-row">';
+  h+='<div style="display:flex;align-items:center;gap:6px;flex:1;flex-wrap:wrap">';
   h+='<div class="lb-name">'+x(ST.weekLabels[weekId]||weekId)+'</div>';
+  h+='<input class="adm-input" id="rename-week-input" placeholder="Rename…" value="'+x(ST.weekLabels[weekId]||weekId)+'" style="font-size:10px;padding:4px 8px;max-width:130px;margin:0">';
+  h+='<button class="adm-btn sel" id="b-rename-week" style="padding:4px 10px;font-size:9px">Rename</button>';
+  h+='</div>';
   h+='<div style="display:flex;gap:5px;flex-wrap:wrap"><button class="btn '+(locked?"btn-red":"btn-green")+'" id="b-lockweek">'+(locked?"&#128274; Locked &mdash; Unlock":"&#128275; Unlocked &mdash; Lock")+'</button>';
   if(locked) h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px">&#128202; Fetch All Results</button>';
   if(ST.weekIds.length>1) h+='<select class="adm-btn" id="b-copy-week" style="padding:5px 8px"><option value="">&#128196; Copy from…</option>'+ST.weekIds.filter(function(w){return w!==weekId;}).map(function(w){return'<option value="'+w+'">'+x(ST.weekLabels[w]||w)+'</option>';}).join("")+'</select>';
@@ -1625,12 +1729,13 @@ function renderGroupPicks(){
     var g=games[gid]||{};
     var awayLogo=g.awayLogo||"";
     var homeLogo=g.homeLogo||"";
+    var gameIsLocked=isGameLocked(weekId,gid);
     h+='<th data-sort-gid="'+gid+'">';
     h+='<div class="gp-game-head">';
     h+='<div class="gp-logos">';
     h+=awayLogo?'<img class="gp-logo" src="'+awayLogo+'" onerror="this.style.display=\'none\'">'
                :'<span class="gp-logo-fallback"></span>';
-    h+='<span class="gp-vs">@</span>';
+    h+='<span class="gp-vs">'+(gameIsLocked?'&#128274;':'@')+'</span>';
     h+=homeLogo?'<img class="gp-logo" src="'+homeLogo+'" onerror="this.style.display=\'none\'">'
                :'<span class="gp-logo-fallback"></span>';
     h+='</div>';
@@ -1838,10 +1943,30 @@ function bind(){
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){ST.user=this.getAttribute("data-user");ST.viewUser=null;draw();});
 
   el=document.getElementById("week-dropdown"); if(el) el.addEventListener("change",function(){
-    ST.curWeek=this.value; draw();
+    var prev=ST.curWeek;
+    ST.curWeek=this.value;
+    // Re-subscribe picks for new week if not already loaded
+    if(ST.curWeek!==prev&&ST._subscribePicksForWeek){
+      if(!ST.picks[ST.curWeek]) ST._subscribePicksForWeek(ST.curWeek);
+    }
+    draw();
   });
 
-  el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
+  // Undo pick
+  el=document.getElementById("undo-pick-btn"); if(el) el.addEventListener("click",function(){
+    if(!_undoPick) return;
+    clearTimeout(_undoTimer); _undoTimer=null;
+    var u=_undoPick; _undoPick=null;
+    if(!ST.picks[u.weekId]) ST.picks[u.weekId]={};
+    if(!ST.picks[u.weekId][u.uk]) ST.picks[u.weekId][u.uk]={};
+    var restored=ST.picks[u.weekId][u.uk][u.gid]||{};
+    if(u.prevSide) restored.side=u.prevSide; else delete restored.side;
+    ST.picks[u.weekId][u.uk][u.gid]=restored;
+    _savePickCache(u.weekId, u.uk, restored);
+    document.getElementById("toast").classList.remove("show");
+    draw();
+    if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
+  });
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){ST.user=null;ST.viewUser=null;draw();});
   el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
 
@@ -2081,6 +2206,11 @@ function bind(){
     });
   });
 
+  el=document.getElementById("b-rename-week"); if(el) el.addEventListener("click",function(){
+    var inp=document.getElementById("rename-week-input");
+    var v=inp?inp.value.trim():"";
+    if(v&&v!==(ST.weekLabels[ST.curWeek]||ST.curWeek)) renameWeek(ST.curWeek, v);
+  });
   el=document.getElementById("b-fetch-all-results"); if(el) el.addEventListener("click",function(){ fetchAllResults(ST.curWeek); });
   el=document.getElementById("b-copy-week"); if(el) el.addEventListener("change",function(){ if(this.value) copyWeekGames(this.value, ST.curWeek); this.value=""; });
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){
@@ -2175,8 +2305,10 @@ function fetchTiebreakerResult(weekId){
   if(!tb.away||!tb.home){toast("No tiebreaker game set");return;}
   var btn=document.getElementById("b-tb-fetch-result");
   if(btn){btn.textContent="Loading…";btn.disabled=true;}
-  var year=ST.importYear||new Date().getFullYear();
-  var week=ST.importWeek||guessWeekNumber(ST.weekLabels[weekId]);
+  // Derive year/week from week label, fall back to import state or current year
+  var weekLabel=ST.weekLabels[weekId]||"";
+  var year=SEASON_YEAR||ST.importYear||new Date().getFullYear();
+  var week=guessWeekNumber(weekLabel)||ST.importWeek||1;
   var url="https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?year="+year+"&week="+week+"&seasontype=2&groups=80&limit=300";
   fetch(url)
     .then(function(r){return r.json();})
