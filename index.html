@@ -1824,6 +1824,13 @@ function renderProfile() {
         gh += '<div style="padding:5px 8px 6px;border-top:1px solid var(--border2);min-height:0">';
         pools.forEach(function(pool){
           var st = statuses[pool.id] || "coming-soon";
+          // Hide pools that have just cycled back to coming-soon with no open date yet
+          // (nextOpenDate was cleared, openDate not yet set for next cycle)
+          if(st==="coming-soon"){
+            var _fbD = (SC._poolDates && SC._poolDates[pool.id]) || {};
+            var _hasOpenDate = !!(_fbD.openDate || pool.openDate);
+            if(!_hasOpenDate) return; // hidden until admin sets next cycle dates
+          }
           var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
           var col = st==="open"?'var(--green)':st==="locked"?'var(--red2)':st==="complete"?'var(--blue)':'var(--dim)';
           var lbl = st==="open"?'Open':st==="locked"?'Live':st==="complete"?'Final':'Soon';
@@ -4449,19 +4456,34 @@ function renderAdmin() {
     h += '</div>';
     h += '</div>';
 
-    // Timeline: Opens → Locks → Ends
+    // Timeline: Opens → Locks → Ends → Next (Soon)
+    // Auto-populate nextOpenDate as 3 days after endDate if not set
+    var nextVal = _pd.nextOpenDate || "";
+    if(!nextVal && endVal) {
+      try {
+        var _endTs = new Date(endVal).getTime();
+        if(!isNaN(_endTs)) {
+          var _nextDt = new Date(_endTs + 3*24*60*60*1000);
+          var _pad = function(n){ return ("0"+n).slice(-2); };
+          nextVal = _nextDt.getFullYear()+"-"+_pad(_nextDt.getMonth()+1)+"-"+_pad(_nextDt.getDate())+"T12:00";
+        }
+      } catch(e){}
+    }
     h += '<div style="display:flex;flex-direction:column;gap:5px">';
     [
       ["openDate","Opens","#22c55e",openVal],
       ["lockDate","Locks","#ef4444",lockVal],
-      ["endDate", "Ends", "#94a3b8",endVal]
+      ["endDate", "Ends", "#94a3b8",endVal],
+      ["nextOpenDate","Next","#a78bfa",nextVal]
     ].forEach(function(row){
       var fieldId = "psd-date-"+pool.id+"-"+row[0];
       var hint = _dtHint(row[3]);
-      h += '<div style="display:flex;align-items:center;gap:6px">';
-      h += '<div style="width:6px;height:6px;border-radius:50%;background:'+row[2]+';flex-shrink:0"></div>';
-      h += '<span style="font-size:9px;font-weight:800;color:'+row[2]+';width:34px;flex-shrink:0">'+row[1]+'</span>';
-      h += '<input type="datetime-local" id="'+fieldId+'" value="'+x(row[3])+'" style="flex:1;font-size:10px;padding:3px 6px;border:1.5px solid var(--border2);border-radius:6px;font-family:\'Nunito\',sans-serif;min-width:0;color:var(--text)">';
+      var isNext = row[0]==="nextOpenDate";
+      h += '<div style="display:flex;align-items:center;gap:6px'+(isNext?';margin-top:2px;padding-top:5px;border-top:1px dashed var(--border2)':'')+'">';
+      h += '<div style="width:6px;height:6px;border-radius:50%;background:'+row[2]+';flex-shrink:0'+(isNext?';opacity:.6':'')+'">';
+      h += '</div>';
+      h += '<span style="font-size:9px;font-weight:800;color:'+row[2]+';width:34px;flex-shrink:0'+(isNext?';opacity:.8':'')+'">'+(isNext?'♻ Next':row[1])+'</span>';
+      h += '<input type="datetime-local" id="'+fieldId+'" value="'+x(row[3])+'" style="flex:1;font-size:10px;padding:3px 6px;border:1.5px solid var(--border2);border-radius:6px;font-family:\'Nunito\',sans-serif;min-width:0;color:var(--text)'+(isNext?';border-style:dashed':'')+'">';
       h += '<div style="min-width:36px;text-align:right">'+hint+'</div>';
       h += '</div>';
     });
@@ -4586,7 +4608,7 @@ function renderAdmin() {
       if(btn) btn.addEventListener("click", function(){ _psdUpdateRow(pool.id, pair[0]); });
     });
     // Countdown hints on date change
-    ["openDate","lockDate","endDate"].forEach(function(field){
+    ["openDate","lockDate","endDate","nextOpenDate"].forEach(function(field){
       var inp = document.getElementById("psd-date-"+pool.id+"-"+field);
       if(inp) inp.addEventListener("change", function(){
         var _ts = new Date(this.value).getTime();
@@ -4614,11 +4636,26 @@ function renderAdmin() {
       var openInp  = document.getElementById("psd-date-"+pool.id+"-openDate");
       var lockInp  = document.getElementById("psd-date-"+pool.id+"-lockDate");
       var endInp   = document.getElementById("psd-date-"+pool.id+"-endDate");
+      var nextInp  = document.getElementById("psd-date-"+pool.id+"-nextOpenDate");
       var existing = (SC._poolDates && SC._poolDates[pool.id]) || {};
+      // Auto-compute nextOpenDate if endDate set and next not explicitly given
+      var _endV = endInp ? endInp.value : (existing.endDate||"");
+      var _nextV = nextInp ? nextInp.value : (existing.nextOpenDate||"");
+      if(!_nextV && _endV) {
+        try {
+          var _et = new Date(_endV).getTime();
+          if(!isNaN(_et)) {
+            var _nd = new Date(_et + 3*24*60*60*1000);
+            var _p = function(n){ return ("0"+n).slice(-2); };
+            _nextV = _nd.getFullYear()+"-"+_p(_nd.getMonth()+1)+"-"+_p(_nd.getDate())+"T12:00";
+          }
+        } catch(e){}
+      }
       var _pd = {
-        openDate: openInp ? openInp.value : (existing.openDate||""),
-        lockDate: lockInp ? lockInp.value : (existing.lockDate||""),
-        endDate:  endInp  ? endInp.value  : (existing.endDate||"")
+        openDate:    openInp ? openInp.value : (existing.openDate||""),
+        lockDate:    lockInp ? lockInp.value : (existing.lockDate||""),
+        endDate:     _endV,
+        nextOpenDate: _nextV
       };
       dateUpdates[pool.id] = _pd;
     });
@@ -5866,6 +5903,24 @@ function subscribeGlobalStatuses() {
   });
 }
 
+// Archive completed pool results before cycling back to Soon
+// Stamps results with year + timestamp so trophy case stays accurate
+function _archivePoolResults(poolId) {
+  if(!DB) return;
+  var year = new Date().getFullYear();
+  var archiveKey = poolId + "_" + year + "_" + Date.now();
+  // Copy current results to archive
+  DB.ref("globalSettings/results/"+poolId).once("value", function(sn){
+    var r = sn.val();
+    if(!r) return;
+    r._archivedAt = Date.now();
+    r._year = year;
+    DB.ref("globalSettings/resultsArchive/"+archiveKey).set(r);
+    // Clear active results so next cycle starts clean
+    DB.ref("globalSettings/results/"+poolId).remove();
+  });
+}
+
 // Auto-snap pool statuses based on stored dates
 // Only snaps if a date has been explicitly set — never overwrites manual status when no dates configured
 function autoSnapStatuses() {
@@ -5879,8 +5934,24 @@ function autoSnapStatuses() {
     var endDate  = dates.endDate;
     var st = (SC.globalStatuses||{})[pool.id] || "coming-soon";
 
-    // Never auto-snap away from complete — that's manual
-    if(st === "complete") return;
+    // Never auto-snap away from complete — UNLESS nextOpenDate has passed
+    if(st === "complete"){
+      var nextOpenDate = dates.nextOpenDate;
+      if(nextOpenDate){
+        var nextTs = _ts(nextOpenDate);
+        if(nextTs && now >= nextTs){
+          // Archive this pool's results before resetting
+          _archivePoolResults(pool.id);
+          dbUpdates["globalSettings/statuses/"+pool.id] = "coming-soon";
+          // Clear dates so the cycle starts fresh
+          dbUpdates["globalSettings/poolDates/"+pool.id+"/openDate"] = "";
+          dbUpdates["globalSettings/poolDates/"+pool.id+"/lockDate"] = "";
+          dbUpdates["globalSettings/poolDates/"+pool.id+"/endDate"] = "";
+          dbUpdates["globalSettings/poolDates/"+pool.id+"/nextOpenDate"] = "";
+        }
+      }
+      return;
+    }
 
     // If NO dates are configured for this pool, leave it alone entirely
     if(!openDate && !lockDate && !endDate) return;
