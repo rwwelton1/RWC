@@ -323,6 +323,8 @@ try{
 // │  Format: ["Name", "+odds"] one per line             │
 // │  Favorites first. Salaries auto-compute from odds.  │
 // │  Tournament: Travelers Championship 2026            │
+// │  Cap: $50,000 · Field: 71 players                   │
+// │  Scheffler $19,000 → Campbell $1,500                │
 // └─────────────────────────────────────────────────────┘
 var _WEEKLY_ODDS = [
   ["Scottie Scheffler",       "+420"],
@@ -401,16 +403,32 @@ var _WEEKLY_ODDS = [
 
 // Auto-build GOLFERS from weekly odds
 (function(){
-  var cap = 50000;
-  var top = 100 / (420 + 100); // top player implied probability (Scheffler +420)
+  var oddsNums = _WEEKLY_ODDS.map(function(row){
+    var o = parseInt((row[1]||"").replace(/[^0-9]/g,"")) || 0;
+    return o > 0 ? 100/(o+100) : 0.01;
+  });
+  var maxImpl = Math.max.apply(null, oddsNums);
+  var minImpl = Math.min.apply(null, oddsNums);
+
   var GOLFERS_RAW = _WEEKLY_ODDS.map(function(row, i){
     var name = row[0], oddsStr = row[1];
-    var o = parseInt(oddsStr.replace(/[^0-9\-]/g,"")) || 0;
-    var impl = o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100);
-    var ratio = impl / top;
-    var salary = Math.round(cap * 0.40 * ratio);
-    salary = Math.max(1000, Math.min(Math.round(cap*0.40), salary));
-    salary = Math.round(salary/50)*50;
+    var impl = oddsNums[i];
+
+    // Square-root compression: compresses the huge gap between favorite and field
+    // Maps implied prob range onto [0,1] then sqrt to flatten the curve
+    var norm = (impl - minImpl) / (maxImpl - minImpl);
+    var compressed = Math.sqrt(norm); // flattens extreme top salaries
+
+    // Scale between floor (3% cap) and ceiling (38% cap)
+    var cap = window.TOURNAMENT ? (window.TOURNAMENT.cap||50000) : 50000;
+    var floor  = cap * 0.03;
+    var ceiling = cap * 0.38;
+    var salary = floor + compressed * (ceiling - floor);
+
+    // Round to nearest $50
+    salary = Math.round(salary / 50) * 50;
+    salary = Math.max(Math.round(floor/50)*50, Math.min(Math.round(ceiling/50)*50, salary));
+
     return {name:name, odds:oddsStr, salary:salary, rank:i+1};
   });
   window._GOLFERS_FROM_ODDS = GOLFERS_RAW;
@@ -894,23 +912,32 @@ function renderAdmin(){
   return h;
 }
 
-// Compute salary from odds using decay formula matching the hardcoded list
-// Anchored to #1 = $20,000, decays with field position
-function oddsToSalary(oddsStr, rank, cap) {
+// Compute salary from odds using sqrt-compressed scale
+// Call with the full parsed list for accurate relative scaling
+function oddsToSalary(oddsStr, rank, cap, allOdds) {
   cap = cap || TOURNAMENT.cap || 50000;
-  // Parse American odds to implied probability
-  var o = parseInt((oddsStr||"").replace(/[^0-9-]/g,"")) || 0;
-  if(!o) return Math.round(cap * 0.04); // fallback $2k
-  var impl = o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100);
-  // Scale: top player (highest prob) gets ~40% of cap, decay by implied prob
-  var topImplied = 1/(1+4.6); // ~+460 top player ≈ 0.178
-  var ratio = impl / topImplied;
-  var salary = Math.round(cap * 0.40 * ratio);
-  // Floor $1k, ceil 40% cap
-  salary = Math.max(1000, Math.min(Math.round(cap*0.40), salary));
-  // Round to nearest $50
-  salary = Math.round(salary/50)*50;
-  return salary;
+  var o = parseInt((oddsStr||"").replace(/[^0-9]/g,"")) || 0;
+  var impl = o > 0 ? 100/(o+100) : 0.01;
+
+  // If we have the full field, use relative scaling
+  if(allOdds && allOdds.length > 1){
+    var impls = allOdds.map(function(od){
+      var n = parseInt((od||"").replace(/[^0-9]/g,"")) || 0;
+      return n > 0 ? 100/(n+100) : 0.01;
+    });
+    var maxI = Math.max.apply(null, impls);
+    var minI = Math.min.apply(null, impls);
+    var norm = maxI > minI ? (impl - minI)/(maxI - minI) : 0.5;
+    var compressed = Math.sqrt(norm);
+    var salary = Math.round(cap*0.03) + compressed*(Math.round(cap*0.38) - Math.round(cap*0.03));
+    salary = Math.round(salary/50)*50;
+    return Math.max(Math.round(cap*0.03/50)*50, Math.min(Math.round(cap*0.38/50)*50, salary));
+  }
+
+  // Fallback: rank-based decay
+  var salary = Math.round(cap * 0.38 * Math.pow(0.93, rank-1));
+  salary = Math.max(Math.round(cap*0.03), salary);
+  return Math.round(salary/50)*50;
 }
 
 function parseOddsPaste(text) {
@@ -1457,11 +1484,12 @@ function bind(){
     var preview=document.getElementById("odds-preview");
     if(!parsed.length){ if(preview){preview.style.display="";preview.innerHTML='<div style="color:var(--red2);font-size:10px">No valid lines found. Format: Name +1200</div>';} return; }
     var cap=TOURNAMENT.cap||50000;
+    var allOddsArr = parsed.map(function(p){ return p.odds; });
     var ph='<table style="width:100%;border-collapse:collapse;font-size:10px">';
     ph+='<tr style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase"><td style="padding:3px 4px">#</td><td>Name</td><td>Odds</td><td style="text-align:right">Salary</td></tr>';
     var total=0;
     parsed.forEach(function(p,i){
-      var sal=oddsToSalary(p.odds,i+1,cap);
+      var sal=oddsToSalary(p.odds,i+1,cap,allOddsArr);
       total+=sal;
       ph+='<tr style="border-top:1px solid var(--border2)"><td style="padding:3px 4px;color:var(--muted)">'+(i+1)+'</td>';
       ph+='<td style="font-weight:700">'+x(p.name)+'</td>';
@@ -1480,8 +1508,9 @@ function bind(){
     if(!parsed.length){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="No valid players found.";} return; }
     if(!DB){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="Firebase unavailable.";} return; }
     var cap=TOURNAMENT.cap||50000;
+    var allOddsArr2=parsed.map(function(p){ return p.odds; });
     var newGolfers=parsed.map(function(p,i){
-      return {name:p.name, odds:p.odds, salary:oddsToSalary(p.odds,i+1,cap), rank:i+1};
+      return {name:p.name, odds:p.odds, salary:oddsToSalary(p.odds,i+1,cap,allOddsArr2), rank:i+1};
     });
     DB.ref("globalSettings/pgatour/golfers").set(newGolfers,function(err){
       if(err){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="Save failed.";} return; }
