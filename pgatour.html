@@ -288,10 +288,14 @@ function loadTournamentConfig(cb) {
     CAP_LIMIT          = TOURNAMENT.cap;
     if(cfg.year)    TOURNAMENT.year    = cfg.year;
     if(cfg.espnUrl) TOURNAMENT.espnUrl = cfg.espnUrl;
+    // Override hardcoded golfer list if Firebase has one for this tournament
+    if(cfg.golfers && cfg.golfers.length) {
+      GOLFERS = cfg.golfers;
+      GOLFERS.forEach(function(g,i){ g.rank = i+1; });
+    }
     // Update subtitle
     var sub = document.getElementById("tour-subtitle");
     if(sub) sub.textContent = TOURNAMENT.name + (TOURNAMENT.course?" • "+TOURNAMENT.course:"") + " • $"+(TOURNAMENT.cap/1000)+"K Cap";
-    // Update confirm dialog text
     if(typeof updateConfirmText==="function") updateConfirmText();
     cb();
   });
@@ -913,6 +917,18 @@ function renderAdmin(){
   h+='<button class="btn btn-gold" id="b-finalize">&#127942; Finalize</button>';
   h+='</div>';
   h+='</div>';
+  h+='<div class="section-label">Field &amp; Salaries</div>';
+  h+='<div class="adm-card">';
+  h+='<div class="adm-title">Paste Odds to Generate Field</div>';
+  h+='<div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">One player per line: <strong>Name +1200</strong> or <strong>Name -110</strong>. Salaries are auto-calculated from odds. Paste the full field in order (favorites first).</div>';
+  h+='<textarea id="odds-paste-area" style="width:100%;box-sizing:border-box;height:160px;font-size:11px;font-family:monospace;padding:8px;border:2px solid var(--border);border-radius:8px;resize:vertical;background:#f8fafc" placeholder="Scottie Scheffler +460&#10;Rory McIlroy +950&#10;Jon Rahm +1025&#10;..."></textarea>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px">';
+  h+='<button class="btn btn-blue" id="b-preview-odds" style="flex:1;font-size:11px">&#128202; Preview Salaries</button>';
+  h+='<button class="btn btn-green" id="b-save-field" style="flex:1;font-size:11px">&#10003; Save Field</button>';
+  h+='</div>';
+  h+='<div id="odds-preview" style="margin-top:10px;max-height:200px;overflow-y:auto;display:none"></div>';
+  h+='<div id="field-save-msg" style="font-size:10px;margin-top:6px;min-height:16px"></div>';
+  h+='</div>';
   h+='<div class="section-label">Enter Scores (to par)</div>';
   h+='<div class="adm-card">';
   h+='<div class="adm-title">Live Scoring</div>';
@@ -933,7 +949,40 @@ function renderAdmin(){
   return h;
 }
 
-// ── Live ESPN scoring ─────────────────────────────────
+// Compute salary from odds using decay formula matching the hardcoded list
+// Anchored to #1 = $20,000, decays with field position
+function oddsToSalary(oddsStr, rank, cap) {
+  cap = cap || TOURNAMENT.cap || 50000;
+  // Parse American odds to implied probability
+  var o = parseInt((oddsStr||"").replace(/[^0-9-]/g,"")) || 0;
+  if(!o) return Math.round(cap * 0.04); // fallback $2k
+  var impl = o > 0 ? 100/(o+100) : Math.abs(o)/(Math.abs(o)+100);
+  // Scale: top player (highest prob) gets ~40% of cap, decay by implied prob
+  var topImplied = 1/(1+4.6); // ~+460 top player ≈ 0.178
+  var ratio = impl / topImplied;
+  var salary = Math.round(cap * 0.40 * ratio);
+  // Floor $1k, ceil 40% cap
+  salary = Math.max(1000, Math.min(Math.round(cap*0.40), salary));
+  // Round to nearest $50
+  salary = Math.round(salary/50)*50;
+  return salary;
+}
+
+function parseOddsPaste(text) {
+  var lines = text.split("\n");
+  var results = [];
+  lines.forEach(function(line){
+    line = line.trim();
+    if(!line) return;
+    // Match: "Name +1200" or "Name -110" or "Name 1200" or "Name: +1200"
+    var m = line.match(/^(.+?)\s*:?\s*([+-]?\d{3,6})\s*$/);
+    if(!m) return;
+    var name = m[1].trim();
+    var odds = (parseInt(m[2]) > 0 ? "+" : "") + parseInt(m[2]);
+    results.push({name:name, odds:odds});
+  });
+  return results;
+}
 function fetchLiveScores(){
   if(_liveLoading)return;
   _liveLoading=true;
@@ -1455,6 +1504,47 @@ function bind(){
 
   el=document.getElementById("b-finalize"); if(el) el.addEventListener("click",finalizePool);
   el=document.getElementById("b-edit-tournament"); if(el) el.addEventListener("click",openTournamentEditor);
+
+  // Field & Salaries
+  el=document.getElementById("b-preview-odds"); if(el) el.addEventListener("click",function(){
+    var text=(document.getElementById("odds-paste-area")||{}).value||"";
+    var parsed=parseOddsPaste(text);
+    var preview=document.getElementById("odds-preview");
+    if(!parsed.length){ if(preview){preview.style.display="";preview.innerHTML='<div style="color:var(--red2);font-size:10px">No valid lines found. Format: Name +1200</div>';} return; }
+    var cap=TOURNAMENT.cap||50000;
+    var ph='<table style="width:100%;border-collapse:collapse;font-size:10px">';
+    ph+='<tr style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase"><td style="padding:3px 4px">#</td><td>Name</td><td>Odds</td><td style="text-align:right">Salary</td></tr>';
+    var total=0;
+    parsed.forEach(function(p,i){
+      var sal=oddsToSalary(p.odds,i+1,cap);
+      total+=sal;
+      ph+='<tr style="border-top:1px solid var(--border2)"><td style="padding:3px 4px;color:var(--muted)">'+(i+1)+'</td>';
+      ph+='<td style="font-weight:700">'+x(p.name)+'</td>';
+      ph+='<td style="color:var(--muted)">'+p.odds+'</td>';
+      ph+='<td style="text-align:right;font-weight:800">$'+(sal/1000).toFixed(1)+'k</td></tr>';
+    });
+    ph+='</table>';
+    ph+='<div style="font-size:9px;color:var(--muted);margin-top:6px">'+parsed.length+' players · Sample 6-pick roster avg: ~$'+(Math.round(total/parsed.length*6/1000))+'k of $'+(cap/1000)+'k cap</div>';
+    if(preview){ preview.style.display=""; preview.innerHTML=ph; }
+  });
+
+  el=document.getElementById("b-save-field"); if(el) el.addEventListener("click",function(){
+    var text=(document.getElementById("odds-paste-area")||{}).value||"";
+    var parsed=parseOddsPaste(text);
+    var msgEl=document.getElementById("field-save-msg");
+    if(!parsed.length){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="No valid players found.";} return; }
+    if(!DB){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="Firebase unavailable.";} return; }
+    var cap=TOURNAMENT.cap||50000;
+    var newGolfers=parsed.map(function(p,i){
+      return {name:p.name, odds:p.odds, salary:oddsToSalary(p.odds,i+1,cap), rank:i+1};
+    });
+    DB.ref("globalSettings/pgatour/golfers").set(newGolfers,function(err){
+      if(err){ if(msgEl){msgEl.style.color="var(--red2)";msgEl.textContent="Save failed.";} return; }
+      GOLFERS=newGolfers;
+      if(msgEl){msgEl.style.color="var(--green)";msgEl.textContent="✓ Field saved — "+newGolfers.length+" players.";}
+      setTimeout(function(){draw();},500); // refresh picks picker with new field
+    });
+  });
 
 
   // Admin score inputs
