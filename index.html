@@ -4436,13 +4436,26 @@ function renderAdmin() {
       h += '">'+pair[1]+'</button>';
     });
     h += '</div>';
-    var showDate = (st==="coming-soon"||st==="open"||st==="locked");
-    h += '<div class="psd-date-wrap" id="psd-datewrap-'+pool.id+'" style="display:flex;align-items:center;gap:4px;'+(showDate?"":"display:none")+'">';
-    h += '<span class="psd-date-lbl" id="psd-datelbl-'+pool.id+'" style="font-size:8px;font-weight:800;color:var(--muted);white-space:nowrap">'+dateLabel+'</span>';
-    h += '<input type="date" class="psd-date-input" id="psd-date-'+pool.id+'" value="'+x(dateVal)+'" style="flex:1;min-width:0">';
-    h += '<span class="psd-hint" id="psd-hint-'+pool.id+'" style="font-size:9px;font-weight:700;color:var(--muted);white-space:nowrap">'+hint+'</span>';
     h += '</div>';
-    h += '</div></div>';
+    // All 4 date fields always visible — set the whole chain at once
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;margin-top:5px">';
+    [["openDate","Opens",openVal,"var(--green)"],["lockDate","Locks",lockVal,"var(--red)"],["endDate","Ends",endVal,"var(--muted)"]].forEach(function(d){
+      var hint="";
+      if(d[2]){
+        var _ts=new Date(d[2]+"T12:00:00").getTime(), _diff=_ts-Date.now();
+        if(!isNaN(_ts)&&_diff>0){
+          var _dv=Math.floor(_diff/86400000), _hv=Math.floor((_diff%86400000)/3600000);
+          hint=_dv>0?_dv+"d"+(_hv>0?" "+_hv+"h":""):_hv+"h";
+        }
+      }
+      h += '<div style="display:flex;align-items:center;gap:4px">';
+      h += '<span style="font-size:8px;font-weight:800;color:'+d[3]+';white-space:nowrap;width:28px">'+d[1]+'</span>';
+      h += '<input type="date" class="psd-date-input" id="psd-date-'+pool.id+'-'+d[0]+'" value="'+x(d[2])+'" style="flex:1;min-width:0;font-size:9px">';
+      if(hint) h += '<span style="font-size:8px;font-weight:700;color:var(--muted);white-space:nowrap">'+hint+'</span>';
+      h += '</div>';
+    });
+    h += '</div>';
+    h += '</div>';
   });
   h += '</div>';
   h += '<div style="display:flex;align-items:center;gap:10px;margin-top:14px">';
@@ -4554,23 +4567,6 @@ function renderAdmin() {
       btn.style.background = active ? stBg[pair[0]] : "#fff";
       btn.style.color = active ? stText[pair[0]] : "var(--muted)";
     });
-    // Update date context
-    var dateWrap = document.getElementById("psd-datewrap-"+poolId);
-    var dateLbl  = document.getElementById("psd-datelbl-"+poolId);
-    var dateInput= document.getElementById("psd-date-"+poolId);
-    if(dateWrap){
-      var showDate = newSt==="coming-soon"||newSt==="open"||newSt==="locked";
-      dateWrap.style.display = showDate ? "" : "none";
-      if(showDate && dateLbl){
-        dateLbl.textContent = newSt==="open" ? "Locks" : newSt==="locked" ? "Ends" : "Opens";
-        if(dateInput){
-          var _pd = (SC._poolDates && SC._poolDates[poolId]) || {};
-          if(newSt==="open")         dateInput.value = _pd.lockDate||"";
-          else if(newSt==="locked")  dateInput.value = _pd.endDate||"";
-          else                       dateInput.value = _pd.openDate||"";
-        }
-      }
-    }
   }
 
   POOL_LIBRARY.forEach(function(pool){
@@ -4578,15 +4574,19 @@ function renderAdmin() {
       var btn = document.getElementById("pcr-"+pool.id+"-"+pair[0]);
       if(btn) btn.addEventListener("click", function(){ _psdUpdateRow(pool.id, pair[0]); });
     });
-    var dateInput = document.getElementById("psd-date-"+pool.id);
-    var hint = document.getElementById("psd-hint-"+pool.id);
-    if(dateInput) dateInput.addEventListener("change", function(){
-      var _ts = new Date(this.value+"T12:00:00").getTime();
-      var _diff = _ts - Date.now();
-      if(!isNaN(_ts) && _diff > 0){
-        var _d=Math.floor(_diff/86400000), _h=Math.floor((_diff%86400000)/3600000);
-        if(hint) hint.textContent = _d>0?_d+"d"+(_h>0?" "+_h+"h":""):_h+"h";
-      } else { if(hint) hint.textContent = ""; }
+    // Countdown hints on date change
+    ["openDate","lockDate","endDate"].forEach(function(field){
+      var inp = document.getElementById("psd-date-"+pool.id+"-"+field);
+      if(inp) inp.addEventListener("change", function(){
+        var _ts = new Date(this.value+"T12:00:00").getTime();
+        var _diff = _ts - Date.now();
+        var hint = this.nextElementSibling;
+        if(hint && hint.tagName !== "SPAN") hint = null;
+        if(!isNaN(_ts) && _diff > 0){
+          var _d=Math.floor(_diff/86400000), _h=Math.floor((_diff%86400000)/3600000);
+          if(hint) hint.textContent = _d>0?_d+"d"+(_h>0?" "+_h+"h":""):_h+"h";
+        } else { if(hint) hint.textContent = ""; }
+      });
     });
   });
 
@@ -4598,21 +4598,17 @@ function renderAdmin() {
     var statusUpdates = {};
     POOL_LIBRARY.forEach(function(pool){
       var newSt = _psdSelected[pool.id] || (SC.globalStatuses||{})[pool.id] || "coming-soon";
-      var dateInput = document.getElementById("psd-date-"+pool.id);
       var prevSt = (SC.globalStatuses||{})[pool.id]||"coming-soon";
       if(newSt !== prevSt) statusUpdates[pool.id] = newSt;
-      // Store date in correct slot
-      var _pd = Object.assign({}, (SC._poolDates && SC._poolDates[pool.id])||{}, {openDate:"", lockDate:"", endDate:""});
-      // Preserve existing dates
+      var openInp  = document.getElementById("psd-date-"+pool.id+"-openDate");
+      var lockInp  = document.getElementById("psd-date-"+pool.id+"-lockDate");
+      var endInp   = document.getElementById("psd-date-"+pool.id+"-endDate");
       var existing = (SC._poolDates && SC._poolDates[pool.id]) || {};
-      _pd.openDate = existing.openDate||"";
-      _pd.lockDate = existing.lockDate||"";
-      _pd.endDate  = existing.endDate||"";
-      if(dateInput && dateInput.value){
-        if(newSt==="open")             _pd.lockDate = dateInput.value;
-        else if(newSt==="coming-soon") _pd.openDate = dateInput.value;
-        else if(newSt==="locked")      _pd.endDate  = dateInput.value;
-      }
+      var _pd = {
+        openDate: openInp ? openInp.value : (existing.openDate||""),
+        lockDate: lockInp ? lockInp.value : (existing.lockDate||""),
+        endDate:  endInp  ? endInp.value  : (existing.endDate||"")
+      };
       dateUpdates[pool.id] = _pd;
     });
     var dbWrites = [DB.ref("globalSettings/poolDates").set(dateUpdates)];
