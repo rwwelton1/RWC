@@ -175,9 +175,12 @@ a{color:inherit;text-decoration:none}
 .wc-team:active{transform:translate(4px,4px);box-shadow:none}
 .wc-team.selected{background:var(--gold-bg);border-color:var(--border)}
 .wc-team.selected .wc-name{color:var(--gold-dark);font-weight:900}
-.wc-team.correct{background:var(--green-bg)}
+.wc-team.correct{background:var(--green-bg);border-color:var(--green)}
 .wc-team.correct .wc-name{color:var(--green);font-weight:900}
-.wc-team.wrong{opacity:.35;text-decoration:line-through}
+.wc-team.promoted{background:var(--blue-bg);border-color:var(--blue)}
+.wc-team.promoted .wc-name{color:var(--blue);font-weight:900}
+.wc-team.wrong{background:var(--red-bg);border-color:var(--border);opacity:.6;text-decoration:line-through}
+.wc-team.wrong .wc-name{color:var(--red)}
 .wc-team.full{opacity:.3;pointer-events:none}
 .wc-flag{font-size:18px;width:24px;text-align:center;flex-shrink:0}
 .wc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
@@ -496,10 +499,10 @@ function calcScore(user){
     var ur=getGroupRanking(user,gid);
     // User's predicted qualifiers: positions 1 and 2
     var userTop2=[ur[0],ur[1]];
-    // +1 for each of user's top-2 picks that actually qualified (1st or 2nd)
+    // +1 for each of user's top-2 picks that actually qualified (1st, 2nd, or wild card)
     userTop2.forEach(function(t){
       if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
+      if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)total+=PTS.qualifier;
     });
     // +2 bonus if user picked the exact group winner in 1st place
     if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
@@ -531,7 +534,7 @@ function calcPhase1Score(user){
     var ur=getGroupRanking(user,gid);
     [ur[0],ur[1]].forEach(function(t){
       if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
+      if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)total+=PTS.qualifier;
     });
     if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
     if(ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2])total+=PTS.perfectGroup;
@@ -910,21 +913,23 @@ function renderWildCards(){
   h+='<div>';
   pool.forEach(function(entry){
     var isSel=uWC.indexOf(entry.name)>=0,isCorrect=rWC.length&&rWC.indexOf(entry.name)>=0;
-    var isWrong=rWC.length&&!isCorrect&&isSel,full=!isSel&&uWC.length>=WILD_CARD_COUNT;
-    var cls="wc-team"+(isCorrect?" correct":isWrong?" wrong":isSel?" selected":full?" full":"");
-
-    // Check actual finish position for this team
-    var actualBadge="";
     var rr=getEffectiveGroupResult(entry.group);
-    if(rr&&rr.length&&isSel){
-      var actualPos=rr.indexOf(entry.name);
+    var actualPos=rr&&rr.length?rr.indexOf(entry.name):-1;
+    var isPromoted=isSel&&actualPos>=0&&actualPos<=1; // picked but finished 1st or 2nd
+    var isWrong=rWC.length&&!isCorrect&&isSel&&!isPromoted;
+    var full=!isSel&&uWC.length>=WILD_CARD_COUNT;
+    var cls="wc-team"+(isCorrect?" correct":isPromoted?" promoted":isWrong?" wrong":isSel?" selected":full?" full":"");
+
+    // Result badge for selected teams
+    var actualBadge="";
+    if(isSel&&actualPos>=0){
       if(actualPos===0){
         actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--gold-bg);border:2px solid var(--border);color:var(--gold-dark);box-shadow:2px 2px 0 var(--border);flex-shrink:0">1st</div>';
       } else if(actualPos===1){
         actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--blue-bg);border:2px solid var(--border);color:var(--blue);box-shadow:2px 2px 0 var(--border);flex-shrink:0">2nd</div>';
       } else if(actualPos===2&&isCorrect){
         actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--green-bg);border:2px solid var(--border);color:var(--green);box-shadow:2px 2px 0 var(--border);flex-shrink:0">3rd ✓</div>';
-      } else if(actualPos>=3&&isSel&&rWC.length){
+      } else if(actualPos>=3){
         actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--red-bg);border:2px solid var(--border);color:var(--red);box-shadow:2px 2px 0 var(--border);flex-shrink:0">Elim</div>';
       }
     }
@@ -1065,7 +1070,13 @@ function renderLB(){
       return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];
     }).length;
     // Teams correct = mirrors scoring logic exactly: ur[0]+ur[1] in actual top 2, plus wild card hits
-    var wcSc=wcHits.length;
+    // Only count wild card hits where team actually finished 3rd (not 1st/2nd)
+    var wcSc=wcHits.filter(function(t){
+      return !GROUP_IDS.some(function(gid){
+        var rr=res[gid];if(!rr||!rr.length)return false;
+        return rr[0]===t||rr[1]===t;
+      });
+    }).length;
     var teamsTotal=32;
     var teamsCorrect=0;
     GROUP_IDS.forEach(function(gid){
@@ -1073,7 +1084,7 @@ function renderLB(){
       var ur=getGroupRanking(p,gid);
       [ur[0],ur[1]].forEach(function(t){
         if(!t)return;
-        if(rr[0]===t||rr[1]===t)teamsCorrect++;
+        if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)teamsCorrect++;
       });
     });
     teamsCorrect+=wcSc;
