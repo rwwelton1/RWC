@@ -1747,12 +1747,12 @@ function renderProfile() {
         else if(st==="locked")     pillsHtml += '<span class="gpp gpp-locked">'+pool.icon+' Live</span>';
         else if(st==="complete")   pillsHtml += '<span class="gpp gpp-complete">'+pool.icon+' Done</span>';
       });
-      if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">Coming soon</span>';
+      if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">No active pools</span>';
 
       var activePool = null;
       for(var i=0;i<pools.length;i++){
         var st2 = statuses[pools[i].id]||"coming-soon";
-        if(st2==="open"||st2==="locked"||st2==="complete"||st2==="coming-soon"){ activePool=pools[i]; break; }
+        if(st2==="open"||st2==="locked"||st2==="complete"){ activePool=pools[i]; break; }
       }
       var iconEmoji = activePool ? activePool.icon : "&#127942;";
 
@@ -1824,13 +1824,8 @@ function renderProfile() {
         gh += '<div style="padding:5px 8px 6px;border-top:1px solid var(--border2);min-height:0">';
         pools.forEach(function(pool){
           var st = statuses[pool.id] || "coming-soon";
-          // Hide pools that have just cycled back to coming-soon with no open date yet
-          // (nextOpenDate was cleared, openDate not yet set for next cycle)
-          if(st==="coming-soon"){
-            var _fbD = (SC._poolDates && SC._poolDates[pool.id]) || {};
-            var _hasOpenDate = !!(_fbD.openDate || pool.openDate);
-            if(!_hasOpenDate) return; // hidden until admin sets next cycle dates
-          }
+          // Hide coming-soon pools entirely — they appear once they go Open
+          if(st==="coming-soon") return;
           var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
           var col = st==="open"?'var(--green)':st==="locked"?'var(--red2)':st==="complete"?'var(--blue)':'var(--dim)';
           var lbl = st==="open"?'Open':st==="locked"?'Live':st==="complete"?'Final':'Soon';
@@ -2545,9 +2540,10 @@ function buildActivityFeed(groups, callback) {
         var result = (SC.globalResults||{})[pool.id];
         var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
         if(result&&result.first&&st==="complete"){
-          // Use completedAt timestamp if available; skip entirely if no valid ts
           var cts = (SC.completedAt||{})[pool.id] || result.ts || null;
-          if(!cts) return; // don't show pool_finalized with no valid date
+          if(!cts) return;
+          // Auto-expire win notifications after 30 days
+          if(Date.now() - cts > 30*24*60*60*1000) return;
           events.push({
             type:"pool_finalized", actor:result.first,
             text:"<strong>"+result.first+"</strong> won the "+x(pool.shortName||pool.name)+" pool",
@@ -2566,12 +2562,20 @@ function buildActivityFeed(groups, callback) {
         events.forEach(function(ev){
           var key = ev.type==="group_created"
             ? "group_created_"+(ev.groupId||"")
+            : ev.type==="pool_finalized"
+            ? "pool_finalized_"+(ev.poolId||"")+"_"+(ev.groupId||"")
             : (ev.type||"")+"_"+(ev.actor||"")+"_"+(ev.groupId||"")+"_"+(ev.poolId||"");
           if(!seen[key]){ seen[key]=true; deduped.push(ev); }
         });
         // Filter out anything older than user's feedSeenAt cutoff
         var cutoff = SC._feedSeenAt || 0;
-        deduped = deduped.filter(function(ev){ return ev.ts > cutoff; });
+        var now7d = Date.now() - 7*24*60*60*1000;
+        deduped = deduped.filter(function(ev){
+          if(ev.ts <= cutoff) return false;
+          // Auto-expire: wins after 30d, everything else after 7d
+          var expire = ev.type==="pool_finalized" ? 30*24*60*60*1000 : 7*24*60*60*1000;
+          return Date.now() - ev.ts < expire;
+        });
         callback(deduped.slice(0,30));
       }
     });
@@ -3205,14 +3209,15 @@ function renderTrophyCase() {
     });
 
     // ── Remove trophies for pools that are no longer complete ──────────────
-    // If admin un-finals a pool (sets it back to locked/open), remove those trophy entries
+    // Only remove if admin explicitly set pool back to open or locked (undoing a final)
+    // Do NOT remove when pool cycles to coming-soon after completing — that's the natural cycle
     Object.keys(archivedTrophies).forEach(function(archiveKey){
       var t = archivedTrophies[archiveKey];
       var poolId = t.poolId;
       if(!poolId) return;
       var currentStatus = (SC.globalStatuses||{})[poolId]||"coming-soon";
-      // If the pool that produced this trophy is no longer complete AND still exists in live groups
-      if(livePoolIds[poolId] && currentStatus !== "complete"){
+      // Only purge if explicitly rolled back to open or locked — not coming-soon
+      if(livePoolIds[poolId] && (currentStatus === "open" || currentStatus === "locked")){
         DB.ref("users/"+ukey+"/trophies/"+archiveKey).remove();
         delete archivedTrophies[archiveKey];
       }
@@ -4164,7 +4169,7 @@ function renderHub() {
   // Group search
   h += '<div class="section-label">Find a Group</div>';
   h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search" placeholder="Search by group name or code..." autocomplete="off"></div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th style="white-space:nowrap">Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
+  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th style="white-space:nowrap">Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results" id="groups-tbody-loading">Loading groups...</td></tr></tbody></table></div>';
 
   h += '</div>';
   render(h);
@@ -4390,6 +4395,8 @@ function renderHub() {
       el.addEventListener("click", function(){ joinGroup(this.getAttribute("data-gid")); });
     });
   }
+  // Load groups — use cache immediately if available, then refresh
+  if(_groupsCache) renderHubGroupsTable(_groupsCache, "");
   loadAllGroups(function(groups){ renderHubGroupsTable(groups, ""); });
   var si = document.getElementById("group-search");
   if(si) si.addEventListener("input", function(){
@@ -4771,7 +4778,14 @@ function renderAdmin() {
         // Also write to globalSettings/results for trophy/badge fanout
         DB.ref("globalSettings/results/"+pid).set(r, function(){
           toast("Results saved ✓","ok");
-          if(Object.keys(r).length) archiveTrophiesFromResults({[pid]: r});
+          if(Object.keys(r).length){
+            // Only archive trophies once per pool per year — check if already done
+            var _archiveYear = new Date().getFullYear();
+            DB.ref("globalSettings/resultsArchive").orderByKey().startAt(pid+"_"+_archiveYear).endAt(pid+"_"+_archiveYear+"\uf8ff").limitToFirst(1).once("value", function(asn){
+              if(asn.val()) return; // already archived this year
+              archiveTrophiesFromResults({[pid]: r});
+            });
+          }
         });
       });
     });
