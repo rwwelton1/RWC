@@ -3163,7 +3163,9 @@ function renderTrophyCase() {
           sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts, year:new Date().getFullYear() });
           // Permanently write to trophies (all competed entries, not just podiums)
           var archiveKey = pool.id + "_" + new Date().getFullYear() + "_" + g.id;
-          var snap = { poolId:pool.id, poolName:pool.name, poolIcon:pool.icon,
+          // Use snapshotted tournament name if stored (golf pools), else pool name
+          var _displayName = (r && r.tournamentName) || pool.name;
+          var snap = { poolId:pool.id, poolName:_displayName, poolIcon:pool.icon,
             poolSport:(pool.sport||pool.name), poolSportIcon:(pool.sportIcon||pool.icon),
             finish:finish, pts:pts, groupName:g.name, year:new Date().getFullYear(), ts:Date.now() };
           DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
@@ -5445,42 +5447,64 @@ function archiveTrophiesFromResults(results) {
   var finishNum = {first:1, second:2, third:3};
   var year = new Date().getFullYear();
 
-  // Load all groups to find which group each winner was in
-  DB.ref("groups").once("value", function(gsn){
-    var allGroups = gsn.val() || {};
+  // Golf pools have tournament-specific names stored in Firebase — fetch them first
+  var golfPoolIds = Object.keys(results).filter(function(pid){
+    var p = poolById(pid); return p && p.sport === "Golf";
+  });
 
-    Object.keys(results).forEach(function(poolId){
-      var r = results[poolId];
-      var pool = poolById(poolId);
-      if(!pool) return;
+  function _doArchive(tournamentNames){
+    DB.ref("groups").once("value", function(gsn){
+      var allGroups = gsn.val() || {};
+      Object.keys(results).forEach(function(poolId){
+        var r = results[poolId];
+        var pool = poolById(poolId);
+        if(!pool) return;
+        // Use snapshotted tournament name for golf, otherwise pool name
+        var displayName = tournamentNames[poolId] || pool.name;
 
-      ["first","second","third"].forEach(function(place){
-        var username = r[place];
-        if(!username) return;
-        var ukey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+        // Snapshot the tournament name on the result itself for permanent reference
+        if(tournamentNames[poolId]){
+          DB.ref("globalSettings/results/"+poolId+"/tournamentName").set(tournamentNames[poolId]);
+        }
 
-        // Find which group this user played this pool in
-        var groupName = "";
-        Object.values(allGroups).forEach(function(g){
-          if(!g || !g.pools) return;
-          if(g.pools.indexOf(poolId) >= 0 && (g.players||[]).indexOf(username) >= 0) {
-            groupName = g.name || groupName;
-          }
+        ["first","second","third"].forEach(function(place){
+          var username = r[place];
+          if(!username) return;
+          var ukey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+          var groupName = "";
+          Object.values(allGroups).forEach(function(g){
+            if(!g || !g.pools) return;
+            if(g.pools.indexOf(poolId) >= 0 && (g.players||[]).indexOf(username) >= 0) {
+              groupName = g.name || groupName;
+            }
+          });
+          var archiveKey = poolId + "_" + year;
+          var entry = {
+            poolId: poolId,
+            poolName: displayName,
+            poolIcon: pool.icon,
+            finish: finishNum[place],
+            pts: finishPts[place],
+            groupName: groupName,
+            year: year,
+            ts: Date.now()
+          };
+          DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(entry);
         });
-
-        var archiveKey = poolId + "_" + year;
-        var entry = {
-          poolId: poolId,
-          poolName: pool.name,
-          poolIcon: pool.icon,
-          finish: finishNum[place],
-          pts: finishPts[place],
-          groupName: groupName,
-          year: year,
-          ts: Date.now()
-        };
-        DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(entry);
       });
+    });
+  }
+
+  if(!golfPoolIds.length){ _doArchive({}); return; }
+
+  // Fetch tournament names for golf pools in parallel
+  var nameMap = {};
+  var pending = golfPoolIds.length;
+  golfPoolIds.forEach(function(pid){
+    DB.ref("globalSettings/"+pid+"/name").once("value", function(sn){
+      if(sn.val()) nameMap[pid] = sn.val();
+      pending--;
+      if(pending === 0) _doArchive(nameMap);
     });
   });
 }
