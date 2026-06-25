@@ -368,6 +368,8 @@ var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
 var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},games:{}};
+// Official bracket matchups from ESPN (separate from predicted R32_SRCS)
+// ST.results.bracketMatchups[rnd][idx] = {a: teamName, b: teamName}
 var _dragState=null; // active drag state
 
 try{
@@ -707,6 +709,7 @@ function loadData(){
     DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
     DB.ref(RESULTS_BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(RESULTS_BASE+"/results/bracketMatchups").on("value",function(sn){if(!ST.results)ST.results={};ST.results.bracketMatchups=sn.val()||{};draw();_restoreScroll();});
     // Stage open flags — admin controls when picks are enabled
     DB.ref(RESULTS_BASE+"/stageOpen").on("value",function(sn){ST.stageOpen=sn.val()||{};draw();_restoreScroll();});
     // Live results feed — admin pushes ESPN standings into official results
@@ -1178,6 +1181,10 @@ function getFeedTeams(user,round,idx){
 
 // Get R32 source teams (from group predictions or official results)
 function getR32Teams(user,idx){
+  // If ESPN has provided official bracket matchups, use them for R32
+  var official=ST.results&&ST.results.bracketMatchups&&ST.results.bracketMatchups.r32&&ST.results.bracketMatchups.r32[idx];
+  if(official&&official.a)return [official.a,official.b||null];
+
   var src=R32_SRCS[idx];
   function resolve(s){
     if(s.wc){
@@ -1190,11 +1197,9 @@ function getR32Teams(user,idx){
     var rr=getResultRanking(s.g);
     if(rr&&rr[s.p]) return rr[s.p];
     // Preview: only use user's pick if they predicted that team in that qualifying position
-    // s.p=0 = winner slot, s.p=1 = runner-up slot
-    // A team picked 3rd by the user does NOT fill a direct qualifier slot
     if(user){
       var ur=getGroupRanking(user,s.g);
-      return ur[s.p]||null; // ur[0] or ur[1] only — these are the user's predicted qualifiers
+      return ur[s.p]||null;
     }
     return null;
   }
@@ -1633,15 +1638,15 @@ function fetchBracketFromESPN(cb){
   var url="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260626-20260719&limit=100";
   fetch(url).then(function(r){return r.json();}).then(function(data){
     var events=(data&&data.events)||[];
-    // Round name mapping: ESPN type.abbreviation → our round keys
+    // Round name mapping: ESPN type.abbreviation / name → our round keys
     var roundMap={
-      "R32":"r32","Round of 32":"r32",
-      "R16":"r16","Round of 16":"r16",
-      "QF":"qf","Quarterfinal":"qf","Quarter-Final":"qf",
-      "SF":"sf","Semifinal":"sf","Semi-Final":"sf",
-      "F":"final","Final":"final","3rd":"3rd"
+      "R32":"r32","Round of 32":"r32","32":"r32",
+      "R16":"r16","Round of 16":"r16","16":"r16",
+      "QF":"qf","Quarterfinal":"qf","Quarter-Final":"qf","8":"qf",
+      "SF":"sf","Semifinal":"sf","Semi-Final":"sf","4":"sf",
+      "F":"final","Final":"final","1":"final","3rd":"3rd","Third":"3rd"
     };
-    // Normalize team name to our GROUPS names
+    // Normalize team name to our GROUPS team names
     function normTeam(name){
       if(!name)return null;
       var nl=name.toLowerCase().trim();
@@ -1654,35 +1659,45 @@ function fetchBracketFromESPN(cb){
       }
       return name;
     }
-    // Collect completed knockout matches grouped by round
+    // Collect all knockout matches (completed or not) grouped by round
     var byRound={};
     events.forEach(function(ev){
-      var typeAbbr=(ev.competitions&&ev.competitions[0]&&ev.competitions[0].type&&ev.competitions[0].type.abbreviation)||"";
-      var typeName=(ev.status&&ev.status.type&&ev.status.type.description)||"";
-      var rndKey=null;
-      for(var k in roundMap){if(typeAbbr===k||typeName.indexOf(k)>=0){rndKey=roundMap[k];break;}}
-      if(!rndKey||rndKey==="3rd")return; // skip 3rd place match
       var comp=(ev.competitions&&ev.competitions[0])||{};
-      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
-      if(!completed)return;
+      var typeAbbr=(comp.type&&comp.type.abbreviation)||"";
+      var typeName=(comp.type&&comp.type.text)||(ev.status&&ev.status.type&&ev.status.type.description)||"";
+      var rndKey=null;
+      for(var k in roundMap){
+        if(typeAbbr===k||typeName===k||typeName.indexOf(k)>=0){rndKey=roundMap[k];break;}
+      }
+      if(!rndKey||rndKey==="3rd")return;
       var competitors=comp.competitors||[];
-      var winner=competitors.find(function(c){return c.winner;});
-      if(!winner)return;
-      var winnerName=normTeam((winner.team&&(winner.team.displayName||winner.team.name))||"");
-      if(!winnerName)return;
+      var teamA=normTeam((competitors[0]&&competitors[0].team&&(competitors[0].team.displayName||competitors[0].team.name))||"");
+      var teamB=normTeam((competitors[1]&&competitors[1].team&&(competitors[1].team.displayName||competitors[1].team.name))||"");
+      var completed=!!(comp.status&&comp.status.type&&comp.status.type.completed);
+      var winner=null;
+      if(completed){
+        var w=competitors.find(function(c){return c.winner;});
+        if(w)winner=normTeam((w.team&&(w.team.displayName||w.team.name))||"");
+      }
       var matchDate=new Date(ev.date||0).getTime();
       if(!byRound[rndKey])byRound[rndKey]=[];
-      byRound[rndKey].push({name:winnerName,date:matchDate});
+      byRound[rndKey].push({teamA:teamA,teamB:teamB,winner:winner,date:matchDate,completed:completed});
     });
-    // Sort each round by match date to assign correct slot indices
-    var results={};
+
+    // Sort each round by date → slot index order
+    var results={};   // winners: results[rnd][idx] = winnerName
+    var matchups={};  // all pairings: matchups[rnd][idx] = {a,b}
     for(var rnd in byRound){
       byRound[rnd].sort(function(a,b){return a.date-b.date;});
       results[rnd]={};
-      byRound[rnd].forEach(function(m,i){results[rnd][i]=m.name;});
+      matchups[rnd]={};
+      byRound[rnd].forEach(function(m,i){
+        if(m.teamA)matchups[rnd][i]={a:m.teamA,b:m.teamB||null};
+        if(m.completed&&m.winner)results[rnd][i]=m.winner;
+      });
     }
-    cb(results,null);
-  }).catch(function(err){cb(null,err);});
+    cb(results,matchups,null);
+  }).catch(function(err){cb(null,null,err);});
 }
 
 function stopResultsRefresh(){clearInterval(_resTimer);_resTimer=null;}
@@ -2150,32 +2165,42 @@ function bind(){
   el=document.getElementById("adm-fetch-bracket");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-bracket-status");
     if(statusEl)statusEl.textContent="Fetching bracket results from ESPN...";
-    fetchBracketFromESPN(function(results,err){
+    fetchBracketFromESPN(function(results,matchups,err){
       if(err){
         if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
         toast("Fetch failed");
         return;
       }
-      var totalMatches=0;
-      for(var rnd in results)totalMatches+=Object.keys(results[rnd]).length;
-      if(!totalMatches){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No completed knockout matches found yet</span>';
-        toast("No bracket results yet");
+      var totalMatchups=0;
+      for(var rnd in matchups)totalMatchups+=Object.keys(matchups[rnd]).length;
+      var totalWinners=0;
+      for(var rnd in results)totalWinners+=Object.keys(results[rnd]).length;
+      if(!totalMatchups&&!totalWinners){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No knockout matches found yet</span>';
+        toast("No bracket data yet");
         return;
       }
-      // Merge into ST.results.bracket and push to Firebase
+      // Save matchups (official bracket pairings) to Firebase
+      if(Object.keys(matchups).length){
+        if(!ST.results.bracketMatchups)ST.results.bracketMatchups={};
+        for(var rnd in matchups){
+          ST.results.bracketMatchups[rnd]=matchups[rnd];
+          if(DB)DB.ref(RESULTS_BASE+"/results/bracketMatchups/"+rnd).set(matchups[rnd]);
+        }
+      }
+      // Save winners
       if(!ST.results.bracket)ST.results.bracket={};
       for(var rnd in results){
         if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
-        for(var idx in results[rnd]){
-          ST.results.bracket[rnd][idx]=results[rnd][idx];
-        }
+        for(var idx in results[rnd])ST.results.bracket[rnd][idx]=results[rnd][idx];
         if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd).update(results[rnd]);
       }
       var roundNames={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
-      var summary=Object.keys(results).map(function(r){return roundNames[r]+"("+Object.keys(results[r]).length+")"}).join(", ");
-      if(statusEl)statusEl.innerHTML='<span style="color:var(--purple)">✓ Pushed: '+summary+'</span>';
-      toast("🏆 Bracket results pushed");
+      var parts=[];
+      if(totalMatchups)parts.push(totalMatchups+" matchups");
+      if(totalWinners)parts.push(totalWinners+" winners");
+      if(statusEl)statusEl.innerHTML='<span style="color:var(--purple)">✓ Pushed: '+parts.join(", ")+'</span>';
+      toast("🏆 Bracket updated");
       draw();
     });
   });
