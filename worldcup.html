@@ -1628,6 +1628,63 @@ function renderResultsInto(){
   el.innerHTML=h;
 }
 
+function fetchBracketFromESPN(cb){
+  // ESPN scoreboard for World Cup knockout dates
+  var url="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260626-20260719&limit=100";
+  fetch(url).then(function(r){return r.json();}).then(function(data){
+    var events=(data&&data.events)||[];
+    // Round name mapping: ESPN type.abbreviation → our round keys
+    var roundMap={
+      "R32":"r32","Round of 32":"r32",
+      "R16":"r16","Round of 16":"r16",
+      "QF":"qf","Quarterfinal":"qf","Quarter-Final":"qf",
+      "SF":"sf","Semifinal":"sf","Semi-Final":"sf",
+      "F":"final","Final":"final","3rd":"3rd"
+    };
+    // Normalize team name to our GROUPS names
+    function normTeam(name){
+      if(!name)return null;
+      var nl=name.toLowerCase().trim();
+      for(var gid in GROUPS){
+        var found=GROUPS[gid].teams.find(function(t){
+          var tn=t.n.toLowerCase();
+          return tn===nl||nl.indexOf(tn)>=0||tn.indexOf(nl)>=0;
+        });
+        if(found)return found.n;
+      }
+      return name;
+    }
+    // Collect completed knockout matches grouped by round
+    var byRound={};
+    events.forEach(function(ev){
+      var typeAbbr=(ev.competitions&&ev.competitions[0]&&ev.competitions[0].type&&ev.competitions[0].type.abbreviation)||"";
+      var typeName=(ev.status&&ev.status.type&&ev.status.type.description)||"";
+      var rndKey=null;
+      for(var k in roundMap){if(typeAbbr===k||typeName.indexOf(k)>=0){rndKey=roundMap[k];break;}}
+      if(!rndKey||rndKey==="3rd")return; // skip 3rd place match
+      var comp=(ev.competitions&&ev.competitions[0])||{};
+      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
+      if(!completed)return;
+      var competitors=comp.competitors||[];
+      var winner=competitors.find(function(c){return c.winner;});
+      if(!winner)return;
+      var winnerName=normTeam((winner.team&&(winner.team.displayName||winner.team.name))||"");
+      if(!winnerName)return;
+      var matchDate=new Date(ev.date||0).getTime();
+      if(!byRound[rndKey])byRound[rndKey]=[];
+      byRound[rndKey].push({name:winnerName,date:matchDate});
+    });
+    // Sort each round by match date to assign correct slot indices
+    var results={};
+    for(var rnd in byRound){
+      byRound[rnd].sort(function(a,b){return a.date-b.date;});
+      results[rnd]={};
+      byRound[rnd].forEach(function(m,i){results[rnd][i]=m.name;});
+    }
+    cb(results,null);
+  }).catch(function(err){cb(null,err);});
+}
+
 function stopResultsRefresh(){clearInterval(_resTimer);_resTimer=null;}
 function startResultsRefresh(){
   clearInterval(_resTimer);
@@ -1665,6 +1722,13 @@ function renderAdmin(){
   h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the full match schedule + live scores from ESPN. This powers the public "World Cup Game Picks" pool (enable it from the master admin panel on the Hub). Re-fetch anytime to update scores/results.</div>';
   h+='<button id="adm-fetch-games" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(85,144,232,.4);background:rgba(85,144,232,.1);color:var(--blue);font-family:inherit;cursor:pointer">🗓️ Fetch Game Schedule &amp; Scores</button>';
   h+='<div id="adm-games-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
+  h+='<div class="adm-sec-label">🏆 Live Bracket Results</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch completed knockout matches from ESPN and push winners as official bracket results. Run after each round completes.</div>';
+  h+='<button id="adm-fetch-bracket" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(155,89,255,.4);background:rgba(155,89,255,.1);color:var(--purple);font-family:inherit;cursor:pointer">🏆 Fetch &amp; Push Bracket Results</button>';
+  h+='<div id="adm-bracket-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
 
   h+='<div class="adm-sec-label">Phase Control</div>';
@@ -2082,6 +2146,38 @@ function bind(){
         if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
         toast("Fetch failed");
       });
+  });
+  el=document.getElementById("adm-fetch-bracket");if(el)el.addEventListener("click",function(){
+    var statusEl=document.getElementById("adm-bracket-status");
+    if(statusEl)statusEl.textContent="Fetching bracket results from ESPN...";
+    fetchBracketFromESPN(function(results,err){
+      if(err){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
+        toast("Fetch failed");
+        return;
+      }
+      var totalMatches=0;
+      for(var rnd in results)totalMatches+=Object.keys(results[rnd]).length;
+      if(!totalMatches){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No completed knockout matches found yet</span>';
+        toast("No bracket results yet");
+        return;
+      }
+      // Merge into ST.results.bracket and push to Firebase
+      if(!ST.results.bracket)ST.results.bracket={};
+      for(var rnd in results){
+        if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
+        for(var idx in results[rnd]){
+          ST.results.bracket[rnd][idx]=results[rnd][idx];
+        }
+        if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd).update(results[rnd]);
+      }
+      var roundNames={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
+      var summary=Object.keys(results).map(function(r){return roundNames[r]+"("+Object.keys(results[r]).length+")"}).join(", ");
+      if(statusEl)statusEl.innerHTML='<span style="color:var(--purple)">✓ Pushed: '+summary+'</span>';
+      toast("🏆 Bracket results pushed");
+      draw();
+    });
   });
   el=document.getElementById("adm-fetch-games");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-games-status");
