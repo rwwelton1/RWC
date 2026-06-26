@@ -1771,10 +1771,11 @@ function renderProfile() {
         var _apKey = activePool.id; if(activePool.id==="cws"&&data["cws2026"]) _apKey="cws2026";
         var _apData = data[_apKey]||{};
         var poolScoresG = _apData.playerTotals || _apData.scores || _apData.playerscores || {};
-        var lowerBetterG = activePool.scoringDirection === "lower-better";
-        if(Object.keys(poolScoresG).length > 0) {
+        var lowerBetterG = activePool && activePool.scoringDirection === "lower-better";
+        if(Object.keys(poolScoresG).length > 0){
           var rankedG = (g.players||[]).slice().sort(function(a,b){
-            var av=Number(poolScoresG[ukey(a)])||0, bv=Number(poolScoresG[ukey(b)])||0;
+            var ak=ukey(a), bk=ukey(b);
+            var av=Number(poolScoresG[ak])||0, bv=Number(poolScoresG[bk])||0;
             return lowerBetterG ? av-bv : bv-av;
           });
           var myPoolRankG = rankedG.indexOf(u.username);
@@ -5853,12 +5854,53 @@ function calcStandings(g, data) {
       });
       return; // skip normal flow for this pool
     }
-    var poolScores = (data[_poolDataKey]||{}).scores||{};
+    // pgatour: same pattern as usopen — compute from picks + live/admin scores
+    if(pool.id==="pgatour"){
+      var _pgData=data[_poolDataKey]||{};
+      var _pgPicks=_pgData.picks||{};
+      var _pgAdminScores=_pgData.scores||{};
+      var _pgLiveScores=_pgData.livescores||{};
+      var _pgGolferScores={};
+      Object.keys(_pgLiveScores).forEach(function(gk){
+        var ls=_pgLiveScores[gk];
+        if(ls&&ls.score!==null&&ls.score!==undefined)
+          _pgGolferScores[gk]={score:Number(ls.score),cut:ls.cut||false};
+      });
+      Object.keys(_pgAdminScores).forEach(function(gk){
+        _pgGolferScores[gk]=_pgAdminScores[gk];
+      });
+      // Also try pre-synced playerscores/playerTotals as a fast-path
+      var _pgPlayerScores=_pgData.playerTotals||_pgData.playerscores||null;
+      var _hasAnyPg=Object.keys(_pgGolferScores).length>0||_pgPlayerScores;
+      golfScores[pool.id]={};
+      players.forEach(function(p){
+        var uk2=ukey(p);
+        // Use pre-synced total if available
+        if(_pgPlayerScores&&_pgPlayerScores[uk2]!==undefined){
+          var total=Number(_pgPlayerScores[uk2])||0;
+          golfScores[pool.id][p]={score:total,cut:false};
+          scores[p]+=(100-total); // invert for leaderboard sorting
+          return;
+        }
+        var pk=_pgPicks[uk2];
+        if(!pk||!pk.picks) return;
+        var total=0;
+        (pk.picks||[]).forEach(function(gname){
+          var gk=gname.toLowerCase().replace(/[^a-z]/g,"");
+          var sc=_pgGolferScores[gk]||null;
+          if(sc&&!sc.cut&&sc.score!==undefined&&sc.score!==null) total+=Number(sc.score);
+        });
+        golfScores[pool.id][p]={score:total,cut:false};
+        scores[p]+=(100-total);
+      });
+      return;
+    }
+    var poolScores = (data[_poolDataKey]||{}).scores || (data[_poolDataKey]||{}).playerTotals || (data[_poolDataKey]||{}).playerscores || {};
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
       players.forEach(function(p){
         var pts = poolScores[ukey(p)];
-        if(pts !== undefined && pts > 0) scores[p] += pts;
+        if(pts !== undefined && pts !== null) scores[p] += Number(pts)||0;
       });
     } else {
       var r=(data.results||{})[pool.id]; if(!r) return;
