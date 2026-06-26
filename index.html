@@ -1770,7 +1770,7 @@ function renderProfile() {
       if(activePool && u && u.username) {
         var _apKey = activePool.id; if(activePool.id==="cws"&&data["cws2026"]) _apKey="cws2026";
         var _apData = data[_apKey]||{};
-        var poolScoresG = _apData.playerTotals || _apData.scores || {};
+        var poolScoresG = _apData.playerTotals || _apData.scores || _apData.playerscores || {};
         var lowerBetterG = activePool.scoringDirection === "lower-better";
         if(Object.keys(poolScoresG).length > 0) {
           var rankedG = (g.players||[]).slice().sort(function(a,b){
@@ -3159,7 +3159,7 @@ function renderTrophyCase() {
           var poolData2 = (g.data&&g.data[_dataKey])||null;
           // Prefer pre-computed playerTotals (written by usopen/salary pool admin actions)
           var playerTotals2 = poolData2 ? (poolData2.playerTotals||null) : null;
-          var poolScores2 = poolData2 ? (poolData2.scores||null) : null;
+          var poolScores2 = poolData2 ? (poolData2.scores||poolData2.playerscores||null) : null;
           if(playerTotals2 || poolScores2){
             var lowerBetter = pool.scoringDirection === "lower-better";
 
@@ -4204,7 +4204,48 @@ function renderHub() {
   // Group search
   h += '<div class="section-label">Find a Group</div>';
   h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search" placeholder="Search by group name or code..." autocomplete="off"></div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th style="white-space:nowrap">Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody"><tr><td colspan="4" class="no-results" id="groups-tbody-loading">Loading groups...</td></tr></tbody></table></div>';
+  // Render groups inline — no async needed, uses cache
+  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th style="white-space:nowrap">Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody">';
+  if(_groupsCache){
+    var _myName2 = u ? u.username : null;
+    var _hubFiltered = _groupsCache.filter(function(g){
+      if(_myName2 && (g.players||[]).indexOf(_myName2) >= 0) return false;
+      if((g.pools||[]).length > 0){
+        var allSoon2 = (g.pools||[]).every(function(pid){
+          return ((SC.globalStatuses||{})[pid]||"coming-soon") === "coming-soon";
+        });
+        if(allSoon2) return false;
+      }
+      return true;
+    });
+    if(!_hubFiltered.length){
+      h += '<tr><td colspan="4" style="padding:16px;text-align:center"><div style="font-size:11px;color:var(--muted);margin-bottom:8px">No groups to join right now</div><button class="btn btn-gold" id="btn-hub-create-empty" style="font-size:11px;padding:7px 18px">+ Create a Group</button></td></tr>';
+    } else {
+      _hubFiltered.forEach(function(g){
+        var playerCount = (g.players||[]).length;
+        var openPool = null, compHtml = '<span style="color:#334155;font-size:10px">—</span>';
+        (g.pools||[]).forEach(function(pid){
+          var status = (SC.globalStatuses||{})[pid]||"coming-soon";
+          if((status==="open"||status==="locked") && !openPool) openPool = pid;
+        });
+        if(openPool){
+          var poolDef = POOL_LIBRARY.find(function(p){ return p.id===openPool; });
+          var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Live" : "Open";
+          var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
+          var icon = poolDef ? poolDef.icon : "🏆";
+          compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span></span>';
+        }
+        h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
+        h += '<td class="group-name-cell" style="font-size:12px">'+x(g.name||"Unnamed")+'</td>';
+        h += '<td style="color:#64748b;font-size:11px;white-space:nowrap">'+playerCount+'</td>';
+        h += '<td>'+compHtml+'</td>';
+        h += '<td><span class="join-link">Join &#8250;</span></td></tr>';
+      });
+    }
+  } else {
+    h += '<tr><td colspan="4" style="padding:16px;text-align:center"><div style="font-size:11px;color:var(--muted);margin-bottom:8px">No groups to join right now</div><button class="btn btn-gold" id="btn-hub-create-empty" style="font-size:11px;padding:7px 18px">+ Create a Group</button></td></tr>';
+  }
+  h += '</tbody></table></div>';
 
   h += '</div>';
   render(h);
@@ -4442,18 +4483,27 @@ function renderHub() {
       el.addEventListener("click", function(){ joinGroup(this.getAttribute("data-gid")); });
     });
   }
-  // Show create button immediately as placeholder, then replace with real data
-  (function(){
-    var _tb = document.getElementById("groups-tbody");
-    if(_tb) _tb.innerHTML = '<tr><td colspan="4" style="padding:16px;text-align:center"><div style="font-size:11px;color:var(--muted);margin-bottom:8px">No groups to join right now</div><button class="btn btn-gold" id="btn-hub-create-empty" style="font-size:11px;padding:7px 18px">+ Create a Group</button></td></tr>';
-    var _cb = document.getElementById("btn-hub-create-empty");
-    if(_cb) _cb.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
-  })();
-  loadAllGroups(function(groups){ renderHubGroupsTable(groups, ""); });
+  // Wire create button (rendered inline)
+  var _cbHub = document.getElementById("btn-hub-create-empty");
+  if(_cbHub) _cbHub.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
+
+  // Search filters the inline table via draw
   var si = document.getElementById("group-search");
   if(si) si.addEventListener("input", function(){
-    loadAllGroups(function(groups){ renderHubGroupsTable(groups, this.value); }.bind(this));
+    var q = this.value.toLowerCase().trim();
+    var tbody = document.getElementById("groups-tbody");
+    if(!tbody || !_groupsCache) return;
+    var rows = tbody.querySelectorAll("tr.clickable-row");
+    rows.forEach(function(row){
+      var name = (row.querySelector(".group-name-cell")||{}).textContent||"";
+      row.style.display = !q || name.toLowerCase().indexOf(q)>=0 ? "" : "none";
+    });
   });
+
+  // If cache is stale, refresh and redraw
+  if(!_groupsCache || Date.now() - _groupsCacheTime > 30000){
+    loadAllGroups(function(){ draw(); });
+  }
 
   document.querySelectorAll("[data-copy-pool]").forEach(function(btn){
     btn.addEventListener("click", function(e){
