@@ -628,13 +628,13 @@ function calcPhase1Score(user){
   return total;
 }
 function calcPhase1MaxPossible(user){
-  var total=calcPhase1Score(user);
-  // Each unsettled group: max = +1+1 (qualifiers) + 2 (group winner) + 2 (perfect group) = 6pts
-  GROUP_IDS.forEach(function(gid){if(!isGroupSettled(gid))total+=(PTS.qualifier*2)+PTS.groupWinner+PTS.perfectGroup;});
-  // Wild cards: if results not set yet, full 8 possible; if set, only remaining correct picks count
-  var rwc=getResultWildcards(),uwc=getUserWildcards(user);
-  if(!rwc.length) total+=WILD_CARD_COUNT*PTS.wildcard;
-  return total;
+  // Fixed theoretical max:
+  // 12 groups × 2 qualifier pts (+1 each for 1st & 2nd pick) = 24
+  // 8 wild card tab picks                                     =  8
+  // 12 groups × 2 winner bonus                               = 24
+  // 12 groups × 2 perfect group bonus                        = 24
+  // Total                                                     = 80
+  return 80;
 }
 
 // Phase 2 = knockout bracket
@@ -1204,17 +1204,27 @@ function renderLB(){
         return rr[0]===t||rr[1]===t;
       });
     }).length;
-    var teamsTotal=32;
+    // Teams stat: count all correct qualifier picks using the same two-list system as calcGroupPoints
+    var teamsTotal=32; // 24 direct (2 per group × 12) + 8 wild cards
     var teamsCorrect=0;
     GROUP_IDS.forEach(function(gid){
-      var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;
+      var gp=calcGroupPoints(p,gid);
+      // Count intersection of pickedToQualify ∩ actuallyQualified — same logic, just count matches
+      var rr=getEffectiveGroupResult(gid); if(!rr||!rr.length) return;
       var ur=getGroupRanking(p,gid);
-      [ur[0],ur[1]].forEach(function(t){
-        if(!t)return;
-        if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)teamsCorrect++;
+      var groupTeams=GROUPS[gid].teams.map(function(t){return t.n;});
+      var picked=[ur[0],ur[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;});
+      getUserWildcards(p).forEach(function(t){
+        var tn=findTeamName(t)||t;
+        if(groupTeams.indexOf(tn)>=0&&picked.indexOf(tn)<0) picked.push(tn);
       });
+      var qualified=[rr[0],rr[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;});
+      rwc.forEach(function(t){
+        var tn=findTeamName(t)||t;
+        if(groupTeams.indexOf(tn)>=0&&qualified.indexOf(tn)<0) qualified.push(tn);
+      });
+      picked.forEach(function(t){ if(qualified.indexOf(t)>=0) teamsCorrect++; });
     });
-    teamsCorrect+=wcSc;
 
     function statCol(val,label,sub,color,borderRight){
       return '<div style="flex:1;text-align:center'+(borderRight?';border-right:2px solid var(--border2)':'')+'">' +
