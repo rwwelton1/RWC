@@ -1203,7 +1203,8 @@ function renderLB(){
     var winners1st=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;return getGroupRanking(p,gid)[0]===rr[0];}).length;
     var perfectGroups=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;var ur=getGroupRanking(p,gid);return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];}).length;
     var teamsCorrect=0;GROUP_IDS.forEach(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;var ur=getGroupRanking(p,gid);var groupTeams=GROUPS[gid].teams.map(function(t){return t.n;});var top2=([ur[0],ur[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqDirect=([rr[0],rr[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqWC=[];rwc.forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});var aq=aqDirect.concat(aqWC);top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});getUserWildcards(p).forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aqWC.indexOf(tn)>=0)teamsCorrect++;});});
-    var displaySc=(winners1st*PTS.groupWinner)+(perfectGroups*PTS.perfectGroup)+teamsCorrect+p2sc;
+    var _scoreOverride=(ST.results.scoreOverrides&&(ST.results.scoreOverrides[ukey(p)]||ST.results.scoreOverrides[p]))||0;
+    var displaySc=(winners1st*PTS.groupWinner)+(perfectGroups*PTS.perfectGroup)+teamsCorrect+p2sc+_scoreOverride;
     h+='<div style="text-align:right;flex-shrink:0">';
     h+='<div style="font-size:24px;font-weight:900;color:'+(displaySc>0?rankColor:'var(--dim)')+';letter-spacing:-.03em">'+displaySc+'</div>';
     h+='<div style="font-size:9px;font-weight:800;color:var(--muted)">pts</div>';
@@ -2035,6 +2036,21 @@ function renderAdmin(){
   }
   h+='</div>';
 
+  h+='<div class="adm-sec-label">✏️ Score Overrides</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Add or subtract points from a player\'s calculated score. Use to correct any scoring errors.</div>';
+  PARTS.forEach(function(pl){
+    var cur=(ST.results.scoreOverrides&&ST.results.scoreOverrides[pl])||0;
+    h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2)">';
+    h+='<span style="font-size:12px;font-weight:800;flex:1;color:var(--text)">'+pem(pl)+x(pl)+'</span>';
+    h+='<button data-adm-override-dec="'+x(pl)+'" style="width:28px;height:28px;border-radius:6px;border:1.5px solid var(--border);background:#fff;font-size:14px;font-weight:900;cursor:pointer;color:var(--red)">−</button>';
+    h+='<span id="adm-ov-'+x(pl)+'" style="font-size:13px;font-weight:900;min-width:32px;text-align:center;color:'+(cur>0?'var(--green)':cur<0?'var(--red)':'var(--muted)')+'">'+( cur>0?'+'+cur:cur)+'</span>';
+    h+='<button data-adm-override-inc="'+x(pl)+'" style="width:28px;height:28px;border-radius:6px;border:1.5px solid var(--border);background:#fff;font-size:14px;font-weight:900;cursor:pointer;color:var(--green)">+</button>';
+    h+='</div>';
+  });
+  h+='<div id="adm-override-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
   h+='<div class="adm-sec-label">📡 Live Results Feed</div>';
   h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
   h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the latest ESPN group standings and push them as official results. All sessions update instantly.</div>';
@@ -2594,6 +2610,21 @@ function bind(){
     if(!confirm("Clear all 8 wild card qualifiers?"))return;
     saveAdminWildcards([]);toast("Wild cards cleared");
   });
+  // Score override +/- buttons
+  document.addEventListener("click",function(e){
+    var inc=e.target.getAttribute("data-adm-override-inc");
+    var dec=e.target.getAttribute("data-adm-override-dec");
+    var pl=inc||dec;
+    if(!pl||!ST.admin)return;
+    if(!ST.results.scoreOverrides)ST.results.scoreOverrides={};
+    var cur=(ST.results.scoreOverrides[pl])||0;
+    ST.results.scoreOverrides[pl]=cur+(inc?1:-1);
+    if(DB)DB.ref(RESULTS_BASE+"/results/scoreOverrides/"+ukey(pl)).set(ST.results.scoreOverrides[pl]);
+    var statusEl=document.getElementById("adm-override-status");
+    if(statusEl)statusEl.textContent="Saved "+pl+": "+(ST.results.scoreOverrides[pl]>0?"+":"")+ST.results.scoreOverrides[pl]+" pts";
+    draw();
+  });
+
   els=document.querySelectorAll("[data-adm-stage-toggle]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
     var stage=this.getAttribute("data-adm-stage-toggle");
