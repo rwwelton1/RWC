@@ -431,7 +431,8 @@ var ST = {
 var board = [];   // active working board (not yet saved)
 var boardDirty = false;
 
-var GROUP_ID       = (new URLSearchParams(location.search)).get("group") || null;
+var GROUP_ID   = (new URLSearchParams(location.search)).get("group") || null;
+var GROUP_NAME = "";
 var URL_USER       = (new URLSearchParams(location.search)).get("user")  || null;
 var GROUP_ADMIN_PW = null;
 
@@ -1127,11 +1128,26 @@ function writeAllPoolResults(){
   var adminEntry=ranked.find(function(r){ return r.name===admin; });
   var adminRank=adminEntry?ranked.indexOf(adminEntry)+1:0;
 
+  // Write to globalSettings/results so hub index can display standings
+  var globalResult={};
+  if(ranked[0]) globalResult.first=ranked[0].name;
+  if(ranked[1]) globalResult.second=ranked[1].name;
+  if(ranked[2]) globalResult.third=ranked[2].name;
+  if(Object.keys(globalResult).length) DB.ref("globalSettings/results/"+POOL_ID).set(globalResult);
+
+  // Write normalized scores to group data for hub standings display
+  if(GROUP_ID){
+    var scoreMap={};
+    ranked.forEach(function(e){ scoreMap[e.uk]=e.total; });
+    DB.ref("groups/"+GROUP_ID+"/data/"+POOL_ID+"/scores").set(scoreMap);
+    DB.ref("groups/"+GROUP_ID+"/data/"+POOL_ID+"/playerTotals").set(scoreMap);
+  }
+
   ranked.forEach(function(e,i){
     var myRank=i+1, margin=(myRank===1&&secondScore!==null)?firstScore-secondScore:null;
     DB.ref("users/"+e.uk+"/stats/poolResults/"+POOL_ID+"_"+GROUP_ID.replace(/[^a-z0-9_]/gi,"")).set({
       poolId:POOL_ID, poolName:"NHL Draft Pool", poolSport:"Hockey",
-      groupId:GROUP_ID, groupName:GROUP_ID, year:2026, ts:Date.now(),
+      groupId:GROUP_ID, groupName:GROUP_NAME||GROUP_ID, year:2026, ts:Date.now(),
       myRank:myRank, totalPlayers:ranked.length, myScore:e.total,
       margin:margin, isGolf:false, hasSalary:false, isDraft:true,
       exactPicks:e.exactPicks, admin:admin, adminRank:adminRank,
@@ -1141,7 +1157,7 @@ function writeAllPoolResults(){
   });
   if(ranked[0]) DB.ref("users/"+ranked[0].uk+"/trophies/"+POOL_ID+"_"+GROUP_ID.replace(/[^a-z0-9_]/gi,"")).set({
     poolId:POOL_ID, poolName:"NHL Draft Pool", poolIcon:"\uD83C\uDFD2",
-    finish:1, pts:ranked[0].total, groupName:GROUP_ID, year:2026, ts:Date.now()
+    finish:1, pts:ranked[0].total, groupName:GROUP_NAME||GROUP_ID, year:2026, ts:Date.now()
   });
 }
 
@@ -1198,6 +1214,7 @@ function loadData(){
     if(!GROUP_ID){ loadPool(); return; }
     DB.ref("groups/"+GROUP_ID).once("value",function(sn){
       var g=sn.val()||{};
+      if(g.name) GROUP_NAME=g.name;
       if(g.adminPw) GROUP_ADMIN_PW=g.adminPw;
       if(g.players&&g.players.length) PARTS=g.players;
       loadPool();
