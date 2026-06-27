@@ -151,9 +151,9 @@ a{color:inherit;text-decoration:none}
 .zone-header.z-elim{background:var(--red-bg);color:var(--red);border-bottom:2px solid var(--border2)}
 .drag-item.zone-qual{border-color:var(--green)!important}
 .drag-item.zone-wc{border-color:var(--gold)!important}
-.drag-item.zone-wc-qualified{border-color:var(--purple,#7c3aed)!important;background:rgba(124,58,237,.06)!important}
+.drag-item.zone-wc-qualified{border-color:#7c3aed!important;background:rgba(124,58,237,.06)!important}
 .drag-item.zone-elim{border-color:var(--red)!important;opacity:.45}
-.di-badge.wc-qualified{background:rgba(124,58,237,.12);color:var(--purple,#7c3aed);border:1px solid rgba(124,58,237,.3)}
+.di-badge.wc-qualified{background:rgba(124,58,237,.12);color:#7c3aed;border:1px solid rgba(124,58,237,.3)}
 
 /* DRAG GHOST */
 .drag-ghost{position:fixed;pointer-events:none;z-index:9999;opacity:.95;border-radius:12px;box-shadow:4px 4px 0 var(--border);background:#ffffff;border:2px solid var(--border);padding:10px 12px;display:flex;align-items:center;gap:9px;left:0;top:0;min-width:200px}
@@ -177,10 +177,15 @@ a{color:inherit;text-decoration:none}
 .wc-team:active{transform:translate(4px,4px);box-shadow:none}
 .wc-team.selected{background:var(--gold-bg);border-color:var(--border)}
 .wc-team.selected .wc-name{color:var(--gold-dark);font-weight:900}
-.wc-team.correct{background:var(--green-bg)}
+.wc-team.correct{background:var(--green-bg);border-color:var(--green);border-width:3px}
 .wc-team.correct .wc-name{color:var(--green);font-weight:900}
-.wc-team.wrong{opacity:.35;text-decoration:line-through}
-.wc-team.full{opacity:.3;pointer-events:none}
+.wc-team.promoted{background:var(--blue-bg);border-color:var(--blue);border-width:3px}
+.wc-team.promoted .wc-name{color:var(--blue);font-weight:900}
+.wc-team.wrong{background:var(--red-bg);border-color:var(--red);border-width:3px;opacity:.7}
+.wc-team.wrong .wc-name{color:var(--red);font-weight:900;text-decoration:line-through}
+.wc-team.full{opacity:.25;pointer-events:none}
+.wc-team.missed{background:#fff8f0;border-color:#e8a800;border-width:3px}
+.wc-team.missed .wc-name{color:#b87800;font-weight:900}
 .wc-flag{font-size:18px;width:24px;text-align:center;flex-shrink:0}
 .wc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .wc-name{font-size:12px;font-weight:800;color:var(--text);flex:1}
@@ -365,6 +370,8 @@ var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
 var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},games:{}};
+// Official bracket matchups from ESPN (separate from predicted R32_SRCS)
+// ST.results.bracketMatchups[rnd][idx] = {a: teamName, b: teamName}
 var _dragState=null; // active drag state
 
 try{
@@ -376,7 +383,13 @@ function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&l
 var _tt;function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2500);}
 function ukey(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
 function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
-function isLocked(){return !!(ST.user&&(isPlayerLocked(ST.user)||(ST.results.phase==="knockout")));}
+function isLocked(stage){
+  if(!ST.user)return false;
+  // Bracket picks are only blocked by the stage toggle — not by individual/group lock
+  if(stage==="bracket")return false;
+  if(isPlayerLocked(ST.user))return true;
+  return ST.results.phase==="knockout";
+}
 function stageOpenForPicks(stage){
   // Groups/wildcards are auto-open until kickoff
   if(stage==="groups"){
@@ -498,10 +511,10 @@ function calcScore(user){
     var ur=getGroupRanking(user,gid);
     // User's predicted qualifiers: positions 1 and 2
     var userTop2=[ur[0],ur[1]];
-    // +1 for each of user's top-2 picks that actually qualified (1st or 2nd)
+    // +1 for each of user's top-2 picks that actually qualified (1st, 2nd, or wild card)
     userTop2.forEach(function(t){
       if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
+      if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)total+=PTS.qualifier;
     });
     // +2 bonus if user picked the exact group winner in 1st place
     if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
@@ -533,7 +546,7 @@ function calcPhase1Score(user){
     var ur=getGroupRanking(user,gid);
     [ur[0],ur[1]].forEach(function(t){
       if(!t)return;
-      if(rr[0]===t||rr[1]===t)total+=PTS.qualifier;
+      if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)total+=PTS.qualifier;
     });
     if(ur[0]&&ur[0]===rr[0])total+=PTS.groupWinner;
     if(ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2])total+=PTS.perfectGroup;
@@ -597,10 +610,13 @@ function calcPhase2MaxPossible(user){
 var _savedScroll=null;
 function _restoreScroll(){
   if(!_savedScroll)return;
-  var sy=_savedScroll.sy;_savedScroll=null;
+  var sy=_savedScroll.sy;
+  // Don't clear immediately — keep alive for 800ms to survive Firebase round-trip
+  clearTimeout(_savedScroll._t);
+  _savedScroll._t=setTimeout(function(){_savedScroll=null;},800);
   requestAnimationFrame(function(){window.scrollTo(0,sy);requestAnimationFrame(function(){window.scrollTo(0,sy);});});
 }
-function _saveScroll(){_savedScroll={sy:window.pageYOffset||0};}
+function _saveScroll(){if(_savedScroll)clearTimeout(_savedScroll._t);_savedScroll={sy:window.pageYOffset||0};}
 
 function saveGroupRanking(gid,ranking){
   if(!ST.user||!DB)return;
@@ -655,7 +671,7 @@ function fetchGamesFromESPN(cb){
   var start="20260611",end="20260719";
   fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+start+"-"+end+"&limit=200")
     .then(function(r){return r.json();})
-    .then(function(data){
+    .then(function(data){_resData=data;_resLastFetch=Date.now();
       var games={};
       (data.events||[]).forEach(function(ev){
         var comp=(ev.competitions||[])[0];
@@ -701,9 +717,17 @@ function loadData(){
   function s2(){var done=0,total=PARTS.length;if(!total){s3();return;}PARTS.forEach(function(p){DB.ref("users/"+ukey(p)+"/emoji").once("value",function(sn){if(sn.val())_EM[p]=sn.val();done++;if(done===total)s3();},function(){done++;if(done===total)s3();});});}
   function s3(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
-    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(BASE+"/picks").on("value",function(sn){
+      var wasBracket=(ST.page==="bracket");
+      var sy=wasBracket?(window.pageYOffset||0):0;
+      ST.picks=sn.val()||{};
+      draw();
+      if(wasBracket&&sy>0){requestAnimationFrame(function(){window.scrollTo(0,sy);requestAnimationFrame(function(){window.scrollTo(0,sy);});});}
+      else{_restoreScroll();}
+    });
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
     DB.ref(RESULTS_BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
+    DB.ref(RESULTS_BASE+"/results/bracketMatchups").on("value",function(sn){if(!ST.results)ST.results={};ST.results.bracketMatchups=sn.val()||{};draw();_restoreScroll();});
     // Stage open flags — admin controls when picks are enabled
     DB.ref(RESULTS_BASE+"/stageOpen").on("value",function(sn){ST.stageOpen=sn.val()||{};draw();_restoreScroll();});
     // Live results feed — admin pushes ESPN standings into official results
@@ -819,10 +843,10 @@ function buildDragList(ranking, gid, rr, viewer, canDrag, isAdmin){
     var rPos=rr?rr.indexOf(name):-1;
     var resCls=rPos===0?" result-1":rPos===1?" result-2":rPos===2?" result-3":rPos===3?" result-4":"";
     // Zone class for left border color
-    var rwc=getResultWildcards();
-    var isResultWC=rr&&rwc.indexOf(name)>=0;
+    var rwcCheck=getResultWildcards();
+    var isResultWC=rr&&rwcCheck.indexOf(name)>=0;
     var zoneCls=!isAdmin?(idx<=1?" zone-qual":idx===2?" zone-wc":" zone-elim"):"";
-    // Override with purple for teams that actually qualified as wild card
+    // Purple override for teams that actually qualified as wild card
     if(!isAdmin&&isResultWC) zoneCls=" zone-wc-qualified";
     var ptsStr="";
     if(rr&&viewer&&!isAdmin){
@@ -832,18 +856,16 @@ function buildDragList(ranking, gid, rr, viewer, canDrag, isAdmin){
     }
     var badge="";
     if(rr&&rPos>=0){
-      var rwc=getResultWildcards();
-      var isResultWC=rwc.indexOf(name)>=0;
       if(rPos===0) badge='<span class="di-badge adv">Winner</span>';
       else if(rPos===1) badge='<span class="di-badge adv">2nd</span>';
       else if(rPos===2) badge='<span class="di-badge wc">3rd</span>';
       else badge='<span class="di-badge elim">Elim</span>';
-      // Show WC badge if team qualified as wild card — purple to distinguish from 3rd place eligible
+      // Purple WC ✓ badge for confirmed wild card qualifiers
       if(isResultWC) badge+='<span class="di-badge wc-qualified" style="margin-left:3px">WC ✓</span>';
     } else if(!rr&&viewer){
       // Pre-result: show if viewer picked this team as wild card
-      var uwc=getUserWildcards(viewer);
-      if(uwc.indexOf(name)>=0) badge='<span class="di-badge wc" style="font-size:9px">WC ★</span>';
+      var uwcPre=getUserWildcards(viewer);
+      if(uwcPre.indexOf(name)>=0) badge='<span class="di-badge wc" style="font-size:9px">WC ★</span>';
     }
     var posCls=idx===0?"p1":idx===1?"p2":idx===2?"p3":"";
     var posLabel=isAdmin?(idx+1)+".":["1st","2nd","3rd","4th"][idx];
@@ -924,15 +946,36 @@ function renderWildCards(){
   h+='<div>';
   pool.forEach(function(entry){
     var isSel=uWC.indexOf(entry.name)>=0,isCorrect=rWC.length&&rWC.indexOf(entry.name)>=0;
-    var isWrong=rWC.length&&!isCorrect&&isSel,full=!isSel&&uWC.length>=WILD_CARD_COUNT;
-    var cls="wc-team"+(isCorrect?" correct":isWrong?" wrong":isSel?" selected":full?" full":"");
+    var rr=getEffectiveGroupResult(entry.group);
+    var actualPos=rr&&rr.length?rr.indexOf(entry.name):-1;
+    var isPromoted=isSel&&actualPos>=0&&actualPos<=1; // picked but finished 1st or 2nd
+    var isWrong=rWC.length&&!isCorrect&&isSel&&!isPromoted;
+    var full=!isSel&&uWC.length>=WILD_CARD_COUNT;
+    // Missed = didn't pick, but team actually qualified (as wild card or promoted)
+    var qualifiedWithoutPick=!isSel&&rWC.length&&(rWC.indexOf(entry.name)>=0||(actualPos>=0&&actualPos<=1));
+    var cls="wc-team"+(isCorrect?" correct":isPromoted?" promoted":isWrong?" wrong":qualifiedWithoutPick?" missed":isSel?" selected":full?" full":"");
+
+    // Result badge
+    var actualBadge="";
+    if(actualPos>=0&&(isSel||qualifiedWithoutPick)){
+      if(actualPos===0){
+        actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--gold-bg);border:2px solid var(--border);color:var(--gold-dark);box-shadow:2px 2px 0 var(--border);flex-shrink:0">1st</div>';
+      } else if(actualPos===1){
+        actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--blue-bg);border:2px solid var(--border);color:var(--blue);box-shadow:2px 2px 0 var(--border);flex-shrink:0">2nd</div>';
+      } else if(actualPos===2&&(isCorrect||qualifiedWithoutPick)){
+        actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:'+(isSel?'var(--green-bg)':'#fff8f0')+';border:2px solid var(--border);color:'+(isSel?'var(--green)':'#b87800')+';box-shadow:2px 2px 0 var(--border);flex-shrink:0">'+(isSel?'3rd ✓':'3rd ✗')+'</div>';
+      } else if(actualPos>=3&&isSel){
+        actualBadge='<div style="font-size:8px;font-weight:900;padding:2px 7px;border-radius:6px;background:var(--red-bg);border:2px solid var(--border);color:var(--red);box-shadow:2px 2px 0 var(--border);flex-shrink:0">Elim</div>';
+      }
+    }
+
     h+='<div class="'+cls+'"'+(canPick&&!full&&phase!=="knockout"?' data-wc="'+x(entry.name)+'"':'')+'>'+
       '<div class="wc-flag">'+entry.team.flag+'</div>'+
       '<div class="wc-dot" style="background:'+entry.team.color+'"></div>'+
       '<div class="wc-name">'+x(entry.name)+'</div>'+
       '<div style="font-size:7px;font-weight:700;color:var(--wc-gold);flex-shrink:0;margin-right:4px">#'+entry.team.r+'</div>'+
-      '<div class="wc-group">Grp '+entry.group+'</div>'+
-      '<div class="wc-icon">'+(isCorrect?"✓":isWrong?"✕":isSel?"★":"")+'</div>'+
+      (actualBadge?actualBadge+'<div style="width:4px"></div>':'<div class="wc-group">Grp '+entry.group+'</div>')+
+      '<div class="wc-icon" style="color:'+(isCorrect?'var(--green)':isPromoted?'var(--blue)':isWrong?'var(--red)':qualifiedWithoutPick?'#b87800':'var(--dim)')+'">'+(isCorrect?"✓":isPromoted?"✓":isWrong?"✕":qualifiedWithoutPick?"✕":"")+'</div>'+
       '</div>';
   });
   h+='</div>';
@@ -986,7 +1029,7 @@ function renderLB(){
     // Per-group breakdown
     var groupHits=[];
     GROUP_IDS.forEach(function(gid){
-      var rr=res[gid];if(!rr||!rr.length)return;
+      var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;
       var ur=getGroupRanking(p,gid);
       if(ur[0]&&ur[0]===rr[0])groupHits.push({gid:gid,team:rr[0],pts:2,type:"winner"});
       [ur[0],ur[1]].forEach(function(t){
@@ -1051,43 +1094,51 @@ function renderLB(){
     // Divider
     h+='<div style="height:2px;background:var(--border2);margin:0 14px 6px"></div>';
 
-    // Breakdown stats row
-    h+='<div style="display:flex;padding:4px 14px 12px;gap:0">';
-
-    var gSc=groupHits.reduce(function(a,b){return a+b.pts;},0);
-    h+='<div style="flex:1;text-align:center;border-right:2px solid var(--border2)">';
-    h+='<div style="font-size:18px;font-weight:900;color:'+(gSc>0?'var(--gold-dark)':'var(--dim)')+'">'+gSc+'</div>';
-    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Groups</div>';
-    h+='<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+groupHits.length+' hits</div>';
-    h+='</div>';
-
-    var wcSc=wcHits.length;
-    h+='<div style="flex:1;text-align:center;border-right:2px solid var(--border2)">';
-    h+='<div style="font-size:18px;font-weight:900;color:'+(wcSc>0?'var(--green)':'var(--dim)')+'">'+wcSc+'</div>';
-    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Wild Cards</div>';
-    h+='<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+wcSc+' / '+wcTotal+' correct</div>';
-    h+='</div>';
-
-    h+='<div style="flex:1;text-align:center">';
-    h+='<div style="font-size:18px;font-weight:900;color:'+(p2sc>0?'var(--blue)':'var(--dim)')+'">'+p2sc+'</div>';
-    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Bracket</div>';
-    h+='<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+(isKnockout?'live':'pending')+'</div>';
-    h+='</div></div>';
-
-    // Hit tags
-    if(groupHits.length>0||wcHits.length>0){
-      h+='<div style="height:2px;background:var(--border2);margin:0 14px"></div>';
-      h+='<div style="padding:8px 14px 12px;display:flex;flex-wrap:wrap;gap:5px">';
-      groupHits.forEach(function(hit){
-        var bg=hit.type==="winner"?'var(--gold-bg)':'var(--blue-bg)';
-        var col=hit.type==="winner"?'var(--gold-dark)':'var(--blue)';
-        h+='<span style="font-size:8px;font-weight:800;padding:3px 8px;border-radius:8px;background:'+bg+';border:2px solid var(--border);color:'+col+';box-shadow:2px 2px 0 var(--border)">'+x(hit.team)+' +'+hit.pts+'</span>';
+    // Breakdown stats row — 4 columns: 1st Place | Perfect | Teams | Bracket
+    var winners1st=GROUP_IDS.filter(function(gid){
+      var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;
+      return getGroupRanking(p,gid)[0]===rr[0];
+    }).length;
+    var perfectGroups=GROUP_IDS.filter(function(gid){
+      var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;
+      var ur=getGroupRanking(p,gid);
+      return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];
+    }).length;
+    // Teams correct = mirrors scoring logic exactly: ur[0]+ur[1] in actual top 2, plus wild card hits
+    // Only count wild card hits where team actually finished 3rd (not 1st/2nd)
+    var wcSc=wcHits.filter(function(t){
+      return !GROUP_IDS.some(function(gid){
+        var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;
+        return rr[0]===t||rr[1]===t;
       });
-      wcHits.forEach(function(t){
-        h+='<span style="font-size:8px;font-weight:800;padding:3px 8px;border-radius:8px;background:var(--green-bg);border:2px solid var(--border);color:var(--green);box-shadow:2px 2px 0 var(--border)">'+x(t)+' +1</span>';
+    }).length;
+    var teamsTotal=32;
+    var teamsCorrect=0;
+    GROUP_IDS.forEach(function(gid){
+      var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;
+      var ur=getGroupRanking(p,gid);
+      [ur[0],ur[1]].forEach(function(t){
+        if(!t)return;
+        if(rr[0]===t||rr[1]===t||rwc.indexOf(t)>=0)teamsCorrect++;
       });
-      h+='</div>';
+    });
+    teamsCorrect+=wcSc;
+
+    function statCol(val,label,sub,color,borderRight){
+      return '<div style="flex:1;text-align:center'+(borderRight?';border-right:2px solid var(--border2)':'')+'">' +
+        '<div style="font-size:18px;font-weight:900;color:'+(val>0?color:'var(--dim)')+'">'+val+'</div>'+
+        '<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">'+label+'</div>'+
+        '<div style="font-size:8px;font-weight:700;color:var(--dim);margin-top:1px">'+sub+'</div>'+
+        '</div>';
     }
+    h+='<div style="display:flex;padding:4px 14px 12px;gap:0">';
+    h+=statCol(winners1st,'1st Place',winners1st+' / 12','var(--gold-dark)',true);
+    h+=statCol(perfectGroups,'Perfect',perfectGroups+' groups','var(--purple)',true);
+    h+=statCol(teamsCorrect,'Teams',teamsCorrect+' / '+teamsTotal,'var(--green)',true);
+    h+=statCol(p2sc,'Bracket',isKnockout?'live':'pending','var(--blue)',false);
+    h+='</div>';
+
+
 
     h+='</div>';
   });
@@ -1158,6 +1209,10 @@ function getFeedTeams(user,round,idx){
 
 // Get R32 source teams (from group predictions or official results)
 function getR32Teams(user,idx){
+  // If ESPN has provided official bracket matchups, use them for R32 (may include TBD placeholders)
+  var official=ST.results&&ST.results.bracketMatchups&&ST.results.bracketMatchups.r32&&ST.results.bracketMatchups.r32[idx];
+  if(official&&(official.a||official.b))return [official.a||null,official.b||null];
+
   var src=R32_SRCS[idx];
   function resolve(s){
     if(s.wc){
@@ -1170,11 +1225,9 @@ function getR32Teams(user,idx){
     var rr=getResultRanking(s.g);
     if(rr&&rr[s.p]) return rr[s.p];
     // Preview: only use user's pick if they predicted that team in that qualifying position
-    // s.p=0 = winner slot, s.p=1 = runner-up slot
-    // A team picked 3rd by the user does NOT fill a direct qualifier slot
     if(user){
       var ur=getGroupRanking(user,s.g);
-      return ur[s.p]||null; // ur[0] or ur[1] only — these are the user's predicted qualifiers
+      return ur[s.p]||null;
     }
     return null;
   }
@@ -1184,7 +1237,7 @@ function getR32Teams(user,idx){
 function saveBracketPick(round,idx,team){
   if(!ST.user||!DB) return;
   // Block picks if bracket stage not open or locked
-  if(!stageOpenForPicks("bracket")||isLocked()) return;
+  if(!stageOpenForPicks("bracket")||isLocked("bracket")) return;
   var uk=ukey(ST.user);
   if(!ST.picks[uk]) ST.picks[uk]={};
   if(!ST.picks[uk].bracket) ST.picks[uk].bracket={};
@@ -1207,17 +1260,26 @@ function saveBracketPick(round,idx,team){
 function renderBracket(){
   var viewer=activeViewer();
   var isOfficial=(ST.results.phase==="knockout");
-  var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&isOfficial&&stageOpenForPicks("bracket"));
+  var bracketHasTeams=!!(ST.results&&ST.results.bracketMatchups&&ST.results.bracketMatchups.r32&&Object.keys(ST.results.bracketMatchups.r32).length);
+  var canPick=!!(ST.user&&!isLocked("bracket")&&viewer===ST.user&&(isOfficial||bracketHasTeams)&&stageOpenForPicks("bracket"));
+  // Debug: log canPick components to console
+
   var h='';
 
   if(isOfficial){
     if(stageOpenForPicks("bracket")){
-      h+='<div class="bk-notice live">&#10003; Knockout phase is live — tap a team to pick them to advance</div>';
+      h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:2px solid var(--border2)">';
+      h+='<div class="bk-notice live" style="flex:1;margin:0;border:none;padding:0;background:none">&#10003; Knockout phase is live — tap a team to pick them to advance</div>';
+      if(canPick){h+='<button id="b-reset-bracket" style="font-size:9px;font-weight:800;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--red-bg);color:var(--red);font-family:inherit;cursor:pointer;flex-shrink:0">Reset picks</button>';}
+      h+='</div>';
     } else {
       h+='<div class="bk-notice preview" style="border-color:rgba(245,197,24,.3);background:rgba(245,197,24,.05)">&#128274; Knockout picks not open yet — wait for admin to unlock</div>';
     }
   } else {
-    h+='<div class="bk-notice preview">&#9889; Preview based on your group predictions — tap a team to make knockout picks</div>';
+    h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:2px solid var(--border2)">';
+    h+='<div class="bk-notice preview" style="flex:1;margin:0;border:none;padding:0;background:none">&#9889; Preview based on your group predictions — tap a team to make knockout picks</div>';
+    if(canPick){h+='<button id="b-reset-bracket" style="font-size:9px;font-weight:800;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--red-bg);color:var(--red);font-family:inherit;cursor:pointer;flex-shrink:0">Reset picks</button>';}
+    h+='</div>';
   }
 
   h+='<div class="bracket-outer"><div class="bracket-stage">';
@@ -1260,7 +1322,7 @@ function renderBracket(){
     // Spacing: matches spaced evenly
     // Each match takes up (total_height / sz) vertical space
     // We use flex with gap to space them
-    var gapPx=ri===0?4:ri===1?40:ri===2?100:ri===3?200:0;
+    var gapPx=ri===0?4:ri===1?82:ri===2?170:ri===3?344:0;
 
     h+='<div style="display:flex;flex-direction:column;gap:'+gapPx+'px">';
     matches.forEach(function(m){
@@ -1273,7 +1335,7 @@ function renderBracket(){
       // Team A
       var aIsWin=winner&&winner===m.ta, aIsLose=winner&&winner!==m.ta&&m.ta;
       var aIsMy=!official&&m.pick&&m.pick===m.ta;
-      var aCanPick=!!(canPick&&m.ta&&m.tb&&!winner);
+      var aCanPick=!!(canPick&&m.ta);
       var aCls="bk-team"+(m.ta?"":" tbd")+(aIsWin?" winner":aIsLose?" loser":aIsMy?" mypick":"")+(aCanPick?" pickable":"");
       h+='<div class="'+aCls+'"'+(aCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.ta||"")+'"':'')+'>'+
         (m.ta?'<div class="bk-flag">'+getTeamFlag(m.ta)+'</div>':'<div style="width:20px"></div>')+
@@ -1284,7 +1346,7 @@ function renderBracket(){
       // Team B
       var bIsWin=winner&&winner===m.tb, bIsLose=winner&&winner!==m.tb&&m.tb;
       var bIsMy=!official&&m.pick&&m.pick===m.tb;
-      var bCanPick=!!(canPick&&m.ta&&m.tb&&!winner);
+      var bCanPick=!!(canPick&&m.tb);
       var bCls="bk-team"+(m.tb?"":" tbd")+(bIsWin?" winner":bIsLose?" loser":bIsMy?" mypick":"")+(bCanPick?" pickable":"");
       h+='<div class="'+bCls+'"'+(bCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.tb||"")+'"':'')+'>'+
         (m.tb?'<div class="bk-flag">'+getTeamFlag(m.tb)+'</div>':'<div style="width:20px"></div>')+
@@ -1608,11 +1670,89 @@ function renderResultsInto(){
   el.innerHTML=h;
 }
 
+function fetchBracketFromESPN(cb){
+  // ESPN scoreboard for World Cup knockout dates
+  var url="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260626-20260719&limit=100";
+  fetch(url).then(function(r){return r.json();}).then(function(data){
+    var events=(data&&data.events)||[];
+    // Round name mapping: ESPN type.abbreviation / name → our round keys
+    var roundMap={
+      "R32":"r32","Round of 32":"r32","32":"r32",
+      "R16":"r16","Round of 16":"r16","16":"r16",
+      "QF":"qf","Quarterfinal":"qf","Quarter-Final":"qf","8":"qf",
+      "SF":"sf","Semifinal":"sf","Semi-Final":"sf","4":"sf",
+      "F":"final","Final":"final","1":"final","3rd":"3rd","Third":"3rd"
+    };
+    // Normalize team name to our GROUPS team names
+    function normTeam(name){
+      if(!name)return null;
+      var nl=name.toLowerCase().trim();
+      for(var gid in GROUPS){
+        var found=GROUPS[gid].teams.find(function(t){
+          var tn=t.n.toLowerCase();
+          return tn===nl||nl.indexOf(tn)>=0||tn.indexOf(nl)>=0;
+        });
+        if(found)return found.n;
+      }
+      return name;
+    }
+    // Collect all knockout matches (completed or not) grouped by round
+    var byRound={};
+    events.forEach(function(ev){
+      var comp=(ev.competitions&&ev.competitions[0])||{};
+      var typeAbbr=(comp.type&&comp.type.abbreviation)||"";
+      var typeName=(comp.type&&comp.type.text)||(ev.status&&ev.status.type&&ev.status.type.description)||"";
+      var rndKey=null;
+      for(var k in roundMap){
+        if(typeAbbr===k||typeName===k||typeName.indexOf(k)>=0){rndKey=roundMap[k];break;}
+      }
+      if(!rndKey||rndKey==="3rd")return;
+      var competitors=comp.competitors||[];
+        // Resolve each competitor — may be a real team or a TBD placeholder (e.g. "3RD A/B/C/D/F", "1I")
+      function resolveCompetitor(c){
+        var raw=(c&&c.team&&(c.team.displayName||c.team.name))||"";
+        if(!raw)return null;
+        var normed=normTeam(raw);
+        // If normTeam found a real team, use it; otherwise keep the raw placeholder
+        return normed||raw;
+      }
+      var teamA=resolveCompetitor(competitors[0]);
+      var teamB=resolveCompetitor(competitors[1]);
+      // Only skip if both sides are completely unknown
+      if(!teamA&&!teamB)return;
+      var completed=!!(comp.status&&comp.status.type&&comp.status.type.completed);
+      var winner=null;
+      if(completed){
+        var w=competitors.find(function(c){return c.winner;});
+        if(w)winner=normTeam((w.team&&(w.team.displayName||w.team.name))||"");
+      }
+      var matchDate=new Date(ev.date||0).getTime();
+      if(!byRound[rndKey])byRound[rndKey]=[];
+      byRound[rndKey].push({teamA:teamA,teamB:teamB,winner:winner,date:matchDate,completed:completed});
+    });
+
+    // Sort each round by date → slot index order
+    var results={};   // winners: results[rnd][idx] = winnerName
+    var matchups={};  // all pairings: matchups[rnd][idx] = {a,b}
+    for(var rnd in byRound){
+      byRound[rnd].sort(function(a,b){return a.date-b.date;});
+      results[rnd]={};
+      matchups[rnd]={};
+      byRound[rnd].forEach(function(m,i){
+        if(m.teamA)matchups[rnd][i]={a:m.teamA,b:m.teamB||null};
+        if(m.completed&&m.winner)results[rnd][i]=m.winner;
+      });
+    }
+    cb(results,matchups,null);
+  }).catch(function(err){cb(null,null,err);});
+}
+
 function stopResultsRefresh(){clearInterval(_resTimer);_resTimer=null;}
 function startResultsRefresh(){
   clearInterval(_resTimer);
-  fetchResults();
-  _resTimer=setInterval(function(){if(ST.page==="results")fetchResults();},60000);
+  _resTimer=null;
+  if(!_resData||Date.now()-_resLastFetch>300000) fetchResults();
+  else renderResultsInto();
 }
 
 function renderAdmin(){
@@ -1646,23 +1786,76 @@ function renderAdmin(){
   h+='<div id="adm-games-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
 
+  h+='<div class="adm-sec-label">🏆 Live Bracket Results</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch completed knockout matches from ESPN and push winners as official bracket results. Run after each round completes.</div>';
+  h+='<button id="adm-fetch-bracket" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(155,89,255,.4);background:rgba(155,89,255,.1);color:var(--purple);font-family:inherit;cursor:pointer">🏆 Fetch &amp; Push Bracket Results</button>';
+  h+='<div id="adm-bracket-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
+  h+='<div class="adm-sec-label">📋 Populate R32 Bracket Manually</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Set the official R32 matchups manually. Select the two teams for each match. Leave blank if not yet determined.</div>';
+  // Build team options from GROUPS
+  var allTeams=[];
+  GROUP_IDS.forEach(function(gid){GROUPS[gid].teams.forEach(function(t){allTeams.push(t);});});
+  allTeams.sort(function(a,b){return a.n.localeCompare(b.n);});
+  function teamSelect(id,val){
+    var s='<select id="'+id+'" style="flex:1;font-size:10px;font-weight:700;font-family:inherit;border:1px solid var(--border);border-radius:6px;padding:4px 6px;background:#fff;color:var(--text);min-width:0"><option value="">-- TBD --</option>';
+    allTeams.forEach(function(t){s+='<option value="'+x(t.n)+'"'+(val===t.n?' selected':'')+'>'+t.flag+' '+x(t.n)+'</option>';});
+    s+='</select>';
+    return s;
+  }
+  var mu=ST.results&&ST.results.bracketMatchups&&ST.results.bracketMatchups.r32||{};
+  for(var mi=0;mi<16;mi++){
+    var curA=(mu[mi]&&mu[mi].a)||'';
+    var curB=(mu[mi]&&mu[mi].b)||'';
+    // Only show real team names in dropdowns (filter out placeholders)
+    var realA=curA&&allTeams.find(function(t){return t.n===curA;})?curA:'';
+    var realB=curB&&allTeams.find(function(t){return t.n===curB;})?curB:'';
+    h+='<div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border2)">';
+    h+='<div style="font-size:8px;font-weight:900;color:var(--muted);margin-bottom:4px">Match '+(mi+1)+'</div>';
+    h+='<div style="display:flex;gap:6px;align-items:center">';
+    h+=teamSelect('bk-a-'+mi,realA);
+    h+='<span style="font-size:9px;font-weight:900;color:var(--muted);flex-shrink:0">vs</span>';
+    h+=teamSelect('bk-b-'+mi,realB);
+    h+='</div></div>';
+  }
+  h+='<button id="adm-save-r32" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(155,89,255,.4);background:rgba(155,89,255,.1);color:var(--purple);font-family:inherit;cursor:pointer;margin-top:4px">💾 Save R32 Matchups</button>';
+  h+='</div>';
+
   h+='<div class="adm-sec-label">Phase Control</div>';
   if(phase==="groups"){h+='<button class="adm-phase-btn adm-close" id="adm-close">&#128274; Close Group Stage → Open Knockout</button>';}
   else{h+='<div style="font-size:9px;color:var(--wc-green);padding:6px 0">&#10003; Knockout phase active</div><button class="adm-phase-btn adm-open" id="adm-reopen" style="margin-top:6px">Reopen Group Stage</button>';}
-  h+='<div class="adm-sec-label">Official Wild Card Qualifiers</div>';
-  var rWC=getResultWildcards(),pool=[];
-  GROUP_IDS.forEach(function(gid){var rr=getResultRanking(gid);if(!rr||!rr[2])return;var name=rr[2];var t=GROUPS[gid].teams.find(function(t){return t.n===name;});if(t)pool.push({group:gid,team:t,name:name});});
-  if(!pool.length){h+='<div style="font-size:9px;color:#3a5270;padding:8px 0">Set group results first</div>';}
-  else{
-    h+='<div style="font-size:8px;color:#6b8ab0;margin-bottom:8px">'+rWC.length+'/8 selected</div>';
-    pool.forEach(function(e){
-      var sel=rWC.indexOf(e.name)>=0,full=!sel&&rWC.length>=8;
-      h+='<div class="adm-wc-team'+(sel?" sel":"")+'"'+(full?' style="opacity:.3;pointer-events:none"':'')+' data-adm-wc="'+x(e.name)+'">'+
-        '<div class="wc-flag">'+e.team.flag+'</div>'+
-        '<div class="wc-name">'+x(e.name)+'</div>'+
-        '<div style="margin-left:auto;font-size:10px;color:var(--wc-green)">'+(sel?"✓":"")+'</div></div>';
+  h+='<button class="adm-phase-btn" id="adm-unlock-all" style="background:var(--blue-bg);color:var(--blue);border-color:var(--blue);margin-top:6px">&#128275; Unlock All Players</button>';
+  h+='<div class="adm-sec-label">🎟️ 3rd Place Wild Card Qualifiers</div>';
+  var rWC=getResultWildcards();
+  var numGroupsSet=GROUP_IDS.filter(function(gid){return !!(getEffectiveGroupResult(gid)&&getEffectiveGroupResult(gid)[2]);}).length;
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.6">Tap the <b style=\"color:var(--text)\">8 third-place teams</b> that advance to the Round of 32. '+(numGroupsSet<12?'<span style=\"color:var(--gold-dark)\">'+numGroupsSet+'/12 groups have results — fetch live standings or set group results to auto-show 3rd place teams.</span>':'All 12 groups resolved.')+'</div>';
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">';
+  h+='<div style="font-size:11px;font-weight:800;color:'+(rWC.length===8?'var(--wc-green)':'var(--text)')+'">'+rWC.length+' / 8 selected</div>';
+  if(rWC.length>0){h+='<button id="adm-wc-clear" style="font-size:9px;font-weight:800;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--red-bg);color:var(--red);font-family:inherit;cursor:pointer">Clear all</button>';}
+  h+='</div>';
+  h+='<div style="background:var(--card);border:2px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:4px 4px 0 var(--border);margin-bottom:10px">';
+  GROUP_IDS.forEach(function(gid,gi){
+    var rr=getEffectiveGroupResult(gid);
+    var teams=rr&&rr[2]?[{n:rr[2],fromResult:true}]:GROUPS[gid].teams.map(function(tm){return {n:tm.n,fromResult:false};});
+    teams.forEach(function(entry,ti){
+      var t=GROUPS[gid].teams.find(function(tm){return tm.n===entry.n;});
+      if(!t)return;
+      var sel=rWC.indexOf(entry.n)>=0,full=!sel&&rWC.length>=8;
+      var borderTop=(gi>0||ti>0)?'border-top:1px solid var(--border2);':'';
+      h+='<div style="display:flex;align-items:center;gap:8px;padding:9px 12px;'+borderTop+'background:'+(sel?'var(--green-bg)':'#ffffff')+';cursor:'+(full?'default':'pointer')+';opacity:'+(full?'.35':'1')+'"'+(full?'':' data-adm-wc="'+x(entry.n)+'"')+'>';
+      h+='<div style="font-size:8px;font-weight:900;color:var(--muted);width:20px;flex-shrink:0">G'+gid+'</div>';
+      h+='<div style="font-size:16px;flex-shrink:0">'+t.flag+'</div>';
+      h+='<div style="font-size:11px;font-weight:800;color:var(--text);flex:1">'+x(entry.n)+'</div>';
+      if(!entry.fromResult){h+='<div style="font-size:7px;font-weight:700;color:var(--muted);background:var(--cream);border:1px solid var(--border2);border-radius:4px;padding:2px 5px">no result</div>';}
+      h+='<div style="width:18px;text-align:center;font-size:12px;color:var(--wc-green);font-weight:900">'+(sel?'&#10003;':'')+'</div>';
+      h+='</div>';
     });
-  }
+  });
+  h+='</div>';
+  if(rWC.length===8){h+='<div style="text-align:center;font-size:10px;font-weight:800;color:var(--wc-green);padding:4px 0 12px">&#10003; All 8 wild card qualifiers set!</div>';}
   h+='<div class="adm-sec-label">Group Results (drag ⋮⋮ to rank)</div>';
   GROUP_IDS.forEach(function(gid){
     var rr=getResultRanking(gid)||GROUPS[gid].teams.map(function(t){return t.n;});
@@ -1693,7 +1886,7 @@ function _drawNow(){
   h+='</div>';
   h+='<div style="display:flex;gap:5px;align-items:center;flex-shrink:0">';
   if(ST.user){
-    var lockIcon=locked?'&nbsp;&#128274;':'';
+    var lockIcon=(locked&&ST.page!=="bracket")?'&nbsp;&#128274;':'';
     h+='<span class="tag'+lockedCls+'" style="font-size:9px;padding:3px 8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+pem(ST.user)+x(ST.user)+lockIcon+'</span>';
   }
   var adminCls=ST.admin?'btn-gold':'btn-ghost';
@@ -1716,10 +1909,7 @@ function _drawNow(){
     h+='</div></div>';
     document.getElementById("root").innerHTML=h;bind();return;
   }
-  if(viewer&&Object.keys(ST.results||{}).length>0){
-    var sc=calcScore(viewer),poss=calcMaxPossible(viewer);
-    h+='<div class="score-banner"><div class="sb-item total"><div class="sl">Score</div><div class="sv">'+sc+'</div></div><div class="sb-item"><div class="sl">Max possible</div><div class="sv">'+poss+'</div></div></div>';
-  }
+
   if(ST.user&&(ST.page==="groups"||ST.page==="wildcard")){
     var beforeKickoff=new Date()<WC_KICKOFF;
     h+='<div class="lock-bar"><div class="lock-info">'+(locked?"&#128274; Locked":"&#9998; Making picks")+'</div>';
@@ -1744,12 +1934,28 @@ function _drawNow(){
   else if(ST.page==="leaderboard")h+=renderLB();
   else if(ST.page==="rules")h+=renderRules();
   else if(ST.page==="admin"&&ST.admin)h+=renderAdmin();
+  var _isBracket=(ST.page==="bracket");
+  var _sy=_isBracket?(window.pageYOffset||document.documentElement.scrollTop||0):0;
+  var _bkOuter=_isBracket?document.querySelector(".bracket-outer"):null;
+  var _sx=_bkOuter?_bkOuter.scrollLeft:0;
   document.getElementById("root").innerHTML=h;
   bind();
   initAllDragLists();
   initGroupSwipe();
   if(ST.page==="results"){if(_resData)renderResultsInto();else startResultsRefresh();}
   else stopResultsRefresh();
+  if(_isBracket&&(_sy>0||_sx>0)){
+    requestAnimationFrame(function(){
+      if(_sy>0)window.scrollTo(0,_sy);
+      var bkO=document.querySelector(".bracket-outer");
+      if(bkO&&_sx>0)bkO.scrollLeft=_sx;
+      requestAnimationFrame(function(){
+        if(_sy>0)window.scrollTo(0,_sy);
+        var bkO2=document.querySelector(".bracket-outer");
+        if(bkO2&&_sx>0)bkO2.scrollLeft=_sx;
+      });
+    });
+  }
   // Post-render
   if(new Date() < WC_KICKOFF) startCountdown();
   if(ST.viewUser)animateViewerIn(ST.viewUser);
@@ -1929,14 +2135,19 @@ function bind(){
   var els,i,el;
   els=document.querySelectorAll("[data-bkpick]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
-    if(!ST.user||isLocked())return;
+    if(!ST.user||isLocked("bracket"))return;
     var rnd=this.getAttribute("data-bkrnd");
     var idx=parseInt(this.getAttribute("data-bkidx"));
     var team=this.getAttribute("data-bkteam");
     if(!team||!rnd)return;
+    // Block picks on TBD placeholder teams not yet resolved to a real nation
+    var isRealTeam=false;
+    for(var _gid in GROUPS){if(GROUPS[_gid].teams.find(function(t){return t.n===team;})){isRealTeam=true;break;}}
+    if(!isRealTeam){toast("⏳ Team TBD — pick once group stage is final");return;}
     // Pop animation before redraw
     var el2=this;
     el2.classList.add("pick-flash");
+    _saveScroll();
     saveBracketPick(rnd,idx,team);
     toast("\u2605 "+team);
   });
@@ -1957,6 +2168,14 @@ function bind(){
     if(ST.viewUser)animateViewerIn(ST.viewUser);
   });
   el=document.getElementById("b-viewself");if(el)el.addEventListener("click",function(){ST.viewUser=null;draw();});
+  el=document.getElementById("b-reset-bracket");if(el)el.addEventListener("click",function(){
+    if(!confirm("Reset all your bracket picks?"))return;
+    var uk=ukey(ST.user);
+    if(ST.picks[uk])ST.picks[uk].bracket=null;
+    if(DB)DB.ref(BASE+"/picks/"+uk+"/bracket").remove();
+    toast("Bracket picks reset");
+    draw();
+  });
   el=document.getElementById("b-unlock");if(el)el.addEventListener("click",function(){
     if(!ST.user||!DB)return;
     if(!confirm("Unlock your picks? You can re-lock before kickoff."))return;
@@ -1975,6 +2194,16 @@ function bind(){
   el=document.getElementById("go-wc");if(el)el.addEventListener("click",function(){ST.page="wildcard";draw();});
   el=document.getElementById("adm-close");if(el)el.addEventListener("click",function(){if(!confirm("Close group stage?"))return;setPhase("knockout");toast("Group stage closed");});
   el=document.getElementById("adm-reopen");if(el)el.addEventListener("click",function(){if(!confirm("Reopen group stage?"))return;setPhase("groups");toast("Reopened");});
+  el=document.getElementById("adm-unlock-all");if(el)el.addEventListener("click",function(){
+    if(!confirm("Unlock all players?"))return;
+    PARTS.forEach(function(p){
+      var uk=ukey(p);
+      ST.locked[uk]=null;
+      if(DB)DB.ref(BASE+"/locked/"+uk).remove();
+    });
+    toast("&#128275; All players unlocked");
+    draw();
+  });
   els=document.querySelectorAll("[data-wc]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
     var name=this.getAttribute("data-wc");if(!name||!ST.user||isLocked())return;
@@ -1994,13 +2223,22 @@ function bind(){
     if(idx<0)rollBall(); // ball rolls when a new wild card qualifier is set
     toast(idx>=0?"Removed":"&#9989; "+name);
   });
+  el=document.getElementById("adm-wc-clear");if(el)el.addEventListener("click",function(){
+    if(!confirm("Clear all 8 wild card qualifiers?"))return;
+    saveAdminWildcards([]);toast("Wild cards cleared");
+  });
   els=document.querySelectorAll("[data-adm-stage-toggle]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
     var stage=this.getAttribute("data-adm-stage-toggle");
     var opening=!(ST.stageOpen&&ST.stageOpen[stage]);
     if(!confirm((opening?"Open":"Close")+" "+stage+" picks?"))return;
     toggleStageOpen(stage);
-    toast((opening?"🔓 Picks OPEN: ":"🔒 Picks CLOSED: ")+stage);
+    if(opening&&stage==="bracket"){
+      PARTS.forEach(function(p){var uk=ukey(p);ST.locked[uk]=null;if(DB)DB.ref(BASE+"/locked/"+uk).remove();});
+      toast("\uD83D\uDD13 Bracket OPEN — all players unlocked");
+    } else {
+      toast((opening?"\uD83D\uDD13 Picks OPEN: ":"\uD83D\uDD12 Picks CLOSED: ")+stage);
+    }
   });
   el=document.getElementById("adm-fetch-live");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-live-status");
@@ -2047,6 +2285,64 @@ function bind(){
         toast("Fetch failed");
       });
   });
+  el=document.getElementById("adm-save-r32");if(el)el.addEventListener("click",function(){
+    var matchups={};
+    for(var mi=0;mi<16;mi++){
+      var a=document.getElementById("bk-a-"+mi),b=document.getElementById("bk-b-"+mi);
+      var va=a?a.value:"",vb=b?b.value:"";
+      if(va||vb)matchups[mi]={a:va||null,b:vb||null};
+    }
+    if(!ST.results)ST.results={};
+    if(!ST.results.bracketMatchups)ST.results.bracketMatchups={};
+    ST.results.bracketMatchups.r32=matchups;
+    if(DB)DB.ref(RESULTS_BASE+"/results/bracketMatchups/r32").set(matchups,function(){
+      toast("✓ R32 matchups saved");
+      draw();
+    });
+    else{toast("✓ R32 matchups saved (local)");draw();}
+  });
+  el=document.getElementById("adm-fetch-bracket");if(el)el.addEventListener("click",function(){
+    var statusEl=document.getElementById("adm-bracket-status");
+    if(statusEl)statusEl.textContent="Fetching bracket results from ESPN...";
+    fetchBracketFromESPN(function(results,matchups,err){
+      if(err){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
+        toast("Fetch failed");
+        return;
+      }
+      var totalMatchups=0;
+      for(var rnd in matchups)totalMatchups+=Object.keys(matchups[rnd]).length;
+      var totalWinners=0;
+      for(var rnd in results)totalWinners+=Object.keys(results[rnd]).length;
+      if(!totalMatchups&&!totalWinners){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No knockout matches found yet</span>';
+        toast("No bracket data yet");
+        return;
+      }
+      // Save matchups (official bracket pairings) to Firebase
+      if(Object.keys(matchups).length){
+        if(!ST.results.bracketMatchups)ST.results.bracketMatchups={};
+        for(var rnd in matchups){
+          ST.results.bracketMatchups[rnd]=matchups[rnd];
+          if(DB)DB.ref(RESULTS_BASE+"/results/bracketMatchups/"+rnd).set(matchups[rnd]);
+        }
+      }
+      // Save winners
+      if(!ST.results.bracket)ST.results.bracket={};
+      for(var rnd in results){
+        if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
+        for(var idx in results[rnd])ST.results.bracket[rnd][idx]=results[rnd][idx];
+        if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd).update(results[rnd]);
+      }
+      var roundNames={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
+      var parts=[];
+      if(totalMatchups)parts.push(totalMatchups+" matchups");
+      if(totalWinners)parts.push(totalWinners+" winners");
+      if(statusEl)statusEl.innerHTML='<span style="color:var(--purple)">✓ Pushed: '+parts.join(", ")+'</span>';
+      toast("🏆 Bracket updated");
+      draw();
+    });
+  });
   el=document.getElementById("adm-fetch-games");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-games-status");
     if(statusEl)statusEl.textContent="Fetching schedule from ESPN...";
@@ -2070,6 +2366,21 @@ function bind(){
 }
 
 loadData();
+
+// Pull-to-refresh for results tab
+(function(){
+  var _ptrStartY=0,_ptrActive=false;
+  document.addEventListener("touchstart",function(e){
+    _ptrStartY=e.touches[0].clientY;
+    _ptrActive=(window.scrollY===0&&ST.page==="results");
+  },{passive:true});
+  document.addEventListener("touchend",function(e){
+    if(!_ptrActive)return;
+    var dy=e.changedTouches[0].clientY-_ptrStartY;
+    if(dy>60) fetchResults();
+    _ptrActive=false;
+  },{passive:true});
+})();
 
 </script>
 </body>
