@@ -1554,46 +1554,112 @@ function applyLiveStandingsToScores(groups){
   return changed;
 }
 
-function fetchResults(){
-  if(_resLoading)return;
-  _resLoading=true;
-  // Try ESPN standings endpoint
-  fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
-    .then(function(r){return r.json();})
-    .then(function(data){
-      _resLoading=false;_resLastFetch=Date.now();_resData=data;
-      if(ST.page==="results")renderResultsInto();
-    })
-    .catch(function(){
-      // Fallback: try scoreboard to derive standings
-      _resLoading=false;
-      var el=document.getElementById("results-wrap");
-      if(el)el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">Could not load live standings.<br><span style="font-size:9px;color:var(--dim)">Data will be available once the tournament starts Jun 11</span><br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
-    });
-}
+// ── FOTMOB PARSER ─────────────────────────────────────────
+// FotMob leagueId 77 = FIFA World Cup
+var FOTMOB_WC_ID = 77;
 
-function renderResultsInto(){
-  var el=document.getElementById("results-wrap");
-  if(!el)return;
-  var data=_resData;
-
-  // Try to parse ESPN standings format
+function parseFotMobGroups(data){
+  // FotMob returns: data.response[] → each has .tables[0].tableRows[]
   var groups=[];
   try{
-    // ESPN v2 standings returns children[] with group tables
+    var resp=(data.response||data.standings||[]);
+    // Sometimes wrapped in a single object with .tables
+    if(!Array.isArray(resp)&&data.tables) resp=data.tables;
+    if(!Array.isArray(resp)&&data.response) resp=data.response;
+    resp.forEach(function(section){
+      // Each section is a group; name like "Group A"
+      var tables=section.tables||[section];
+      tables.forEach(function(table){
+        var rawName=(table.leagueName||table.name||section.leagueName||section.name||"");
+        var gname=rawName.replace(/^group\s*/i,"").trim().toUpperCase();
+        if(!gname||gname.length!==1) return;
+        var rows=[];
+        (table.tableRows||table.rows||[]).forEach(function(row){
+          var tname=row.name||row.shortName||"";
+          // Match to our team names
+          var matched=null;
+          if(GROUPS[gname]){
+            GROUPS[gname].teams.forEach(function(t){
+              var en=tname.toLowerCase(), on=t.n.toLowerCase();
+              if(en===on||en.indexOf(on)>=0||on.indexOf(en)>=0) matched=t.n;
+            });
+          }
+          rows.push({
+            name:matched||tname,
+            p:parseInt(row.played||0),
+            w:parseInt(row.wins||0),
+            d:parseInt(row.draws||0),
+            l:parseInt(row.losses||0),
+            gf:parseInt((row.scoresStr||"0:0").split(":")[0])||0,
+            ga:parseInt((row.scoresStr||"0:0").split(":")[1])||0,
+            gd:parseInt(row.goalConDiff||0),
+            pts:parseInt(row.pts||row.points||0)
+          });
+        });
+        if(rows.length===4){
+          rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
+          groups.push({name:"Group "+gname, rows:rows, gname:gname});
+        }
+      });
+    });
+  }catch(e){ console.warn("FotMob parse error",e); }
+  return groups;
+}
+
+function fetchFotMob(cb){
+  fetch("https://www.fotmob.com/api/leaguetable?leagueId="+FOTMOB_WC_ID,{
+    headers:{"Referer":"https://www.fotmob.com","x-mas":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"}
+  })
+  .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+  .then(function(data){ cb(null, data); })
+  .catch(function(err){ cb(err, null); });
+}
+
+function fetchESPNStandings(cb){
+  fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+  .then(function(r){return r.json();})
+  .then(function(data){ cb(null, data); })
+  .catch(function(err){ cb(err, null); });
+}
+
+function fetchStandingsWithFallback(onGroups, onError){
+  fetchFotMob(function(err, data){
+    if(!err && data){
+      var groups=parseFotMobGroups(data);
+      if(groups.length>0){ onGroups(groups,"FotMob"); return; }
+    }
+    // Fallback to ESPN
+    fetchESPNStandings(function(err2, data2){
+      if(err2||!data2){ onError(err2||new Error("Both failed")); return; }
+      var groups=parseESPNGroups(data2);
+      onGroups(groups,"ESPN");
+    });
+  });
+}
+
+function parseESPNGroups(data){
+  var groups=[];
+  try{
     if(data&&data.children&&data.children.length){
       data.children.forEach(function(group){
         var name=group.name||group.abbreviation||"";
+        var gname=name.replace(/^group\s*/i,"").trim().toUpperCase();
         var entries=(group.standings&&group.standings.entries)||[];
         var rows=[];
         entries.forEach(function(e){
           var team=e.team||{};
           var tname=team.displayName||team.name||"";
           var stats={};
-          (e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=s.value||s.displayValue||0;});
+          (e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=parseFloat(s.value||0);});
+          var matched=null;
+          if(GROUPS[gname]){
+            GROUPS[gname].teams.forEach(function(t){
+              var en=tname.toLowerCase(),on=t.n.toLowerCase();
+              if(en===on||en.indexOf(on)>=0||on.indexOf(en)>=0)matched=t.n;
+            });
+          }
           rows.push({
-            name:tname,
-            abbr:team.abbreviation||tname.substring(0,3),
+            name:matched||tname,
             p:parseInt(stats.gamesPlayed||stats.GP||0),
             w:parseInt(stats.wins||stats.W||0),
             d:parseInt(stats.ties||stats.D||0),
@@ -1605,14 +1671,48 @@ function renderResultsInto(){
           });
         });
         if(rows.length){
-          rows.sort(function(a,b){
-            return b.pts-a.pts || b.gd-a.gd || b.gf-a.gf;
-          });
-          groups.push({name:name,rows:rows});
+          rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
+          groups.push({name:name,gname:gname,rows:rows});
         }
       });
     }
   }catch(e){}
+  return groups;
+}
+
+function fetchResults(){
+  if(_resLoading)return;
+  _resLoading=true;
+  fetchStandingsWithFallback(
+    function(groups, source){
+      _resLoading=false; _resLastFetch=Date.now();
+      _resData={_parsed:groups, _source:source};
+      if(ST.page==="results") renderResultsInto();
+    },
+    function(){
+      _resLoading=false;
+      var el=document.getElementById("results-wrap");
+      if(el)el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">Could not load live standings.<br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
+    }
+  );
+}
+
+function renderResultsInto(){
+  var el=document.getElementById("results-wrap");
+  if(!el)return;
+  var data=_resData;
+
+  // Use pre-parsed groups if available (from fetchStandingsWithFallback)
+  var groups=[];
+  var source="";
+  if(data&&data._parsed){
+    groups=data._parsed;
+    source=data._source||"";
+  } else if(data){
+    // Legacy ESPN raw format
+    groups=parseESPNGroups(data);
+    source="ESPN";
+  }
 
   // Apply live standings to scores for groups with at least 1 game played per team
   if(applyLiveStandingsToScores(groups)){
@@ -1621,16 +1721,18 @@ function renderResultsInto(){
   }
 
   var ago=_resLastFetch?Math.round((Date.now()-_resLastFetch)/1000):0;
+  var agoStr=ago<60?ago+"s ago":Math.round(ago/60)+"m ago";
 
   if(!groups.length){
-    el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">No standings data yet.<br><span style="font-size:9px;color:var(--dim)">Check back once matches begin on Jun 11, 2026</span><br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
+    el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">No standings data yet.<br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
     return;
   }
 
   var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
   h+='<div style="font-size:9px;font-weight:700;color:var(--text)">Group Standings</div>';
   h+='<div style="display:flex;align-items:center;gap:8px">';
-  h+='<span style="font-size:7px;color:var(--dim)">Updated '+ago+'s ago</span>';
+  if(source)h+='<span style="font-size:7px;color:var(--dim)">via '+source+'</span>';
+  h+='<span style="font-size:7px;color:var(--dim)">'+agoStr+'</span>';
   h+='<button style="padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:none;color:var(--muted);font-family:inherit;font-size:8px;cursor:pointer" onclick="fetchResults()">&#8635;</button>';
   h+='</div></div>';
 
@@ -1821,7 +1923,7 @@ function renderAdmin(){
   h+='<div class="adm-sec-label">📡 Live Results Feed</div>';
   h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
   h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the latest ESPN group standings and push them as official results. All sessions update instantly.</div>';
-  h+='<button id="adm-fetch-live" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(46,201,92,.4);background:rgba(46,201,92,.1);color:var(--wc-green);font-family:inherit;cursor:pointer">📡 Fetch &amp; Push Live Standings</button>';
+  h+='<button id="adm-fetch-live" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(46,201,92,.4);background:rgba(46,201,92,.1);color:var(--wc-green);font-family:inherit;cursor:pointer">📡 Fetch &amp; Push Live Standings (FotMob → ESPN)</button>';
   h+='<div id="adm-live-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
 
@@ -2352,48 +2454,30 @@ function bind(){
   });
   el=document.getElementById("adm-fetch-live");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-live-status");
-    if(statusEl)statusEl.textContent="Fetching from ESPN...";
-    fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
-      .then(function(r){return r.json();})
-      .then(function(data){
+    if(statusEl)statusEl.textContent="Fetching standings...";
+    fetchStandingsWithFallback(
+      function(groups, source){
         var pushed={};
-        if(data&&data.children&&data.children.length){
-          data.children.forEach(function(group){
-            // Match ESPN group name to our group ID (e.g. "Group A" → "A")
-            var gname=(group.name||group.abbreviation||"").replace(/^group\s*/i,"").trim().toUpperCase();
-            if(!gname||!GROUPS[gname])return;
-            var entries=(group.standings&&group.standings.entries)||[];
-            // Sort by points desc, then GD desc
-            var rows=[];
-            entries.forEach(function(e){
-              var stats={};(e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=parseFloat(s.value||0);});
-              var tname=(e.team&&(e.team.displayName||e.team.name))||"";
-              // Try to map ESPN name back to our team name
-              var matched=null;
-              GROUPS[gname].teams.forEach(function(t){
-                var ename=tname.toLowerCase(),oname=t.n.toLowerCase();
-                if(ename===oname||ename.indexOf(oname)>=0||oname.indexOf(ename)>=0)matched=t.n;
-              });
-              rows.push({name:matched||tname,pts:stats.points||stats.PTS||0,gd:stats.pointDifferential||stats.GD||0,gf:stats.pointsFor||stats.GF||0});
-            });
-            rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
-            var ranking=rows.map(function(r){return r.name;}).filter(Boolean);
-            if(ranking.length===4)pushed[gname]=ranking;
-          });
-        }
+        groups.forEach(function(g){
+          var gname=g.gname;
+          if(!gname||!GROUPS[gname]) return;
+          var ranking=g.rows.map(function(r){return r.name;}).filter(Boolean);
+          if(ranking.length===4) pushed[gname]=ranking;
+        });
         if(Object.keys(pushed).length){
           pushLiveGroupsToResults(pushed);
-          if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Pushed '+Object.keys(pushed).length+' groups</span>';
-          toast("📡 Live standings pushed");
+          if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Pushed '+Object.keys(pushed).length+' groups via '+source+'</span>';
+          toast("📡 Live standings pushed ("+source+")");
         } else {
           if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No standings data yet</span>';
           toast("No data available yet");
         }
-      })
-      .catch(function(err){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
+      },
+      function(err){
+        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed — check connection</span>';
         toast("Fetch failed");
-      });
+      }
+    );
   });
   el=document.getElementById("adm-save-r32");if(el)el.addEventListener("click",function(){
     var matchups={};
