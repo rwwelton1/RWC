@@ -895,7 +895,7 @@ function renderGroups(){
   var canPick=!!(ST.user&&!isLocked()&&viewer===ST.user&&groupsOpen);
   var gid=ST.group;
   var ranking=viewer?getGroupRanking(viewer,gid):GROUPS[gid].teams.map(function(t){return t.n;});
-  var rr=getResultRanking(gid);
+  var rr=getEffectiveGroupResult(gid);
   var phase=ST.results.phase||"groups";
   var canDrag=canPick&&phase!=="knockout";
   var h='<div class="group-wrap">';
@@ -1778,6 +1778,42 @@ function renderAdmin(){
   h+='<button data-adm-stage-toggle="bracket" style="padding:5px 14px;border-radius:20px;font-size:10px;font-weight:700;border:1px solid '+(bracketOpen?'rgba(46,201,92,.4)':'rgba(230,29,37,.35)')+';background:'+(bracketOpen?'rgba(46,201,92,.1)':'rgba(230,29,37,.08)')+';color:'+(bracketOpen?'var(--wc-green)':'#ff7070')+';cursor:pointer">'+(bracketOpen?'🔓 OPEN':'🔒 CLOSED')+'</button>';
   h+='</div></div>';
 
+  h+='<div class="adm-sec-label">📋 Set Group Results Manually</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Select a group, drag to reorder, then tap Save to finalize that group\'s official result.</div>';
+  // Group selector pills
+  h+='<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">';
+  GROUP_IDS.forEach(function(gid){
+    var hasResult=!!(getEffectiveGroupResult(gid)&&getEffectiveGroupResult(gid)[0]);
+    var isSelected=ST._adminGroupEdit===gid;
+    h+='<button data-adm-group-sel="'+gid+'" style="padding:5px 10px;border-radius:7px;font-size:10px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(isSelected?'var(--blue)':hasResult?'var(--green)':'var(--border)')+';background:'+(isSelected?'var(--blue-bg)':hasResult?'var(--green-bg)':'#fff')+';color:'+(isSelected?'var(--blue)':hasResult?'var(--green)':'var(--muted)')+'">'+gid+(hasResult?' ✓':'')+'</button>';
+  });
+  h+='</div>';
+  // Edit panel for selected group
+  var egid=ST._adminGroupEdit;
+  if(egid){
+    var eTeams=ST._adminGroupOrder&&ST._adminGroupOrder[egid]
+      ? ST._adminGroupOrder[egid]
+      : (getEffectiveGroupResult(egid)||GROUPS[egid].teams.map(function(t){return t.n;}));
+    h+='<div style="font-size:10px;font-weight:800;margin-bottom:6px">Group '+egid+' — drag to reorder</div>';
+    h+='<div id="adm-group-sort-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">';
+    eTeams.forEach(function(name,pos){
+      var t=GROUPS[egid].teams.find(function(tm){return tm.n===name;})||{flag:"",n:name};
+      var posLbl=["1st","2nd","3rd","4th"][pos]||((pos+1)+"th");
+      var posCol=pos===0?"var(--gold-dark)":pos===1?"#64748b":pos===2?"var(--wc-gold)":"var(--muted)";
+      h+='<div class="adm-group-sort-item" data-pos="'+pos+'" data-name="'+x(name)+'" style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:#fff;border:2px solid var(--border);border-radius:8px;cursor:grab">';
+      h+='<span style="font-size:10px;font-weight:900;color:'+posCol+';width:26px;flex-shrink:0">'+posLbl+'</span>';
+      h+='<span style="font-size:15px">'+t.flag+'</span>';
+      h+='<span style="font-size:11px;font-weight:700;flex:1">'+x(name)+'</span>';
+      h+='<span style="font-size:14px;color:var(--muted);cursor:grab">⋮⋮</span>';
+      h+='</div>';
+    });
+    h+='</div>';
+    h+='<button id="adm-save-group-result" data-gid="'+egid+'" style="width:100%;padding:9px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(46,201,92,.4);background:rgba(46,201,92,.1);color:var(--wc-green);font-family:inherit;cursor:pointer">✓ Save Group '+egid+' Result</button>';
+    h+='<div id="adm-group-save-status" style="margin-top:6px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  }
+  h+='</div>';
+
   h+='<div class="adm-sec-label">📡 Live Results Feed</div>';
   h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
   h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the latest ESPN group standings and push them as official results. All sessions update instantly.</div>';
@@ -2198,6 +2234,70 @@ function bind(){
   el=document.getElementById("adm-wipe-bracket");if(el)el.addEventListener("click",function(){if(!confirm("Wipe ALL bracket picks for everyone? Cannot be undone."))return;wipeBracketPicks();toast("&#128465; Bracket picks wiped");});
   el=document.getElementById("b-lock");if(el)el.addEventListener("click",function(){if(!ST.user||!DB)return;if(!confirm("Lock your picks?"))return;DB.ref(BASE+"/locked/"+ukey(ST.user)).set(true);toast("&#128274; Locked!");launchConfetti();});
   el=document.getElementById("go-wc");if(el)el.addEventListener("click",function(){ST.page="wildcard";draw();});
+  // Per-group sort panel
+  els=document.querySelectorAll("[data-adm-group-sel]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var gid=this.getAttribute("data-adm-group-sel");
+    ST._adminGroupEdit = ST._adminGroupEdit===gid ? null : gid;
+    if(!ST._adminGroupOrder) ST._adminGroupOrder={};
+    if(gid && !ST._adminGroupOrder[gid]){
+      var eff=getEffectiveGroupResult(gid);
+      ST._adminGroupOrder[gid]=eff||GROUPS[gid].teams.map(function(t){return t.n;});
+    }
+    draw();
+  });
+  // Drag-to-reorder list
+  (function(){
+    var list=document.getElementById("adm-group-sort-list");
+    if(!list) return;
+    var gid=ST._adminGroupEdit; if(!gid) return;
+    var dragged=null;
+    list.querySelectorAll(".adm-group-sort-item").forEach(function(item){
+      item.addEventListener("dragstart",function(e){
+        dragged=this; this.style.opacity=".4";
+        e.dataTransfer.effectAllowed="move";
+      });
+      item.setAttribute("draggable","true");
+      item.addEventListener("dragend",function(){ this.style.opacity=""; dragged=null; });
+      item.addEventListener("dragover",function(e){ e.preventDefault(); e.dataTransfer.dropEffect="move"; });
+      item.addEventListener("drop",function(e){
+        e.preventDefault();
+        if(!dragged||dragged===this) return;
+        var items=Array.from(list.querySelectorAll(".adm-group-sort-item"));
+        var fromIdx=items.indexOf(dragged);
+        var toIdx=items.indexOf(this);
+        if(fromIdx<toIdx) list.insertBefore(dragged,this.nextSibling);
+        else list.insertBefore(dragged,this);
+        // Update ST._adminGroupOrder from current DOM order
+        var newOrder=Array.from(list.querySelectorAll(".adm-group-sort-item")).map(function(el2){
+          return el2.getAttribute("data-name");
+        });
+        if(!ST._adminGroupOrder) ST._adminGroupOrder={};
+        ST._adminGroupOrder[gid]=newOrder;
+        // Update position labels without full redraw
+        list.querySelectorAll(".adm-group-sort-item").forEach(function(el2,pos){
+          var lbl=el2.querySelector("span");
+          if(lbl){ lbl.textContent=["1st","2nd","3rd","4th"][pos]||((pos+1)+"th"); }
+        });
+      });
+    });
+  })();
+  el=document.getElementById("adm-save-group-result"); if(el) el.addEventListener("click",function(){
+    var gid=this.getAttribute("data-gid"); if(!gid||!DB) return;
+    var order=ST._adminGroupOrder&&ST._adminGroupOrder[gid];
+    if(!order||order.length<2){toast("Set order first");return;}
+    var statusEl=document.getElementById("adm-group-save-status");
+    if(statusEl) statusEl.textContent="Saving…";
+    DB.ref(RESULTS_BASE+"/results/groups/"+gid).set(order, function(err){
+      if(err){ if(statusEl) statusEl.textContent="Error: "+err.message; return; }
+      if(!ST.results.groups) ST.results.groups={};
+      ST.results.groups[gid]=order;
+      if(statusEl){ statusEl.style.color="var(--wc-green)"; statusEl.textContent="✓ Group "+gid+" saved!"; }
+      toast("✓ Group "+gid+" result saved");
+      draw();
+    });
+  });
+
   el=document.getElementById("adm-close");if(el)el.addEventListener("click",function(){if(!confirm("Close group stage?"))return;setPhase("knockout");toast("Group stage closed");});
   el=document.getElementById("adm-reopen");if(el)el.addEventListener("click",function(){if(!confirm("Reopen group stage?"))return;setPhase("groups");toast("Reopened");});
   el=document.getElementById("adm-unlock-all");if(el)el.addEventListener("click",function(){
