@@ -1365,6 +1365,21 @@ function getBracketSlot(user,round,idx){
   return null;
 }
 
+// Get only the user's own pick (never official result) — for display of their bracket choices
+function getUserPickOnly(user,round,idx){
+  if(!user) return null;
+  var br=(ST.picks[ukey(user)]&&ST.picks[ukey(user)].bracket)||{};
+  return (br[round]&&br[round][idx]!=null)?br[round][idx]:null;
+}
+
+// Feed teams into a round for display: always use the user's own picks (not official winners)
+// so that wrong picks propagate visibly (shown with strikethrough) rather than being replaced
+function getUserFeedTeams(user,round,idx){
+  var prevRound=ROUNDS[ROUNDS.indexOf(round)-1];
+  if(!prevRound) return [null,null];
+  return [getUserPickOnly(user,prevRound,idx*2), getUserPickOnly(user,prevRound,idx*2+1)];
+}
+
 // Get the two teams feeding into a slot in a given round
 function getFeedTeams(user,round,idx){
   var prevRound=ROUNDS[ROUNDS.indexOf(round)-1];
@@ -1479,6 +1494,8 @@ function renderBracket(){
   var COL_W=110, LINE_W=20;
 
   // Build all round data for viewer
+  // ta/tb = what to DISPLAY (user's own picks flow through, so wrong picks show with strikethrough)
+  // pick = user's pick for this specific match slot
   var rounds_data={};
   for(var ri=0;ri<ROUNDS.length;ri++){
     var rnd=ROUNDS[ri];
@@ -1490,10 +1507,14 @@ function renderBracket(){
         var pair=getR32Teams(viewer,mi);
         ta=pair[0];tb=pair[1];
       } else {
-        var feed=getFeedTeams(viewer,rnd,mi);
+        // Use the user's own picks to populate ta/tb (not official winners)
+        // This means an eliminated pick still appears (greyed/strikethrough) rather than being replaced
+        var feed=viewer?getUserFeedTeams(viewer,rnd,mi):getFeedTeams(viewer,rnd,mi);
         ta=feed[0];tb=feed[1];
+        // If no user pick for this feed slot yet, fall back to official to show actual teams
+        if(!ta&&!tb){var fallback=getFeedTeams(viewer,rnd,mi);ta=fallback[0];tb=fallback[1];}
       }
-      rounds_data[rnd].push({ta:ta,tb:tb,pick:getBracketSlot(viewer,rnd,mi),idx:mi});
+      rounds_data[rnd].push({ta:ta,tb:tb,pick:getUserPickOnly(viewer,rnd,mi),official:(ST.results.bracket&&ST.results.bracket[rnd]&&ST.results.bracket[rnd][mi])||null,idx:mi});
     }
   }
 
@@ -1514,7 +1535,7 @@ function renderBracket(){
 
     h+='<div style="display:flex;flex-direction:column;gap:'+gapPx+'px">';
     matches.forEach(function(m){
-      var official=ST.results.bracket&&ST.results.bracket[rnd]&&ST.results.bracket[rnd][m.idx]||null;
+      var official=m.official||null;
       // winner used only for the match card border/projected state — picks don't count as "winner"
       var winner=official||m.pick;
 
