@@ -78,11 +78,11 @@ a{color:inherit;text-decoration:none}
 .bracket-outer{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:10px 0 20px}
 .bracket-outer::-webkit-scrollbar{height:4px}
 .bracket-outer::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-.b-row{display:flex;align-items:stretch;min-width:max-content;padding:0 12px}
+.b-row{display:flex;align-items:flex-start;min-width:max-content;padding:0 12px}
 .b-col{display:flex;flex-direction:column;flex-shrink:0;width:152px}
 .b-col-head{font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);padding:2px 5px 6px;border-bottom:2px solid var(--border2);display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
 .b-col-head .ph{font-size:7px;font-weight:800;color:var(--gold-dark);text-transform:none;letter-spacing:0}
-.b-cards{flex:1;display:flex;flex-direction:column;justify-content:space-around;padding:5px 3px}
+.b-cards{display:flex;flex-direction:column;padding:5px 3px}
 .mc{background:#ffffff;border:2px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:4px 4px 0 var(--border);flex-shrink:0}
 .mc-head{padding:3px 7px;background:var(--cream);border-bottom:1px solid var(--border2);display:flex;justify-content:space-between;align-items:center}
 .mc-lbl{font-size:7px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
@@ -100,7 +100,7 @@ a{color:inherit;text-decoration:none}
 .ts-icon{font-size:8px;flex-shrink:0}
 .ts-tbd{padding:5px 7px;font-size:8px;font-weight:700;color:var(--dim);font-style:italic;min-height:28px;display:flex;align-items:center}
 .champ-col{display:flex;flex-direction:column;flex-shrink:0;width:144px}
-.champ-body{flex:1;display:flex;align-items:center;justify-content:center;padding:6px 4px}
+.champ-body{display:flex;align-items:center;justify-content:center;padding:6px 4px}
 .champ-card{background:#ffffff;border:3px solid var(--border);border-radius:14px;padding:14px 10px;box-shadow:5px 5px 0 var(--border);text-align:center;width:132px}
 .champ-trophy{font-size:28px;margin-bottom:6px}
 .champ-name{font-size:11px;font-weight:900;color:var(--text);line-height:1.3;margin-bottom:3px}
@@ -254,14 +254,21 @@ function saveP(mid,v){
   if(!ST.picks[uk])ST.picks[uk]={};
   ST.picks[uk][mid]=v;
   DB.ref(BASE+"/picks/"+uk+"/"+mid).set(v);
-  draw();toast("✓ "+v);
+  var bo=document.querySelector(".bracket-outer");var sy=bo?bo.scrollLeft:0;
+  draw();
+  if(bo){var bo2=document.querySelector(".bracket-outer");if(bo2)bo2.scrollLeft=sy;}
+  window.scrollTo(0,0);
+  toast("✓ "+v);
 }
 function removeP(mid){
   if(!ST.user||!DB)return;
   var uk=ukey(ST.user);
   if(ST.picks[uk])delete ST.picks[uk][mid];
   DB.ref(BASE+"/picks/"+uk+"/"+mid).remove();
+  var bo=document.querySelector(".bracket-outer");var sy=bo?bo.scrollLeft:0;
   draw();
+  if(bo){var bo2=document.querySelector(".bracket-outer");if(bo2)bo2.scrollLeft=sy;}
+  window.scrollTo(0,0);
 }
 function saveR(mid,v){
   if(!DB)return;
@@ -516,8 +523,19 @@ function renderBracket(){
 }
 
 function renderCol(rnd,mids,lk){
+  // Gap between cards doubles each round (each card spans 2 of the previous round)
+  // R64: no gap (32 cards, packed)
+  // R32: 1 card-height gap between pairs
+  // R16: 3 card-height gaps, etc.
+  // Card unit height = 74px, base gap = 6px
+  var CH=74, G=6;
+  var gaps={r32:0, r16:CH+G, qf:3*(CH+G)+CH, sf:7*(CH+G)+3*CH, f:15*(CH+G)+7*CH};
+  var gap=gaps[rnd]||0;
   var h='<div class="b-col"><div class="b-col-head">'+ROUND_LABEL[rnd]+' <span class="ph">+'+PTS[rnd]+'pt</span></div><div class="b-cards">';
-  mids.forEach(function(mid){h+=renderCard(mid,rnd,lk);});
+  mids.forEach(function(mid,i){
+    if(i>0&&gap>0) h+='<div style="height:'+gap+'px;flex-shrink:0"></div>';
+    h+=renderCard(mid,rnd,lk);
+  });
   h+='</div></div>';
   return h;
 }
@@ -554,7 +572,15 @@ function slotHTML(mid,name,seed,result,pick,canPick){
 function renderChampCol(lk){
   var cm=TREE.champ[0],teams=getTeams(cm.id),result=getR(cm.id),pick=getP(cm.id);
   var canPick=!!ST.user&&!lk&&!isLocked()&&activeViewer()===ST.user;
-  var h='<div class="champ-col"><div class="b-col-head">&#127942; Final <span class="ph">+'+PTS.champ+'pt</span></div><div class="champ-body"><div class="champ-card">';
+  // Center champ card: top of SF col + (SF full height / 2) - (champ card height / 2)
+  // SF: 4 cards, gap=7*(74+6)+3*74 between each = 7*80+222=782? Too complex.
+  // Simpler: measure SF column height and divide by 2.
+  // Use same gap formula as renderCol: sfGap = 7*(CH+G)+3*CH, CH=74,G=6
+  var CH=74,G=6;
+  var sfGap=7*(CH+G)+3*CH; // gap between SF cards
+  var sfColHeight=4*CH+3*sfGap; // total SF column height
+  var champTopPad=Math.round((sfColHeight-CH)/2); // center champ vertically
+  var h='<div class="champ-col"><div class="b-col-head">&#127942; Final <span class="ph">+'+PTS.champ+'pt</span></div><div style="height:'+champTopPad+'px;flex-shrink:0"></div><div class="champ-body"><div class="champ-card">';
   h+='<div class="champ-trophy">'+(result?'&#127942;':'&#127934;')+'</div>';
   if(result){
     h+='<div class="champ-name">'+x(result)+'</div>';
