@@ -98,7 +98,21 @@ a{color:inherit;text-decoration:none}
 .ts-icon{font-size:8px;flex-shrink:0}
 .ts-tbd{padding:5px 7px;font-size:8px;font-weight:700;color:var(--dim);font-style:italic;min-height:28px;display:flex;align-items:center}
 
-/* ── ADMIN ── */
+/* ── ROUND NAV ── */
+.round-nav{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--cream);border-bottom:2px solid var(--border2);overflow-x:auto;-webkit-overflow-scrolling:touch}
+.round-nav::-webkit-scrollbar{display:none}
+.rnav-tab{padding:5px 12px;border-radius:20px;font-size:9px;font-weight:900;border:2px solid var(--border);background:#ffffff;color:var(--muted);white-space:nowrap;box-shadow:2px 2px 0 var(--border);font-family:'Nunito',sans-serif;flex-shrink:0}
+.rnav-tab.active{background:var(--gold);color:var(--text);box-shadow:3px 3px 0 var(--border)}
+.rnav-tab:active{transform:translate(2px,2px);box-shadow:none}
+.bracket-swipe-wrap{overflow:hidden;position:relative}
+.bracket-slide{transition:transform .22s cubic-bezier(.4,0,.2,1);will-change:transform}
+.swipe-hint{text-align:center;font-size:8px;font-weight:800;color:var(--dim);padding:6px 0 0;letter-spacing:.05em}
+.round-arrows{display:flex;justify-content:space-between;align-items:center;padding:6px 12px}
+.rarrow{width:34px;height:34px;border-radius:8px;background:#fff;border:2px solid var(--border);font-size:16px;display:flex;align-items:center;justify-content:center;box-shadow:2px 2px 0 var(--border);font-family:'Nunito',sans-serif}
+.rarrow:active{transform:translate(2px,2px);box-shadow:none}
+.rarrow:disabled{opacity:.25;pointer-events:none}
+.round-label-big{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+
 .adm-wrap{padding:10px 12px}
 .adm-sec-label{font-size:9px;font-weight:900;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;margin-top:16px;padding-bottom:5px;border-bottom:2px solid var(--border2)}
 .adm-sec-label:first-child{margin-top:0}
@@ -213,7 +227,7 @@ var _params=new URLSearchParams(window.location.search);
 var GROUP_ID=_params.get("group")||null;
 var URL_USER=_params.get("user")||null;
 
-var ST={page:"leaderboard",user:URL_USER,viewUser:null,admin:false,picks:{},results:{},locked:{}};
+var ST={page:"leaderboard",user:URL_USER,viewUser:null,admin:false,picks:{},results:{},locked:{},bracketRound:0};
 var PARTS=URL_USER?[URL_USER]:[];
 var DB=null;
 try{
@@ -499,25 +513,48 @@ function renderLB(){
 }
 
 // ── BRACKET ───────────────────────────────────────────────────────────────────
+var BRACKET_ROUNDS=[
+  {rnd:"r32",  mids:null, label:"R64"},
+  {rnd:"r16",  mids:null, label:"R32"},
+  {rnd:"qf",   mids:null, label:"R16"},
+  {rnd:"sf",   mids:null, label:"QF"},
+  {rnd:"f",    mids:null, label:"SF"},
+  {rnd:"champ",mids:null, label:"Final"},
+];
+function getBRMids(rnd){
+  if(rnd==="r32") return R32.map(function(m){return m.id;});
+  return TREE[rnd].map(function(m){return m.id;});
+}
+
 function renderBracket(){
   var lk=isLocked();
-  var rounds=[
-    {rnd:"r32", mids:R32.map(function(m){return m.id;})},
-    {rnd:"r16", mids:TREE.r16.map(function(m){return m.id;})},
-    {rnd:"qf",  mids:TREE.qf.map(function(m){return m.id;})},
-    {rnd:"sf",  mids:TREE.sf.map(function(m){return m.id;})},
-    {rnd:"f",   mids:TREE.f.map(function(m){return m.id;})},
-    {rnd:"champ",mids:[TREE.champ[0].id]},
-  ];
-  var h='<div class="bracket-stack">';
-  rounds.forEach(function(r){
-    h+='<div class="bstack-round">';
-    h+='<div class="bstack-header"><span>'+ROUND_LABEL[r.rnd]+'</span><span class="ph">+'+PTS[r.rnd]+'pt</span></div>';
-    h+='<div class="bstack-cards">';
-    r.mids.forEach(function(mid){ h+=renderCard(mid,r.rnd,lk); });
-    h+='</div></div>';
+  var ri=Math.max(0,Math.min(ST.bracketRound, BRACKET_ROUNDS.length-1));
+  var cur=BRACKET_ROUNDS[ri];
+  var mids=getBRMids(cur.rnd);
+
+  // Round nav tabs
+  var h='<div class="round-nav" id="round-nav-bar">';
+  BRACKET_ROUNDS.forEach(function(r,i){
+    h+='<button class="rnav-tab'+(i===ri?" active":"")+'" data-bround="'+i+'">'+r.label+'</button>';
   });
   h+='</div>';
+
+  // Arrows + label
+  h+='<div class="round-arrows">';
+  h+='<button class="rarrow" id="brnd-prev"'+(ri===0?' disabled':'')+'>&#8592;</button>';
+  h+='<span class="round-label-big">'+cur.label+' <span style="font-size:9px;font-weight:800;color:var(--gold-dark)">+'+PTS[cur.rnd]+'pt</span></span>';
+  h+='<button class="rarrow" id="brnd-next"'+(ri===BRACKET_ROUNDS.length-1?' disabled':'')+'>&#8594;</button>';
+  h+='</div>';
+
+  // Cards
+  h+='<div class="bracket-swipe-wrap" id="bracket-swipe-wrap">';
+  h+='<div class="bracket-slide"><div class="bracket-stack" id="bracket-slide-inner">';
+  h+='<div class="bstack-round"><div class="bstack-cards">';
+  mids.forEach(function(mid){ h+=renderCard(mid,cur.rnd,lk); });
+  h+='</div></div>';
+  h+='</div></div></div>';
+
+  h+='<div class="swipe-hint">← swipe to change round →</div>';
   return h;
 }
 
@@ -676,7 +713,44 @@ function bind(){
   els=document.querySelectorAll("[data-unlock]");
   for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){var p=this.getAttribute("data-unlock");if(!DB)return;DB.ref(BASE+"/locked/"+ukey(p)).remove();delete ST.locked[ukey(p)];draw();toast("&#128275; Unlocked "+p);});
 
-  // Admin: reset
+  // Bracket round nav tabs
+  els=document.querySelectorAll("[data-bround]");
+  for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
+    ST.bracketRound=parseInt(this.getAttribute("data-bround"),10);
+    draw();
+    var nb=document.getElementById("round-nav-bar");if(nb){var at=nb.querySelector(".rnav-tab.active");if(at)at.scrollIntoView({inline:"center",behavior:"smooth"});}
+  });
+
+  // Bracket prev/next arrows
+  el=document.getElementById("brnd-prev");
+  if(el)el.addEventListener("click",function(){if(ST.bracketRound>0){ST.bracketRound--;draw();}});
+  el=document.getElementById("brnd-next");
+  if(el)el.addEventListener("click",function(){if(ST.bracketRound<5){ST.bracketRound++;draw();}});
+
+  // Swipe gesture on bracket
+  (function(){
+    var sw=document.getElementById("bracket-swipe-wrap");
+    if(!sw)return;
+    var sx=0,sy=0,tracking=false,moved=false;
+    sw.addEventListener("touchstart",function(e){
+      sx=e.touches[0].clientX;sy=e.touches[0].clientY;tracking=true;moved=false;
+    },{passive:true});
+    sw.addEventListener("touchmove",function(e){
+      if(!tracking)return;
+      var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
+      if(!moved&&Math.abs(dx)>8&&Math.abs(dx)>Math.abs(dy)*1.2){moved=true;}
+      if(moved)e.preventDefault();
+    },{passive:false});
+    sw.addEventListener("touchend",function(e){
+      if(!tracking)return;tracking=false;
+      var dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;
+      if(Math.abs(dx)<40||Math.abs(dy)>Math.abs(dx)*0.7)return;
+      if(dx<0&&ST.bracketRound<5){ST.bracketRound++;draw();}
+      else if(dx>0&&ST.bracketRound>0){ST.bracketRound--;draw();}
+    },{passive:true});
+  })();
+
+
   el=document.getElementById("adm-reset");
   if(el)el.addEventListener("click",function(){if(!confirm("Reset ALL Wimbledon data?"))return;DB.ref(BASE).set(null);ST.picks={};ST.results={};ST.locked={};toast("Reset done");draw();});
 }
