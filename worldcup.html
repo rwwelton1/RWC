@@ -621,14 +621,17 @@ function calcScore(user){
 
   // Bracket points
   var bracketTotal=0;
-  var bres=ST.results.bracketResults||{};
+  var bres=ST.results.bracket||{};
   var bpicks=(ST.picks[ukey(user)]||{}).bracket||{};
   Object.keys(ROUND_PTS).forEach(function(round){
     var resObj=bres[round]||{};
-    var resVals=Array.isArray(resObj)?resObj:Object.keys(resObj).map(function(k){return resObj[k];});
     var picksObj=bpicks[round]||{};
-    var picksVals=Array.isArray(picksObj)?picksObj:Object.keys(picksObj).map(function(k){return picksObj[k];});
-    picksVals.forEach(function(t){ if(t&&resVals.indexOf(t)>=0) bracketTotal+=ROUND_PTS[round]; });
+    // Both are {idx: teamName} objects — check if each pick matches the official result at same idx
+    Object.keys(picksObj).forEach(function(idx){
+      var pick=picksObj[idx];
+      var res=resObj[idx];
+      if(pick&&res&&pick===res) bracketTotal+=ROUND_PTS[round];
+    });
   });
 
   return groupTotal + bracketTotal;
@@ -869,6 +872,18 @@ function loadData(){
   }
   function s3(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+    // Sanity-check results/bracket: if ESPN wrote garbage (multiple "final" entries), wipe it
+    if(DB){DB.ref(RESULTS_BASE+"/results/bracket/final").once("value",function(sn){
+      var v=sn.val();
+      if(v&&typeof v==="object"){
+        var keys=Object.keys(v);
+        // Legitimate final has at most 1 winner (key "0"). If it has multiple keys, it's ESPN garbage.
+        if(keys.length>1){
+          DB.ref(RESULTS_BASE+"/results/bracket").remove();
+          console.log("Wiped corrupt ESPN bracket data ("+keys.length+" entries in final)");
+        }
+      }
+    });}
     DB.ref(BASE+"/picks").on("value",function(sn){
       var wasBracket=(ST.page==="bracket");
       var sy=wasBracket?(window.pageYOffset||0):0;
@@ -1565,12 +1580,14 @@ function renderBracket(){
     }
   });
 
-  // Champion — read user's pick directly from ST.picks, ignore official until final is played
+  // Champion — read directly from user's picks in Firebase. Never use ST.results.bracket
+  // for champion display until admin confirms the final result by setting phase=knockout.
   var uk=viewer?ukey(viewer):"";
-  var userFinalPick=(ST.picks[uk]&&ST.picks[uk].bracket&&ST.picks[uk].bracket["final"]&&ST.picks[uk].bracket["final"][0])||null;
-  var officialFinal=ST.results&&ST.results.bracket&&ST.results.bracket["final"];
-  // Only treat as official if there's a confirmed winner (admin-set, not ESPN projection)
-  var officialChamp=(officialFinal&&ST.results.phase==="knockout")?officialFinal[0]:null;
+  var userBracket=(ST.picks[uk]&&ST.picks[uk].bracket)||{};
+  var userFinalRnd=userBracket["final"]||{};
+  var userFinalPick=Array.isArray(userFinalRnd)?userFinalRnd[0]:(userFinalRnd[0]||null);
+  var officialChamp=(ST.results.phase==="knockout"&&ST.results.bracket&&ST.results.bracket["final"])?
+    (Array.isArray(ST.results.bracket["final"])?ST.results.bracket["final"][0]:ST.results.bracket["final"][0]):null;
   var champ=officialChamp||userFinalPick;
   var champLabel=officialChamp?"Champion":"My Pick";
   h+='<div style="flex-shrink:0;padding:0 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:80px">';
@@ -2166,6 +2183,40 @@ function renderAdmin(){
   h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch completed knockout matches from ESPN and push winners as official bracket results. Run after each round completes.</div>';
   h+='<button id="adm-fetch-bracket" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(155,89,255,.4);background:rgba(155,89,255,.1);color:var(--purple);font-family:inherit;cursor:pointer">🏆 Fetch &amp; Push Bracket Results</button>';
   h+='<div id="adm-bracket-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
+  h+='</div>';
+
+  // ── Manual knockout winner setter ──
+  h+='<div class="adm-sec-label">✅ Set Knockout Winners</div>';
+  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Tap the winner of each completed match. Saves instantly and updates scores.</div>';
+  var knockoutRounds=[{id:"r32",label:"Round of 32"},{id:"r16",label:"Round of 16"},{id:"qf",label:"Quarter-Finals"},{id:"sf",label:"Semi-Finals"},{id:"final",label:"Final"}];
+  var bmu=ST.results&&ST.results.bracketMatchups||{};
+  var bwr=ST.results&&ST.results.bracket||{};
+  knockoutRounds.forEach(function(rnd){
+    var matchups=bmu[rnd.id]||{};
+    var winners=bwr[rnd.id]||{};
+    var keys=Object.keys(matchups);
+    if(!keys.length)return; // skip rounds with no matchups set yet
+    h+='<div style="font-size:9px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.06em;margin:10px 0 6px">'+rnd.label+'</div>';
+    keys.sort(function(a,b){return parseInt(a)-parseInt(b);}).forEach(function(idx){
+      var m=matchups[idx];
+      var w=winners[idx]||null;
+      var ta=m&&m.a?m.a:null, tb=m&&m.b?m.b:null;
+      if(!ta&&!tb)return;
+      var fA=ta?findTeamFlag(ta):"❓", fB=tb?findTeamFlag(tb):"❓";
+      h+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:7px;padding:6px 8px;background:var(--cream);border-radius:8px;border:1px solid var(--border2)">';
+      // Team A button
+      var aSel=(w&&ta&&w===ta), bSel=(w&&tb&&w===tb);
+      h+='<button data-set-winner="'+rnd.id+'-'+idx+'-'+(ta||"")+'" style="flex:1;padding:6px 4px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(aSel?'var(--green)':'var(--border)')+';background:'+(aSel?'var(--green-bg)':'#fff')+';color:'+(aSel?'var(--green)':'var(--text)')+'">'+fA+' '+(ta||'TBD')+(aSel?' ✓':'')+'</button>';
+      h+='<span style="font-size:8px;font-weight:900;color:var(--dim);flex-shrink:0">vs</span>';
+      // Team B button
+      h+='<button data-set-winner="'+rnd.id+'-'+idx+'-'+(tb||"")+'" style="flex:1;padding:6px 4px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(bSel?'var(--green)':'var(--border)')+';background:'+(bSel?'var(--green-bg)':'#fff')+';color:'+(bSel?'var(--green)':'var(--text)')+'">'+fB+' '+(tb||'TBD')+(bSel?' ✓':'')+'</button>';
+      // Clear button if winner set
+      if(w)h+='<button data-clear-winner="'+rnd.id+'-'+idx+'" style="padding:4px 6px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid var(--border2);background:#fff;color:var(--muted)">✕</button>';
+      h+='</div>';
+    });
+  });
+  h+='<div id="adm-winner-status" style="font-size:9px;color:var(--muted);min-height:14px;margin-top:4px"></div>';
   h+='</div>';
 
   h+='<div class="adm-sec-label">📋 Populate R32 Bracket Manually</div>';
@@ -2806,6 +2857,34 @@ function bind(){
     });
     else{toast("✓ R32 matchups saved (local)");draw();}
   });
+  // Set knockout winner buttons
+  document.querySelectorAll("[data-set-winner]").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var parts=this.getAttribute("data-set-winner").split("-");
+      // format: rnd-idx-teamName (teamName may contain hyphens)
+      var rnd=parts[0], idx=parts[1], team=parts.slice(2).join("-");
+      if(!rnd||idx==null||!team)return;
+      if(!ST.results.bracket)ST.results.bracket={};
+      if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
+      ST.results.bracket[rnd][idx]=team;
+      if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd+"/"+idx).set(team,function(){
+        var el=document.getElementById("adm-winner-status");
+        if(el)el.innerHTML='<span style="color:var(--green)">✓ '+team+' saved as winner</span>';
+        syncScoresToGroup();
+      });
+      draw();
+    });
+  });
+  document.querySelectorAll("[data-clear-winner]").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var parts=this.getAttribute("data-clear-winner").split("-");
+      var rnd=parts[0], idx=parts[1];
+      if(ST.results.bracket&&ST.results.bracket[rnd])delete ST.results.bracket[rnd][idx];
+      if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd+"/"+idx).remove();
+      draw();
+    });
+  });
+
   el=document.getElementById("adm-fetch-bracket");if(el)el.addEventListener("click",function(){
     var statusEl=document.getElementById("adm-bracket-status");
     if(statusEl)statusEl.textContent="Fetching bracket results from ESPN...";
@@ -2832,13 +2911,9 @@ function bind(){
           if(DB)DB.ref(RESULTS_BASE+"/results/bracketMatchups/"+rnd).set(matchups[rnd]);
         }
       }
-      // Save winners
-      if(!ST.results.bracket)ST.results.bracket={};
-      for(var rnd in results){
-        if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
-        for(var idx in results[rnd])ST.results.bracket[rnd][idx]=results[rnd][idx];
-        if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd).update(results[rnd]);
-      }
+      // NOTE: We intentionally do NOT write winners to results/bracket here.
+      // ESPN projections are not confirmed results — admin sets official winners manually.
+      // Only bracketMatchups (team pairings) are written from ESPN.
       var roundNames={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
       var parts=[];
       if(totalMatchups)parts.push(totalMatchups+" matchups");
