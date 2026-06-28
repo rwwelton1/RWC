@@ -1105,21 +1105,14 @@ function loadGroup(code, cb) {
 }
 
 function subscribeWCData(groupId, players) {
+  // Scores are written by worldcup.html — just subscribe to that path directly
   if(!DB) return;
-  var RESULTS_BASE = "wc2026";
-  var BASE = "groups/"+groupId+"/data/wc2026";
-  // Subscribe to picks and results so we can compute WC scores live
-  DB.ref(BASE+"/picks").on("value", function(sn){
-    if(!SC.wcData) SC.wcData = {};
-    SC.wcData.picks = sn.val() || {};
-    SC.wcData._picksLoaded = true;
-    if(SC.wcData._resultsLoaded) { computeWCScores(groupId, players); if(SC.screen==="hub") scheduleDraw(); }
-  });
-  DB.ref(RESULTS_BASE+"/results").on("value", function(sn){
-    if(!SC.wcData) SC.wcData = {};
-    SC.wcData.results = sn.val() || {};
-    SC.wcData._resultsLoaded = true;
-    if(SC.wcData._picksLoaded) { computeWCScores(groupId, players); if(SC.screen==="hub") scheduleDraw(); }
+  DB.ref('groups/'+groupId+'/data/wc/scores').on('value', function(sn){
+    var scores = sn.val() || {};
+    if(!SC.group||!SC.group.data) return;
+    if(!SC.group.data.wc) SC.group.data.wc = {};
+    SC.group.data.wc.scores = scores;
+    if(SC.screen==='hub') scheduleDraw();
   });
 }
 
@@ -1148,42 +1141,7 @@ function _wcGetUserWildcards(picks, player){
 }
 
 function computeWCScores(groupId, players) {
-  if(!SC.wcData||!SC.wcData._picksLoaded||!SC.wcData._resultsLoaded) return;
-  var picks=SC.wcData.picks||{};
-  var results=SC.wcData.results||{};
-  var officialGroups=results.groups||{};
-  var rwc=results.wildcards||[];
-  var scores={};
-  (players||[]).forEach(function(player){
-    var winners1st=0,perfectGroups=0,teamsCorrect=0;
-    _WC_GROUP_IDS.forEach(function(gid){
-      var rr=officialGroups[gid]; if(!rr||!rr.length) return;
-      var ur=_wcGetGroupRanking(picks,player,gid);
-      var groupTeams=_WC_GROUPS[gid]||[];
-      var ur0=_wcFindName(ur[0]),ur1=_wcFindName(ur[1]),ur2=ur[2]?_wcFindName(ur[2]):null;
-      var rr0=_wcFindName(rr[0]),rr1=_wcFindName(rr[1]),rr2=rr[2]?_wcFindName(rr[2]):null;
-      // Winner bonus
-      if(ur0&&ur0===rr0) winners1st++;
-      // Perfect group
-      if(ur0&&ur1&&ur2&&ur0===rr0&&ur1===rr1&&ur2===rr2) perfectGroups++;
-      // Teams correct
-      var top2=[ur0,ur1].filter(Boolean);
-      var aqDirect=[rr0,rr1].filter(Boolean);
-      var aqWC=[];
-      rwc.forEach(function(t){var tn=_wcFindName(t);if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});
-      var aq=aqDirect.concat(aqWC);
-      top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});
-      _wcGetUserWildcards(picks,player).forEach(function(t){
-        var tn=_wcFindName(t);
-        if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aq.indexOf(tn)>=0)teamsCorrect++;
-      });
-    });
-    scores[_wcUkey(player)]=(winners1st*_WC_PTS.groupWinner)+(perfectGroups*_WC_PTS.perfectGroup)+teamsCorrect;
-  });
-  // Write computed scores into group data so calcStandings picks them up
-  if(!SC.group||!SC.group.data) return;
-  if(!SC.group.data.wc) SC.group.data.wc={};
-  SC.group.data.wc.scores=scores;
+  // No-op: scores are written by worldcup.html and read via subscribeWCData
 }
 
 function subscribeGroup(id) {
@@ -1191,10 +1149,6 @@ function subscribeGroup(id) {
   DB.ref("groups/"+id+"/data").on("value", function(sn){
     if(SC.group && SC.group.id===id) {
       SC.group.data = sn.val() || {statuses:{},results:{}};
-      // Re-apply computed WC scores immediately — the Firebase listener overwrites them otherwise
-      if(SC.wcData&&SC.wcData._picksLoaded&&SC.wcData._resultsLoaded){
-        computeWCScores(id, SC.group.players||[]);
-      }
       
       // Pools write their own scores to data[pool.id].scores
       // Only fall back to results-based scoring if pool hasn't provided scores yet
