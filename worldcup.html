@@ -1233,10 +1233,10 @@ function renderLB(){
     var p1sc=calcPhase1Score(p),p1max=calcPhase1MaxPossible(p);
     var p2sc=calcPhase2Score(p),p2max=calcPhase2MaxPossible(p);
     var totalMax=p1max+p2max;
+    var displaySc=calcDisplayScore(p);
     var winners1st=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;return getGroupRanking(p,gid)[0]===rr[0];}).length;
     var perfectGroups=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;var ur=getGroupRanking(p,gid);return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];}).length;
     var teamsCorrect=0;GROUP_IDS.forEach(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;var ur=getGroupRanking(p,gid);var groupTeams=GROUPS[gid].teams.map(function(t){return t.n;});var top2=([ur[0],ur[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqDirect=([rr[0],rr[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqWC=[];rwc.forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});var aq=aqDirect.concat(aqWC);top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});getUserWildcards(p).forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aq.indexOf(tn)>=0)teamsCorrect++;});});
-    var displaySc=(winners1st*PTS.groupWinner)+(perfectGroups*PTS.perfectGroup)+teamsCorrect+p2sc;
     h+='<div style="text-align:right;flex-shrink:0">';
     h+='<div style="font-size:24px;font-weight:900;color:'+(displaySc>0?rankColor:'var(--dim)')+';letter-spacing:-.03em">'+displaySc+'</div>';
     h+='<div style="font-size:9px;font-weight:800;color:var(--muted)">pts</div>';
@@ -1636,18 +1636,35 @@ function renderRules(){
 // ── LIVE RESULTS TABLE ───────────────────────────────────
 var _resTimer=null,_resData=null,_resLoading=false,_resLastFetch=0;
 
+function calcDisplayScore(player){
+  // Single source of truth — same formula used in the leaderboard display
+  var rwc=getResultWildcards();
+  var winners1st=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;return getGroupRanking(player,gid)[0]===rr[0];}).length;
+  var perfectGroups=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;var ur=getGroupRanking(player,gid);return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];}).length;
+  var teamsCorrect=0;
+  GROUP_IDS.forEach(function(gid){
+    var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;
+    var ur=getGroupRanking(player,gid);
+    var groupTeams=GROUPS[gid].teams.map(function(t){return t.n;});
+    var top2=[ur[0],ur[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;});
+    var aqDirect=[rr[0],rr[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;});
+    var aqWC=[];
+    rwc.forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});
+    var aq=aqDirect.concat(aqWC);
+    top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});
+    getUserWildcards(player).forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aq.indexOf(tn)>=0)teamsCorrect++;});
+  });
+  return (winners1st*PTS.groupWinner)+(perfectGroups*PTS.perfectGroup)+teamsCorrect+calcPhase2Score(player);
+}
+
 function syncScoresToGroup(){
   if(!GROUP_ID||!PARTS||!DB)return;
-  var groupPath='groups/'+GROUP_ID+'/data/wc/scores';
-  var rwc=getResultWildcards();
+  // Write all scores atomically as one object so index always reads consistent data
+  var scores={};
   PARTS.forEach(function(player){
-    var winners1st=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;return getGroupRanking(player,gid)[0]===rr[0];}).length;
-    var perfectGroups=GROUP_IDS.filter(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return false;var ur=getGroupRanking(player,gid);return ur[0]&&ur[1]&&ur[2]&&ur[0]===rr[0]&&ur[1]===rr[1]&&ur[2]===rr[2];}).length;
-    var teamsCorrect=0;GROUP_IDS.forEach(function(gid){var rr=getEffectiveGroupResult(gid);if(!rr||!rr.length)return;var ur=getGroupRanking(player,gid);var groupTeams=GROUPS[gid].teams.map(function(t){return t.n;});var top2=([ur[0],ur[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqDirect=([rr[0],rr[1]].filter(Boolean).map(function(n){return findTeamName(n)||n;}));var aqWC=[];rwc.forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});var aq=aqDirect.concat(aqWC);top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});getUserWildcards(player).forEach(function(t){var tn=findTeamName(t)||t;if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aq.indexOf(tn)>=0)teamsCorrect++;});});
-    var p2sc=calcPhase2Score(player);
-    var score=(winners1st*PTS.groupWinner)+(perfectGroups*PTS.perfectGroup)+teamsCorrect+p2sc;
-    DB.ref(groupPath+'/'+ukey(player)).set(score);
+    scores[ukey(player)]=calcDisplayScore(player);
   });
+  DB.ref('groups/'+GROUP_ID+'/data/wc/scores').set(scores);
 }
 
 function applyLiveStandingsToScores(groups){
