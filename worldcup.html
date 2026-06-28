@@ -2491,34 +2491,96 @@ function bind(){
     var list=document.getElementById("adm-group-sort-list");
     if(!list) return;
     var gid=ST._adminGroupEdit; if(!gid) return;
-    var dragged=null;
-    list.querySelectorAll(".adm-group-sort-item").forEach(function(item){
-      item.addEventListener("dragstart",function(e){
-        dragged=this; this.style.opacity=".4";
-        e.dataTransfer.effectAllowed="move";
+    var dragged=null, ghost=null, startY=0, itemH=0;
+
+    function getAdmItems(){ return Array.from(list.querySelectorAll(".adm-group-sort-item")); }
+    function findAdmItemAt(y){
+      var found=null;
+      getAdmItems().forEach(function(el){
+        var r=el.getBoundingClientRect();
+        if(y>=r.top&&y<=r.bottom) found=el;
       });
+      return found;
+    }
+    function removeAdmGhost(){ if(ghost&&ghost.parentNode){ghost.parentNode.removeChild(ghost);ghost=null;} }
+    function updateLabels(){
+      getAdmItems().forEach(function(el2,pos){
+        var lbl=el2.querySelector("span");
+        if(lbl) lbl.textContent=["1st","2nd","3rd","4th"][pos]||((pos+1)+"th");
+      });
+    }
+    function commitOrder(){
+      var newOrder=getAdmItems().map(function(el2){ return el2.getAttribute("data-name"); });
+      if(!ST._adminGroupOrder) ST._adminGroupOrder={};
+      ST._adminGroupOrder[gid]=newOrder;
+      updateLabels();
+    }
+    function doAdmDrop(target){
+      if(!dragged||!target||dragged===target) return;
+      var items=getAdmItems();
+      var fromIdx=items.indexOf(dragged);
+      var toIdx=items.indexOf(target);
+      if(fromIdx<toIdx) list.insertBefore(dragged,target.nextSibling);
+      else list.insertBefore(dragged,target);
+      commitOrder();
+    }
+
+    getAdmItems().forEach(function(item){
+      var handle=item.querySelector(".adm-drag-handle")||item;
+
+      // Touch events (iOS Safari)
+      item.addEventListener("touchstart",function(e){
+        e.preventDefault();
+        dragged=item;
+        item.style.opacity=".4";
+        startY=e.touches[0].clientY;
+        itemH=item.offsetHeight;
+        ghost=document.createElement("div");
+        ghost.style.cssText="position:fixed;z-index:9999;opacity:.9;pointer-events:none;background:#fff;border:2px solid var(--border);border-radius:8px;padding:7px 10px;display:flex;align-items:center;gap:8px;min-width:200px;box-shadow:4px 4px 0 var(--border)";
+        ghost.innerHTML=item.innerHTML;
+        ghost.style.width=item.offsetWidth+"px";
+        ghost.style.top=(item.getBoundingClientRect().top)+"px";
+        ghost.style.left=(item.getBoundingClientRect().left)+"px";
+        document.body.appendChild(ghost);
+      },{passive:false});
+
+      item.addEventListener("touchmove",function(e){
+        if(!dragged) return;
+        e.preventDefault();
+        var ty=e.touches[0].clientY;
+        if(ghost){ ghost.style.top=(ty-itemH/2)+"px"; }
+        getAdmItems().forEach(function(el){ el.style.outline=""; });
+        var target=findAdmItemAt(ty);
+        if(target&&target!==dragged) target.style.outline="2px solid var(--gold)";
+      },{passive:false});
+
+      item.addEventListener("touchend",function(e){
+        if(!dragged) return;
+        e.preventDefault();
+        var ty=e.changedTouches[0].clientY;
+        removeAdmGhost();
+        item.style.opacity="";
+        getAdmItems().forEach(function(el){ el.style.outline=""; });
+        var target=findAdmItemAt(ty);
+        doAdmDrop(target);
+        dragged=null;
+      },{passive:false});
+
+      item.addEventListener("touchcancel",function(){
+        removeAdmGhost();
+        if(dragged) dragged.style.opacity="";
+        getAdmItems().forEach(function(el){ el.style.outline=""; });
+        dragged=null;
+      });
+
+      // Mouse events (desktop)
       item.setAttribute("draggable","true");
+      item.addEventListener("dragstart",function(e){ dragged=this; this.style.opacity=".4"; e.dataTransfer.effectAllowed="move"; });
       item.addEventListener("dragend",function(){ this.style.opacity=""; dragged=null; });
       item.addEventListener("dragover",function(e){ e.preventDefault(); e.dataTransfer.dropEffect="move"; });
       item.addEventListener("drop",function(e){
         e.preventDefault();
-        if(!dragged||dragged===this) return;
-        var items=Array.from(list.querySelectorAll(".adm-group-sort-item"));
-        var fromIdx=items.indexOf(dragged);
-        var toIdx=items.indexOf(this);
-        if(fromIdx<toIdx) list.insertBefore(dragged,this.nextSibling);
-        else list.insertBefore(dragged,this);
-        // Update ST._adminGroupOrder from current DOM order
-        var newOrder=Array.from(list.querySelectorAll(".adm-group-sort-item")).map(function(el2){
-          return el2.getAttribute("data-name");
-        });
-        if(!ST._adminGroupOrder) ST._adminGroupOrder={};
-        ST._adminGroupOrder[gid]=newOrder;
-        // Update position labels without full redraw
-        list.querySelectorAll(".adm-group-sort-item").forEach(function(el2,pos){
-          var lbl=el2.querySelector("span");
-          if(lbl){ lbl.textContent=["1st","2nd","3rd","4th"][pos]||((pos+1)+"th"); }
-        });
+        doAdmDrop(this);
       });
     });
   })();
