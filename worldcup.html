@@ -2188,33 +2188,60 @@ function renderAdmin(){
   // ── Manual knockout winner setter ──
   h+='<div class="adm-sec-label">✅ Set Knockout Winners</div>';
   h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
-  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Tap the winner of each completed match. Saves instantly and updates scores.</div>';
-  var knockoutRounds=[{id:"r32",label:"Round of 32"},{id:"r16",label:"Round of 16"},{id:"qf",label:"Quarter-Finals"},{id:"sf",label:"Semi-Finals"},{id:"final",label:"Final"}];
-  var bmu=ST.results&&ST.results.bracketMatchups||{};
-  var bwr=ST.results&&ST.results.bracket||{};
+  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Tap the winner of each completed match. After all winners in a round are set, the next round&#39;s matchups appear.</div>';
+  var knockoutRounds=[{id:"r32",label:"Round of 32",size:16},{id:"r16",label:"Round of 16",size:8},{id:"qf",label:"Quarter-Finals",size:4},{id:"sf",label:"Semi-Finals",size:2},{id:"final",label:"Final",size:1}];
+  var bmu=(ST.results&&ST.results.bracketMatchups)||{};
+  var bwr=(ST.results&&ST.results.bracket)||{};
+
+  // Derive matchups for rounds after R32 from winners of previous round
+  function getRoundMatchups(rndId, prevRndId, prevWinners, prevSize){
+    // Use official bracketMatchups if set, else derive from previous round winners
+    var official=bmu[rndId]||{};
+    if(Object.keys(official).length) return official;
+    if(!prevRndId) return {};
+    var derived={};
+    for(var i=0;i<prevSize/2;i++){
+      var wA=prevWinners[i*2], wB=prevWinners[i*2+1];
+      if(wA||wB) derived[i]={a:wA||null,b:wB||null};
+    }
+    return derived;
+  }
+
+  var prevRnd=null, prevSize=32;
   knockoutRounds.forEach(function(rnd){
-    var matchups=bmu[rnd.id]||{};
+    var prevWinners=prevRnd?(bwr[prevRnd]||{}):{};
+    var matchups=getRoundMatchups(rnd.id, prevRnd, prevWinners, prevSize);
     var winners=bwr[rnd.id]||{};
-    var keys=Object.keys(matchups);
-    if(!keys.length)return; // skip rounds with no matchups set yet
-    h+='<div style="font-size:9px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.06em;margin:10px 0 6px">'+rnd.label+'</div>';
-    keys.sort(function(a,b){return parseInt(a)-parseInt(b);}).forEach(function(idx){
+    var keys=Object.keys(matchups).sort(function(a,b){return parseInt(a)-parseInt(b);});
+
+    // Only show this round if previous round is complete OR this is R32 with matchups set
+    var prevComplete=!prevRnd||Object.keys(bwr[prevRnd]||{}).length>=(prevSize/2);
+    if(!keys.length&&!prevComplete){prevRnd=rnd.id;prevSize=rnd.size*2;return;}
+    if(!keys.length){prevRnd=rnd.id;prevSize=rnd.size*2;return;}
+
+    var roundComplete=Object.keys(winners).length>=rnd.size;
+    h+='<div style="margin-bottom:12px">';
+    h+='<div style="font-size:9px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;display:flex;align-items:center;gap:6px">';
+    h+=rnd.label;
+    if(roundComplete) h+='<span style="font-size:8px;background:var(--green-bg);color:var(--green);border:1px solid var(--green);border-radius:10px;padding:1px 7px;font-weight:800">✓ Done</span>';
+    else h+='<span style="font-size:8px;color:var(--muted);font-weight:700">'+Object.keys(winners).length+'/'+rnd.size+' set</span>';
+    h+='</div>';
+
+    keys.forEach(function(idx){
       var m=matchups[idx];
       var w=winners[idx]||null;
       var ta=m&&m.a?m.a:null, tb=m&&m.b?m.b:null;
-      if(!ta&&!tb)return;
       var fA=ta?findTeamFlag(ta):"❓", fB=tb?findTeamFlag(tb):"❓";
-      h+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:7px;padding:6px 8px;background:var(--cream);border-radius:8px;border:1px solid var(--border2)">';
-      // Team A button
       var aSel=(w&&ta&&w===ta), bSel=(w&&tb&&w===tb);
-      h+='<button data-set-winner="'+rnd.id+'-'+idx+'-'+(ta||"")+'" style="flex:1;padding:6px 4px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(aSel?'var(--green)':'var(--border)')+';background:'+(aSel?'var(--green-bg)':'#fff')+';color:'+(aSel?'var(--green)':'var(--text)')+'">'+fA+' '+(ta||'TBD')+(aSel?' ✓':'')+'</button>';
+      h+='<div style="display:flex;align-items:center;gap:5px;margin-bottom:6px">';
+      h+='<button data-set-winner="'+rnd.id+':'+idx+':'+(ta||"")+'" style="flex:1;padding:7px 4px;border-radius:8px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(aSel?'var(--green)':'var(--border2)')+';background:'+(aSel?'var(--green-bg)':'#fff')+';color:'+(aSel?'var(--green)':'var(--text)')+'">'+fA+' '+(ta||'TBD')+(aSel?' ✓':'')+'</button>';
       h+='<span style="font-size:8px;font-weight:900;color:var(--dim);flex-shrink:0">vs</span>';
-      // Team B button
-      h+='<button data-set-winner="'+rnd.id+'-'+idx+'-'+(tb||"")+'" style="flex:1;padding:6px 4px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(bSel?'var(--green)':'var(--border)')+';background:'+(bSel?'var(--green-bg)':'#fff')+';color:'+(bSel?'var(--green)':'var(--text)')+'">'+fB+' '+(tb||'TBD')+(bSel?' ✓':'')+'</button>';
-      // Clear button if winner set
-      if(w)h+='<button data-clear-winner="'+rnd.id+'-'+idx+'" style="padding:4px 6px;border-radius:6px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid var(--border2);background:#fff;color:var(--muted)">✕</button>';
+      h+='<button data-set-winner="'+rnd.id+':'+idx+':'+(tb||"")+'" style="flex:1;padding:7px 4px;border-radius:8px;font-size:9px;font-weight:800;font-family:inherit;cursor:pointer;border:2px solid '+(bSel?'var(--green)':'var(--border2)')+';background:'+(bSel?'var(--green-bg)':'#fff')+';color:'+(bSel?'var(--green)':'var(--text)')+'">'+fB+' '+(tb||'TBD')+(bSel?' ✓':'')+'</button>';
+      if(w)h+='<button data-clear-winner="'+rnd.id+':'+idx+'" style="width:28px;height:28px;border-radius:6px;font-size:10px;font-weight:800;font-family:inherit;cursor:pointer;border:1px solid var(--border2);background:#fff;color:var(--muted);flex-shrink:0">✕</button>';
       h+='</div>';
     });
+    h+='</div>';
+    prevRnd=rnd.id; prevSize=rnd.size*2;
   });
   h+='<div id="adm-winner-status" style="font-size:9px;color:var(--muted);min-height:14px;margin-top:4px"></div>';
   h+='</div>';
@@ -2860,9 +2887,8 @@ function bind(){
   // Set knockout winner buttons
   document.querySelectorAll("[data-set-winner]").forEach(function(btn){
     btn.addEventListener("click",function(){
-      var parts=this.getAttribute("data-set-winner").split("-");
-      // format: rnd-idx-teamName (teamName may contain hyphens)
-      var rnd=parts[0], idx=parts[1], team=parts.slice(2).join("-");
+      var parts=this.getAttribute("data-set-winner").split(":");
+      var rnd=parts[0], idx=parts[1], team=parts.slice(2).join(":");
       if(!rnd||idx==null||!team)return;
       if(!ST.results.bracket)ST.results.bracket={};
       if(!ST.results.bracket[rnd])ST.results.bracket[rnd]={};
@@ -2877,7 +2903,7 @@ function bind(){
   });
   document.querySelectorAll("[data-clear-winner]").forEach(function(btn){
     btn.addEventListener("click",function(){
-      var parts=this.getAttribute("data-clear-winner").split("-");
+      var parts=this.getAttribute("data-clear-winner").split(":");
       var rnd=parts[0], idx=parts[1];
       if(ST.results.bracket&&ST.results.bracket[rnd])delete ST.results.bracket[rnd][idx];
       if(DB)DB.ref(RESULTS_BASE+"/results/bracket/"+rnd+"/"+idx).remove();
