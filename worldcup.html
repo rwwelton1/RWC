@@ -1416,9 +1416,9 @@ function getR32Teams(user,idx){
   return [resolve(src.a),resolve(src.b)];
 }
 
-// Returns true if the team has been officially knocked out in any bracket round
-function isTeamEliminated(team){
-  if(!team||!ST.results||!ST.results.bracket) return false;
+// Returns the round name a team was officially knocked out in, or null if still alive
+function getEliminatedRound(team){
+  if(!team||!ST.results||!ST.results.bracket) return null;
   var br=ST.results.bracket;
   for(var r=0;r<ROUNDS.length;r++){
     var rnd=ROUNDS[r];
@@ -1428,15 +1428,14 @@ function isTeamEliminated(team){
     for(var mi=0;mi<sz;mi++){
       var winner=rndResults[mi];
       if(!winner) continue;
-      // Get the two teams that played in this match
       var pair=rnd==="r32"?getR32Teams(null,mi):getFeedTeams(null,rnd,mi);
       var ta=pair[0],tb=pair[1];
-      // If team was in this match and lost, they're eliminated
-      if((ta===team||tb===team)&&winner!==team) return true;
+      if((ta===team||tb===team)&&winner!==team) return rnd;
     }
   }
-  return false;
+  return null;
 }
+function isTeamEliminated(team){ return !!getEliminatedRound(team); }
 
 function saveBracketPick(round,idx,team){
   if(!ST.user||!DB) return;
@@ -1537,20 +1536,18 @@ function renderBracket(){
     h+='<div style="display:flex;flex-direction:column;gap:'+gapPx+'px">';
     matches.forEach(function(m){
       var official=m.official||null;
-      // Card border: show as projected only if user hasn't picked yet
       var winner=m.pick;
 
       h+='<div class="bk-match'+(winner?"":" projected")+(!canPick?" bk-locked":"")+'">';
 
-      // Team A — only show user's pick state, never official winner styling
+      // Team A
       var aIsMy=!!(m.pick&&m.pick===m.ta);
-      var aIsElim=!!(m.ta&&isTeamEliminated(m.ta));
+      var aElimRnd=m.ta?getEliminatedRound(m.ta):null;
+      // Only show eliminated styling if they were knocked out in THIS round or a later round
+      // (i.e. don't retroactively strikethrough rounds they already survived)
+      var aIsElim=!!(aElimRnd&&ROUNDS.indexOf(aElimRnd)<=ROUNDS.indexOf(rnd));
       var aCanPick=!!(canPick&&m.ta&&!aIsElim);
-      // If this team is eliminated: show strikethrough regardless of whether it's the pick
-      // If it's the user's pick and eliminated: red strikethrough
-      // If it's the user's pick and not eliminated: gold highlight
-      // Otherwise: plain
-      var aCls="bk-team"+(m.ta?"":" tbd")+(aIsElim?(aIsMy?" mypick eliminated":" eliminated-other"):aIsMy?" mypick":"")+(aCanPick?" pickable":"");
+      var aCls="bk-team"+(m.ta?"":" tbd")+(aIsElim?" eliminated":aIsMy?" mypick":"")+(aCanPick?" pickable":"");
       h+='<div class="'+aCls+'"'+(aCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.ta||"")+'"':'')+'>'+
         (m.ta?'<div class="bk-flag">'+(aIsElim?'<span style="opacity:.4">'+getTeamFlag(m.ta)+'</span>':getTeamFlag(m.ta))+'</div>':'<div style="width:20px"></div>')+
         '<div class="bk-name">'+(m.ta?x(m.ta):'TBD')+'</div>'+
@@ -1558,9 +1555,10 @@ function renderBracket(){
 
       // Team B
       var bIsMy=!!(m.pick&&m.pick===m.tb);
-      var bIsElim=!!(m.tb&&isTeamEliminated(m.tb));
+      var bElimRnd=m.tb?getEliminatedRound(m.tb):null;
+      var bIsElim=!!(bElimRnd&&ROUNDS.indexOf(bElimRnd)<=ROUNDS.indexOf(rnd));
       var bCanPick=!!(canPick&&m.tb&&!bIsElim);
-      var bCls="bk-team"+(m.tb?"":" tbd")+(bIsElim?(bIsMy?" mypick eliminated":" eliminated-other"):bIsMy?" mypick":"")+(bCanPick?" pickable":"");
+      var bCls="bk-team"+(m.tb?"":" tbd")+(bIsElim?" eliminated":bIsMy?" mypick":"")+(bCanPick?" pickable":"");
       h+='<div class="'+bCls+'"'+(bCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.tb||"")+'"':'')+'>'+
         (m.tb?'<div class="bk-flag">'+(bIsElim?'<span style="opacity:.4">'+getTeamFlag(m.tb)+'</span>':getTeamFlag(m.tb))+'</div>':'<div style="width:20px"></div>')+
         '<div class="bk-name">'+(m.tb?x(m.tb):'TBD')+'</div>'+
