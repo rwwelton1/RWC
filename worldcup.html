@@ -312,7 +312,6 @@ var RESULTS_BASE="wc2026";
 var MASTER_PW="Sloop";
 
 // ── OFFICIAL 2026 WORLD CUP GROUPS ────────────────────────
-// Source: UEFA.com / ESPN confirmed complete draw (all 48 teams)
 var GROUPS={
   A:{id:"A",teams:[{n:"Mexico",       flag:"🇲🇽",code:"MEX",conf:"CONCACAF",color:"#006847",r:15},
                    {n:"South Africa", flag:"🇿🇦",code:"RSA",conf:"CAF",     color:"#007a4d",r:60},
@@ -371,8 +370,7 @@ var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
 var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},games:{},cachedScores:{}};
-// Official bracket matchups from ESPN (separate from predicted R32_SRCS)
-// ST.results.bracketMatchups[rnd][idx] = {a: teamName, b: teamName}
+// Official bracket matchups — ST.results.bracketMatchups[rnd][idx] = {a: teamName, b: teamName}
 var _dragState=null; // active drag state
 
 try{
@@ -447,13 +445,13 @@ function teamNameMatch(a,b){
 }
 
 // ── Game Picks (for fun — does not affect pool score) ──────
-// Flat list of all 48 teams across all groups, for matching ESPN names to flags etc.
+// Flat list of all 48 teams across all groups
 var ALL_TEAMS=(function(){
   var arr=[];
   GROUP_IDS.forEach(function(gid){GROUPS[gid].teams.forEach(function(t){arr.push(t);});});
   return arr;
 })();
-// ESPN sometimes uses different official names than ours — map those here.
+// Team name aliases for matching alternate spellings
 var TEAM_ALIASES={
   "united states":"USA",
   "united states of america":"USA",
@@ -507,6 +505,10 @@ function findTeamCode(name){var t=findTeam(name);return t?t.code:(name||"").slic
 function getEffectiveGroupResult(gid){
   var off=(ST.results.groups||{})[gid];
   if(off&&off.length)return off;
+  // During knockout phase, only use official admin-set group results — never live standings.
+  // This freezes group stage scores (Teams, 1st Place, Perfect) once the phase transitions
+  // to knockout, so they cannot be altered by live data updates or later admin edits.
+  if(ST.results&&ST.results.phase==="knockout")return null;
   var live=(ST.liveGroupResults||{})[gid];
   if(live&&live.length)return live;
   return null;
@@ -787,45 +789,10 @@ function toggleStageOpen(stage){
   DB.ref(RESULTS_BASE+"/stageOpen/"+stage).set(nowOpen?null:true);
 }
 function pushLiveGroupsToResults(groupsData){
-  // Push parsed ESPN standings into liveResults (which then flows into ST.results)
   if(!DB||!groupsData)return;
   DB.ref(RESULTS_BASE+"/liveResults/groups").set(groupsData);
 }
-// Fetch the World Cup schedule + scores from ESPN for the public Game Picks pool (for fun, no scoring impact)
-function fetchGamesFromESPN(cb){
-  var start="20260611",end="20260719";
-  fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates="+start+"-"+end+"&limit=200")
-    .then(function(r){return r.json();})
-    .then(function(data){_resData=data;_resLastFetch=Date.now();
-      var games={};
-      (data.events||[]).forEach(function(ev){
-        var comp=(ev.competitions||[])[0];
-        if(!comp)return;
-        var home=null,away=null;
-        (comp.competitors||[]).forEach(function(c){
-          var entry={name:(c.team&&(c.team.displayName||c.team.name))||"",score:(c.score!=null&&c.score!=="")?parseInt(c.score):null};
-          if(c.homeAway==="home")home=entry;else away=entry;
-        });
-        if(!home||!away)return;
-        var state=(ev.status&&ev.status.type&&ev.status.type.state)||"pre";
-        var completed=!!(ev.status&&ev.status.type&&ev.status.type.completed);
-        var winner=null;
-        if(completed&&home.score!=null&&away.score!=null){
-          if(home.score===away.score)winner="draw";
-          else winner=home.score>away.score?"home":"away";
-        }
-        games[ev.id]={
-          id:ev.id,date:ev.date,
-          home:findTeamName(home.name),homeFlag:findTeamFlag(home.name),homeScore:home.score,
-          away:findTeamName(away.name),awayFlag:findTeamFlag(away.name),awayScore:away.score,
-          status:completed?"post":state,
-          winner:winner
-        };
-      });
-      if(cb)cb(games,null);
-    })
-    .catch(function(err){if(cb)cb(null,err);});
-}
+
 function wipeBracketPicks(){
   if(!DB)return;
   // Remove bracket picks for all users
@@ -872,18 +839,6 @@ function loadData(){
   }
   function s3(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
-    // Sanity-check results/bracket: if ESPN wrote garbage (multiple "final" entries), wipe it
-    if(DB){DB.ref(RESULTS_BASE+"/results/bracket/final").once("value",function(sn){
-      var v=sn.val();
-      if(v&&typeof v==="object"){
-        var keys=Object.keys(v);
-        // Legitimate final has at most 1 winner (key "0"). If it has multiple keys, it's ESPN garbage.
-        if(keys.length>1){
-          DB.ref(RESULTS_BASE+"/results/bracket").remove();
-          console.log("Wiped corrupt ESPN bracket data ("+keys.length+" entries in final)");
-        }
-      }
-    });}
     DB.ref(BASE+"/picks").on("value",function(sn){
       var wasBracket=(ST.page==="bracket");
       var sy=wasBracket?(window.pageYOffset||0):0;
@@ -899,10 +854,12 @@ function loadData(){
     DB.ref(RESULTS_BASE+"/results/bracketMatchups").on("value",function(sn){if(!ST.results)ST.results={};ST.results.bracketMatchups=sn.val()||{};draw();_restoreScroll();});
     // Stage open flags — admin controls when picks are enabled
     DB.ref(RESULTS_BASE+"/stageOpen").on("value",function(sn){ST.stageOpen=sn.val()||{};draw();_restoreScroll();});
-    // Live results feed — admin pushes ESPN standings into official results
+    // Live results feed
     DB.ref(RESULTS_BASE+"/liveResults").on("value",function(sn){
       var live=sn.val()||{};
-      if(live.groups){if(!ST.results.groups)ST.results.groups={};for(var gid in live.groups)ST.results.groups[gid]=live.groups[gid];}
+      // Only apply live group standings when NOT in knockout phase — once knockout starts,
+      // group results are frozen and live feed updates must not overwrite them.
+      if(live.groups&&ST.results.phase!=="knockout"){if(!ST.results.groups)ST.results.groups={};for(var gid in live.groups)ST.results.groups[gid]=live.groups[gid];}
       if(live.wildcards)ST.results.wildcards=live.wildcards;
       draw();_restoreScroll();
       if(ST._picksLoaded) syncScoresToGroup();
@@ -1417,7 +1374,7 @@ function getFeedTeams(user,round,idx){
 
 // Get R32 source teams (from group predictions or official results)
 function getR32Teams(user,idx){
-  // If ESPN has provided official bracket matchups, use them for R32 (may include TBD placeholders)
+  // If official bracket matchups are set, use them for R32 (may include TBD placeholders)
   var official=ST.results&&ST.results.bracketMatchups&&ST.results.bracketMatchups.r32&&ST.results.bracketMatchups.r32[idx];
   if(official&&(official.a||official.b))return [official.a||null,official.b||null];
 
@@ -1695,7 +1652,6 @@ function renderRules(){
 }
 
 // ── LIVE RESULTS TABLE ───────────────────────────────────
-var _resTimer=null,_resData=null,_resLoading=false,_resLastFetch=0;
 
 function calcDisplayScore(player){
   // Single source of truth — same formula used in the leaderboard display
@@ -1731,370 +1687,8 @@ function syncScoresToGroup(){
   DB.ref('groups/'+GROUP_ID+'/data/wc/scores').set(scores);
 }
 
-function applyLiveStandingsToScores(groups){
-  // Apply ESPN parsed groups to ST.liveGroupResults — pseudo-live scoring.
-  // groups = [{name:"Group A", rows:[{name:"Mexico",p:1,...},...]}]
-  // A group's live ranking only takes effect once EVERY team in the group
-  // has played at least 1 game. Once every team has played all 3 group
-  // games, the group is marked "final" — this is the point at which the
-  // group stage's "max possible" score is reduced to reflect this group.
-  if(!groups||!groups.length)return;
-  var changed=false;
-  var changedGids=[];
-  if(!ST.liveGroupResults)ST.liveGroupResults={};
-  if(!ST.liveGroupFinal)ST.liveGroupFinal={};
-  groups.forEach(function(group){
-    // Extract group letter e.g. "Group A" -> "A"
-    var gid=(group.name||"").replace(/^group\s*/i,"").trim().toUpperCase();
-    if(!GROUPS[gid])return;
-    if(!group.rows||group.rows.length!==4)return;
-    // Require every team to have played at least 1 game
-    var minPlayed=Math.min.apply(null,group.rows.map(function(r){return r.p||0;}));
-    if(minPlayed<1)return;
-    // Match ESPN team names to our team names
-    var ranking=group.rows.map(function(row){
-      var matched=null;
-      GROUPS[gid].teams.forEach(function(t){
-        if(teamNameMatch(row.name,t.n))matched=t.n;
-      });
-      return matched||row.name;
-    }).filter(Boolean);
-    if(ranking.length!==4)return;
-    var gidChanged=false;
-    if(JSON.stringify(ST.liveGroupResults[gid])!==JSON.stringify(ranking)){
-      ST.liveGroupResults[gid]=ranking;
-      changed=true;gidChanged=true;
-    }
-    // Once every team has played all 3 group-stage games, the group is final.
-    var isFinal=minPlayed>=3;
-    if(!!ST.liveGroupFinal[gid]!==isFinal){
-      ST.liveGroupFinal[gid]=isFinal;
-      changed=true;gidChanged=true;
-    }
-    if(gidChanged)changedGids.push(gid);
-  });
-  // Persist any changed groups to Firebase so they survive page reloads
-  if(changedGids.length&&DB){
-    changedGids.forEach(function(gid){
-      DB.ref(RESULTS_BASE+"/liveGroupResults/"+gid).set(ST.liveGroupResults[gid]||null);
-      DB.ref(RESULTS_BASE+"/liveGroupFinal/"+gid).set(!!ST.liveGroupFinal[gid]);
-    });
-  }
-  return changed;
-}
 
-// ── FOTMOB PARSER ─────────────────────────────────────────
-// FotMob leagueId 77 = FIFA World Cup
-var FOTMOB_WC_ID = 77;
 
-function parseFotMobGroups(data){
-  // FotMob returns: data.response[] → each has .tables[0].tableRows[]
-  var groups=[];
-  try{
-    var resp=(data.response||data.standings||[]);
-    // Sometimes wrapped in a single object with .tables
-    if(!Array.isArray(resp)&&data.tables) resp=data.tables;
-    if(!Array.isArray(resp)&&data.response) resp=data.response;
-    resp.forEach(function(section){
-      // Each section is a group; name like "Group A"
-      var tables=section.tables||[section];
-      tables.forEach(function(table){
-        var rawName=(table.leagueName||table.name||section.leagueName||section.name||"");
-        var gname=rawName.replace(/^group\s*/i,"").trim().toUpperCase();
-        if(!gname||gname.length!==1) return;
-        var rows=[];
-        (table.tableRows||table.rows||[]).forEach(function(row){
-          var tname=row.name||row.shortName||"";
-          // Match to our team names
-          var matched=null;
-          if(GROUPS[gname]){
-            GROUPS[gname].teams.forEach(function(t){
-              var en=tname.toLowerCase(), on=t.n.toLowerCase();
-              if(en===on||en.indexOf(on)>=0||on.indexOf(en)>=0) matched=t.n;
-            });
-          }
-          rows.push({
-            name: findTeamName(tname),
-            p:parseInt(row.played||0),
-            w:parseInt(row.wins||0),
-            d:parseInt(row.draws||0),
-            l:parseInt(row.losses||0),
-            gf:parseInt((row.scoresStr||"0:0").split(":")[0])||0,
-            ga:parseInt((row.scoresStr||"0:0").split(":")[1])||0,
-            gd:parseInt(row.goalConDiff||0),
-            pts:parseInt(row.pts||row.points||0)
-          });
-        });
-        if(rows.length===4){
-          rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
-          groups.push({name:"Group "+gname, rows:rows, gname:gname});
-        }
-      });
-    });
-  }catch(e){ console.warn("FotMob parse error",e); }
-  return groups;
-}
-
-function fetchFotMob(cb){
-  fetch("https://www.fotmob.com/api/leaguetable?leagueId="+FOTMOB_WC_ID,{
-    headers:{"Referer":"https://www.fotmob.com","x-mas":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"}
-  })
-  .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
-  .then(function(data){ cb(null, data); })
-  .catch(function(err){ cb(err, null); });
-}
-
-function fetchESPNStandings(cb){
-  fetch("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
-  .then(function(r){return r.json();})
-  .then(function(data){ cb(null, data); })
-  .catch(function(err){ cb(err, null); });
-}
-
-function fetchStandingsWithFallback(onGroups, onError){
-  fetchFotMob(function(err, data){
-    if(!err && data){
-      var groups=parseFotMobGroups(data);
-      if(groups.length>0){ onGroups(groups,"FotMob"); return; }
-    }
-    // Fallback to ESPN
-    fetchESPNStandings(function(err2, data2){
-      if(err2||!data2){ onError(err2||new Error("Both failed")); return; }
-      var groups=parseESPNGroups(data2);
-      onGroups(groups,"ESPN");
-    });
-  });
-}
-
-function parseESPNGroups(data){
-  var groups=[];
-  try{
-    if(data&&data.children&&data.children.length){
-      data.children.forEach(function(group){
-        var name=group.name||group.abbreviation||"";
-        var gname=name.replace(/^group\s*/i,"").trim().toUpperCase();
-        var entries=(group.standings&&group.standings.entries)||[];
-        var rows=[];
-        entries.forEach(function(e){
-          var team=e.team||{};
-          var tname=team.displayName||team.name||"";
-          var stats={};
-          (e.stats||[]).forEach(function(s){stats[s.name||s.abbreviation]=parseFloat(s.value||0);});
-          var matched=null;
-          if(GROUPS[gname]){
-            GROUPS[gname].teams.forEach(function(t){
-              var en=tname.toLowerCase(),on=t.n.toLowerCase();
-              if(en===on||en.indexOf(on)>=0||on.indexOf(en)>=0)matched=t.n;
-            });
-          }
-          rows.push({
-            name: findTeamName(tname),
-            p:parseInt(stats.gamesPlayed||stats.GP||0),
-            w:parseInt(stats.wins||stats.W||0),
-            d:parseInt(stats.ties||stats.D||0),
-            l:parseInt(stats.losses||stats.L||0),
-            gf:parseInt(stats.pointsFor||stats.GF||0),
-            ga:parseInt(stats.pointsAgainst||stats.GA||0),
-            gd:parseInt(stats.pointDifferential||stats.GD||0),
-            pts:parseInt(stats.points||stats.PTS||0)
-          });
-        });
-        if(rows.length){
-          rows.sort(function(a,b){return b.pts-a.pts||b.gd-a.gd||b.gf-a.gf;});
-          groups.push({name:name,gname:gname,rows:rows});
-        }
-      });
-    }
-  }catch(e){}
-  return groups;
-}
-
-function fetchResults(){
-  if(_resLoading)return;
-  _resLoading=true;
-  fetchStandingsWithFallback(
-    function(groups, source){
-      _resLoading=false; _resLastFetch=Date.now();
-      _resData={_parsed:groups, _source:source};
-      if(ST.page==="results") renderResultsInto();
-    },
-    function(){
-      _resLoading=false;
-      var el=document.getElementById("results-wrap");
-      if(el)el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">Could not load live standings.<br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
-    }
-  );
-}
-
-function renderResultsInto(){
-  var el=document.getElementById("results-wrap");
-  if(!el)return;
-  var data=_resData;
-
-  // Use pre-parsed groups if available (from fetchStandingsWithFallback)
-  var groups=[];
-  var source="";
-  if(data&&data._parsed){
-    groups=data._parsed;
-    source=data._source||"";
-  } else if(data){
-    // Legacy ESPN raw format
-    groups=parseESPNGroups(data);
-    source="ESPN";
-  }
-
-  // Apply live standings to scores for groups with at least 1 game played per team
-  if(applyLiveStandingsToScores(groups)){
-    syncScoresToGroup();
-    if(ST.page==="leaderboard")draw();
-  }
-
-  var ago=_resLastFetch?Math.round((Date.now()-_resLastFetch)/1000):0;
-  var agoStr=ago<60?ago+"s ago":Math.round(ago/60)+"m ago";
-
-  if(!groups.length){
-    el.innerHTML='<div style="text-align:center;padding:30px;color:var(--muted);font-size:11px;line-height:2">No standings data yet.<br><button style="margin-top:10px;padding:4px 12px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);font-family:inherit;font-size:9px;cursor:pointer" onclick="fetchResults()">&#8635; Retry</button></div>';
-    return;
-  }
-
-  var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
-  h+='<div style="font-size:9px;font-weight:700;color:var(--text)">Group Standings</div>';
-  h+='<div style="display:flex;align-items:center;gap:8px">';
-  if(source)h+='<span style="font-size:7px;color:var(--dim)">via '+source+'</span>';
-  h+='<span style="font-size:7px;color:var(--dim)">'+agoStr+'</span>';
-  h+='<button style="padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:none;color:var(--muted);font-family:inherit;font-size:8px;cursor:pointer" onclick="fetchResults()">&#8635;</button>';
-  h+='</div></div>';
-
-  groups.forEach(function(group){
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:10px">';
-    // Header
-    h+='<div style="padding:7px 12px;background:linear-gradient(90deg,#0e2fa8,#1248c8);border-bottom:1px solid rgba(245,197,24,.25);display:flex;align-items:center;justify-content:space-between">';
-    h+='<div style="font-size:10px;font-weight:800;color:#fff">'+x(group.name)+'</div>';
-    h+='<div style="display:flex;gap:12px;font-size:7px;font-weight:700;color:rgba(255,255,255,.5)">';
-    h+='<span style="width:14px;text-align:center">P</span><span style="width:14px;text-align:center">W</span><span style="width:14px;text-align:center">D</span><span style="width:14px;text-align:center">L</span><span style="width:22px;text-align:center">GD</span><span style="width:22px;text-align:center;color:var(--wc-gold)">PTS</span>';
-    h+='</div></div>';
-    // Rows
-    group.rows.forEach(function(row,i){
-      var isQual=i<2;
-      var isWC=i===2;
-      var bgStyle=i===0?"rgba(46,201,92,.06)":i===1?"rgba(25,82,217,.05)":i===2?"rgba(245,197,24,.04)":"";
-      var borderLeft=isQual?"3px solid "+(i===0?"var(--wc-green)":"rgba(25,82,217,.6)"):isWC?"3px solid rgba(245,197,24,.5)":"3px solid transparent";
-      h+='<div style="display:flex;align-items:center;padding:7px 10px 7px 9px;border-left:'+borderLeft+';background:'+bgStyle+';'+(i<group.rows.length-1?"border-bottom:1px solid var(--border2);":"")+'">';
-      h+='<div style="font-size:9px;font-weight:700;color:var(--dim);width:16px;flex-shrink:0">'+(i+1)+'</div>';
-      // Find flag from GROUPS
-      var flag="";
-      for(var gid in GROUPS){
-        var tm=GROUPS[gid].teams.find(function(t){
-          return t.n===row.name||t.n===row.abbr||teamNameMatch(row.name,t.n);
-        });
-        if(tm){flag=tm.flag;break;}
-      }
-      h+='<div style="font-size:14px;width:22px;text-align:center;flex-shrink:0">'+flag+'</div>';
-      h+='<div style="font-size:10px;font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:6px">'+x(row.name)+'</div>';
-      h+='<div style="display:flex;gap:12px;font-size:9px;flex-shrink:0">';
-      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.p+'</span>';
-      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.w+'</span>';
-      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.d+'</span>';
-      h+='<span style="width:14px;text-align:center;color:var(--muted)">'+row.l+'</span>';
-      h+='<span style="width:22px;text-align:center;color:var(--muted)">'+(row.gd>0?"+":"")+row.gd+'</span>';
-      h+='<span style="width:22px;text-align:center;font-weight:800;color:var(--wc-gold)">'+row.pts+'</span>';
-      h+='</div></div>';
-    });
-    // Legend
-    h+='<div style="display:flex;gap:12px;padding:4px 10px;background:rgba(0,0,0,.15);font-size:7px;color:var(--dim)">';
-    h+='<span style="color:var(--wc-green)">&#9646; Qualify</span>';
-    h+='<span style="color:rgba(245,197,24,.7)">&#9646; Wild card</span>';
-    h+='</div></div>';
-  });
-
-  h+='<div style="text-align:center;font-size:7px;color:var(--dim);padding:4px 0 8px">via ESPN &middot; auto-refreshes every 60s</div>';
-  el.innerHTML=h;
-}
-
-function fetchBracketFromESPN(cb){
-  // ESPN scoreboard for World Cup knockout dates
-  var url="https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260626-20260719&limit=100";
-  fetch(url).then(function(r){return r.json();}).then(function(data){
-    var events=(data&&data.events)||[];
-    // Round name mapping: ESPN type.abbreviation / name → our round keys
-    var roundMap={
-      "R32":"r32","Round of 32":"r32","32":"r32",
-      "R16":"r16","Round of 16":"r16","16":"r16",
-      "QF":"qf","Quarterfinal":"qf","Quarter-Final":"qf","8":"qf",
-      "SF":"sf","Semifinal":"sf","Semi-Final":"sf","4":"sf",
-      "F":"final","Final":"final","1":"final","3rd":"3rd","Third":"3rd"
-    };
-    // Normalize team name to our GROUPS team names
-    function normTeam(name){
-      if(!name)return null;
-      var nl=name.toLowerCase().trim();
-      for(var gid in GROUPS){
-        var found=GROUPS[gid].teams.find(function(t){
-          var tn=t.n.toLowerCase();
-          return tn===nl||nl.indexOf(tn)>=0||tn.indexOf(nl)>=0;
-        });
-        if(found)return found.n;
-      }
-      return name;
-    }
-    // Collect all knockout matches (completed or not) grouped by round
-    var byRound={};
-    events.forEach(function(ev){
-      var comp=(ev.competitions&&ev.competitions[0])||{};
-      var typeAbbr=(comp.type&&comp.type.abbreviation)||"";
-      var typeName=(comp.type&&comp.type.text)||(ev.status&&ev.status.type&&ev.status.type.description)||"";
-      var rndKey=null;
-      for(var k in roundMap){
-        if(typeAbbr===k||typeName===k||typeName.indexOf(k)>=0){rndKey=roundMap[k];break;}
-      }
-      if(!rndKey||rndKey==="3rd")return;
-      var competitors=comp.competitors||[];
-        // Resolve each competitor — may be a real team or a TBD placeholder (e.g. "3RD A/B/C/D/F", "1I")
-      function resolveCompetitor(c){
-        var raw=(c&&c.team&&(c.team.displayName||c.team.name))||"";
-        if(!raw)return null;
-        var normed=normTeam(raw);
-        // If normTeam found a real team, use it; otherwise keep the raw placeholder
-        return normed||raw;
-      }
-      var teamA=resolveCompetitor(competitors[0]);
-      var teamB=resolveCompetitor(competitors[1]);
-      // Only skip if both sides are completely unknown
-      if(!teamA&&!teamB)return;
-      var completed=!!(comp.status&&comp.status.type&&comp.status.type.completed);
-      var winner=null;
-      if(completed){
-        var w=competitors.find(function(c){return c.winner;});
-        if(w)winner=normTeam((w.team&&(w.team.displayName||w.team.name))||"");
-      }
-      var matchDate=new Date(ev.date||0).getTime();
-      if(!byRound[rndKey])byRound[rndKey]=[];
-      byRound[rndKey].push({teamA:teamA,teamB:teamB,winner:winner,date:matchDate,completed:completed});
-    });
-
-    // Sort each round by date → slot index order
-    var results={};   // winners: results[rnd][idx] = winnerName
-    var matchups={};  // all pairings: matchups[rnd][idx] = {a,b}
-    for(var rnd in byRound){
-      byRound[rnd].sort(function(a,b){return a.date-b.date;});
-      results[rnd]={};
-      matchups[rnd]={};
-      byRound[rnd].forEach(function(m,i){
-        if(m.teamA)matchups[rnd][i]={a:m.teamA,b:m.teamB||null};
-        if(m.completed&&m.winner)results[rnd][i]=m.winner;
-      });
-    }
-    cb(results,matchups,null);
-  }).catch(function(err){cb(null,null,err);});
-}
-
-function stopResultsRefresh(){clearInterval(_resTimer);_resTimer=null;}
-function startResultsRefresh(){
-  clearInterval(_resTimer);
-  _resTimer=null;
-  if(!_resData||Date.now()-_resLastFetch>300000) fetchResults();
-  else renderResultsInto();
-}
 
 function renderAdmin(){
   var phase=ST.results.phase||"groups";
@@ -2164,26 +1758,8 @@ function renderAdmin(){
 
 
 
-  h+='<div class="adm-sec-label">📡 Live Results Feed</div>';
-  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
-  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the latest ESPN group standings and push them as official results. All sessions update instantly.</div>';
-  h+='<button id="adm-fetch-live" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(46,201,92,.4);background:rgba(46,201,92,.1);color:var(--wc-green);font-family:inherit;cursor:pointer">📡 Fetch &amp; Push Live Standings (FotMob → ESPN)</button>';
-  h+='<div id="adm-live-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
-  h+='</div>';
 
-  h+='<div class="adm-sec-label">🎮 Game Picks Schedule</div>';
-  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
-  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch the full match schedule + live scores from ESPN. This powers the public "World Cup Game Picks" pool (enable it from the master admin panel on the Hub). Re-fetch anytime to update scores/results.</div>';
-  h+='<button id="adm-fetch-games" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(85,144,232,.4);background:rgba(85,144,232,.1);color:var(--blue);font-family:inherit;cursor:pointer">🗓️ Fetch Game Schedule &amp; Scores</button>';
-  h+='<div id="adm-games-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
-  h+='</div>';
 
-  h+='<div class="adm-sec-label">🏆 Live Bracket Results</div>';
-  h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:12px;margin-bottom:10px">';
-  h+='<div style="font-size:9px;color:var(--muted);margin-bottom:10px;line-height:1.7">Fetch completed knockout matches from ESPN and push winners as official bracket results. Run after each round completes.</div>';
-  h+='<button id="adm-fetch-bracket" style="width:100%;padding:10px;border-radius:8px;font-size:11px;font-weight:700;border:1px solid rgba(155,89,255,.4);background:rgba(155,89,255,.1);color:var(--purple);font-family:inherit;cursor:pointer">🏆 Fetch &amp; Push Bracket Results</button>';
-  h+='<div id="adm-bracket-status" style="margin-top:8px;font-size:9px;color:var(--muted);min-height:14px"></div>';
-  h+='</div>';
 
   // ── Manual knockout winner setter ──
   h+='<div class="adm-sec-label">✅ Set Knockout Winners</div>';
@@ -2367,8 +1943,7 @@ function _drawNow(){try{
   bind();
   initAllDragLists();
   initGroupSwipe();
-  if(ST.page==="results"){if(_resData)renderResultsInto();else startResultsRefresh();}
-  else stopResultsRefresh();
+  if(ST.page==="results"){}
   if(_isBracket&&(_sy>0||_sx>0)){
     requestAnimationFrame(function(){
       if(_sy>0)window.scrollTo(0,_sy);
@@ -2841,33 +2416,6 @@ function bind(){
       toast((opening?"\uD83D\uDD13 Picks OPEN: ":"\uD83D\uDD12 Picks CLOSED: ")+stage);
     }
   });
-  el=document.getElementById("adm-fetch-live");if(el)el.addEventListener("click",function(){
-    var statusEl=document.getElementById("adm-live-status");
-    if(statusEl)statusEl.textContent="Fetching standings...";
-    fetchStandingsWithFallback(
-      function(groups, source){
-        var pushed={};
-        groups.forEach(function(g){
-          var gname=g.gname;
-          if(!gname||!GROUPS[gname]) return;
-          var ranking=g.rows.map(function(r){return findTeamName(r.name)||r.name;}).filter(Boolean);
-          if(ranking.length===4) pushed[gname]=ranking;
-        });
-        if(Object.keys(pushed).length){
-          pushLiveGroupsToResults(pushed);
-          if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Pushed '+Object.keys(pushed).length+' groups via '+source+'</span>';
-          toast("📡 Live standings pushed ("+source+")");
-        } else {
-          if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No standings data yet</span>';
-          toast("No data available yet");
-        }
-      },
-      function(err){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed — check connection</span>';
-        toast("Fetch failed");
-      }
-    );
-  });
   el=document.getElementById("adm-save-r32");if(el)el.addEventListener("click",function(){
     var matchups={};
     for(var mi=0;mi<16;mi++){
@@ -2911,82 +2459,12 @@ function bind(){
     });
   });
 
-  el=document.getElementById("adm-fetch-bracket");if(el)el.addEventListener("click",function(){
-    var statusEl=document.getElementById("adm-bracket-status");
-    if(statusEl)statusEl.textContent="Fetching bracket results from ESPN...";
-    fetchBracketFromESPN(function(results,matchups,err){
-      if(err){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
-        toast("Fetch failed");
-        return;
-      }
-      var totalMatchups=0;
-      for(var rnd in matchups)totalMatchups+=Object.keys(matchups[rnd]).length;
-      var totalWinners=0;
-      for(var rnd in results)totalWinners+=Object.keys(results[rnd]).length;
-      if(!totalMatchups&&!totalWinners){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No knockout matches found yet</span>';
-        toast("No bracket data yet");
-        return;
-      }
-      // Save matchups (official bracket pairings) to Firebase
-      if(Object.keys(matchups).length){
-        if(!ST.results.bracketMatchups)ST.results.bracketMatchups={};
-        for(var rnd in matchups){
-          ST.results.bracketMatchups[rnd]=matchups[rnd];
-          if(DB)DB.ref(RESULTS_BASE+"/results/bracketMatchups/"+rnd).set(matchups[rnd]);
-        }
-      }
-      // NOTE: We intentionally do NOT write winners to results/bracket here.
-      // ESPN projections are not confirmed results — admin sets official winners manually.
-      // Only bracketMatchups (team pairings) are written from ESPN.
-      var roundNames={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
-      var parts=[];
-      if(totalMatchups)parts.push(totalMatchups+" matchups");
-      if(totalWinners)parts.push(totalWinners+" winners");
-      if(statusEl)statusEl.innerHTML='<span style="color:var(--purple)">✓ Pushed: '+parts.join(", ")+'</span>';
-      toast("🏆 Bracket updated");
-      draw();
-    });
-  });
-  el=document.getElementById("adm-fetch-games");if(el)el.addEventListener("click",function(){
-    var statusEl=document.getElementById("adm-games-status");
-    if(statusEl)statusEl.textContent="Fetching schedule from ESPN...";
-    fetchGamesFromESPN(function(games,err){
-      if(err){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">Fetch failed: '+err.message+'</span>';
-        toast("Fetch failed");
-        return;
-      }
-      var count=Object.keys(games||{}).length;
-      if(!count){
-        if(statusEl)statusEl.innerHTML='<span style="color:#ff7070">No games found</span>';
-        toast("No games found");
-        return;
-      }
-      if(DB)DB.ref(RESULTS_BASE+"/games").update(games);
-      if(statusEl)statusEl.innerHTML='<span style="color:var(--wc-green)">✓ Loaded '+count+' games</span>';
-      toast("🗓️ Game schedule updated");
-    });
-  });
 }
 
 loadData();
 
-// Pull-to-refresh for results tab
-(function(){
-  var _ptrStartY=0,_ptrActive=false;
-  document.addEventListener("touchstart",function(e){
-    _ptrStartY=e.touches[0].clientY;
-    _ptrActive=(window.scrollY===0&&ST.page==="results");
-  },{passive:true});
-  document.addEventListener("touchend",function(e){
-    if(!_ptrActive)return;
-    var dy=e.changedTouches[0].clientY-_ptrStartY;
-    if(dy>60) fetchResults();
-    _ptrActive=false;
-  },{passive:true});
-})();
+
+
 
 </script>
 </body>
