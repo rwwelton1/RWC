@@ -1104,6 +1104,88 @@ function loadGroup(code, cb) {
   }
 }
 
+function subscribeWCData(groupId, players) {
+  if(!DB) return;
+  var RESULTS_BASE = "wc2026";
+  var BASE = "groups/"+groupId+"/data/wc2026";
+  // Subscribe to picks and results so we can compute WC scores live
+  DB.ref(BASE+"/picks").on("value", function(sn){
+    if(!SC.wcData) SC.wcData = {};
+    SC.wcData.picks = sn.val() || {};
+    SC.wcData._picksLoaded = true;
+    if(SC.wcData._resultsLoaded) { computeWCScores(groupId, players); if(SC.screen==="hub") scheduleDraw(); }
+  });
+  DB.ref(RESULTS_BASE+"/results").on("value", function(sn){
+    if(!SC.wcData) SC.wcData = {};
+    SC.wcData.results = sn.val() || {};
+    SC.wcData._resultsLoaded = true;
+    if(SC.wcData._picksLoaded) { computeWCScores(groupId, players); if(SC.screen==="hub") scheduleDraw(); }
+  });
+}
+
+var _WC_GROUPS={A:["Mexico","South Africa","South Korea","Czechia"],B:["Canada","Bosnia & Herz.","Qatar","Switzerland"],C:["Brazil","Morocco","Haiti","Scotland"],D:["USA","Paraguay","Australia","Türkiye"],E:["Germany","Curaçao","Ivory Coast","Ecuador"],F:["Netherlands","Japan","Sweden","Tunisia"],G:["Belgium","Egypt","Iran","New Zealand"],H:["Spain","Cape Verde","Saudi Arabia","Uruguay"],I:["France","Senegal","Iraq","Norway"],J:["Argentina","Algeria","Austria","Jordan"],K:["Portugal","DR Congo","Uzbekistan","Colombia"],L:["England","Croatia","Ghana","Panama"]};
+var _WC_GROUP_IDS=["A","B","C","D","E","F","G","H","I","J","K","L"];
+var _WC_ALIASES={"united states":"USA","united states of america":"USA","usa":"USA","us":"USA","usmnt":"USA","ivory coast":"Ivory Coast","cote d'ivoire":"Ivory Coast","côte d'ivoire":"Ivory Coast","bosnia and herzegovina":"Bosnia & Herz.","bosnia & herzegovina":"Bosnia & Herz.","turkiye":"Türkiye","turkey":"Türkiye","south korea":"South Korea","korea republic":"South Korea","cape verde":"Cape Verde"};
+var _WC_PTS={groupWinner:2,qualifier:1,wildcard:1,perfectGroup:2};
+
+function _wcUkey(n){return (n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
+function _wcFindName(name){
+  if(!name) return name;
+  for(var gid in _WC_GROUPS){
+    var teams=_WC_GROUPS[gid];
+    for(var i=0;i<teams.length;i++){ if(teams[i]===name) return name; }
+  }
+  var alias=_WC_ALIASES[(name||"").toLowerCase().trim()];
+  return alias||name;
+}
+function _wcGetGroupRanking(picks, player, gid){
+  var uk=_wcUkey(player);
+  return ((picks[uk]&&picks[uk].groups&&picks[uk].groups[gid])||[]);
+}
+function _wcGetUserWildcards(picks, player){
+  var uk=_wcUkey(player);
+  return (picks[uk]&&picks[uk].wildcards)||[];
+}
+
+function computeWCScores(groupId, players) {
+  if(!SC.wcData||!SC.wcData._picksLoaded||!SC.wcData._resultsLoaded) return;
+  var picks=SC.wcData.picks||{};
+  var results=SC.wcData.results||{};
+  var officialGroups=results.groups||{};
+  var rwc=results.wildcards||[];
+  var scores={};
+  (players||[]).forEach(function(player){
+    var winners1st=0,perfectGroups=0,teamsCorrect=0;
+    _WC_GROUP_IDS.forEach(function(gid){
+      var rr=officialGroups[gid]; if(!rr||!rr.length) return;
+      var ur=_wcGetGroupRanking(picks,player,gid);
+      var groupTeams=_WC_GROUPS[gid]||[];
+      var ur0=_wcFindName(ur[0]),ur1=_wcFindName(ur[1]),ur2=ur[2]?_wcFindName(ur[2]):null;
+      var rr0=_wcFindName(rr[0]),rr1=_wcFindName(rr[1]),rr2=rr[2]?_wcFindName(rr[2]):null;
+      // Winner bonus
+      if(ur0&&ur0===rr0) winners1st++;
+      // Perfect group
+      if(ur0&&ur1&&ur2&&ur0===rr0&&ur1===rr1&&ur2===rr2) perfectGroups++;
+      // Teams correct
+      var top2=[ur0,ur1].filter(Boolean);
+      var aqDirect=[rr0,rr1].filter(Boolean);
+      var aqWC=[];
+      rwc.forEach(function(t){var tn=_wcFindName(t);if(groupTeams.indexOf(tn)>=0)aqWC.push(tn);});
+      var aq=aqDirect.concat(aqWC);
+      top2.forEach(function(t){if(aq.indexOf(t)>=0)teamsCorrect++;});
+      _wcGetUserWildcards(picks,player).forEach(function(t){
+        var tn=_wcFindName(t);
+        if(groupTeams.indexOf(tn)>=0&&top2.indexOf(tn)<0&&aq.indexOf(tn)>=0)teamsCorrect++;
+      });
+    });
+    scores[_wcUkey(player)]=(winners1st*_WC_PTS.groupWinner)+(perfectGroups*_WC_PTS.perfectGroup)+teamsCorrect;
+  });
+  // Write computed scores into group data so calcStandings picks them up
+  if(!SC.group||!SC.group.data) return;
+  if(!SC.group.data.wc) SC.group.data.wc={};
+  SC.group.data.wc.scores=scores;
+}
+
 function subscribeGroup(id) {
   if(!DB) return;
   DB.ref("groups/"+id+"/data").on("value", function(sn){
@@ -1143,6 +1225,8 @@ function subscribeGroupPlayers(id) {
   DB.ref("groups/"+id+"/players").on("value", function(sn){
     if(SC.group && SC.group.id===id) {
       SC.group.players = sn.val() || [];
+      // Re-subscribe WC data now that we have the players list
+      if(SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(id, SC.group.players);
       if(SC.screen==="hub") scheduleDraw();
     }
   });
@@ -1189,7 +1273,7 @@ function render(h) {
   var bb = document.getElementById("btn-back");
   if(bb) bb.addEventListener("click", function(){
     if(SC.screen==="join"||SC.screen==="create"){ SC.screen="profile"; SC.error=""; draw(); }
-    else if(SC.screen==="created"){ SC.screen="hub"; subscribeGroup(SC.group.id); draw(); }
+    else if(SC.screen==="created"){ SC.screen="hub"; subscribeGroup(SC.group.id); if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(SC.group.id, SC.group.players||[]); draw(); }
     else if(SC.screen==="trophy"){ SC.screen="profile"; draw(); }
   });
   var plogo = document.getElementById("btn-logo");
@@ -1241,7 +1325,7 @@ function draw() {
             addGroupToUser(un, group.id);
           }
           SC.group=group; SC.group.data=group.data||{};
-          saveLastGroup(group.id); subscribeGroup(group.id); subscribeGroupPlayers(group.id);
+          saveLastGroup(group.id); subscribeGroup(group.id); subscribeGroupPlayers(group.id); if(group.pools&&group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
           var pools=groupPools(group), statuses=SC.globalStatuses||{}, destPool=null;
           for(var _i=0;_i<pools.length;_i++){ var _st=statuses[pools[_i].id]||"coming-soon"; if(_st==="open"||_st==="locked"){destPool=pools[_i];break;} }
           if(!destPool&&pools.length)destPool=pools[0];
@@ -2088,6 +2172,7 @@ function joinGroupSilent(groupId) {
     SC.screen = "hub";
     saveLastGroup(group.id);
     subscribeGroup(group.id);
+    if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
     subscribeGroupPlayers(group.id);
     draw();
   });
@@ -3761,6 +3846,7 @@ function joinGroup(code) {
       if(!SC.isMaster) checkGroupAdmin(group);
       saveLastGroup(group.id);
       subscribeGroup(group.id);
+      if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
       subscribeGroupPlayers(group.id);
 
       // Navigate directly to the active pool if one exists
@@ -3856,6 +3942,7 @@ function submitCreate() {
     SC.screen = "created";
     saveLastGroup(group.id);
     subscribeGroup(group.id);
+    if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
     subscribeGroupPlayers(group.id);
     draw();
   });
@@ -6246,6 +6333,7 @@ function autoSnapStatuses() {
           SC.group.data = group.data || {};
           saveLastGroup(group.id);
           subscribeGroup(group.id);
+          if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
           subscribeGroupPlayers(group.id);
           // Navigate to the active pool immediately
           var username = SC.currentUser ? SC.currentUser.username : "";
