@@ -1191,6 +1191,10 @@ function subscribeGroup(id) {
   DB.ref("groups/"+id+"/data").on("value", function(sn){
     if(SC.group && SC.group.id===id) {
       SC.group.data = sn.val() || {statuses:{},results:{}};
+      // Re-apply computed WC scores immediately — the Firebase listener overwrites them otherwise
+      if(SC.wcData&&SC.wcData._picksLoaded&&SC.wcData._resultsLoaded){
+        computeWCScores(id, SC.group.players||[]);
+      }
       
       // Pools write their own scores to data[pool.id].scores
       // Only fall back to results-based scoring if pool hasn't provided scores yet
@@ -1199,6 +1203,9 @@ function subscribeGroup(id) {
         pools.forEach(function(pool){
           if(!SC.group.data[pool.id]) SC.group.data[pool.id] = {};
           var poolData = SC.group.data[pool.id];
+          
+          // WC scores are always computed live — never use stale Firebase scores
+          if(pool.id==="wc") { return; }
           
           // If pool has live scores, use them (they come from the pool file)
           // If not, try to calculate from results
@@ -6008,7 +6015,10 @@ function calcStandings(g, data) {
       });
       return;
     }
-    var poolScores = (data[_poolDataKey]||{}).scores || (data[_poolDataKey]||{}).playerTotals || (data[_poolDataKey]||{}).playerscores || {};
+    // For WC, always use live-computed scores from SC.group.data.wc.scores (set by computeWCScores)
+    var poolScores = (pool.id==="wc" && SC.group && SC.group.data && SC.group.data.wc && SC.group.data.wc.scores)
+      ? SC.group.data.wc.scores
+      : ((data[_poolDataKey]||{}).scores || (data[_poolDataKey]||{}).playerTotals || (data[_poolDataKey]||{}).playerscores || {});
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
       players.forEach(function(p){
