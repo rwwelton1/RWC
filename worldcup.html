@@ -211,12 +211,23 @@ a{color:inherit;text-decoration:none}
 .progress-poss{position:absolute;top:0;height:100%;border-radius:4px;background:rgba(85,144,232,.25)}
 
 /* BRACKET */
-.bracket-outer{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:10px 0 16px}
-.bracket-outer::-webkit-scrollbar{height:4px}
-.bracket-outer::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-.bracket-stage{display:flex;gap:0;min-width:max-content;align-items:center;padding:0 12px}
-.bracket-col{display:flex;flex-direction:column;justify-content:space-around;flex-shrink:0}
-.bracket-col-label{font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:center;padding:0 6px 6px}
+.bracket-outer{overflow:hidden;position:relative}
+.bracket-stage{display:flex;gap:0;align-items:flex-start;padding:0}
+.bracket-col{display:flex;flex-direction:column;flex-shrink:0}
+.bracket-col-label{font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:left;padding:0 6px 6px}
+/* Round nav pills */
+.wc-round-nav{display:flex;align-items:center;gap:6px;padding:8px 12px;background:var(--bg);border-bottom:2px solid var(--border2);overflow-x:auto;-webkit-overflow-scrolling:touch}
+.wc-round-nav::-webkit-scrollbar{display:none}
+.wc-rnav-tab{padding:5px 11px;border-radius:20px;font-size:9px;font-weight:900;border:2px solid var(--border);background:#fff;color:var(--muted);white-space:nowrap;box-shadow:2px 2px 0 var(--border);font-family:inherit;flex-shrink:0;cursor:pointer}
+.wc-rnav-tab.active{background:var(--wc-gold);color:#111;box-shadow:3px 3px 0 var(--border)}
+.wc-rnav-tab:active{transform:translate(2px,2px);box-shadow:none}
+.wc-round-arrows{display:flex;justify-content:space-between;align-items:center;padding:6px 12px}
+.wc-rarrow{width:34px;height:34px;border-radius:8px;background:#fff;border:2px solid var(--border);font-size:16px;display:flex;align-items:center;justify-content:center;box-shadow:2px 2px 0 var(--border);cursor:pointer;font-family:inherit}
+.wc-rarrow:active{transform:translate(2px,2px);box-shadow:none}
+.wc-rarrow:disabled{opacity:.25;pointer-events:none}
+.wc-round-label{font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--text)}
+.wc-bracket-slide{display:flex;gap:0}
+.wc-swipe-hint{text-align:center;font-size:8px;font-weight:800;color:var(--muted);padding:6px 0;letter-spacing:.05em}
 .bk-match{background:#ffffff;border:2px solid var(--border);border-radius:10px;overflow:hidden;width:114px;flex-shrink:0;position:relative;box-shadow:4px 4px 0 var(--border)}
 .bk-match.projected{border-color:var(--border);opacity:.9}
 .bk-team{display:flex;align-items:center;gap:5px;padding:7px 8px;min-height:32px;transition:background .1s;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
@@ -371,7 +382,7 @@ var WILD_CARD_COUNT=8;
 var PARTS=["Player1","Player2","Player3","Player4"];
 var _EM={};
 var DB=null;
-var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},games:{},cachedScores:{}};
+var ST={page:"leaderboard",group:"A",user:URL_USER||null,viewUser:null,admin:false,picks:{},results:{},locked:{},stageOpen:{groups:false,bracket:false},liveGroupResults:{},liveGroupFinal:{},games:{},cachedScores:{},bracketRound:0};
 // Official bracket matchups — ST.results.bracketMatchups[rnd][idx] = {a: teamName, b: teamName}
 var _dragState=null; // active drag state
 
@@ -1518,123 +1529,89 @@ function renderBracket(){
 
   h+='<div class="bracket-outer"><div class="bracket-stage">';
 
-  // ── R32 column (16 matches, shown as 8 per sub-column) ──
-  // Due to mobile width constraints, show R32 as a single scrollable column then connect
-  // Layout: R32 | lines | R16 | lines | QF | lines | SF | lines | F | champion
+  var ROUND_SHORT={r32:"R32",r16:"R16",qf:"QF",sf:"SF",final:"Final"};
 
-  var COL_W=110, LINE_W=20;
-
-  // Build all round data for viewer
-  // ta/tb = what to DISPLAY (user's own picks flow through, so wrong picks show with strikethrough)
-  // pick = user's pick for this specific match slot
+  // Build all round data
   var rounds_data={};
-  for(var ri=0;ri<ROUNDS.length;ri++){
-    var rnd=ROUNDS[ri];
-    var sz=ROUND_SIZES[rnd];
-    rounds_data[rnd]=[];
-    for(var mi=0;mi<sz;mi++){
-      var ta=null,tb=null;
-      if(rnd==="r32"){
-        var pair=getR32Teams(viewer,mi);
-        ta=pair[0];tb=pair[1];
+  for(var _ri=0;_ri<ROUNDS.length;_ri++){
+    var _rnd=ROUNDS[_ri];
+    var _sz=ROUND_SIZES[_rnd];
+    rounds_data[_rnd]=[];
+    for(var _mi=0;_mi<_sz;_mi++){
+      var _ta=null,_tb=null;
+      if(_rnd==="r32"){
+        var _pair=getR32Teams(viewer,_mi);
+        _ta=_pair[0];_tb=_pair[1];
       } else {
-        // Use the user's own picks to populate ta/tb (not official winners)
-        // This means an eliminated pick still appears (greyed/strikethrough) rather than being replaced
-        var feed=viewer?getUserFeedTeams(viewer,rnd,mi):getFeedTeams(viewer,rnd,mi);
-        ta=feed[0];tb=feed[1];
-        // If no user pick for this feed slot yet, fall back to official to show actual teams
-        if(!ta&&!tb){var fallback=getFeedTeams(viewer,rnd,mi);ta=fallback[0];tb=fallback[1];}
+        var _feed=viewer?getUserFeedTeams(viewer,_rnd,_mi):getFeedTeams(viewer,_rnd,_mi);
+        _ta=_feed[0];_tb=_feed[1];
+        if(!_ta&&!_tb){var _fb=getFeedTeams(viewer,_rnd,_mi);_ta=_fb[0];_tb=_fb[1];}
       }
-      rounds_data[rnd].push({ta:ta,tb:tb,pick:getUserPickOnly(viewer,rnd,mi),official:(ST.results.bracket&&ST.results.bracket[rnd]&&ST.results.bracket[rnd][mi])||null,idx:mi});
+      rounds_data[_rnd].push({ta:_ta,tb:_tb,pick:getUserPickOnly(viewer,_rnd,_mi),official:(ST.results.bracket&&ST.results.bracket[_rnd]&&ST.results.bracket[_rnd][_mi])||null,idx:_mi});
     }
   }
 
-  // Render each round as a column
-  ROUNDS.forEach(function(rnd,ri){
-    var sz=ROUND_SIZES[rnd];
+  // Clamp so right column always exists
+  var ri=Math.max(0,Math.min(ST.bracketRound||0, ROUNDS.length-2));
+  var rA=ROUNDS[ri], rB=ROUNDS[ri+1]||null;
+
+  // Round nav pills
+  h+='<div class="wc-round-nav" id="wc-round-nav-bar">';
+  ROUNDS.forEach(function(rnd,i){
+    var isActive=(i===ri||(rB&&i===ri+1));
+    h+='<button class="wc-rnav-tab'+(isActive?" active":"")+'" data-wcbround="'+i+'">'+ROUND_SHORT[rnd]+'</button>';
+  });
+  h+='</div>';
+
+  // Arrows + label
+  h+='<div class="wc-round-arrows">';
+  h+='<button class="wc-rarrow" id="wc-brnd-prev"'+(ri===0?' disabled':'')+'>&#8592;</button>';
+  h+='<span class="wc-round-label">'+ROUND_SHORT[rA]+(rB?' & '+ROUND_SHORT[rB]:'')+'</span>';
+  h+='<button class="wc-rarrow" id="wc-brnd-next"'+(ri>=ROUNDS.length-2?' disabled':'')+'>&#8594;</button>';
+  h+='</div>';
+
+  h+='<div id="wc-bracket-swipe-wrap"><div class="wc-bracket-slide">';
+
+  function renderRoundCol(rnd){
     var matches=rounds_data[rnd];
     var pts=ROUND_PTS[rnd];
-
-    // Column label
-    h+='<div class="bracket-col" style="width:'+COL_W+'px">';
-    h+='<div class="bracket-col-label">'+ROUND_LABELS[rnd]+'<br><span style="color:var(--wc-gold)">'+pts+'pt</span></div>';
-
-    // Spacing: matches spaced evenly
-    // Each match takes up (total_height / sz) vertical space
-    // We use flex with gap to space them
-    var gapPx=ri===0?4:ri===1?82:ri===2?170:ri===3?344:0;
-
-    h+='<div style="display:flex;flex-direction:column;gap:'+gapPx+'px">';
+    var col='<div style="flex:1;min-width:0;padding:6px 6px 40px">';
+    col+='<div style="font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;display:flex;justify-content:space-between;padding:0 2px">';
+    col+='<span>'+ROUND_LABELS[rnd]+'</span><span style="color:var(--wc-gold)">+'+pts+'pt</span></div>';
+    col+='<div style="display:flex;flex-direction:column;gap:6px">';
     matches.forEach(function(m){
-      var official=m.official||null;
-      var winner=m.pick;
-
-      h+='<div class="bk-match'+(winner?"":" projected")+(!canPick?" bk-locked":"")+'">';
-
-      // Team A
+      col+='<div class="bk-match'+(m.pick?"":" projected")+(!canPick?" bk-locked":"")+'">';
       var aIsMy=!!(m.pick&&m.pick===m.ta);
       var aElimRnd=m.ta?getEliminatedRound(m.ta):null;
       var aIsElim=!!(aElimRnd&&ROUNDS.indexOf(aElimRnd)<=ROUNDS.indexOf(rnd));
       var aIsCorrect=!!(aIsMy&&m.official&&m.official===m.ta);
       var aCanPick=!!(canPick&&m.ta&&!aIsElim);
       var aCls="bk-team"+(m.ta?"":" tbd")+(aIsCorrect?" winner":aIsElim?" eliminated":aIsMy?" mypick":"")+(aCanPick?" pickable":"");
-      h+='<div class="'+aCls+'"'+(aCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.ta||"")+'"':'')+'>'+
+      col+='<div class="'+aCls+'"'+(aCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.ta||"")+'"':'')+'>'+
         (m.ta?'<div class="bk-flag">'+(aIsElim?'<span style="opacity:.4">'+getTeamFlag(m.ta)+'</span>':getTeamFlag(m.ta))+'</div>':'<div style="width:20px"></div>')+
         '<div class="bk-name">'+(m.ta?x(m.ta):'TBD')+'</div>'+
-        '<div class="bk-icon">'+(aIsCorrect?'✓':'')+'</div>'+
-        '</div>';
-
-      // Team B
+        '<div class="bk-icon">'+(aIsCorrect?'✓':'')+'</div></div>';
       var bIsMy=!!(m.pick&&m.pick===m.tb);
       var bElimRnd=m.tb?getEliminatedRound(m.tb):null;
       var bIsElim=!!(bElimRnd&&ROUNDS.indexOf(bElimRnd)<=ROUNDS.indexOf(rnd));
       var bIsCorrect=!!(bIsMy&&m.official&&m.official===m.tb);
       var bCanPick=!!(canPick&&m.tb&&!bIsElim);
       var bCls="bk-team"+(m.tb?"":" tbd")+(bIsCorrect?" winner":bIsElim?" eliminated":bIsMy?" mypick":"")+(bCanPick?" pickable":"");
-      h+='<div class="'+bCls+'"'+(bCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.tb||"")+'"':'')+'>'+
+      col+='<div class="'+bCls+'"'+(bCanPick?' data-bkpick data-bkrnd="'+rnd+'" data-bkidx="'+m.idx+'" data-bkteam="'+x(m.tb||"")+'"':'')+'>'+
         (m.tb?'<div class="bk-flag">'+(bIsElim?'<span style="opacity:.4">'+getTeamFlag(m.tb)+'</span>':getTeamFlag(m.tb))+'</div>':'<div style="width:20px"></div>')+
         '<div class="bk-name">'+(m.tb?x(m.tb):'TBD')+'</div>'+
-        '<div class="bk-icon">'+(bIsCorrect?'✓':'')+'</div>'+
-        '</div>';
-
-      h+='</div>';
+        '<div class="bk-icon">'+(bIsCorrect?'✓':'')+'</div></div>';
+      col+='</div>';
     });
-    h+='</div></div>';
-
-    // Connector lines between rounds
-    if(ri<ROUNDS.length-1){
-      h+='<div style="width:'+LINE_W+'px;display:flex;flex-direction:column;justify-content:space-around;flex-shrink:0">';
-      // Draw connecting lines — pairs of matches merge into one
-      var nextSz=ROUND_SIZES[ROUNDS[ri+1]];
-      for(var ni=0;ni<nextSz;ni++){
-        h+='<div style="display:flex;flex-direction:column;align-items:flex-start;justify-content:center;flex:1">';
-        h+='<div style="width:'+LINE_W+'px;height:1px;background:var(--border)"></div>';
-        h+='</div>';
-      }
-      h+='</div>';
-    }
-  });
-
-  // Champion — read directly from user's picks in Firebase. Never use ST.results.bracket
-  // for champion display until admin confirms the final result by setting phase=knockout.
-  var uk=viewer?ukey(viewer):"";
-  var userBracket=(ST.picks[uk]&&ST.picks[uk].bracket)||{};
-  var userFinalRnd=userBracket["final"]||{};
-  var userFinalPick=Array.isArray(userFinalRnd)?userFinalRnd[0]:(userFinalRnd[0]||null);
-  var officialChamp=(ST.results.phase==="knockout"&&ST.results.bracket&&ST.results.bracket["final"])?
-    (Array.isArray(ST.results.bracket["final"])?ST.results.bracket["final"][0]:ST.results.bracket["final"][0]):null;
-  var champ=officialChamp||userFinalPick;
-  var champLabel=officialChamp?"Champion":"My Pick";
-  h+='<div style="flex-shrink:0;padding:0 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:80px">';
-  h+='<div style="font-size:26px;margin-bottom:4px">&#127942;</div>';
-  if(champ){
-    h+='<div style="font-size:16px">'+getTeamFlag(champ)+'</div>';
-    h+='<div style="font-size:9px;font-weight:800;color:var(--wc-gold);text-align:center;margin-top:2px">'+x(champ)+'</div>';
-    h+='<div style="font-size:7px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px">'+champLabel+'</div>';
-  } else {
-    h+='<div style="font-size:9px;color:var(--dim);text-align:center">TBD</div>';
+    col+='</div></div>';
+    return col;
   }
-  h+='</div>';
+
+  h+=renderRoundCol(rA);
+  if(rB) h+=renderRoundCol(rB);
+
+  h+='</div></div>'; // end slide + swipe-wrap
+  h+='<div class="wc-swipe-hint">← swipe to change rounds →</div>';
 
   h+='</div></div>'; // end stage + outer
 
@@ -2318,6 +2295,39 @@ function bind(){
     toast("Bracket picks reset");
     draw();
   });
+
+  // Round nav pills
+  els=document.querySelectorAll("[data-wcbround]");
+  for(i=0;i<els.length;i++)els[i].addEventListener("click",function(){
+    ST.bracketRound=Math.min(parseInt(this.getAttribute("data-wcbround"),10),ROUNDS.length-2);
+    draw();
+    var nb=document.getElementById("wc-round-nav-bar");if(nb){var at=nb.querySelector(".wc-rnav-tab.active");if(at)at.scrollIntoView({inline:"center",behavior:"smooth"});}
+  });
+  el=document.getElementById("wc-brnd-prev");
+  if(el)el.addEventListener("click",function(){if(ST.bracketRound>0){ST.bracketRound--;draw();}});
+  el=document.getElementById("wc-brnd-next");
+  if(el)el.addEventListener("click",function(){if(ST.bracketRound<ROUNDS.length-2){ST.bracketRound++;draw();}});
+
+  // Swipe gesture
+  (function(){
+    var sw=document.getElementById("wc-bracket-swipe-wrap");
+    if(!sw)return;
+    var sx=0,sy=0,tracking=false,moved=false;
+    sw.addEventListener("touchstart",function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;tracking=true;moved=false;},{passive:true});
+    sw.addEventListener("touchmove",function(e){
+      if(!tracking)return;
+      var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
+      if(!moved&&Math.abs(dx)>8&&Math.abs(dx)>Math.abs(dy)*1.2)moved=true;
+      if(moved)e.preventDefault();
+    },{passive:false});
+    sw.addEventListener("touchend",function(e){
+      if(!tracking)return;tracking=false;
+      var dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;
+      if(Math.abs(dx)<40||Math.abs(dy)>Math.abs(dx)*0.7)return;
+      if(dx<0&&ST.bracketRound<ROUNDS.length-2){ST.bracketRound++;draw();}
+      else if(dx>0&&ST.bracketRound>0){ST.bracketRound--;draw();}
+    },{passive:true});
+  })();
   el=document.getElementById("b-unlock");if(el)el.addEventListener("click",function(){
     if(!ST.user||!DB)return;
     if(!confirm("Unlock your picks? You can re-lock before kickoff."))return;
