@@ -309,9 +309,14 @@ function loadTournamentConfig(cb) {
       DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").once("value", function(tsn){
         if(tsn.val()) TOURNAMENT.type = tsn.val();
         MAX_PICKS = getMaxPicks();
+        var sub2 = document.getElementById("tour-subtitle");
+        if(sub2){
+          var _tl3=TOURNAMENT.type==="tier"?"Tier Draft":TOURNAMENT.type==="confidence"?"Confidence":TOURNAMENT.type==="daily"?"Daily Lineup":"Salary Pool";
+          sub2.textContent = TOURNAMENT.name + " • " + _tl3;
+        }
         cb();
-      });
-      return; // cb called inside nested read
+      }, function(){ cb(); }); // also call cb on error
+      return;
     }
     // Update subtitle
     var sub = document.getElementById("tour-subtitle");
@@ -347,17 +352,31 @@ try{
 var GOLFERS=[]; // loaded from Firebase globalSettings/pgatour/field
 
 function loadGolferField(cb){
-  if(!DB){ cb(); return; }
+  // Restore from localStorage instantly (survives page reloads and redeployment)
+  try{
+    var _cached = localStorage.getItem("sc_pga_field");
+    if(_cached){
+      var _cf = JSON.parse(_cached);
+      if(_cf && _cf.length > 0) GOLFERS = _cf;
+    }
+  }catch(e){}
+
+  if(!DB){ if(cb) cb(); return; }
   DB.ref("globalSettings/pgatour/field").once("value", function(sn){
     var field = sn.val();
+    var parsed = null;
     if(field && Array.isArray(field) && field.length > 0){
-      GOLFERS = field;
-    } else if(field && typeof field === "object"){
-      // stored as object with numeric keys
-      GOLFERS = Object.values(field).filter(Boolean);
+      parsed = field;
+    } else if(field && typeof field === "object" && Object.keys(field).length > 0){
+      parsed = Object.values(field).filter(Boolean);
+    }
+    if(parsed && parsed.length > 0){
+      GOLFERS = parsed;
+      // Cache to localStorage so it survives redeploys
+      try{ localStorage.setItem("sc_pga_field", JSON.stringify(parsed)); }catch(e){}
     }
     if(cb) cb();
-  });
+  }, function(){ if(cb) cb(); }); // call cb even on Firebase error
 }
 
 var ST={
@@ -1404,6 +1423,7 @@ function importPlayerField() {
   DB.ref("globalSettings/pgatour/field").set(parsed, function(err){
     if(err){ toast("Error saving","err"); return; }
     GOLFERS = parsed;
+    try{ localStorage.setItem("sc_pga_field", JSON.stringify(parsed)); }catch(e){}
     toast("Field imported: "+parsed.length+" players ✓","ok");
     draw();
   });
@@ -1641,8 +1661,12 @@ function toggleCut(name){
 // ── Firebase load ─────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
+  // Load tournament config + golfer field FIRST, then start pool subscriptions
+  // This ensures GOLFERS is populated before any draw() fires
   loadTournamentConfig(function(){
-    loadGolferField(function(){ draw(); });
+    loadGolferField(function(){
+      loadGroup(); // now start group/pool subscriptions
+    });
   });
 
   function loadGroup(){
