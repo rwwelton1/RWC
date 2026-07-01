@@ -1084,6 +1084,12 @@ function createGroup(name, adminPw, pools, cb) {
         text:"<strong>"+x(group.createdBy||"Someone")+"</strong> created the group",
         icon:"🪄"
       });
+      // Auto-set pgatour to "open" and write selected type for new groups
+      var _hasPGA = (group.pools||[]).indexOf("pgatour")>=0;
+      if(_hasPGA){
+        DB.ref("groups/"+id+"/data/statuses/pgatour").set("open");
+        DB.ref("groups/"+id+"/data/pgatour/type").set(SC.createForm.pgatourType||"salary");
+      }
       cb(group, null);
     });
   } else {
@@ -1730,7 +1736,7 @@ function renderProfile() {
   if(poolLink) poolLink.addEventListener("click", function(e){ if(requireAuth()) e.preventDefault(); });
   document.getElementById("btn-create-profile").addEventListener("click", function(){
     if(requireAuth()) return;
-    SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
+    SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw();
   });
 
   var _pastBtn = document.getElementById("btn-past-scores");
@@ -1769,7 +1775,7 @@ function renderProfile() {
     if(!groups.length) {
       container.innerHTML = '<div class="home-empty"><div class="home-empty-icon">🏆</div><div class="home-empty-txt">You\'re not in any groups yet.</div><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn btn-gold" id="btn-empty-create" style="padding:10px 20px;font-size:12px">+ Create a Group</button><button class="btn btn-primary" id="btn-join-empty" style="padding:10px 20px;font-size:12px">Find a Group</button></div><div style="font-size:10px;color:var(--muted);margin-top:12px;font-weight:700">Create your own group or search for one below ↓</div></div>';
       var ec = document.getElementById("btn-empty-create");
-      if(ec) ec.addEventListener("click", function(){ if(requireAuth())return; SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
+      if(ec) ec.addEventListener("click", function(){ if(requireAuth())return; SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw(); });
       return;
     }
     var statuses = SC.globalStatuses || {};
@@ -3728,7 +3734,7 @@ function renderUnauthLanding() {
   // Create a Group CTA → triggers auth then create
   document.getElementById("btn-landing-create").addEventListener("click", function(){
     if(requireAuth()) return;
-    SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw();
+    SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw();
   });
 
   // Username log in link
@@ -3776,7 +3782,7 @@ function renderLanding() {
   h += '</div>';
   render(h);
 
-  document.getElementById("btn-create").addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
+  document.getElementById("btn-create").addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw(); });
 
   var rb = document.getElementById("btn-return");
   if(rb) rb.addEventListener("click", function(){ joinGroup(last); });
@@ -3981,6 +3987,17 @@ function renderCreate() {
   });
   h += '</div></div>';
 
+  // PGA Tour type selector — shown only when pgatour is selected
+  if(f.pools.indexOf("pgatour")>=0){
+    h += '<div class="form-group"><label class="form-label">PGA Tour Format</label>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+    [["salary","💰 Salary Cap"],["tier","🏷️ Tier Draft"],["confidence","🎯 Confidence"],["daily","📅 Daily Lineup"]].forEach(function(t){
+      var active = (f.pgatourType||"salary")===t[0];
+      h += '<button class="pgt-type-btn" data-type="'+t[0]+'" style="padding:10px 8px;border-radius:10px;border:2px solid var(--border);font-size:12px;font-weight:800;font-family:inherit;cursor:pointer;box-shadow:2px 2px 0 var(--border);background:'+(active?"var(--gold)":"#fff")+';color:'+(active?"var(--text)":"var(--muted)")+'">'+t[1]+'</button>';
+    });
+    h += '</div></div>';
+  }
+
   h += '<div class="error-msg" id="create-error">'+x(SC.error)+'</div>';
   h += '<button class="btn btn-primary" style="width:100%;padding:11px;margin-top:4px" id="btn-create-go">Create Group</button>';
   h += '</div></div>';
@@ -3994,6 +4011,12 @@ function renderCreate() {
       var idx=SC.createForm.pools.indexOf(pid);
       if(idx>=0) SC.createForm.pools.splice(idx,1);
       else SC.createForm.pools.push(pid);
+      draw();
+    });
+  });
+  document.querySelectorAll(".pgt-type-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      SC.createForm.pgatourType = this.getAttribute("data-type");
       draw();
     });
   });
@@ -4051,7 +4074,12 @@ function renderCreated() {
     try{ navigator.clipboard.writeText(g.name); toast("Copied: "+g.name); }catch(e){ toast("Name: "+g.name); }
   });
   document.getElementById("btn-go-hub").addEventListener("click", function(){
-    SC.screen="hub"; subscribeGroup(SC.group.id); subscribeGroupPlayers(SC.group.id); if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(SC.group.id, SC.group.players||[]); draw();
+    SC.group = null;
+    SC.screen = "profile";
+    // Clear group cache so fresh data is fetched
+    _allGroupsCache = null;
+    try{ sessionStorage.removeItem("sc_groups_cache"); }catch(e){}
+    draw();
   });
 }
 
@@ -4636,7 +4664,7 @@ function renderHub() {
         ? '<tr><td colspan="4" class="no-results">No groups match</td></tr>'
         : '<tr><td colspan="4" style="padding:16px;text-align:center"><div style="font-size:11px;color:var(--muted);margin-bottom:8px">No groups to join right now</div><button class="btn btn-gold" id="btn-hub-create-empty" style="font-size:11px;padding:7px 18px">+ Create a Group</button></td></tr>';
       var cb = document.getElementById("btn-hub-create-empty");
-      if(cb) cb.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
+      if(cb) cb.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw(); });
       return;
     }
     var h = "";
@@ -4671,7 +4699,7 @@ function renderHub() {
   }
   // Wire create button (rendered inline)
   var _cbHub = document.getElementById("btn-hub-create-empty");
-  if(_cbHub) _cbHub.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[]}; draw(); });
+  if(_cbHub) _cbHub.addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw(); });
 
   // Search filters the inline table via draw
   var si = document.getElementById("group-search");
