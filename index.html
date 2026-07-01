@@ -5576,6 +5576,7 @@ function loadAdminUsers(q) {
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:transparent;color:#64748b;cursor:pointer;font-family:inherit">Rename</button>';
       h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:transparent;color:#6ee7b7;cursor:pointer;font-family:inherit">Merge</button>';
       if(isGuestAcct) h+='<button data-setpw-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit">Set PW</button>';
+      h+='<button data-history-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(96,165,250,.35);background:transparent;color:#60a5fa;cursor:pointer;font-family:inherit">History</button>';
       h+='</div>';
       h+='<div id="setpw-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Set a password for this account so they can log in from any device.</div>';
@@ -5587,6 +5588,9 @@ function loadAdminUsers(q) {
       h+='<div id="merge-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Merge this account into another user. Groups &amp; picks transfer over, this account is deleted.</div>';
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="Username to merge into" maxlength="30" id="merge-input-'+safeKey+'"><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
+      h+='</div>';
+      h+='<div id="history-area-'+safeKey+'" style="display:none;margin-top:8px;padding:8px;border-radius:8px;background:rgba(96,165,250,.06);border:1px solid rgba(96,165,250,.2)">';
+      h+='<div style="color:#475569;font-size:10px;text-align:center;padding:6px">Loading pool history...</div>';
       h+='</div>';
       h+='</td>';
       h+='<td style="padding:7px 6px;color:#475569">'+grpCount+(grpCount===1?' group':' groups')+'</td>';
@@ -5640,6 +5644,21 @@ function loadAdminUsers(q) {
         mergeGuestIntoUser(guestName, key, targetName);
       });
     });
+    list.querySelectorAll("[data-history-user]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var uname = this.getAttribute("data-history-user");
+        var key = this.getAttribute("data-user-key");
+        // Close other areas
+        var ra = document.getElementById("rename-area-"+key); if(ra) ra.style.display = "none";
+        var ma = document.getElementById("merge-area-"+key); if(ma) ma.style.display = "none";
+        var sa = document.getElementById("setpw-area-"+key); if(sa) sa.style.display = "none";
+        var area = document.getElementById("history-area-"+key);
+        if(!area) return;
+        var opening = area.style.display === "none";
+        area.style.display = opening ? "block" : "none";
+        if(opening) loadUserHistory(uname, key);
+      });
+    });
     list.querySelectorAll("[data-setpw-user]").forEach(function(btn){
       btn.addEventListener("click", function(){
         var key = this.getAttribute("data-user-key");
@@ -5672,6 +5691,72 @@ function loadAdminUsers(q) {
     });
     }); // end groups scan
   }); // end users load
+}
+
+// ── Master Admin: per-user pool history viewer/editor ──────────────────────
+function loadUserHistory(username, key) {
+  var area = document.getElementById("history-area-"+key);
+  if(!area) return;
+  if(!DB){ area.innerHTML='<div style="color:#475569;font-size:10px;text-align:center;padding:6px">Firebase unavailable</div>'; return; }
+  area.innerHTML='<div style="color:#475569;font-size:10px;text-align:center;padding:6px">Loading pool history...</div>';
+  DB.ref("users/"+key+"/trophies").once("value", function(sn){
+    var trophies = sn.val()||{};
+    var keys = Object.keys(trophies);
+    var h='<div style="font-size:9px;font-weight:800;color:#60a5fa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Pool History &mdash; '+x(username)+'</div>';
+    if(!keys.length){
+      h+='<div style="color:#475569;font-size:10px;text-align:center;padding:8px">No finished pools yet.</div>';
+      area.innerHTML=h;
+      return;
+    }
+    // Most recent first
+    keys.sort(function(a,b){ return (trophies[b].ts||0)-(trophies[a].ts||0); });
+    keys.forEach(function(tk){
+      var t = trophies[tk];
+      var safeTk = x(tk);
+      var icon = t.poolSportIcon || t.poolIcon || "🏆";
+      h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 0;border-top:1px solid rgba(96,165,250,.15)">';
+      h+='<span style="font-size:13px">'+icon+'</span>';
+      h+='<div style="flex:1;min-width:120px">';
+      h+='<div style="font-size:10px;font-weight:800;color:#f1f5f9">'+x(t.poolName||t.poolId||"Unknown pool")+'</div>';
+      h+='<div style="font-size:8px;color:#64748b">'+x(t.groupName||"")+' &middot; '+x(t.year||"")+'</div>';
+      h+='</div>';
+      h+='<select data-hist-finish="'+safeTk+'" data-user-key="'+x(key)+'" style="font-size:9px;padding:3px 6px;border-radius:5px;border:1px solid #2d3f52;background:#0f1923;color:#f1f5f9;font-family:inherit">';
+      [[1,"🥇 Win"],[2,"🥈 2nd"],[3,"🥉 3rd"],[99,"No podium"]].forEach(function(opt){
+        h+='<option value="'+opt[0]+'"'+(Number(t.finish)===opt[0]?" selected":"")+'>'+opt[1]+'</option>';
+      });
+      h+='</select>';
+      h+='<button data-hist-save="'+safeTk+'" data-user-key="'+x(key)+'" style="font-size:9px;padding:3px 8px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit">Save</button>';
+      h+='<button data-hist-del="'+safeTk+'" data-user-key="'+x(key)+'" style="font-size:9px;padding:3px 8px;border-radius:5px;border:1px solid rgba(239,68,68,.3);background:transparent;color:#f87171;cursor:pointer;font-family:inherit">Delete</button>';
+      h+='</div>';
+    });
+    area.innerHTML=h;
+
+    area.querySelectorAll("[data-hist-save]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var tk = this.getAttribute("data-hist-save");
+        var ukey2 = this.getAttribute("data-user-key");
+        var sel = area.querySelector('[data-hist-finish="'+CSS.escape(tk)+'"]');
+        var finish = sel ? Number(sel.value) : 99;
+        var pts = finish===1?4:finish===2?2:finish===3?1:0;
+        DB.ref("users/"+ukey2+"/trophies/"+tk).update({finish:finish, pts:pts}, function(err){
+          if(err){ toast("Failed to update"); return; }
+          toast("Pool result updated ✓");
+        });
+      });
+    });
+    area.querySelectorAll("[data-hist-del]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var tk = this.getAttribute("data-hist-del");
+        var ukey2 = this.getAttribute("data-user-key");
+        if(!confirm("Delete this pool history entry? This cannot be undone.")) return;
+        DB.ref("users/"+ukey2+"/trophies/"+tk).remove(function(err){
+          if(err){ toast("Delete failed"); return; }
+          toast("Entry removed ✓");
+          loadUserHistory(username, ukey2);
+        });
+      });
+    });
+  });
 }
 
 function deleteUser(username) {
