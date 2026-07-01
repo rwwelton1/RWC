@@ -304,9 +304,21 @@ function loadTournamentConfig(cb) {
     if(cfg.year)    TOURNAMENT.year    = cfg.year;
     if(cfg.espnUrl) TOURNAMENT.espnUrl = cfg.espnUrl;
     if(cfg.type)    TOURNAMENT.type    = cfg.type;
+    // Group-level type override (set at group creation, takes priority)
+    if(GROUP_ID){
+      DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").once("value", function(tsn){
+        if(tsn.val()) TOURNAMENT.type = tsn.val();
+        MAX_PICKS = getMaxPicks();
+        cb();
+      });
+      return; // cb called inside nested read
+    }
     // Update subtitle
     var sub = document.getElementById("tour-subtitle");
-    if(sub) sub.textContent = TOURNAMENT.name + (TOURNAMENT.course?" • "+TOURNAMENT.course:"") + " • $"+(TOURNAMENT.cap/1000)+"K Cap";
+    if(sub){
+      var _tl=TOURNAMENT.type==="tier"?"Tier Draft":TOURNAMENT.type==="confidence"?"Confidence":TOURNAMENT.type==="daily"?"Daily Lineup":"Salary Pool";
+      sub.textContent = TOURNAMENT.name + " • " + _tl;
+    }
     // Update confirm dialog text
     if(typeof updateConfirmText==="function") updateConfirmText();
     cb();
@@ -614,7 +626,7 @@ function showPickConfirmation(){
     else { lbl=g?(g.salary>=14000?"FAV":g.salary>=8000?"CONT":g.salary>=3500?"MID":"VAL"):""; }
     rowsHtml+='<div class="confirm-pick-row">'
       +'<span class="confirm-pick-name">'+x(pname)+'</span>'
-      +'<span class="confirm-pick-salary"><span style="color:'+lblCol+';font-weight:900;font-size:9px;margin-right:5px">'+lbl+'</span>'+sal+'</span>'
+      +'<span class="confirm-pick-salary"><span style="color:'+lblCol+';font-weight:900;font-size:9px;margin-right:5px">'+lbl+'</span>'+(type==="salary"?sal:'')+'</span>'
       +'</div>';
   }
   overlay.innerHTML='<div class="confirm-sheet">'
@@ -749,7 +761,7 @@ function renderPickSlots(){
       if(filled){
         var g=golferByName(filled);
         h2+='<div class="slot-name">'+filled+'</div>';
-        if(g) h2+='<div class="slot-salary">$'+(g.salary/1000).toFixed(1)+'K</div>';
+        if(g&&TOURNAMENT.type==="salary") h2+='<div class="slot-salary">$'+(g.salary/1000).toFixed(1)+'K</div>';
         h2+='<button class="slot-remove" data-slot-remove="'+i+'">✕</button>';
       } else {
         h2+='<div class="slot-empty">Tap to pick</div>';
@@ -769,7 +781,7 @@ function renderPickSlots(){
       if(filled){
         var g=golferByName(filled);
         h2+='<div class="slot-name">'+filled+'</div>';
-        if(g) h2+='<div class="slot-salary">$'+(g.salary/1000).toFixed(1)+'K</div>';
+        if(g&&TOURNAMENT.type==="salary") h2+='<div class="slot-salary">$'+(g.salary/1000).toFixed(1)+'K</div>';
         h2+='<button class="slot-remove" data-slot-remove="'+i+'">✕</button>';
       } else {
         h2+='<div class="slot-empty">Tap to pick</div>';
@@ -896,12 +908,12 @@ function renderPicks(){
         h+='<div class="golfer-name">'+x(rname)+'</div>';
         h+='<div class="golfer-meta">'+x(rg.odds)+(rg.odds!="NR"?' to win':'  Qualifier')+'</div>';
         h+='</div>';
-        h+='<div class="golfer-salary">'+fmt(rg.salary)+'</div>';
+        if(type==="salary") h+='<div class="golfer-salary">'+fmt(rg.salary)+'</div>';
         h+='<div class="golfer-check" style="background:var(--green);border-color:var(--green);color:#fff">&#10003;</div>';
         h+='</div>';
       }
     }
-    h+='<div class="roster-footer-note">Picks lock at the first tee time Thursday Jun 18 \u00b7 '+fmt(CAP)+' cap \u00b7 '+MAX_PICKS+' golfers</div>';
+    h+='<div class="roster-footer-note">Picks lock at the first tee time Thursday Jun 18 \u00b7 '+(type==="salary"?fmt(CAP)+' cap \u00b7 ':'')+MAX_PICKS+' golfers</div>';
   }
 
   h+='</div>';
@@ -989,7 +1001,7 @@ function renderGolferList(used){
     h+='<div class="golfer-name">'+x(g.name)+'</div>';
     h+='<div class="golfer-meta">'+x(g.odds)+(g.odds!="NR"?' to win':'  Qualifier')+'</div>';
     h+='</div>';
-    h+='<div class="golfer-salary">'+fmt(g.salary)+'</div>';
+    if(_type==="salary") h+='<div class="golfer-salary">'+fmt(g.salary)+'</div>';
     h+='<div class="golfer-check">'+(isPicked?"&#10003;":"")+'</div>';
     h+='</div>';
     shown++;
@@ -1397,7 +1409,8 @@ function draw(){
   // Topbar
   h+='<div class="topbar">';
   h+='<div class="topbar-left"><a href="index.html" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
-  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">US Open &bull; Salary Pool</div></div>';
+  var _typeLbl=TOURNAMENT.type==="tier"?"Tier Draft":TOURNAMENT.type==="confidence"?"Confidence":TOURNAMENT.type==="daily"?"Daily Lineup":"Salary Pool";
+  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub" id="tour-subtitle">'+TOURNAMENT.name+' &bull; '+_typeLbl+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
     h+='<span class="tag">'+x(ST.user)+'</span>';
@@ -1530,7 +1543,10 @@ function openTournamentEditor() {
       CAP_LIMIT = cfg.cap;
       MAX_PICKS = getMaxPicks();
       var sub = document.getElementById("tour-subtitle");
-      if(sub) sub.textContent = cfg.name+(cfg.course?" • "+cfg.course:"")+" • $"+(cfg.cap/1000)+"K Cap";
+      if(sub){
+        var _tl2=cfg.type==="tier"?"Tier Draft":cfg.type==="confidence"?"Confidence":cfg.type==="daily"?"Daily Lineup":"Salary Pool";
+        sub.textContent = cfg.name + " • " + _tl2;
+      }
       overlay.remove();
       toast("Tournament updated ✓","ok");
       draw();
