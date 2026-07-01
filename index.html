@@ -1932,14 +1932,17 @@ function renderProfile() {
           }
           gh += '<span style="display:inline-block;font-size:8px;font-weight:800;padding:4px 8px;border-radius:7px;background:'+bg+';border:1.5px solid var(--border);color:'+col+';white-space:normal;line-height:1.5;max-width:100%">'+pool.icon+' '+x(pool.shortName||pool.name)+' &middot; '+lbl+_cdHtml+'</span>';
           // Admin: per-group status switcher for recurring pools (pgatour etc)
-          if(_gcIsAdmin && pool.recurring){
+          if(_gcIsAdmin && pool.sport==="Golf"){
             var _curSt = effectiveStatus(g, pool.id);
             gh += '<div style="display:flex;gap:3px;margin-top:5px">';
-            [["coming-soon","Soon","var(--dim)"],["open","Open","var(--green)"],["locked","Live","var(--red2)"],["complete","Final","var(--blue)"]].forEach(function(s){
+            // Only show Open / Live / Final (no Soon — that auto-sets 3 days after Final)
+            [["open","Open","#16a34a"],["locked","Live","#dc2626"],["complete","Final","#2563eb"]].forEach(function(s){
               var _active = _curSt===s[0];
               gh += '<button class="gcst-btn" data-gid="'+x(g.id)+'" data-pid="'+x(pool.id)+'" data-st="'+s[0]+'" '+
-                'style="flex:1;padding:3px;border-radius:5px;border:1.5px solid '+(_active?"var(--border)":"var(--border2)")+';'+
-                'background:'+(_active?s[2]:"#fff")+';color:'+(_active?"#fff":"var(--dim)")+';'+
+                'style="flex:1;padding:3px 2px;border-radius:5px;'+
+                'border:1.5px solid '+(_active?s[2]:"var(--border2)")+';'+
+                'background:'+(_active?s[2]:"var(--bg)")+';'+
+                'color:'+(_active?"#fff":s[2])+';'+
                 'font-size:7px;font-weight:800;cursor:pointer;font-family:inherit">'+s[1]+'</button>';
             });
             gh += '</div>';
@@ -2069,6 +2072,23 @@ function renderProfile() {
         // Write to groups/{id}/data/statuses/{poolId}
         DB.ref("groups/"+gid+"/data/statuses/"+pid).set(st, function(){
           toast("Status updated ✓","ok");
+          // Auto-schedule coming-soon 3 days after Final
+          if(st==="complete"){
+            var _soonAt = Date.now() + (3 * 24 * 60 * 60 * 1000);
+            DB.ref("groups/"+gid+"/data/statusSchedule/"+pid).set({
+              status:"coming-soon", at:_soonAt
+            });
+          } else {
+            // Clear any pending schedule if manually changed
+            DB.ref("groups/"+gid+"/data/statusSchedule/"+pid).remove();
+          }
+          // If set to Final, write a resetAt timestamp — auto-Soon after 3 days
+          if(st==="complete"){
+            var _resetAt = Date.now() + 3 * 24 * 60 * 60 * 1000;
+            DB.ref("groups/"+gid+"/data/statusResetAt/"+pid).set(_resetAt);
+          } else {
+            DB.ref("groups/"+gid+"/data/statusResetAt/"+pid).remove();
+          }
           // Update _allGroupsCache so re-render reflects change immediately
           if(_allGroupsCache) _allGroupsCache.forEach(function(grp){
             if(grp&&grp.id===gid){
@@ -2077,14 +2097,12 @@ function renderProfile() {
               grp.data.statuses[pid]=st;
             }
           });
-          // Also write activity event for status change
           var _pool = poolById(pid);
           var _stLbl = st==="open"?"opened for picks":st==="locked"?"is now live":st==="complete"?"is complete":"is coming soon";
           var _icon = st==="open"?"🟢":st==="locked"?"🔴":st==="complete"?"🏁":"🔜";
           writeActivityEvent(gid,{type:"status_changed",actor:"",
             text:"<strong>"+((_pool&&_pool.shortName)||pid)+"</strong> "+_stLbl,
             icon:_icon, poolId:pid});
-          // Re-render cards
           var container2 = document.getElementById("profile-groups");
           if(container2) renderGroupCards(_allGroupsCache||[], container2);
         });
@@ -2151,6 +2169,20 @@ function renderProfile() {
       _allGroupsCache = groups;
       // Persist to sessionStorage so returning from pool pages is instant
       try{ sessionStorage.setItem("sc_groups_cache", JSON.stringify(groups)); }catch(e){}
+      // Auto-Soon: check if any group's pool status should reset after 3 days
+      if(DB) groups.forEach(function(g){
+        if(!g||!g.id||!g.data||!g.data.statusResetAt) return;
+        var _resets = g.data.statusResetAt;
+        Object.keys(_resets).forEach(function(pid){
+          if(_resets[pid] && Date.now() > _resets[pid]){
+            // Reset to coming-soon and clear the timer
+            DB.ref("groups/"+g.id+"/data/statuses/"+pid).set("coming-soon");
+            DB.ref("groups/"+g.id+"/data/statusResetAt/"+pid).remove();
+            if(g.data.statuses) g.data.statuses[pid]="coming-soon";
+          }
+        });
+      });
+
       // Render activity feed immediately (read-only, single query per group, not blocking)
       renderActivityFeed(groups);
       // Defer all write-side badge/stat tracking — these are background bookkeeping
@@ -2164,6 +2196,20 @@ function renderProfile() {
             if(!sn.val()||_maxSize>sn.val()) DB.ref("users/"+_gu+"/stats/maxGroupSize").set(_maxSize);
           });
           computeAndWritePoolResults(groups, _gu);
+          // Check statusSchedule — auto-set coming-soon 3 days after Final
+          groups.forEach(function(grp){
+            if(!grp||!grp.id) return;
+            var _sched = (grp.data&&grp.data.statusSchedule)||{};
+            Object.keys(_sched).forEach(function(pid){
+              var _entry = _sched[pid];
+              if(_entry&&_entry.status&&_entry.at&&Date.now()>=_entry.at){
+                DB.ref("groups/"+grp.id+"/data/statuses/"+pid).set(_entry.status);
+                DB.ref("groups/"+grp.id+"/data/statusSchedule/"+pid).remove();
+                if(!grp.data.statuses) grp.data.statuses={};
+                grp.data.statuses[pid]=_entry.status;
+              }
+            });
+          });
         }, 1200);
       }
       var container = document.getElementById("profile-groups");
