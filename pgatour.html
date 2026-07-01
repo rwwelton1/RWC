@@ -1949,68 +1949,59 @@ function toggleCut(name){
 // ── Firebase load ─────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
-  // Safety timeout — if Firebase chain stalls for any reason, force draw after 4s
-  var _loadTimeout = setTimeout(function(){
-    console.warn("loadData timeout — forcing draw");
-    draw();
-  }, 4000);
 
-  // Load tournament config + golfer field FIRST, then start pool subscriptions
-  loadTournamentConfig(function(){
-    loadGolferField(function(){
-      clearTimeout(_loadTimeout);
-      loadGroup(); // now start group/pool subscriptions
-    });
+  // ── Strategy: fire everything in parallel, draw() on each arrival ────────
+  // Config + field are already cached in localStorage so draw() is instant.
+  // Firebase loads update state as they arrive — each one calls draw().
+
+  // 1. Tournament config + golfer field (parallel, both update and redraw)
+  loadTournamentConfig(function(){ draw(); });
+  loadGolferField(function(){ draw(); });
+
+  // 2. Group players (if GROUP_ID) — parallel
+  if(GROUP_ID){
+    DB.ref("groups/"+GROUP_ID+"/players").once("value",function(sn){
+      var p=sn.val()||[];
+      if(Array.isArray(p)&&p.length) PARTS=p;
+    },function(){});
+  }
+
+  // 3. Master password
+  DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+
+  // 4. Pool subscriptions — all fire draw() when data arrives
+  DB.ref(BASE+"/meta/locked").on("value",function(sn){
+    ST.locked=!!sn.val();
+    draw();
   });
-
-  function loadGroup(){
-    if(!GROUP_ID){loadPool();return;}
-    DB.ref("groups/"+GROUP_ID).once("value",function(sn){
-      var g=sn.val()||{};
-      if(g.players&&g.players.length) PARTS=g.players;
-      loadPool();
-    },function(){loadPool();});
-  }
-
-  function loadPool(){
-    DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
-    DB.ref(BASE+"/meta/locked").on("value",function(sn){
-      ST.locked=!!sn.val();
-      draw();
-    });
-    DB.ref(BASE+"/picks").on("value",function(sn){
-      ST.picks=sn.val()||{};setTimeout(syncPlayerScoresToGroup,800);
-      // If user already selected, sync draft with saved picks
-      if(ST.user&&!draftPicks.length){
-        var saved=ST.picks[ukey(ST.user)];
-        if(saved&&saved.picks) draftPicks=saved.picks.slice();
-      }
-      draw();
-    });
-    DB.ref(BASE+"/scores").on("value",function(sn){
-      var raw=sn.val()||{};
-      ST.scores={};
-      for(var k in raw){
-        for(var i=0;i<GOLFERS.length;i++){
-          if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];break;}
-        }
-      }
-      draw();
-    });
-    // Load cached live scores from Firebase (written by whoever last refreshed)
-    DB.ref(BASE+"/livescores").once("value",function(sn){
-      var raw=sn.val()||{};
-      if(Object.keys(raw).length){
-        for(var _k in raw) liveScores[_k]=raw[_k];
-        _liveLastFetch=Date.now(); // mark as "have data" so leaderboard shows scores
-        if(ST.page==="live") renderLiveInto();
-        else draw();
-      }
-    });
+  DB.ref(BASE+"/picks").on("value",function(sn){
+    ST.picks=sn.val()||{};
+    setTimeout(syncPlayerScoresToGroup,800);
+    if(ST.user&&!draftPicks.filter(function(p){return p;}).length){
+      var saved=ST.picks[ukey(ST.user)];
+      if(saved&&saved.picks){ draftPicks=saved.picks.slice(); normalizeDraftPicks(); }
+    }
     draw();
-  }
-
-  loadGroup();
+  });
+  DB.ref(BASE+"/scores").on("value",function(sn){
+    var raw=sn.val()||{};
+    ST.scores={};
+    for(var k in raw){
+      for(var i=0;i<GOLFERS.length;i++){
+        if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];break;}
+      }
+    }
+    draw();
+  });
+  DB.ref(BASE+"/livescores").once("value",function(sn){
+    var raw=sn.val()||{};
+    if(Object.keys(raw).length){
+      for(var _k in raw) liveScores[_k]=raw[_k];
+      _liveLastFetch=Date.now();
+      draw();
+    }
+  });
+  draw();
 }
 
 // Restore tournament type from localStorage cache for instant correct render
