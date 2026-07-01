@@ -1035,16 +1035,28 @@ function renderAdmin(){
   h+='<div class="section-label">Enter Scores (to par)</div>';
   h+='<div class="adm-card">';
   h+='<div class="adm-title">Live Scoring</div>';
+  var _isDailyPool = TOURNAMENT.type==="daily";
   for(var i=0;i<GOLFERS.length;i++){
     var g=GOLFERS[i];
     var sc=ST.scores[g.name]||{};
     var scVal=sc.score!==undefined&&sc.score!==null?sc.score:"";
     var isCut=sc.cut||false;
-    h+='<div class="adm-row">';
+    h+='<div class="adm-row" style="flex-wrap:wrap">';
     h+='<span class="adm-rank">#'+(i+1)+'</span>';
     h+='<span class="adm-name">'+x(g.name)+'</span>';
-    h+='<input class="score-inp" data-golfer="'+x(g.name)+'" type="number" placeholder="E" value="'+scVal+'">';
+    h+='<input class="score-inp" data-golfer="'+x(g.name)+'" type="number" placeholder="Total" value="'+scVal+'">';
     h+='<button class="cut-btn'+(isCut?" cut":"")+'" data-cut="'+x(g.name)+'">'+(isCut?"CUT":"in")+'</button>';
+    if(_isDailyPool){
+      h+='<div style="width:100%;display:flex;gap:4px;margin-top:4px;padding-left:30px">';
+      ["r1","r2","r3","r4"].forEach(function(rk,ri){
+        var rv=(sc.rounds&&sc.rounds[rk]!==undefined)?sc.rounds[rk]:"";
+        h+='<div style="flex:1;text-align:center">';
+        h+='<div style="font-size:7px;font-weight:800;color:var(--muted);margin-bottom:2px">R'+(ri+1)+'</div>';
+        h+='<input class="round-inp" data-golfer="'+x(g.name)+'" data-round="'+rk+'" type="number" placeholder="E" value="'+rv+'" style="width:100%;padding:4px;border:1.5px solid var(--border2);border-radius:5px;font-size:10px;text-align:center;font-family:Nunito,sans-serif">';
+        h+='</div>';
+      });
+      h+='</div>';
+    }
     h+='</div>';
   }
   h+='</div>';
@@ -1170,6 +1182,30 @@ function parseLiveScores(data){
       }
     }
 
+    // Extract per-round scores from linescores
+    var roundScores={};
+    var linescoresArr=c.linescores||[];
+    linescoresArr.forEach(function(rd, ri){
+      var rdKey="r"+(ri+1);
+      // Each linescores entry is a round — value is the round score to par
+      var rdScore=null;
+      if(rd.value!==null&&rd.value!==undefined&&rd.value!==""){
+        rdScore=parseInt(rd.value);
+        if(isNaN(rdScore)) rdScore=null;
+      }
+      // Fallback: linescores array within round = hole scores, sum to par
+      if(rdScore===null&&rd.linescores&&rd.linescores.length){
+        var par=0;
+        rd.linescores.forEach(function(h){
+          if(h&&h.value&&h.displayValue&&h.displayValue!=="-"&&h.displayValue!==""){
+            par+=Number(h.value)||0;
+          }
+        });
+        if(par!==0) rdScore=par;
+      }
+      if(rdScore!==null) roundScores[rdKey]=rdScore;
+    });
+
     var key=normName(fullName);
     newScores[key]={
       name:fullName,
@@ -1177,7 +1213,8 @@ function parseLiveScores(data){
       pos:pos,
       thru:thru,
       cut:isCut||isWD,
-      status:status
+      status:status,
+      rounds:roundScores
     };
   });
   liveScores=newScores;
@@ -1636,6 +1673,11 @@ function openTournamentEditor() {
       TOURNAMENT.type   = cfg.type||"salary";
       CAP_LIMIT = cfg.cap;
       MAX_PICKS = getMaxPicks();
+      // Also write name+type to group-level so invite/display picks it up
+      if(GROUP_ID){
+        DB.ref("groups/"+GROUP_ID+"/data/pgatour/name").set(cfg.name);
+        DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").set(cfg.type||"salary");
+      }
       var sub = document.getElementById("tour-subtitle");
       if(sub){
         var _tl2=cfg.type==="tier"?"Tier Draft":cfg.type==="confidence"?"Confidence":cfg.type==="daily"?"Daily Lineup":"Salary Pool";
@@ -1755,9 +1797,28 @@ function bind(){
 
   els=document.querySelectorAll(".cut-btn[data-cut]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){toggleCut(this.getAttribute("data-cut"));});
+
+  // Wire per-round score inputs (daily pool)
+  els=document.querySelectorAll(".round-inp[data-golfer]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
+    saveRoundScore(this.getAttribute("data-golfer"),this.getAttribute("data-round"),this.value);
+  });
 }
 
 // ── Admin actions ─────────────────────────────────────
+function saveRoundScore(name,roundKey,val){
+  var sc=ST.scores[name]||{};
+  if(!sc.rounds) sc.rounds={};
+  if(val===""||val===null){ delete sc.rounds[roundKey]; }
+  else{ sc.rounds[roundKey]=Number(val); }
+  // Auto-update total score from rounds
+  var total=0;
+  Object.keys(sc.rounds).forEach(function(k){ total+=Number(sc.rounds[k])||0; });;
+  sc.score=total;
+  ST.scores[name]=sc;
+  if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc);
+}
+
 function saveScore(name,val){
   var sc=ST.scores[name]||{};
   if(val===""||val===null){delete sc.score;}
