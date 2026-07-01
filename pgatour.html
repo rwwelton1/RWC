@@ -306,33 +306,18 @@ function loadTournamentConfig(cb) {
     if(cfg.year)    TOURNAMENT.year    = cfg.year;
     if(cfg.espnUrl) TOURNAMENT.espnUrl = cfg.espnUrl;
     if(cfg.type)    TOURNAMENT.type    = cfg.type;
-    MAX_PICKS = getMaxPicks();
-    normalizeDraftPicks();
     // Group-level type override (set at group creation, takes priority)
     if(GROUP_ID){
-      var _cfgDone = false;
-      function _cfgCb(){
-        if(_cfgDone) return; _cfgDone=true;
+      DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").once("value", function(tsn){
+        if(tsn.val()) TOURNAMENT.type = tsn.val();
         MAX_PICKS = getMaxPicks();
-        normalizeDraftPicks();
-        // Cache so next load gets correct type instantly
-        try{
-          var _ck="sc_pga_config"+(GROUP_ID?"_"+GROUP_ID:"");
-          localStorage.setItem(_ck,JSON.stringify({type:TOURNAMENT.type,name:TOURNAMENT.name,cap:TOURNAMENT.cap}));
-        }catch(e){}
         var sub2 = document.getElementById("tour-subtitle");
         if(sub2){
           var _tl3=TOURNAMENT.type==="tier"?"Tier Draft":TOURNAMENT.type==="confidence"?"Confidence":TOURNAMENT.type==="daily"?"Daily Lineup":"Salary Pool";
           sub2.textContent = TOURNAMENT.name + " • " + _tl3;
         }
         cb();
-      }
-      // Timeout in case Firebase stalls
-      setTimeout(_cfgCb, 3000);
-      DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").once("value", function(tsn){
-        if(tsn.val()) TOURNAMENT.type = tsn.val();
-        _cfgCb();
-      }, _cfgCb);
+      }, function(){ cb(); }); // also call cb on error
       return;
     }
     // Update subtitle
@@ -453,15 +438,6 @@ function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.clas
 // ── Draft picks (in-progress, not yet saved) ─────────
 var draftPicks=[];
 
-// Ensure draftPicks is always the right size for the current pool type
-function normalizeDraftPicks(){
-  var maxP = getMaxPicks();
-  // Pad to full length with empty strings
-  while(draftPicks.length < maxP) draftPicks.push("");
-  // Trim excess
-  if(draftPicks.length > maxP) draftPicks = draftPicks.slice(0, maxP);
-}
-
 function draftCapUsed(){
   var t=0;
   for(var i=0;i<draftPicks.length;i++){var g=golferByName(draftPicks[i]);if(g)t+=g.salary;}
@@ -498,14 +474,14 @@ function togglePick(name){
     ST.activeSlot=null; ST.showPicker=false;
 
   } else if(type==="daily"){
+    // Slot = 0-7 (2 per round), no repeats across entire lineup
     if(slot===null){ toast("Tap a round slot first"); return; }
-    // Ensure array is full size before indexing
-    normalizeDraftPicks();
     // Check no duplicate (excluding current slot)
     for(var _di=0;_di<draftPicks.length;_di++){
       if(_di!==slot && draftPicks[_di]===name){ toast("Already assigned "+name); return; }
     }
-    draftPicks[slot]=name; // direct index assignment — no push/splice
+    while(draftPicks.length<=slot) draftPicks.push("");
+    draftPicks[slot]=name;
     ST.activeSlot=null; ST.showPicker=false;
 
   } else if(type==="confidence"){
@@ -527,28 +503,16 @@ function togglePick(name){
     ST.activeSlot=null; ST.showPicker=false;
   }
   draw();
-  autoSavePicks();
 }
 
 function removePick(name){
-  var type=TOURNAMENT.type||"salary";
   var idx=draftPicks.indexOf(name);
-  if(idx<0) return;
-  if(type==="daily"||type==="tier"){
-    draftPicks[idx]=""; // clear slot, keep array structure intact
-  } else {
-    draftPicks.splice(idx,1);
-  }
-  draw();
-  autoSavePicks();
+  if(idx>=0){draftPicks.splice(idx,1);draw();}
 }
 
 // ── Submit picks ───────────────────────────────────────
 function showPickConfirmation(){
-  var _filledCount = (TOURNAMENT.type==="daily"||TOURNAMENT.type==="tier"||TOURNAMENT.type==="confidence")
-    ? draftPicks.filter(function(p){return p&&p.trim();}).length
-    : draftPicks.length;
-  if(!ST.user||_filledCount<getMaxPicks())return;
+  if(!ST.user||draftPicks.length<MAX_PICKS)return;
   // Build sheet
   var existing=document.getElementById("pick-confirm-overlay");
   if(existing) existing.remove();
@@ -595,37 +559,8 @@ function showPickConfirmation(){
   overlay.addEventListener("click",function(e){ if(e.target===overlay) overlay.remove(); });
 }
 
-
-// ── AUTO-SAVE PICKS ────────────────────────────────────────────────────────
-var _autoSaveTimer = null;
-function autoSavePicks(){
-  if(!ST.user||ST.locked||!DB) return;
-  var type = TOURNAMENT.type||"salary";
-  var filledCount = (type==="daily"||type==="tier"||type==="confidence")
-    ? draftPicks.filter(function(p){return p&&p.trim();}).length
-    : draftPicks.filter(function(p){return p;}).length;
-  if(filledCount === 0) return; // nothing to save yet
-  clearTimeout(_autoSaveTimer);
-  _autoSaveTimer = setTimeout(function(){
-    var uk = ukey(ST.user);
-    var obj = {name:ST.user, picks:draftPicks.slice(), cap:draftCapUsed(), ts:Date.now()};
-    DB.ref(BASE+"/picks/"+uk).set(obj, function(err){
-      if(!err){
-        ST.picks[uk] = obj;
-        // Show brief save indicator
-        var saveEl = document.getElementById("auto-save-status");
-        if(saveEl){ saveEl.textContent="✓ Saved"; saveEl.style.opacity="1";
-          setTimeout(function(){ saveEl.style.opacity="0"; }, 1500); }
-      }
-    });
-  }, 600); // debounce 600ms
-}
-
 function submitPicks(){
-  var _filledCount = (TOURNAMENT.type==="daily"||TOURNAMENT.type==="tier"||TOURNAMENT.type==="confidence")
-    ? draftPicks.filter(function(p){return p&&p.trim();}).length
-    : draftPicks.length;
-  if(!ST.user||_filledCount<getMaxPicks())return;
+  if(!ST.user||draftPicks.length<MAX_PICKS)return;
   var uk=ukey(ST.user);
   var obj={name:ST.user,picks:draftPicks.slice(),cap:draftCapUsed(),ts:Date.now()};
   if(DB){
@@ -1000,33 +935,15 @@ function renderGolferList(used){
 }
 
 function renderSubmitBar(){
-  var type=TOURNAMENT.type||"salary";
   var used=draftCapUsed();
-  // Count only filled slots for daily/tier (draftPicks may have empty strings)
-  var filledPicks = (type==="daily"||type==="tier"||type==="confidence")
-    ? draftPicks.filter(function(p){return p&&p.trim();}).length
-    : draftPicks.length;
-  var maxP=getMaxPicks();
+  var n=draftPicks.length;
   var disabled=true;
   var label="";
   if(ST.locked){label="&#128274; Picks are locked";}
   else if(!ST.user){label="Select your name to save picks";}
-  else if(filledPicks<maxP){var need=maxP-filledPicks;label="Pick "+(need)+" more golfer"+(need>1?"s":"");}
-  else if(type==="salary"&&used>CAP){label="Over cap by "+fmt(used-CAP);}
-  else{
-    disabled=false;
-    label=type==="salary"?"Save Picks \u2014 "+fmt(used)+" / "+fmt(CAP):"Save Picks \u2014 "+filledPicks+" / "+maxP+" golfers";
-  }
-  // For non-salary types: auto-save is active, show status instead of submit button
-  if(type!=="salary"){
-    if(disabled){
-      return '<div class="submit-bar"><button class="submit-btn" disabled>'+label+'</button></div>';
-    }
-    return '<div class="submit-bar" style="display:flex;align-items:center;gap:10px">'+
-      '<button class="submit-btn" id="b-submit" style="flex:1">Lock Picks ✓</button>'+
-      '<span id="auto-save-status" style="font-size:10px;font-weight:800;color:var(--green);opacity:0;transition:opacity .3s;flex-shrink:0"></span>'+
-      '</div>';
-  }
+  else if(n<MAX_PICKS){var need=MAX_PICKS-n;label="Pick "+(need)+" more golfer"+(need>1?"s":"");}
+  else if(used>CAP){label="Over cap by "+fmt(used-CAP);}
+  else{disabled=false;label="Save Picks \u2014 "+fmt(used)+" / "+fmt(CAP);}
   return '<div class="submit-bar"><button class="submit-btn" id="b-submit"'+(disabled?' disabled':'')+'>'+label+'</button></div>';
 }
 
@@ -1756,12 +1673,6 @@ function openTournamentEditor() {
       TOURNAMENT.type   = cfg.type||"salary";
       CAP_LIMIT = cfg.cap;
       MAX_PICKS = getMaxPicks();
-      normalizeDraftPicks();
-      // Cache immediately so next load gets the right type
-      try{
-        var _eck="sc_pga_config"+(GROUP_ID?"_"+GROUP_ID:"");
-        localStorage.setItem(_eck,JSON.stringify({type:cfg.type||"salary",name:cfg.name,cap:cfg.cap}));
-      }catch(e){}
       // Also write name+type to group-level so invite/display picks it up
       if(GROUP_ID){
         DB.ref("groups/"+GROUP_ID+"/data/pgatour/name").set(cfg.name);
@@ -1795,7 +1706,6 @@ function bind(){
     ST.user=this.getAttribute("data-user");
     var pk=ST.picks[ukey(ST.user)];
     draftPicks=pk&&pk.picks?pk.picks.slice():[];
-    normalizeDraftPicks();
     draw();
   });
 
@@ -1838,43 +1748,23 @@ function bind(){
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){togglePick(this.getAttribute("data-pick"));});
 
   // Slot card taps
-  // Use event delegation on document for slot cards — survives DOM re-injection
-  // (daily/tier/confidence slots get innerHTML'd each draw, losing direct listeners)
-  // Slot card delegation — bubble phase (NOT capture) to avoid swallowing other clicks
-  document.addEventListener("click", function(e){
-    try{
-      var t = e.target;
-      // Walk up to find .slot-remove or .slot-card
-      var node = t;
-      var removeBtn = null, card = null;
-      while(node && node !== document.body){
-        if(!removeBtn && node.classList && node.classList.contains("slot-remove") && node.getAttribute("data-slot-remove")!==null){
-          removeBtn = node; break;
-        }
-        if(!card && node.classList && node.classList.contains("slot-card") && node.getAttribute("data-slot")!==null){
-          card = node;
-        }
-        node = node.parentNode;
-      }
-      if(removeBtn){
-        e.stopPropagation();
-        var s=parseInt(removeBtn.getAttribute("data-slot-remove"));
-        if(!isNaN(s)&&s>=0&&s<draftPicks.length){
-          var _rtype=TOURNAMENT.type||"salary";
-          if(_rtype==="daily"||_rtype==="tier"){ draftPicks[s]=""; }
-          else { draftPicks.splice(s,1); }
-        }
-        ST.activeSlot=null; ST.showPicker=false;
-        draw(); autoSavePicks(); return;
-      }
-      if(card){
-        var s=parseInt(card.getAttribute("data-slot"));
-        if(isNaN(s)) return;
-        if(ST.activeSlot===s){ ST.activeSlot=null; ST.showPicker=false; }
-        else{ ST.activeSlot=s; ST.showPicker=true; ST.search=""; }
-        draw();
-      }
-    }catch(err){}
+  els=document.querySelectorAll(".slot-card[data-slot]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
+    if(e.target.hasAttribute&&e.target.hasAttribute("data-slot-remove")) return;
+    var s=parseInt(this.getAttribute("data-slot"));
+    if(ST.activeSlot===s){ST.activeSlot=null;ST.showPicker=false;}
+    else{ST.activeSlot=s;ST.showPicker=true;ST.search="";}
+    draw();
+  });
+
+  // Slot remove buttons
+  els=document.querySelectorAll(".slot-remove[data-slot-remove]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
+    e.stopPropagation();
+    var s=parseInt(this.getAttribute("data-slot-remove"));
+    if(s>=0&&s<draftPicks.length){draftPicks.splice(s,1);}
+    ST.activeSlot=null;ST.showPicker=false;
+    draw();
   });
 
   // Roster row taps (re-pick)
@@ -1923,7 +1813,7 @@ function saveRoundScore(name,roundKey,val){
   else{ sc.rounds[roundKey]=Number(val); }
   // Auto-update total score from rounds
   var total=0;
-  Object.keys(sc.rounds).forEach(function(k){ total+=Number(sc.rounds[k])||0; });
+  Object.keys(sc.rounds).forEach(function(k){ total+=Number(sc.rounds[k])||0; });;
   sc.score=total;
   ST.scores[name]=sc;
   if(DB) DB.ref(BASE+"/scores/"+ukey(name)).set(sc);
@@ -1949,74 +1839,64 @@ function toggleCut(name){
 // ── Firebase load ─────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
+  // Load tournament config + golfer field FIRST, then start pool subscriptions
+  // This ensures GOLFERS is populated before any draw() fires
+  loadTournamentConfig(function(){
+    loadGolferField(function(){
+      loadGroup(); // now start group/pool subscriptions
+    });
+  });
 
-  // ── Strategy: fire everything in parallel, draw() on each arrival ────────
-  // Config + field are already cached in localStorage so draw() is instant.
-  // Firebase loads update state as they arrive — each one calls draw().
-
-  // 1. Tournament config + golfer field (parallel, both update and redraw)
-  loadTournamentConfig(function(){ draw(); });
-  loadGolferField(function(){ draw(); });
-
-  // 2. Group players (if GROUP_ID) — parallel
-  if(GROUP_ID){
-    DB.ref("groups/"+GROUP_ID+"/players").once("value",function(sn){
-      var p=sn.val()||[];
-      if(Array.isArray(p)&&p.length) PARTS=p;
-    },function(){});
+  function loadGroup(){
+    if(!GROUP_ID){loadPool();return;}
+    DB.ref("groups/"+GROUP_ID).once("value",function(sn){
+      var g=sn.val()||{};
+      if(g.players&&g.players.length) PARTS=g.players;
+      loadPool();
+    },function(){loadPool();});
   }
 
-  // 3. Master password
-  DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
-
-  // 4. Pool subscriptions — all fire draw() when data arrives
-  DB.ref(BASE+"/meta/locked").on("value",function(sn){
-    ST.locked=!!sn.val();
-    draw();
-  });
-  DB.ref(BASE+"/picks").on("value",function(sn){
-    ST.picks=sn.val()||{};
-    setTimeout(syncPlayerScoresToGroup,800);
-    if(ST.user&&!draftPicks.filter(function(p){return p;}).length){
-      var saved=ST.picks[ukey(ST.user)];
-      if(saved&&saved.picks){ draftPicks=saved.picks.slice(); normalizeDraftPicks(); }
-    }
-    draw();
-  });
-  DB.ref(BASE+"/scores").on("value",function(sn){
-    var raw=sn.val()||{};
-    ST.scores={};
-    for(var k in raw){
-      for(var i=0;i<GOLFERS.length;i++){
-        if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];break;}
-      }
-    }
-    draw();
-  });
-  DB.ref(BASE+"/livescores").once("value",function(sn){
-    var raw=sn.val()||{};
-    if(Object.keys(raw).length){
-      for(var _k in raw) liveScores[_k]=raw[_k];
-      _liveLastFetch=Date.now();
+  function loadPool(){
+    DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
+    DB.ref(BASE+"/meta/locked").on("value",function(sn){
+      ST.locked=!!sn.val();
       draw();
-    }
-  });
-  draw();
+    });
+    DB.ref(BASE+"/picks").on("value",function(sn){
+      ST.picks=sn.val()||{};setTimeout(syncPlayerScoresToGroup,800);
+      // If user already selected, sync draft with saved picks
+      if(ST.user&&!draftPicks.length){
+        var saved=ST.picks[ukey(ST.user)];
+        if(saved&&saved.picks) draftPicks=saved.picks.slice();
+      }
+      draw();
+    });
+    DB.ref(BASE+"/scores").on("value",function(sn){
+      var raw=sn.val()||{};
+      ST.scores={};
+      for(var k in raw){
+        for(var i=0;i<GOLFERS.length;i++){
+          if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];break;}
+        }
+      }
+      draw();
+    });
+    // Load cached live scores from Firebase (written by whoever last refreshed)
+    DB.ref(BASE+"/livescores").once("value",function(sn){
+      var raw=sn.val()||{};
+      if(Object.keys(raw).length){
+        for(var _k in raw) liveScores[_k]=raw[_k];
+        _liveLastFetch=Date.now(); // mark as "have data" so leaderboard shows scores
+        if(ST.page==="live") renderLiveInto();
+        else draw();
+      }
+    });
+    draw();
+  }
+
+  loadGroup();
 }
 
-// Restore tournament type from localStorage cache for instant correct render
-try{
-  var _tcache = localStorage.getItem("sc_pga_config"+(GROUP_ID?"_"+GROUP_ID:""));
-  if(_tcache){
-    var _tc = JSON.parse(_tcache);
-    if(_tc.type) TOURNAMENT.type = _tc.type;
-    if(_tc.name) TOURNAMENT.name = _tc.name;
-    if(_tc.cap)  { TOURNAMENT.cap = _tc.cap; CAP_LIMIT = _tc.cap; }
-    MAX_PICKS = getMaxPicks();
-    normalizeDraftPicks();
-  }
-}catch(e){}
-draw();
 loadData();
 // Pull-to-refresh
 (function(){
