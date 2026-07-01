@@ -306,6 +306,8 @@ function loadTournamentConfig(cb) {
     if(cfg.year)    TOURNAMENT.year    = cfg.year;
     if(cfg.espnUrl) TOURNAMENT.espnUrl = cfg.espnUrl;
     if(cfg.type)    TOURNAMENT.type    = cfg.type;
+    MAX_PICKS = getMaxPicks();
+    normalizeDraftPicks();
     // Group-level type override (set at group creation, takes priority)
     if(GROUP_ID){
       DB.ref("groups/"+GROUP_ID+"/data/pgatour/type").once("value", function(tsn){
@@ -438,6 +440,15 @@ function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.clas
 // ── Draft picks (in-progress, not yet saved) ─────────
 var draftPicks=[];
 
+// Ensure draftPicks is always the right size for the current pool type
+function normalizeDraftPicks(){
+  var maxP = getMaxPicks();
+  // Pad to full length with empty strings
+  while(draftPicks.length < maxP) draftPicks.push("");
+  // Trim excess
+  if(draftPicks.length > maxP) draftPicks = draftPicks.slice(0, maxP);
+}
+
 function draftCapUsed(){
   var t=0;
   for(var i=0;i<draftPicks.length;i++){var g=golferByName(draftPicks[i]);if(g)t+=g.salary;}
@@ -474,14 +485,14 @@ function togglePick(name){
     ST.activeSlot=null; ST.showPicker=false;
 
   } else if(type==="daily"){
-    // Slot = 0-7 (2 per round), no repeats across entire lineup
     if(slot===null){ toast("Tap a round slot first"); return; }
+    // Ensure array is full size before indexing
+    normalizeDraftPicks();
     // Check no duplicate (excluding current slot)
     for(var _di=0;_di<draftPicks.length;_di++){
       if(_di!==slot && draftPicks[_di]===name){ toast("Already assigned "+name); return; }
     }
-    while(draftPicks.length<=slot) draftPicks.push("");
-    draftPicks[slot]=name;
+    draftPicks[slot]=name; // direct index assignment — no push/splice
     ST.activeSlot=null; ST.showPicker=false;
 
   } else if(type==="confidence"){
@@ -506,13 +517,23 @@ function togglePick(name){
 }
 
 function removePick(name){
+  var type=TOURNAMENT.type||"salary";
   var idx=draftPicks.indexOf(name);
-  if(idx>=0){draftPicks.splice(idx,1);draw();}
+  if(idx<0) return;
+  if(type==="daily"||type==="tier"){
+    draftPicks[idx]=""; // clear slot, keep array structure intact
+  } else {
+    draftPicks.splice(idx,1);
+  }
+  draw();
 }
 
 // ── Submit picks ───────────────────────────────────────
 function showPickConfirmation(){
-  if(!ST.user||draftPicks.length<MAX_PICKS)return;
+  var _filledCount = (TOURNAMENT.type==="daily"||TOURNAMENT.type==="tier"||TOURNAMENT.type==="confidence")
+    ? draftPicks.filter(function(p){return p&&p.trim();}).length
+    : draftPicks.length;
+  if(!ST.user||_filledCount<getMaxPicks())return;
   // Build sheet
   var existing=document.getElementById("pick-confirm-overlay");
   if(existing) existing.remove();
@@ -560,7 +581,10 @@ function showPickConfirmation(){
 }
 
 function submitPicks(){
-  if(!ST.user||draftPicks.length<MAX_PICKS)return;
+  var _filledCount = (TOURNAMENT.type==="daily"||TOURNAMENT.type==="tier"||TOURNAMENT.type==="confidence")
+    ? draftPicks.filter(function(p){return p&&p.trim();}).length
+    : draftPicks.length;
+  if(!ST.user||_filledCount<getMaxPicks())return;
   var uk=ukey(ST.user);
   var obj={name:ST.user,picks:draftPicks.slice(),cap:draftCapUsed(),ts:Date.now()};
   if(DB){
@@ -935,15 +959,23 @@ function renderGolferList(used){
 }
 
 function renderSubmitBar(){
+  var type=TOURNAMENT.type||"salary";
   var used=draftCapUsed();
-  var n=draftPicks.length;
+  // Count only filled slots for daily/tier (draftPicks may have empty strings)
+  var filledPicks = (type==="daily"||type==="tier"||type==="confidence")
+    ? draftPicks.filter(function(p){return p&&p.trim();}).length
+    : draftPicks.length;
+  var maxP=getMaxPicks();
   var disabled=true;
   var label="";
   if(ST.locked){label="&#128274; Picks are locked";}
   else if(!ST.user){label="Select your name to save picks";}
-  else if(n<MAX_PICKS){var need=MAX_PICKS-n;label="Pick "+(need)+" more golfer"+(need>1?"s":"");}
-  else if(used>CAP){label="Over cap by "+fmt(used-CAP);}
-  else{disabled=false;label="Save Picks \u2014 "+fmt(used)+" / "+fmt(CAP);}
+  else if(filledPicks<maxP){var need=maxP-filledPicks;label="Pick "+(need)+" more golfer"+(need>1?"s":"");}
+  else if(type==="salary"&&used>CAP){label="Over cap by "+fmt(used-CAP);}
+  else{
+    disabled=false;
+    label=type==="salary"?"Save Picks \u2014 "+fmt(used)+" / "+fmt(CAP):"Save Picks \u2014 "+filledPicks+" / "+maxP+" golfers";
+  }
   return '<div class="submit-bar"><button class="submit-btn" id="b-submit"'+(disabled?' disabled':'')+'>'+label+'</button></div>';
 }
 
@@ -1706,6 +1738,7 @@ function bind(){
     ST.user=this.getAttribute("data-user");
     var pk=ST.picks[ukey(ST.user)];
     draftPicks=pk&&pk.picks?pk.picks.slice():[];
+    normalizeDraftPicks();
     draw();
   });
 
@@ -1748,24 +1781,35 @@ function bind(){
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){togglePick(this.getAttribute("data-pick"));});
 
   // Slot card taps
-  els=document.querySelectorAll(".slot-card[data-slot]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
-    if(e.target.hasAttribute&&e.target.hasAttribute("data-slot-remove")) return;
-    var s=parseInt(this.getAttribute("data-slot"));
-    if(ST.activeSlot===s){ST.activeSlot=null;ST.showPicker=false;}
-    else{ST.activeSlot=s;ST.showPicker=true;ST.search="";}
-    draw();
-  });
-
-  // Slot remove buttons
-  els=document.querySelectorAll(".slot-remove[data-slot-remove]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
-    e.stopPropagation();
-    var s=parseInt(this.getAttribute("data-slot-remove"));
-    if(s>=0&&s<draftPicks.length){draftPicks.splice(s,1);}
-    ST.activeSlot=null;ST.showPicker=false;
-    draw();
-  });
+  // Use event delegation on document for slot cards — survives DOM re-injection
+  // (daily/tier/confidence slots get innerHTML'd each draw, losing direct listeners)
+  document.addEventListener("click", function(e){
+    // Slot remove button
+    var removeBtn = e.target.closest ? e.target.closest(".slot-remove[data-slot-remove]") : null;
+    if(removeBtn){
+      e.stopPropagation();
+      var s=parseInt(removeBtn.getAttribute("data-slot-remove"));
+      if(!isNaN(s)&&s>=0&&s<draftPicks.length){
+        var _rtype=TOURNAMENT.type||"salary";
+        if(_rtype==="daily"||_rtype==="tier"){
+          draftPicks[s]=""; // clear slot in place
+        } else {
+          draftPicks.splice(s,1);
+        }
+      }
+      ST.activeSlot=null; ST.showPicker=false;
+      draw(); return;
+    }
+    // Slot card
+    var card = e.target.closest ? e.target.closest(".slot-card[data-slot]") : null;
+    if(card){
+      var s=parseInt(card.getAttribute("data-slot"));
+      if(isNaN(s)) return;
+      if(ST.activeSlot===s){ ST.activeSlot=null; ST.showPicker=false; }
+      else{ ST.activeSlot=s; ST.showPicker=true; ST.search=""; }
+      draw();
+    }
+  }, true); // capture phase so it fires before child handlers
 
   // Roster row taps (re-pick)
   els=document.querySelectorAll(".roster-body .golfer-row[data-slot]");
