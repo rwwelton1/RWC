@@ -289,9 +289,11 @@ var TIERS = [
   {id:"value",      label:"Value",      min:0,     max:3500,    icon:"⚪", pick:1}
 ];
 
-// Daily round labels
-var ROUNDS = ["R1","R2","R3","R4"];
-var ROUND_LABELS = ["Round 1","Round 2","Round 3","Round 4"];
+// Daily round labels — 2 golfers per round = 8 slots total
+var ROUNDS = ["R1","R1","R2","R2","R3","R3","R4","R4"];
+var ROUND_LABELS = ["Round 1 (Pick 1)","Round 1 (Pick 2)","Round 2 (Pick 1)","Round 2 (Pick 2)",
+                    "Round 3 (Pick 1)","Round 3 (Pick 2)","Round 4 (Pick 1)","Round 4 (Pick 2)"];
+var ROUND_DISPLAY = ["R1","R1","R2","R2","R3","R3","R4","R4"];
 
 function loadTournamentConfig(cb) {
   if(!DB){ cb(); return; }
@@ -334,7 +336,7 @@ var CAP=50000;
 var MAX_PICKS=6; // overridden by getMaxPicks()
 function getMaxPicks(){
   if(TOURNAMENT.type==="tier")  return 4;
-  if(TOURNAMENT.type==="daily") return 4;
+  if(TOURNAMENT.type==="daily") return 8; // 2 per round × 4 rounds
   return 6; // salary, confidence
 }
 
@@ -472,9 +474,12 @@ function togglePick(name){
     ST.activeSlot=null; ST.showPicker=false;
 
   } else if(type==="daily"){
-    // Slot = round index 0-3, no repeats
+    // Slot = 0-7 (2 per round), no repeats across entire lineup
     if(slot===null){ toast("Tap a round slot first"); return; }
-    if(draftPicks.indexOf(name)>=0){ toast("Can't assign same golfer twice"); return; }
+    // Check no duplicate (excluding current slot)
+    for(var _di=0;_di<draftPicks.length;_di++){
+      if(_di!==slot && draftPicks[_di]===name){ toast("Already assigned "+name); return; }
+    }
     while(draftPicks.length<=slot) draftPicks.push("");
     draftPicks[slot]=name;
     ST.activeSlot=null; ST.showPicker=false;
@@ -597,20 +602,18 @@ function entryTotal(picks, picksObj){
   }
 
   if(type==="daily"){
-    // picks = [R1golfer, R2golfer, R3golfer, R4golfer]
-    var rounds=["r1","r2","r3","r4"];
-    var penalties=[0,0,5,10]; // R3 miss=+5, R4 miss=+10
+    // picks = [R1a, R1b, R2a, R2b, R3a, R3b, R4a, R4b]
+    var roundKeys=["r1","r1","r2","r2","r3","r3","r4","r4"];
+    var penalties=[0,0,0,0,5,5,10,10]; // R3 miss=+5, R4 miss=+10 per golfer
     for(var ri=0;ri<picks.length;ri++){
       var pname=picks[ri];
       if(!pname) continue;
       var gs=golferScore(pname);
       if(gs.cut){
-        // Missed cut — apply penalty if R3 or R4
         t+=penalties[ri];
         continue;
       }
-      // Get this golfer's score for their assigned round
-      var roundKey=rounds[ri];
+      var roundKey=roundKeys[ri];
       var rScore=gs.rounds&&gs.rounds[roundKey]!==undefined ? Number(gs.rounds[roundKey]) : null;
       if(rScore!==null) t+=rScore;
     }
@@ -674,22 +677,27 @@ function renderPickSlots(){
   }
 
   if(type==="daily"){
-    ROUNDS.forEach(function(r,i){
-      var filled=draftPicks[i]||"";
-      var isActive=ST.activeSlot===i;
-      var penalty=i===2?"+5 if cut":i===3?"+10 if cut":"";
-      h2+='<div class="slot-card'+(isActive?" slot-active":"")+(filled?" slot-filled":"")+'" data-slot="'+i+'">';
-      h2+='<div class="slot-tier-label">'+r+(penalty?' <span style="font-size:8px;color:var(--muted)">'+penalty+'</span>':'')+'</div>';
-      if(filled){
-        var g=golferByName(filled);
-        h2+='<div class="slot-name">'+filled+'</div>';
-        if(g&&TOURNAMENT.type==="salary") h2+='<div class="slot-salary">$'+(g.salary/1000).toFixed(1)+'K</div>';
-        h2+='<button class="slot-remove" data-slot-remove="'+i+'">✕</button>';
-      } else {
-        h2+='<div class="slot-empty">Tap to pick</div>';
+    var _dayLabels=["R1","R2","R3","R4"];
+    var _dayPenalty=["","","\u26a0\ufe0f +5 if cut","\u26a0\ufe0f +10 if cut"];
+    for(var di=0;di<4;di++){
+      h2+='<div style="font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;padding:4px 0 2px'+(di>0?";border-top:1px solid var(--border2)":"")+'">'+_dayLabels[di]+(_dayPenalty[di]?' <span style="font-size:8px;color:var(--red2)">'+_dayPenalty[di]+'</span>':'')+"</div>";
+      h2+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px">';
+      for(var pi=0;pi<2;pi++){
+        var i=di*2+pi;
+        var filled=draftPicks[i]||"";
+        var isActive=ST.activeSlot===i;
+        h2+='<div class="slot-card'+(isActive?" slot-active":"")+(filled?" slot-filled":"")+'" data-slot="'+i+'">',
+        h2+='<div class="slot-tier-label">Pick '+(pi+1)+'</div>';
+        if(filled){
+          h2+='<div class="slot-name">'+filled+'</div>';
+          h2+='<button class="slot-remove" data-slot-remove="'+i+'">\u00d7</button>';
+        } else {
+          h2+='<div class="slot-empty">Tap to pick</div>';
+        }
+        h2+='</div>';
       }
       h2+='</div>';
-    });
+    }
     return h2;
   }
 
@@ -894,10 +902,13 @@ function renderGolferList(used){
         if(_gTier!==_at.id) continue;
       }
     }
-    // Daily: exclude already-assigned golfers (except the current slot)
-    if(_type==="daily"){
-      var _dailyIdx=draftPicks.indexOf(g.name);
-      if(_dailyIdx>=0 && _dailyIdx!==ST.activeSlot) continue;
+    // Daily: exclude already-assigned golfers (except current slot)
+    if(_type==="daily" && ST.activeSlot!==null){
+      var _alreadyPicked=false;
+      for(var _dfi=0;_dfi<draftPicks.length;_dfi++){
+        if(_dfi!==ST.activeSlot && draftPicks[_dfi]===g.name){ _alreadyPicked=true; break; }
+      }
+      if(_alreadyPicked) continue;
     }
     var isPicked=draftPicks.indexOf(g.name)>=0;
     var isInActiveSlot=ST.activeSlot!==null&&draftPicks[ST.activeSlot]===g.name;
@@ -1456,6 +1467,11 @@ function recalcField(){
   var _g0 = _fixed[0]||{};
   var _dbg = "First: "+_g0.name+" odds="+_g0.odds+" prob="+oddsToProb(_g0.odds).toFixed(4);
   if(!confirm("Recalculate "+_fixed.length+" players?\n\n"+_dbg)) return;
+  // Clear cache BEFORE recalc so stale values never load on next read
+  try{
+    localStorage.removeItem("sc_pga_field");
+    localStorage.removeItem("sc_pga_field"+(GROUP_ID?"_"+GROUP_ID:""));
+  }catch(e){}
   var recalced = calcFieldSalariesAndTiers(_fixed);
   var _fieldPath = GROUP_ID
     ? "groups/"+GROUP_ID+"/data/pgatour/field"
