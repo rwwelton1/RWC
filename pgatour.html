@@ -352,9 +352,10 @@ try{
 var GOLFERS=[]; // loaded from Firebase globalSettings/pgatour/field
 
 function loadGolferField(cb){
-  // Restore from localStorage instantly (survives page reloads and redeployment)
+  // Restore from localStorage instantly — keyed by group
+  var _cacheKey = "sc_pga_field"+(GROUP_ID?"_"+GROUP_ID:"");
   try{
-    var _cached = localStorage.getItem("sc_pga_field");
+    var _cached = localStorage.getItem(_cacheKey);
     if(_cached){
       var _cf = JSON.parse(_cached);
       if(_cf && _cf.length > 0) GOLFERS = _cf;
@@ -362,8 +363,8 @@ function loadGolferField(cb){
   }catch(e){}
 
   if(!DB){ if(cb) cb(); return; }
-  DB.ref("globalSettings/pgatour/field").once("value", function(sn){
-    var field = sn.val();
+
+  function _applyField(field){
     var parsed = null;
     if(field && Array.isArray(field) && field.length > 0){
       parsed = field;
@@ -372,11 +373,30 @@ function loadGolferField(cb){
     }
     if(parsed && parsed.length > 0){
       GOLFERS = parsed;
-      // Cache to localStorage so it survives redeploys
-      try{ localStorage.setItem("sc_pga_field", JSON.stringify(parsed)); }catch(e){}
+      try{ localStorage.setItem(_cacheKey, JSON.stringify(parsed)); }catch(e){}
     }
-    if(cb) cb();
-  }, function(){ if(cb) cb(); }); // call cb even on Firebase error
+  }
+
+  if(GROUP_ID){
+    // Try group-level field first, fall back to global
+    DB.ref("groups/"+GROUP_ID+"/data/pgatour/field").once("value", function(sn){
+      if(sn.val()){
+        _applyField(sn.val());
+        if(cb) cb();
+      } else {
+        // No group field — use global
+        DB.ref("globalSettings/pgatour/field").once("value", function(sn2){
+          _applyField(sn2.val());
+          if(cb) cb();
+        }, function(){ if(cb) cb(); });
+      }
+    }, function(){ if(cb) cb(); });
+  } else {
+    DB.ref("globalSettings/pgatour/field").once("value", function(sn){
+      _applyField(sn.val());
+      if(cb) cb();
+    }, function(){ if(cb) cb(); });
+  }
 }
 
 var ST={
@@ -1420,10 +1440,15 @@ function importPlayerField() {
   // Auto-calculate salaries and tiers from odds
   parsed = calcFieldSalariesAndTiers(parsed);
   if(!confirm("Import "+parsed.length+" players?\n\nSalaries and tiers auto-calculated from odds.\nThis replaces the current field.")){ return; }
-  DB.ref("globalSettings/pgatour/field").set(parsed, function(err){
+  var _fieldPath = GROUP_ID
+    ? "groups/"+GROUP_ID+"/data/pgatour/field"
+    : "globalSettings/pgatour/field";
+  DB.ref(_fieldPath).set(parsed, function(err){
     if(err){ toast("Error saving","err"); return; }
     GOLFERS = parsed;
-    try{ localStorage.setItem("sc_pga_field", JSON.stringify(parsed)); }catch(e){}
+    // Cache keyed by group so different groups don't overwrite each other
+    var _cacheKey = "sc_pga_field"+(GROUP_ID?"_"+GROUP_ID:"");
+    try{ localStorage.setItem(_cacheKey, JSON.stringify(parsed)); }catch(e){}
     toast("Field imported: "+parsed.length+" players ✓","ok");
     draw();
   });
