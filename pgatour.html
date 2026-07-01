@@ -419,8 +419,9 @@ function togglePick(name){
     // Slot corresponds to tier index — enforce one per tier
     if(slot===null){ toast("Tap a tier slot first"); return; }
     var tier=TIERS[slot]; if(!tier) return;
-    // Validate golfer belongs to this tier
-    if(g.salary<tier.min||g.salary>=tier.max){
+    // Validate golfer belongs to this tier (use explicit tier field if available)
+    var _gTier = g.tier || (g.salary>=14000?"elite":g.salary>=8000?"contender":g.salary>=3500?"mid":"value");
+    if(_gTier !== tier.id){
       toast("Pick a "+tier.label+" golfer for this slot"); return;
     }
     while(draftPicks.length<=slot) draftPicks.push("");
@@ -759,8 +760,9 @@ function renderPicks(){
         var rg=golferByName(rname);
         var rsc=ST.scores[rname]||{};
         h+='<div class="golfer-row" data-slot="'+j+'">';
-        var rCls=rg.salary>=14000?"top5":rg.salary>=8000?"top10":rg.salary>=3500?"top25":"other";
-        var rTierLbl=rg.salary>=14000?"FAV":rg.salary>=8000?"CONT":rg.salary>=3500?"MID":"VAL";
+        var _rTierKey = rg.tier || (rg.salary>=14000?"elite":rg.salary>=8000?"contender":rg.salary>=3500?"mid":"value");
+        var rCls = _rTierKey==="elite"?"top5":_rTierKey==="contender"?"top10":_rTierKey==="mid"?"top25":"other";
+        var rTierLbl = _rTierKey==="elite"?"FAV":_rTierKey==="contender"?"CONT":_rTierKey==="mid"?"MID":"VAL";
         h+='<div class="rank-badge '+rCls+'">'+rTierLbl+'</div>';
         h+='<div class="golfer-info">';
         h+='<div class="golfer-name">'+x(rname)+'</div>';
@@ -844,7 +846,10 @@ function renderGolferList(used){
     // Tier: only show golfers from active slot's tier
     if(_type==="tier" && ST.activeSlot!==null){
       var _at=TIERS[ST.activeSlot];
-      if(_at && (g.salary<_at.min || g.salary>=_at.max)) continue;
+      if(_at){
+        var _gTier=g.tier||(g.salary>=14000?"elite":g.salary>=8000?"contender":g.salary>=3500?"mid":"value");
+        if(_gTier!==_at.id) continue;
+      }
     }
     // Daily: exclude already-assigned golfers (except the current slot)
     if(_type==="daily"){
@@ -858,7 +863,8 @@ function renderGolferList(used){
     var rankCls=g.salary>=14000?"top5":g.salary>=8000?"top10":g.salary>=3500?"top25":"other";
     var rowCls="golfer-row"+(isPicked?" selected":wouldExceed?" over-cap":"");
     h+='<div class="'+rowCls+'" data-pick="'+x(g.name)+'">';
-    var tierLbl=g.salary>=14000?"FAV":g.salary>=8000?"CONT":g.salary>=3500?"MID":"VAL";
+    var _gTierKey = g.tier || (g.salary>=14000?"elite":g.salary>=8000?"contender":g.salary>=3500?"mid":"value");
+    var tierLbl = _gTierKey==="elite"?"FAV":_gTierKey==="contender"?"CONT":_gTierKey==="mid"?"MID":"VAL";
     h+='<div class="rank-badge '+rankCls+'">'+tierLbl+'</div>';
     h+='<div class="golfer-info">';
     h+='<div class="golfer-name">'+x(g.name)+'</div>';
@@ -965,7 +971,7 @@ function renderAdmin(){
   h+='<div class="section-label">Player Field</div>';
   h+='<div class="adm-card">';
   h+='<div class="adm-title">Import Players</div>';
-  h+='<div style="font-size:10px;color:var(--muted);font-weight:700;margin-bottom:8px">Paste one player per line or CSV: Name, Odds, Salary<br>e.g. "Scottie Scheffler, +460, 20000"</div>';
+  h+='<div style="font-size:10px;color:var(--muted);font-weight:700;margin-bottom:8px">Paste one player per line: Name, Odds<br>e.g. "Scottie Scheffler, +460"<br>Salaries &amp; tiers auto-calculated from odds.</div>';
   h+='<textarea id="field-import" rows="5" style="width:100%;padding:8px;border:2px solid var(--border);border-radius:8px;font-size:11px;font-family:Nunito,sans-serif;resize:vertical" placeholder="Scottie Scheffler, +460, 20000&#10;Rory McIlroy, +950, 14950&#10;..."></textarea>';
   h+='<button class="btn btn-primary" id="b-import-field" style="width:100%;margin-top:8px;padding:9px">Import Field</button>';
   h+='</div>';
@@ -1323,6 +1329,48 @@ function draw(){
 
 // ── FINALIZE POOL — records winner to globalSettings/results/pgatour ───────
 
+
+// ── AUTO SALARY & TIER FROM ODDS ─────────────────────────────────────────────
+// Formula: salary = MIN + (MAX - MIN) × √(prob / max_prob)
+// Tiers: relative to field average probability
+// prob = 100 / (odds + 100) for positive odds
+function oddsToProb(oddsStr){
+  var n = parseInt((oddsStr||"").replace(/[^0-9-+]/g,""));
+  if(isNaN(n)) return 0.01; // default 1% for missing odds
+  if(n > 0) return 100 / (n + 100);
+  return Math.abs(n) / (Math.abs(n) + 100);
+}
+
+function calcFieldSalariesAndTiers(golfers){
+  if(!golfers||!golfers.length) return golfers;
+  var MIN_SAL = 1000, MAX_SAL = 20000;
+
+  // Compute probabilities
+  var probs = golfers.map(function(g){ return oddsToProb(g.odds); });
+  var maxProb = Math.max.apply(null, probs);
+  var avgProb = probs.reduce(function(a,b){return a+b;},0) / probs.length;
+
+  // Tier thresholds relative to field average
+  var eliteThresh      = avgProb * 3.0;
+  var contenderThresh  = avgProb * 1.5;
+  var midThresh        = avgProb * 0.7;
+
+  return golfers.map(function(g, i){
+    var prob = probs[i];
+    // √(prob / max_prob) salary curve
+    var ratio = Math.sqrt(prob / maxProb);
+    var salary = Math.round((MIN_SAL + (MAX_SAL - MIN_SAL) * ratio) / 50) * 50; // round to $50
+
+    // Tier assignment
+    var tier = prob >= eliteThresh     ? "elite"
+             : prob >= contenderThresh ? "contender"
+             : prob >= midThresh       ? "mid"
+             : "value";
+
+    return { name:g.name, odds:g.odds, salary:salary, tier:tier };
+  });
+}
+
 // ── IMPORT PLAYER FIELD ────────────────────────────────────────────────────
 function importPlayerField() {
   var raw = (document.getElementById("field-import")||{}).value||"";
@@ -1350,7 +1398,9 @@ function importPlayerField() {
     parsed.push({ name:name, odds:odds, salary:salary });
   });
   if(!parsed.length){ toast("No valid players found","err"); return; }
-  if(!confirm("Import "+parsed.length+" players? This replaces the current field.")){ return; }
+  // Auto-calculate salaries and tiers from odds
+  parsed = calcFieldSalariesAndTiers(parsed);
+  if(!confirm("Import "+parsed.length+" players?\n\nSalaries and tiers auto-calculated from odds.\nThis replaces the current field.")){ return; }
   DB.ref("globalSettings/pgatour/field").set(parsed, function(err){
     if(err){ toast("Error saving","err"); return; }
     GOLFERS = parsed;
