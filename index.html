@@ -1774,6 +1774,13 @@ function renderProfile() {
     }
     var statuses = SC.globalStatuses || {};
 
+    // Helper: get effective status for a pool in a group
+    // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
+    function effectiveStatus(g, poolId){
+      var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
+      return grpSt || statuses[poolId] || "coming-soon";
+    }
+
     // Sort groups by pool status: Live → Open → Final → Coming Soon
     var _statusOrder = {"locked":0, "open":1, "complete":2, "coming-soon":3};
     groups = groups.slice().sort(function(a, b){
@@ -1781,8 +1788,9 @@ function renderProfile() {
       function bestStatus(g){
         var pools = groupPools(g);
         var best = 99;
+        var _gSt2 = (g.data&&g.data.statuses)||{};
         pools.forEach(function(p){
-          var st = statuses[p.id]||"coming-soon";
+          var st = _gSt2[p.id] || statuses[p.id] || "coming-soon";
           var ord = _statusOrder[st]!==undefined ? _statusOrder[st] : 99;
           if(ord < best) best = ord;
         });
@@ -1798,8 +1806,7 @@ function renderProfile() {
 
       // Skip group card entirely if all active pools are coming-soon
       var hasVisiblePool = pools.some(function(p){
-        var st = statuses[p.id]||"coming-soon";
-        return st==="open"||st==="locked"||st==="complete";
+        return effectiveStatus(g,p.id)!=="coming-soon";
       });
       if(!hasVisiblePool) return;
 
@@ -1810,17 +1817,16 @@ function renderProfile() {
       // Pills
       var pillsHtml = "";
       pools.forEach(function(pool){
-        var st = statuses[pool.id] || "coming-soon";
+        var st = effectiveStatus(g,pool.id);
         if(st==="open")            pillsHtml += '<span class="gpp gpp-open">'+pool.icon+' Open</span>';
         else if(st==="locked")     pillsHtml += '<span class="gpp gpp-locked">'+pool.icon+' Live</span>';
         else if(st==="complete")   pillsHtml += '<span class="gpp gpp-complete">'+pool.icon+' Done</span>';
-        // coming-soon: hidden
       });
       if(!pillsHtml) pillsHtml = '<span style="font-size:9px;color:#334155">No active pools</span>';
 
       var activePool = null;
       for(var i=0;i<pools.length;i++){
-        var st2 = statuses[pools[i].id]||"coming-soon";
+        var st2 = effectiveStatus(g,pools[i].id);
         if(st2==="open"||st2==="locked"||st2==="complete"){ activePool=pools[i]; break; }
       }
       var iconEmoji = activePool ? activePool.icon : "&#127942;";
@@ -1852,7 +1858,7 @@ function renderProfile() {
       var _3days = 3 * 24 * 60 * 60 * 1000;
       var stackedPills = "";
       pools.forEach(function(pool){
-        var st = statuses[pool.id] || "coming-soon";
+        var st = effectiveStatus(g,pool.id);
         var completedTs = (SC.completedAt||{})[pool.id] || null;
         var recentlyComplete = st==="complete" && completedTs && (_now - completedTs) < _3days;
         if(st==="open")           stackedPills += '<div style="font-size:9px;color:#6ee7b7;white-space:nowrap">'+pool.icon+' Open</div>';
@@ -1862,6 +1868,11 @@ function renderProfile() {
       });
 
       var activeUrl = (activePool && u && u.username) ? activePool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(u.username) : null;
+
+      // Is the current user an admin of this group?
+      var _gcIsAdmin = SC.isMaster ||
+        (u && g.createdBy && g.createdBy === u.username) ||
+        (u && g.adminUsers && g.adminUsers.indexOf(u.username) >= 0);
 
       gh += '<div class="gcard" data-gid="'+x(g.id)+'"'+(activeUrl?' data-pool-url="'+x(activeUrl)+'"':'')+'>'; 
 
@@ -1875,8 +1886,8 @@ function renderProfile() {
       // Status label from stackedPills
       var _stText = "";
       pools.forEach(function(pool){
-        var _st = statuses[pool.id]||"coming-soon";
-        if(_st==="coming-soon") return; // hidden
+        var _st = effectiveStatus(g,pool.id);
+        if(_st==="coming-soon") return;
         var _stCol = _st==="open"?"var(--green)":_st==="locked"?"var(--red2)":_st==="complete"?"var(--blue)":"var(--dim)";
         var _stLbl = _st==="open"?"Open":_st==="locked"?"Live":"Final";
         _stText += '<span style="color:'+_stCol+';font-weight:800;font-size:9px">'+pool.icon+' '+_stLbl+'</span> ';
@@ -1892,8 +1903,7 @@ function renderProfile() {
       if(pools.length > 0) {
         gh += '<div style="padding:5px 8px 6px;border-top:1px solid var(--border2);min-height:0">';
         pools.forEach(function(pool){
-          var st = statuses[pool.id] || "coming-soon";
-          // Hide coming-soon pools entirely — they appear once they go Open
+          var st = effectiveStatus(g,pool.id);
           if(st==="coming-soon") return;
           var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
           var col = st==="open"?'var(--green)':st==="locked"?'var(--red2)':st==="complete"?'var(--blue)':'var(--dim)';
@@ -1921,6 +1931,19 @@ function renderProfile() {
             }
           }
           gh += '<span style="display:inline-block;font-size:8px;font-weight:800;padding:4px 8px;border-radius:7px;background:'+bg+';border:1.5px solid var(--border);color:'+col+';white-space:normal;line-height:1.5;max-width:100%">'+pool.icon+' '+x(pool.shortName||pool.name)+' &middot; '+lbl+_cdHtml+'</span>';
+          // Admin: per-group status switcher for recurring pools (pgatour etc)
+          if(_gcIsAdmin && pool.recurring){
+            var _curSt = effectiveStatus(g, pool.id);
+            gh += '<div style="display:flex;gap:3px;margin-top:5px">';
+            [["coming-soon","Soon","var(--dim)"],["open","Open","var(--green)"],["locked","Live","var(--red2)"],["complete","Final","var(--blue)"]].forEach(function(s){
+              var _active = _curSt===s[0];
+              gh += '<button class="gcst-btn" data-gid="'+x(g.id)+'" data-pid="'+x(pool.id)+'" data-st="'+s[0]+'" '+
+                'style="flex:1;padding:3px;border-radius:5px;border:1.5px solid '+(_active?"var(--border)":"var(--border2)")+';'+
+                'background:'+(_active?s[2]:"#fff")+';color:'+(_active?"#fff":"var(--dim)")+';'+
+                'font-size:7px;font-weight:800;cursor:pointer;font-family:inherit">'+s[1]+'</button>';
+            });
+            gh += '</div>';
+          }
         });
         gh += '</div>';
       }
@@ -2034,6 +2057,40 @@ function renderProfile() {
     gh += '</div>';
     container.innerHTML = gh;
     startCountdownTicker();
+
+    // ── Per-group pool status switcher ─────────────────────────────────────
+    container.querySelectorAll(".gcst-btn").forEach(function(btn){
+      btn.addEventListener("click", function(e){
+        e.stopPropagation(); // don't navigate into pool
+        var gid = this.getAttribute("data-gid");
+        var pid = this.getAttribute("data-pid");
+        var st  = this.getAttribute("data-st");
+        if(!DB||!gid||!pid||!st) return;
+        // Write to groups/{id}/data/statuses/{poolId}
+        DB.ref("groups/"+gid+"/data/statuses/"+pid).set(st, function(){
+          toast("Status updated ✓","ok");
+          // Update _allGroupsCache so re-render reflects change immediately
+          if(_allGroupsCache) _allGroupsCache.forEach(function(grp){
+            if(grp&&grp.id===gid){
+              if(!grp.data) grp.data={};
+              if(!grp.data.statuses) grp.data.statuses={};
+              grp.data.statuses[pid]=st;
+            }
+          });
+          // Also write activity event for status change
+          var _pool = poolById(pid);
+          var _stLbl = st==="open"?"opened for picks":st==="locked"?"is now live":st==="complete"?"is complete":"is coming soon";
+          var _icon = st==="open"?"🟢":st==="locked"?"🔴":st==="complete"?"🏁":"🔜";
+          writeActivityEvent(gid,{type:"status_changed",actor:"",
+            text:"<strong>"+((_pool&&_pool.shortName)||pid)+"</strong> "+_stLbl,
+            icon:_icon, poolId:pid});
+          // Re-render cards
+          var container2 = document.getElementById("profile-groups");
+          if(container2) renderGroupCards(_allGroupsCache||[], container2);
+        });
+      });
+    });
+
     container.querySelectorAll(".gcard").forEach(function(el){
       el.addEventListener("click", function(){
         var poolUrl = this.getAttribute("data-pool-url");
@@ -6318,6 +6375,13 @@ function autoSnapStatuses() {
           var username = SC.currentUser ? SC.currentUser.username : "";
           var pools = groupPools(group);
           var statuses = SC.globalStatuses || {};
+
+    // Helper: get effective status for a pool in a group
+    // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
+    function effectiveStatus(g, poolId){
+      var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
+      return grpSt || statuses[poolId] || "coming-soon";
+    }
           var destPool = null;
           for(var _i=0;_i<pools.length;_i++){
             var _st = statuses[pools[_i].id]||"coming-soon";
@@ -6337,6 +6401,13 @@ function autoSnapStatuses() {
           var username = SC.currentUser ? SC.currentUser.username : "";
           var pools = groupPools(group);
           var statuses = SC.globalStatuses || {};
+
+    // Helper: get effective status for a pool in a group
+    // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
+    function effectiveStatus(g, poolId){
+      var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
+      return grpSt || statuses[poolId] || "coming-soon";
+    }
           var destPool = null;
           for(var _i=0;_i<pools.length;_i++){
             var _st = statuses[pools[_i].id]||"coming-soon";
