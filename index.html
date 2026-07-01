@@ -3324,6 +3324,7 @@ function renderTrophyCase() {
     var sportMap = {};
     var historyEntries = [];
     var livePoolIds = {}; // track which pools we already have live data for
+    var liveGroupKeys = {}; // track exact poolId+groupId pairs we already have live data for
 
     // ── Live group data ──────────────────────────────────────────────────────
     groups.forEach(function(g){
@@ -3337,12 +3338,16 @@ function renderTrophyCase() {
         var isFinished = st==="complete";
         var isActive = st==="locked"||st==="open";
         livePoolIds[sid] = true; // always track — needed for trophy display
+        liveGroupKeys[pool.id+"|"+g.id] = true; // exact group+pool pair, used to avoid skipping other groups' archived trophies
 
         if(!sportMap[sid]) sportMap[sid]={ pool:pool, wins:0, seconds:0, thirds:0, entries:0, groups:[] };
 
         // Count as entered if: finished, active, OR has an archived trophy (cycled back to coming-soon)
         var hasArchivedTrophy = Object.keys(archivedTrophies).some(function(k){
-          return archivedTrophies[k].poolId === pool.id;
+          var tk = archivedTrophies[k];
+          if(tk.poolId !== pool.id) return false;
+          var tgid = _archiveGroupId(k, tk);
+          return !tgid || tgid === g.id; // legacy records with no parseable group id are matched loosely
         });
         if(!isFinished && !isActive && !hasArchivedTrophy) return;
         sportMap[sid].entries++;
@@ -3351,10 +3356,12 @@ function renderTrophyCase() {
         // If pool cycled back to coming-soon but has a trophy, use the archived result
         var finish=null, pts=0;
         if(!isFinished && hasArchivedTrophy && !r){
-          // Get finish from archived trophy
+          // Get finish from archived trophy — only the record for THIS group
           Object.keys(archivedTrophies).forEach(function(k){
             var t = archivedTrophies[k];
             if(t.poolId!==pool.id) return;
+            var tgid = _archiveGroupId(k, t);
+            if(tgid && tgid !== g.id) return;
             if(t.finish===1){ finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
             else if(t.finish===2){ finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
             else if(t.finish===3){ finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
@@ -3415,6 +3422,8 @@ function renderTrophyCase() {
           Object.keys(archivedTrophies).forEach(function(k){
             var t = archivedTrophies[k];
             if(t.poolId!==pool.id) return;
+            var tgid = _archiveGroupId(k, t);
+            if(tgid && tgid !== g.id) return;
             sportMap[sid].groups.push({
               name: t.groupName||g.name,
               finish: t.finish||null,
@@ -3430,7 +3439,7 @@ function renderTrophyCase() {
           var _displayName = (r && r.tournamentName) || pool.name;
           var snap = { poolId:pool.id, poolName:_displayName, poolIcon:pool.icon,
             poolSport:(pool.sport||pool.name), poolSportIcon:(pool.sportIcon||pool.icon),
-            finish:finish, pts:pts, groupName:g.name, year:new Date().getFullYear(), ts:Date.now() };
+            finish:finish, pts:pts, groupName:g.name, groupId:g.id, year:new Date().getFullYear(), ts:Date.now() };
           DB.ref("users/"+ukey+"/trophies/"+archiveKey).set(snap);
           if(finish===1){
             writeActivityEvent(g.id, {
@@ -3453,27 +3462,44 @@ function renderTrophyCase() {
       });
     });
 
+    // Resolve which specific group a trophy record belongs to (new records store
+    // groupId directly; legacy records parse it back out of the archive key,
+    // which is always formatted poolId_year_groupId).
+    function _archiveGroupId(archiveKey, t){
+      if(t.groupId) return t.groupId;
+      var m = archiveKey.match(/^.*_\d{4}_(.+)$/);
+      return m ? m[1] : null;
+    }
+
     // ── Remove trophies for pools that are no longer complete ──────────────
     // Only remove if admin explicitly set pool back to open or locked (undoing a final)
     // Do NOT remove when pool cycles to coming-soon after completing — that's the natural cycle
+    // Only touches a trophy if ITS SPECIFIC group is still live (not just any group
+    // sharing the same pool type) — otherwise a new tournament cycling the same pool
+    // type would wrongly wipe out an older, unrelated group's finished result.
     Object.keys(archivedTrophies).forEach(function(archiveKey){
       var t = archivedTrophies[archiveKey];
       var poolId = t.poolId;
       if(!poolId) return;
+      var gid = _archiveGroupId(archiveKey, t);
       var currentStatus = (SC.globalStatuses||{})[poolId]||"coming-soon";
       // Only purge if explicitly rolled back to open or locked — not coming-soon
-      if(livePoolIds[poolId] && (currentStatus === "open" || currentStatus === "locked")){
+      if(gid && liveGroupKeys[poolId+"|"+gid] && (currentStatus === "open" || currentStatus === "locked")){
         DB.ref("users/"+ukey+"/trophies/"+archiveKey).remove();
         delete archivedTrophies[archiveKey];
       }
     });
 
     // ── Archived trophies for deleted groups ─────────────────────────────────
+    // (or for groups that are simply no longer live/joined by this user)
     Object.keys(archivedTrophies).forEach(function(archiveKey){
-      // archiveKey is poolId_year (e.g. "wc_2026") or legacy poolId
+      // archiveKey is poolId_year_groupId (e.g. "pgatour_2026_abc123") or legacy poolId
       var t = archivedTrophies[archiveKey];
-      var poolId = t.poolId || archiveKey.replace(/_\d{4}$/, "");
-      if(livePoolIds[poolId]) return; // already covered by live data
+      var poolId = t.poolId || archiveKey.replace(/_\d{4}.*$/, "");
+      var gid = _archiveGroupId(archiveKey, t);
+      // Skip only if THIS exact group+pool pair was already rendered by the live loop —
+      // a different live group of the same pool type must not hide this trophy.
+      if(gid && liveGroupKeys[poolId+"|"+gid]) return;
       var pool = poolById(poolId);
       if(!pool) {
         pool = { id:poolId, name:t.poolName||poolId, icon:t.poolIcon||"🏆", bg:"linear-gradient(135deg,#334155,#475569)", desc:"", dates:"" };
@@ -3501,7 +3527,6 @@ function renderTrophyCase() {
       // ── Scorecery Rating — career rating across all pools ────────────────────
       var _crW=0,_crS=0,_crT=0,_crE=0,_crPools=0,_crSports={};
       Object.keys(sportMap).forEach(function(sid){
-        if(!livePoolIds[sid]) return; // live data only, no archive duplicates
         var s=sportMap[sid];
         var _seenGroups={};
         var _finGroups=s.groups.filter(function(ge){
