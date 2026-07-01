@@ -1012,7 +1012,10 @@ function renderAdmin(){
   h+='<div class="adm-title">Import Players</div>';
   h+='<div style="font-size:10px;color:var(--muted);font-weight:700;margin-bottom:8px">Paste one player per line: Name, Odds<br>e.g. "Scottie Scheffler, +460"<br>Salaries &amp; tiers auto-calculated from odds.</div>';
   h+='<textarea id="field-import" rows="5" style="width:100%;padding:8px;border:2px solid var(--border);border-radius:8px;font-size:11px;font-family:Nunito,sans-serif;resize:vertical" placeholder="Scottie Scheffler, +460, 20000&#10;Rory McIlroy, +950, 14950&#10;..."></textarea>';
-  h+='<button class="btn btn-primary" id="b-import-field" style="width:100%;margin-top:8px;padding:9px">Import Field</button>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px">';
+  h+='<button class="btn btn-primary" id="b-import-field" style="flex:2;padding:9px">Import Field</button>';
+  h+='<button class="btn btn-blue" id="b-recalc-field" style="flex:1;padding:9px">Recalc</button>';
+  h+='</div>';
   h+='</div>';
   h+='<div class="section-label">Enter Scores (to par)</div>';
   h+='<div class="adm-card">';
@@ -1370,43 +1373,76 @@ function draw(){
 
 
 // ── AUTO SALARY & TIER FROM ODDS ─────────────────────────────────────────────
-// Formula: salary = MIN + (MAX - MIN) × √(prob / max_prob)
-// Tiers: relative to field average probability
-// prob = 100 / (odds + 100) for positive odds
+// Salary: MIN + (MAX - MIN) × √(prob / max_prob)
+// Tiers: fixed slot counts — top 6 Elite, next 8 Contender, next 10 Mid, rest Value
+// This ensures tiers are always meaningful regardless of field strength
 function oddsToProb(oddsStr){
-  var n = parseInt((oddsStr||"").replace(/[^0-9-+]/g,""));
-  if(isNaN(n)) return 0.01; // default 1% for missing odds
-  if(n > 0) return 100 / (n + 100);
-  return Math.abs(n) / (Math.abs(n) + 100);
+  var s = String(oddsStr||"").trim();
+  // Match optional sign then digits
+  var m = s.match(/([+-]?)(\d+)/);
+  if(!m) return 0.005;
+  var n = parseInt(m[2]);
+  if(isNaN(n)||n===0) return 0.005;
+  var neg = m[1]==="-";
+  if(!neg) return 100 / (n + 100);        // positive odds
+  return n / (n + 100);                   // negative odds (favorites)
 }
 
 function calcFieldSalariesAndTiers(golfers){
   if(!golfers||!golfers.length) return golfers;
   var MIN_SAL = 1000, MAX_SAL = 20000;
+  var ELITE_N = 6, CONT_N = 8, MID_N = 10;
 
   // Compute probabilities
   var probs = golfers.map(function(g){ return oddsToProb(g.odds); });
   var maxProb = Math.max.apply(null, probs);
-  var avgProb = probs.reduce(function(a,b){return a+b;},0) / probs.length;
 
-  // Tier thresholds relative to field average
-  var eliteThresh      = avgProb * 3.0;
-  var contenderThresh  = avgProb * 1.5;
-  var midThresh        = avgProb * 0.7;
+  // Sort probs descending to find tier cutoff values
+  var probsSorted = probs.slice().sort(function(a,b){ return b-a; });
+  var n = probsSorted.length;
+  var eliteThresh     = probsSorted[Math.min(ELITE_N-1, n-1)];
+  var contenderThresh = probsSorted[Math.min(ELITE_N+CONT_N-1, n-1)];
+  var midThresh       = probsSorted[Math.min(ELITE_N+CONT_N+MID_N-1, n-1)];
 
-  return golfers.map(function(g, i){
-    var prob = probs[i];
-    // √(prob / max_prob) salary curve
+  // Count assigned slots to handle ties at boundaries
+  var eliteCount=0, contCount=0, midCount=0;
+
+  // Sort golfers by prob descending for slot assignment
+  var indexed = golfers.map(function(g,i){ return {g:g, prob:probs[i], idx:i}; });
+  indexed.sort(function(a,b){ return b.prob-a.prob; });
+
+  var result = new Array(golfers.length);
+  indexed.forEach(function(item){
+    var prob = item.prob;
     var ratio = Math.sqrt(prob / maxProb);
-    var salary = Math.round((MIN_SAL + (MAX_SAL - MIN_SAL) * ratio) / 50) * 50; // round to $50
+    var salary = Math.round((MIN_SAL + (MAX_SAL - MIN_SAL) * ratio) / 50) * 50;
+    var tier;
+    if(eliteCount < ELITE_N){ tier="elite"; eliteCount++; }
+    else if(contCount < CONT_N){ tier="contender"; contCount++; }
+    else if(midCount < MID_N){ tier="mid"; midCount++; }
+    else { tier="value"; }
+    result[item.idx] = { name:item.g.name, odds:item.g.odds, salary:salary, tier:tier };
+  });
+  return result;
+}
 
-    // Tier assignment
-    var tier = prob >= eliteThresh     ? "elite"
-             : prob >= contenderThresh ? "contender"
-             : prob >= midThresh       ? "mid"
-             : "value";
 
-    return { name:g.name, odds:g.odds, salary:salary, tier:tier };
+// ── RECALCULATE FIELD SALARIES & TIERS ────────────────────────────────────────
+// Re-runs the formula on the existing stored field without requiring re-import
+function recalcField(){
+  if(!GOLFERS||!GOLFERS.length){ toast("No field loaded","err"); return; }
+  if(!confirm("Recalculate salaries and tiers for all "+GOLFERS.length+" players from odds?")) return;
+  var recalced = calcFieldSalariesAndTiers(GOLFERS);
+  var _fieldPath = GROUP_ID
+    ? "groups/"+GROUP_ID+"/data/pgatour/field"
+    : "globalSettings/pgatour/field";
+  DB.ref(_fieldPath).set(recalced, function(err){
+    if(err){ toast("Error saving","err"); return; }
+    GOLFERS = recalced;
+    var _cacheKey = "sc_pga_field"+(GROUP_ID?"_"+GROUP_ID:"");
+    try{ localStorage.setItem(_cacheKey, JSON.stringify(recalced)); }catch(e){}
+    toast("Recalculated "+recalced.length+" players ✓","ok");
+    draw();
   });
 }
 
@@ -1655,6 +1691,7 @@ function bind(){
   el=document.getElementById("b-finalize"); if(el) el.addEventListener("click",finalizePool);
   el=document.getElementById("b-edit-tournament"); if(el) el.addEventListener("click",openTournamentEditor);
   el=document.getElementById("b-import-field"); if(el) el.addEventListener("click",importPlayerField);
+  el=document.getElementById("b-recalc-field"); if(el) el.addEventListener("click",recalcField);
 
 
   // Admin score inputs
