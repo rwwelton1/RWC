@@ -1165,6 +1165,15 @@ function parseLiveScores(data){
   var comps=(comp.competitions&&comp.competitions[0])||comp;
   var competitors=comps.competitors||[];
 
+  // Debug: log first competitor's linescores structure
+  if(competitors.length>0){
+    var _dbgC=competitors[0];
+    var _dbgName=(_dbgC.athlete&&_dbgC.athlete.fullName)||"?";
+    var _dbgRds=(_dbgC.linescores||[]).map(function(rd,ri){
+      return "R"+(ri+1)+": val="+rd.value+" dv="+rd.displayValue+" holes="+(rd.linescores||[]).length;
+    });
+    console.log("ESPN round debug for",_dbgName,":",_dbgRds.join(" | "));
+  }
   competitors.forEach(function(c){
     var fullName=(c.athlete&&(c.athlete.fullName||c.athlete.displayName))||"";
     if(!fullName)return;
@@ -1236,26 +1245,43 @@ function parseLiveScores(data){
     }
 
     // Extract per-round scores from linescores
+    // ESPN linescores[ri].value = stroke total (e.g. 68), not to-par
+    // We derive to-par by summing hole scores relative to hole par
     var roundScores={};
     var linescoresArr=c.linescores||[];
     linescoresArr.forEach(function(rd, ri){
       var rdKey="r"+(ri+1);
-      // Each linescores entry is a round — value is the round score to par
       var rdScore=null;
-      if(rd.value!==null&&rd.value!==undefined&&rd.value!==""){
-        rdScore=parseInt(rd.value);
-        if(isNaN(rdScore)) rdScore=null;
+
+      // Method 1: displayValue is sometimes already to-par (e.g. "-2", "+1", "E")
+      var dv=String(rd.displayValue||"").trim();
+      if(dv&&dv!=""&&dv!=="-"&&dv!=="0"){
+        if(dv==="E"||dv==="Even") rdScore=0;
+        else if(dv.charAt(0)==="-"||dv.charAt(0)==="+"){
+          var n=parseInt(dv); if(!isNaN(n)) rdScore=n;
+        }
       }
-      // Fallback: linescores array within round = hole scores, sum to par
+
+      // Method 2: sum hole scores vs hole par within the round
       if(rdScore===null&&rd.linescores&&rd.linescores.length){
-        var par=0;
-        rd.linescores.forEach(function(h){
-          if(h&&h.value&&h.displayValue&&h.displayValue!=="-"&&h.displayValue!==""){
-            par+=Number(h.value)||0;
-          }
+        var rdTotal=0, rdHoles=0;
+        rd.linescores.forEach(function(hole){
+          if(!hole||hole.displayValue==="-"||hole.displayValue===""||hole.displayValue===undefined) return;
+          // hole.value = strokes on that hole, hole.par = par for that hole
+          var strokes=Number(hole.value)||0;
+          var par=Number(hole.par)||0;
+          if(strokes>0&&par>0){ rdTotal+=(strokes-par); rdHoles++; }
         });
-        if(par!==0) rdScore=par;
+        // Only use if we have at least 9 holes (partial round still counts)
+        if(rdHoles>=9) rdScore=rdTotal;
+        else if(rdHoles>0) rdScore=rdTotal; // use even partial
       }
+
+      // Method 3: derive from cumulative difference
+      // If we have previous round cumulative and current cumulative, diff = this round
+      // We can't do this per-competitor cleanly without storing prior state
+      // so skip for now — rely on methods 1 and 2
+
       if(rdScore!==null) roundScores[rdKey]=rdScore;
     });
 
