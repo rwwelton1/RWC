@@ -420,6 +420,11 @@ var ST={
 // ── Live ESPN data ─────────────────────────────────
 var _liveData=null,_liveLoading=false,_liveLastFetch=0,_liveTimer=null;
 var liveScores={};
+// Restore cached live scores instantly on load
+try{
+  var _lsCache=localStorage.getItem("sc_livescores_"+(GROUP_ID||""));
+  if(_lsCache){ var _lsParsed=JSON.parse(_lsCache); if(_lsParsed&&Object.keys(_lsParsed).length){ liveScores=_lsParsed; _liveLastFetch=Date.now(); } }
+}catch(e){}
 
 
 
@@ -1008,28 +1013,29 @@ function renderLeaderboard(){
     h+='<div class="lb-team">';
     var _isDailyLb = TOURNAMENT.type==="daily";
     if(_isDailyLb){
-      // Group picks by round for daily pool
       var _rdLabels=["R1","R2","R3","R4"];
       var _rdKeys=["r1","r2","r3","r4"];
+      h+='<div style="display:flex;flex-direction:column;gap:4px;margin-top:2px">';
       for(var rd=0;rd<4;rd++){
         var _rdPicks=[e.picks[rd*2]||"",e.picks[rd*2+1]||""];
         var _rdHasAny=_rdPicks.some(function(p){return p&&p.trim();});
         if(!_rdHasAny) continue;
-        h+='<div style="font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;margin-top:4px;margin-bottom:2px">'+_rdLabels[rd]+'</div>';
-        h+='<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">';
+        h+='<div style="display:flex;align-items:flex-start;gap:6px">';
+        h+='<span style="font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;width:16px;padding-top:3px;flex-shrink:0">'+_rdLabels[rd]+'</span>';
+        h+='<div style="display:flex;flex-wrap:wrap;gap:3px;flex:1">';
         _rdPicks.forEach(function(pname){
           if(!pname||!pname.trim()) return;
           var live=getLiveForGolfer(pname);
           var psc=live||ST.scores[pname]||{};
-          // Get round-specific score
           var _rk=_rdKeys[rd];
           var _roundScore=psc.rounds&&psc.rounds[_rk]!==undefined ? Number(psc.rounds[_rk]) : null;
           var chipCls="lb-chip"+(psc.cut?" cut":_roundScore!==null&&_roundScore<0?" scored":_roundScore!==null&&_roundScore>0?" over":"");
           var pscore=psc.cut?"CUT":(_roundScore!==null?fmtScore(_roundScore):(showScore?"E":""));
           h+='<span class="'+chipCls+'">'+x(pname)+(pscore?" ("+pscore+")":"")+"</span>";
         });
-        h+='</div>';
+        h+='</div></div>';
       }
+      h+='</div>';
     } else {
       for(var j=0;j<e.picks.length;j++){
         var pname=e.picks[j];
@@ -1132,11 +1138,13 @@ function fetchLiveScores(){
         var _lsWrite={};
         for(var _lk in liveScores){
           var _ls=liveScores[_lk];
-          _lsWrite[_lk]={name:_ls.name,score:_ls.score,thru:_ls.thru||"",pos:_ls.pos||"",cut:_ls.cut||false};
+          _lsWrite[_lk]={name:_ls.name,score:_ls.score,thru:_ls.thru||"",pos:_ls.pos||"",cut:_ls.cut||false,rounds:_ls.rounds||{}};
         }
         DB.ref(BASE+"/livescores").set(_lsWrite);
       }
       syncPlayerScoresToGroup();
+      // Cache to localStorage so switching tabs doesn't lose scores
+      try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
       if(ST.page==="live")renderLiveInto();
       if(ST.page==="leaderboard")draw();
     })
@@ -1962,7 +1970,13 @@ function loadData(){
     DB.ref(BASE+"/livescores").once("value",function(sn){
       var raw=sn.val()||{};
       if(Object.keys(raw).length){
-        for(var _k in raw) liveScores[_k]=raw[_k];
+        for(var _k in raw){
+          liveScores[_k]=raw[_k];
+          // Ensure rounds is always an object
+          if(!liveScores[_k].rounds) liveScores[_k].rounds={};
+        }
+        // Update localStorage with Firebase data (may be more recent than cache)
+        try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
         _liveLastFetch=Date.now(); // mark as "have data" so leaderboard shows scores
         if(ST.page==="live") renderLiveInto();
         else draw();
