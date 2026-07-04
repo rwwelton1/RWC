@@ -150,7 +150,12 @@ a{color:inherit;text-decoration:none}
 <div id="toast"></div>
 
 <script>
-var BASE = "wimbledon2026";
+// ── URL PARAMS ────────────────────────────────────────────────────────────────
+var _params=new URLSearchParams(window.location.search);
+var GROUP_ID=_params.get("group")||null;
+var URL_USER=_params.get("user")||null;
+var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/wimbledon":"wimbledon2026";
+var GROUP_ADMIN_PW=null;
 var MASTER_PW = "Sloop";
 var PTS = {r32:2, r16:4, qf:8, sf:15, f:25, champ:40};
 var MAX_PTS = 32*2 + 16*4 + 8*8 + 4*15 + 2*25 + 1*40; // 342
@@ -222,10 +227,6 @@ R32.forEach(function(m){MID_ROUND[m.id]="r32";});
 var ALL_IDS=R32.map(function(m){return m.id;});
 ["r16","qf","sf","f","champ"].forEach(function(r){TREE[r].forEach(function(m){ALL_IDS.push(m.id);});});
 
-// ── URL PARAMS ────────────────────────────────────────────────────────────────
-var _params=new URLSearchParams(window.location.search);
-var GROUP_ID=_params.get("group")||null;
-var URL_USER=_params.get("user")||null;
 
 var ST={page:"leaderboard",user:URL_USER,viewUser:null,admin:false,picks:{},results:{},locked:{},bracketRound:0};
 var PARTS=URL_USER?[URL_USER]:[];
@@ -320,10 +321,12 @@ function _onData(d){
 function loadData(){
   if(!DB){draw();return;}
   if(GROUP_ID){
-    DB.ref("groups/"+GROUP_ID+"/players").once("value",function(sn){
-      var players=sn.val()||[];
+    DB.ref("groups/"+GROUP_ID).once("value",function(sn){
+      var g=sn.val()||{};
+      var players=g.players||[];
       if(players.length) PARTS=players;
       else if(URL_USER&&PARTS.indexOf(URL_USER)<0) PARTS=[URL_USER];
+      GROUP_ADMIN_PW=g.adminPw||g.groupAdminPw||null;
       DB.ref(BASE).on("value",function(sn2){_onData(sn2.val()||{});});
     });
   } else {
@@ -654,7 +657,7 @@ function renderAdmin(){
   // ESPN fetch button
   h+='<div class="adm-sec-label">&#127935; ESPN Auto-Fill Results</div>';
   h+='<div class="adm-card" style="display:flex;flex-direction:column;gap:8px">';
-  h+='<div style="font-size:9px;color:var(--muted);line-height:1.6">Fetch completed Wimbledon match results from ESPN and auto-fill winners. Only fills matches not already set — never touches picks.</div>';
+  h+='<div style="font-size:9px;color:var(--muted);line-height:1.6">Fetches completed Wimbledon men\'s singles results from ESPN and auto-fills winners. Never touches picks.</div>';
   h+='<button id="b-fetch-espn" style="padding:11px;border-radius:10px;font-size:12px;font-weight:900;border:2px solid var(--border);background:var(--green-bg);color:var(--green);font-family:\'Nunito\',sans-serif;cursor:pointer;box-shadow:4px 4px 0 var(--border)">&#8635; Fetch Results from ESPN</button>';
   h+='<div id="espn-status" style="font-size:9px;font-weight:700;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
@@ -717,116 +720,113 @@ function renderAdmin(){
 // ── ESPN FETCH ────────────────────────────────────────────────────────────────
 function fetchESPN(){
   var statusEl=document.getElementById("espn-status");
-  function setStatus(msg){if(statusEl)statusEl.textContent=msg;}
-  setStatus("Fetching from ESPN…");
+  function setStatus(msg,col){if(statusEl){statusEl.textContent=msg;if(col)statusEl.style.color=col;}}
+  setStatus("Fetching from ESPN...");
 
-  // ESPN ATP structure: data.events[] each has flat competitions[] where
-  // comp.type.slug === "mens-singles" identifies the right matches.
-  // Filter to Wimbledon by event name. Fetch the full fortnight date range.
-  var url="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=1000";
-  fetch(url).then(function(r){return r.json();}).then(function(data){
+  var pad=function(n){return n<10?"0"+n:String(n);};
+  var now=new Date();
+  var today=now.getFullYear()+""+pad(now.getMonth()+1)+""+pad(now.getDate());
 
-    // Collect all mens-singles competitions from Wimbledon events
-    var competitions=[];
+  function extractMatches(data){
+    var results=[],espnPlayers={};
+    var lastName=function(n){return(n||"").split(" ").slice(-1)[0].toLowerCase().replace(/[^a-z]/g,"");};
+    var allComps=[];
+
+    // ESPN ATP tennis: events[] each with competitions[] flat (no groupings layer)
     (data.events||[]).forEach(function(ev){
-      var evName=(ev.name||ev.shortName||"").toLowerCase();
-      var isWimbledon=evName.indexOf("wimbledon")>=0;
-      (ev.competitions||[]).forEach(function(comp){
-        var typeSlug=(comp.type&&comp.type.slug)||"";
-        var isMensSingles=typeSlug==="mens-singles"||typeSlug==="men-singles";
-        // If event is confirmed Wimbledon, take all men's singles.
-        // If event name unknown, still include if type matches (fallback).
-        if(isMensSingles&&(isWimbledon||!evName)) competitions.push(comp);
-      });
+      (ev.competitions||[]).forEach(function(comp){allComps.push(comp);});
     });
+    // Also check top-level competitions
+    (data.competitions||[]).forEach(function(comp){allComps.push(comp);});
 
-    // Also handle case where competitions are top-level (no events wrapper)
-    if(!competitions.length){
-      (data.competitions||[]).forEach(function(comp){
-        var typeSlug=(comp.type&&comp.type.slug)||"";
-        if(typeSlug==="mens-singles"||typeSlug==="men-singles") competitions.push(comp);
-      });
-    }
-
-    if(!competitions.length){
-      setStatus("No Wimbledon men's singles matches found. Tournament may not have started yet.");
-      return;
-    }
-
-    function lastName(n){return(n||"").split(" ").slice(-1)[0].toLowerCase().replace(/[^a-z]/g,"");}
-    function nameMatch(espnName,ourName){
-      var en=(espnName||"").toLowerCase(),on=(ourName||"").toLowerCase();
-      if(en===on) return true;
-      if(lastName(espnName)===lastName(ourName)) return true;
-      if(en.length>3&&on.indexOf(en)>=0) return true;
-      if(on.length>3&&en.indexOf(on)>=0) return true;
-      return false;
-    }
-
-    // Extract completed results AND also update R32 player names from any round
-    var espnResults=[]; // {a, b, winner, round}
-    var espnPlayers={}; // lastName -> fullName (for bracket update)
-
-    competitions.forEach(function(comp){
+    allComps.forEach(function(comp){
+      var slug=(comp.type&&comp.type.slug)||"";
+      // Skip if clearly not mens singles
+      if(slug&&slug!=="mens-singles"&&slug!=="men-singles"&&slug!=="mens_singles") return;
       var comps=comp.competitors||[];
       if(comps.length<2) return;
       var p0=comps[0],p1=comps[1];
-      var n0=(p0.athlete&&(p0.athlete.fullName||p0.athlete.shortName))||"";
-      var n1=(p1.athlete&&(p1.athlete.fullName||p1.athlete.shortName))||"";
+      var n0=(p0.athlete&&(p0.athlete.fullName||p0.athlete.shortName||p0.athlete.displayName))||p0.displayName||"";
+      var n1=(p1.athlete&&(p1.athlete.fullName||p1.athlete.shortName||p1.athlete.displayName))||p1.displayName||"";
       if(!n0||!n1) return;
-      // Cache all player names by last name for bracket updating
-      if(n0) espnPlayers[lastName(n0)]=n0;
-      if(n1) espnPlayers[lastName(n1)]=n1;
-      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
+      if(lastName(n0)) espnPlayers[lastName(n0)]=n0;
+      if(lastName(n1)) espnPlayers[lastName(n1)]=n1;
+      var completed=!!(comp.status&&comp.status.type&&comp.status.type.completed);
       if(!completed) return;
       var winner=p0.winner?n0:p1.winner?n1:"";
-      if(winner) espnResults.push({a:n0,b:n1,winner:winner,round:(comp.round&&comp.round.displayName)||""});
+      if(winner) results.push({a:n0,b:n1,winner:winner});
     });
+    return {results:results,players:espnPlayers};
+  }
 
-    // Step 1: Update R32 player names from ESPN data
+  function applyData(extracted,label){
+    var results=extracted.results,espnPlayers=extracted.players;
+    var lastName=function(n){return(n||"").split(" ").slice(-1)[0].toLowerCase().replace(/[^a-z]/g,"");};
+
+    if(!results.length&&!Object.keys(espnPlayers).length){
+      setStatus("No matches found from ESPN ("+label+").","var(--red)");
+      return;
+    }
+
+    // Update R32 player names to match ESPN
     var namesUpdated=0;
     R32.forEach(function(m){
-      // Try to match each slot to an ESPN player name
-      [["a","sa"],["b","sb"]].forEach(function(side){
-        var ourName=m[side[0]];
-        var lnOur=lastName(ourName);
-        if(espnPlayers[lnOur]&&espnPlayers[lnOur]!==ourName){
-          // Update the in-memory name to match ESPN exactly
-          m[side[0]]=espnPlayers[lnOur];
-          namesUpdated++;
-        }
+      ["a","b"].forEach(function(side){
+        var ln=lastName(m[side]);
+        if(espnPlayers[ln]&&espnPlayers[ln]!==m[side]){m[side]=espnPlayers[ln];namesUpdated++;}
       });
     });
 
-    // Step 2: Fill results
+    // Fill results
+    var nameMatch=function(a,b){
+      if(!a||!b) return false;
+      var ae=a.toLowerCase(),be=b.toLowerCase();
+      if(ae===be) return true;
+      if(lastName(a)===lastName(b)) return true;
+      if(ae.length>3&&be.indexOf(ae)>=0) return true;
+      if(be.length>3&&ae.indexOf(be)>=0) return true;
+      return false;
+    };
     var allMids=R32.map(function(m){return m.id;});
     ["r16","qf","sf","f","champ"].forEach(function(r){TREE[r].forEach(function(m){allMids.push(m.id);});});
 
     var filled=0;
-    espnResults.forEach(function(espnMatch){
+    results.forEach(function(em){
       allMids.forEach(function(mid){
         if(getR(mid)) return;
-        var teams=getTeams(mid);
-        var tA=teams[0],tB=teams[1];
+        var t=getTeams(mid),tA=t[0],tB=t[1];
         if(!tA||!tB) return;
-        var aMatchA=nameMatch(espnMatch.a,tA)||nameMatch(espnMatch.b,tA);
-        var aMatchB=nameMatch(espnMatch.a,tB)||nameMatch(espnMatch.b,tB);
-        if(!aMatchA||!aMatchB) return;
-        var winnerOur=nameMatch(espnMatch.winner,tA)?tA:tB;
-        saveR(mid,winnerOur);
+        if(!(nameMatch(em.a,tA)||nameMatch(em.b,tA))) return;
+        if(!(nameMatch(em.a,tB)||nameMatch(em.b,tB))) return;
+        saveR(mid,nameMatch(em.winner,tA)?tA:tB);
         filled++;
       });
     });
 
-    var msg="✓ "+filled+" result"+(filled!==1?"s":"")+" filled";
-    if(namesUpdated) msg+=" · "+namesUpdated+" name"+(namesUpdated!==1?"s":"")+" updated";
-    if(!filled&&!namesUpdated) msg="No new matches to fill ("+espnResults.length+" completed found, "+competitions.length+" total).";
-    setStatus(msg);
-    if(filled>0||namesUpdated>0) draw();
+    var parts=[];
+    if(filled) parts.push(filled+" result"+(filled!==1?"s":"")+" filled");
+    if(namesUpdated) parts.push(namesUpdated+" name"+(namesUpdated!==1?"s":"")+" synced");
+    if(!parts.length) parts.push("Up to date — "+results.length+" completed matches, "+Object.keys(espnPlayers).length+" players");
+    setStatus("✓ "+parts.join(" · "),filled||namesUpdated?"var(--green)":null);
+    if(filled||namesUpdated) draw();
+  }
 
-  }).catch(function(err){
-    setStatus("ESPN fetch error: "+err.message);
-    console.error("ESPN fetch",err);
+  // Try today first, then full Wimbledon range
+  var todayUrl="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates="+today;
+  var rangeUrl="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=1000";
+
+  fetch(todayUrl).then(function(r){return r.json();}).then(function(data){
+    var ex=extractMatches(data);
+    if(ex.results.length||Object.keys(ex.players).length){
+      applyData(ex,"today");
+    } else {
+      setStatus("Today empty, trying full range...");
+      fetch(rangeUrl).then(function(r){return r.json();}).then(function(data2){
+        applyData(extractMatches(data2),"range");
+      }).catch(function(e){setStatus("Error: "+e.message,"var(--red)");});
+    }
+  }).catch(function(e){
+    setStatus("Error: "+e.message,"var(--red)");
   });
 }
 
@@ -872,7 +872,7 @@ function bind(){
   if(el)el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="leaderboard";draw();return;}
     var pw=prompt("Admin password:");if(pw===null)return;
-    if(pw===MASTER_PW){ST.admin=true;draw();}else toast("Wrong password");
+    if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){ST.admin=true;draw();}else toast("Wrong password");
   });
 
   // Bracket picks
