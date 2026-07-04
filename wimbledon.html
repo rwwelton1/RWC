@@ -720,68 +720,92 @@ function fetchESPN(){
   function setStatus(msg){if(statusEl)statusEl.textContent=msg;}
   setStatus("Fetching from ESPN…");
 
-  // Fetch the full ATP scoreboard covering Wimbledon fortnight
-  var url="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=500";
+  // ESPN ATP structure: data.events[] each has flat competitions[] where
+  // comp.type.slug === "mens-singles" identifies the right matches.
+  // Filter to Wimbledon by event name. Fetch the full fortnight date range.
+  var url="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=1000";
   fetch(url).then(function(r){return r.json();}).then(function(data){
 
-    // Walk: data.events[] → find Wimbledon → groupings[] → mens-singles → competitions[]
+    // Collect all mens-singles competitions from Wimbledon events
     var competitions=[];
     (data.events||[]).forEach(function(ev){
-      // Filter to Wimbledon only
-      var name=(ev.name||ev.shortName||"").toLowerCase();
-      if(name.indexOf("wimbledon")<0) return;
-      (ev.groupings||[]).forEach(function(g){
-        var slug=(g.grouping&&g.grouping.slug)||"";
-        // Only Men's Singles
-        if(slug.indexOf("mens-singles")<0&&slug.indexOf("men-singles")<0) return;
-        (g.competitions||[]).forEach(function(comp){competitions.push(comp);});
+      var evName=(ev.name||ev.shortName||"").toLowerCase();
+      var isWimbledon=evName.indexOf("wimbledon")>=0;
+      (ev.competitions||[]).forEach(function(comp){
+        var typeSlug=(comp.type&&comp.type.slug)||"";
+        var isMensSingles=typeSlug==="mens-singles"||typeSlug==="men-singles";
+        // If event is confirmed Wimbledon, take all men's singles.
+        // If event name unknown, still include if type matches (fallback).
+        if(isMensSingles&&(isWimbledon||!evName)) competitions.push(comp);
       });
     });
 
+    // Also handle case where competitions are top-level (no events wrapper)
     if(!competitions.length){
-      setStatus("No Wimbledon men's singles matches found yet. Check back once play starts.");
+      (data.competitions||[]).forEach(function(comp){
+        var typeSlug=(comp.type&&comp.type.slug)||"";
+        if(typeSlug==="mens-singles"||typeSlug==="men-singles") competitions.push(comp);
+      });
+    }
+
+    if(!competitions.length){
+      setStatus("No Wimbledon men's singles matches found. Tournament may not have started yet.");
       return;
     }
 
-    var filled=0;
-
     function lastName(n){return(n||"").split(" ").slice(-1)[0].toLowerCase().replace(/[^a-z]/g,"");}
-    function nameMatch(espnName, ourName){
-      var en=(espnName||"").toLowerCase(), on=(ourName||"").toLowerCase();
+    function nameMatch(espnName,ourName){
+      var en=(espnName||"").toLowerCase(),on=(ourName||"").toLowerCase();
       if(en===on) return true;
-      // shortName "J. Sinner" vs "Jannik Sinner" — check last name
       if(lastName(espnName)===lastName(ourName)) return true;
-      // partial: one contains the other
-      if(en.indexOf(on)>=0||on.indexOf(en)>=0) return true;
+      if(en.length>3&&on.indexOf(en)>=0) return true;
+      if(on.length>3&&en.indexOf(on)>=0) return true;
       return false;
     }
 
-    // Build flat list of completed match results
-    var results=[];
+    // Extract completed results AND also update R32 player names from any round
+    var espnResults=[]; // {a, b, winner, round}
+    var espnPlayers={}; // lastName -> fullName (for bracket update)
+
     competitions.forEach(function(comp){
-      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
-      if(!completed) return;
       var comps=comp.competitors||[];
       if(comps.length<2) return;
       var p0=comps[0],p1=comps[1];
       var n0=(p0.athlete&&(p0.athlete.fullName||p0.athlete.shortName))||"";
       var n1=(p1.athlete&&(p1.athlete.fullName||p1.athlete.shortName))||"";
+      if(!n0||!n1) return;
+      // Cache all player names by last name for bracket updating
+      if(n0) espnPlayers[lastName(n0)]=n0;
+      if(n1) espnPlayers[lastName(n1)]=n1;
+      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
+      if(!completed) return;
       var winner=p0.winner?n0:p1.winner?n1:"";
-      if(n0&&n1&&winner) results.push({a:n0,b:n1,winner:winner});
+      if(winner) espnResults.push({a:n0,b:n1,winner:winner,round:(comp.round&&comp.round.displayName)||""});
     });
 
-    if(!results.length){
-      setStatus("Wimbledon found but no completed men's singles matches yet.");
-      return;
-    }
+    // Step 1: Update R32 player names from ESPN data
+    var namesUpdated=0;
+    R32.forEach(function(m){
+      // Try to match each slot to an ESPN player name
+      [["a","sa"],["b","sb"]].forEach(function(side){
+        var ourName=m[side[0]];
+        var lnOur=lastName(ourName);
+        if(espnPlayers[lnOur]&&espnPlayers[lnOur]!==ourName){
+          // Update the in-memory name to match ESPN exactly
+          m[side[0]]=espnPlayers[lnOur];
+          namesUpdated++;
+        }
+      });
+    });
 
-    // Match against our bracket
+    // Step 2: Fill results
     var allMids=R32.map(function(m){return m.id;});
     ["r16","qf","sf","f","champ"].forEach(function(r){TREE[r].forEach(function(m){allMids.push(m.id);});});
 
-    results.forEach(function(espnMatch){
+    var filled=0;
+    espnResults.forEach(function(espnMatch){
       allMids.forEach(function(mid){
-        if(getR(mid)) return; // already set, don't overwrite
+        if(getR(mid)) return;
         var teams=getTeams(mid);
         var tA=teams[0],tB=teams[1];
         if(!tA||!tB) return;
@@ -794,10 +818,11 @@ function fetchESPN(){
       });
     });
 
-    var msg="Done — "+filled+" result"+(filled!==1?"s":"")+" filled from "+results.length+" completed matches.";
-    if(!filled) msg="Matched "+results.length+" ESPN results but none lined up with unset bracket slots.";
+    var msg="✓ "+filled+" result"+(filled!==1?"s":"")+" filled";
+    if(namesUpdated) msg+=" · "+namesUpdated+" name"+(namesUpdated!==1?"s":"")+" updated";
+    if(!filled&&!namesUpdated) msg="No new matches to fill ("+espnResults.length+" completed found, "+competitions.length+" total).";
     setStatus(msg);
-    if(filled>0) draw();
+    if(filled>0||namesUpdated>0) draw();
 
   }).catch(function(err){
     setStatus("ESPN fetch error: "+err.message);
