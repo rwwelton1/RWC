@@ -77,6 +77,14 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .lchip.live{background:var(--red-bg);color:var(--red2)}
 
 .games-wrap{padding:10px}
+.date-group{margin-bottom:12px}
+.date-hdr{width:100%;display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--gold-bg);border:2px solid var(--border);border-radius:10px;box-shadow:3px 3px 0 var(--border);font-family:'Nunito',sans-serif;cursor:pointer;margin-bottom:8px}
+.date-hdr:active{transform:translate(3px,3px);box-shadow:none}
+.date-hdr.tourney{background:var(--purple-bg)}
+.date-hdr-caret{font-size:12px;font-weight:900;color:var(--muted);flex-shrink:0;width:12px}
+.date-hdr-title{font-size:12px;font-weight:900;color:var(--text);flex:1;text-align:left}
+.date-hdr-meta{font-size:9px;font-weight:800;color:var(--muted);flex-shrink:0;background:#fff;border:1.5px solid var(--border);border-radius:20px;padding:2px 9px}
+.date-body{}
 .lb-note{font-size:11px;font-weight:700;color:var(--muted);line-height:1.8;background:#ffffff;border:2px solid var(--border2);border-radius:10px;padding:16px;margin:12px;text-align:center}
 .game-card{background:#ffffff;border:2px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:4px 4px 0 var(--border)}
 .game-card.tourney{border-color:var(--purple);box-shadow:4px 4px 0 var(--purple)}
@@ -220,7 +228,8 @@ var ST={
   importGames:[],
   importSelected:{},
   importLoading:false,
-  importError:""
+  importError:"",
+  collapsed:{}
 };
 
 var DB=null;
@@ -240,6 +249,44 @@ function activeGames(dayId){
   return GAME_IDS.filter(function(gid){var gm=g[gid];return gm&&gm.away&&gm.home;});
 }
 function gamePhase(dayId,gid){ var g=(ST.games[dayId]||{})[gid]||{}; return g.phase||"league"; }
+// Per-game lock: locks at tip-off, once results exist, or if admin locked the day
+function gameLocked(dayId,gid){
+  if(ST.locked[dayId])return true;
+  var g=(ST.games[dayId]||{})[gid]||{};
+  if(gameWinner(dayId,gid))return true;
+  if(g.tipTs&&Date.now()>=g.tipTs)return true;
+  return false;
+}
+function gameDateKey(dayId,gid){
+  var g=(ST.games[dayId]||{})[gid]||{};
+  if(g.tipTs){var d=new Date(g.tipTs);return d.getFullYear()+"-"+("0"+(d.getMonth()+1)).slice(-2)+"-"+("0"+d.getDate()).slice(-2);}
+  return "z-"+(ST.dayLabels[dayId]||dayId); // fallback: group by admin day label
+}
+function dateKeyLabel(key){
+  if(key.indexOf("z-")===0)return key.slice(2);
+  var p=key.split("-");var d=new Date(Number(p[0]),Number(p[1])-1,Number(p[2]));
+  return d.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+}
+// Flatten every game across all days into {dayId,gid,tipTs,dateKey}, sorted chronologically
+function allGamesFlat(){
+  var out=[];
+  ST.dayIds.forEach(function(d){
+    activeGames(d).forEach(function(gid){
+      var g=ST.games[d][gid]||{};
+      out.push({dayId:d,gid:gid,tipTs:g.tipTs||0,dateKey:gameDateKey(d,gid)});
+    });
+  });
+  out.sort(function(a,b){ if(a.tipTs&&b.tipTs)return a.tipTs-b.tipTs; return a.dateKey<b.dateKey?-1:a.dateKey>b.dateKey?1:0; });
+  return out;
+}
+function groupGamesByDate(){
+  var flat=allGamesFlat(),groups=[],idx={};
+  flat.forEach(function(item){
+    if(!(item.dateKey in idx)){ idx[item.dateKey]=groups.length; groups.push({key:item.dateKey,items:[]}); }
+    groups[idx[item.dateKey]].items.push(item);
+  });
+  return groups;
+}
 function gameWinner(dayId,gid){
   var r=(ST.results[dayId]||{})[gid];
   if(!r)return null;
@@ -327,11 +374,11 @@ function defaultDay(){
   return ST.dayIds.length?ST.dayIds[ST.dayIds.length-1]:null;
 }
 
-function pickGame(gid,side){
+function pickGame(day,gid,side){
   if(PUBLIC_VIEW)return;
   if(!ST.user){toast("Pick a name first");return;}
-  var day=ST.curDay;if(!day)return;
-  if(ST.locked[day]){toast("🔒 Day locked");return;}
+  if(!day)return;
+  if(gameLocked(day,gid)){toast("🔒 Locked — game has tipped off");return;}
   var uk=ukey(ST.user);
   if(!ST.picks[day])ST.picks[day]={};
   if(!ST.picks[day][uk])ST.picks[day][uk]={};
@@ -361,12 +408,13 @@ function parseEspn(data){
     function logo(c){var t=c.team;if(!t)return"";if(t.logo)return t.logo;if(t.logos&&t.logos.length)return t.logos[0].href||"";return"";}
     var dt=ev.date?new Date(ev.date):null;
     var tip=dt?dt.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"}):"";
+    var tipTs=dt?dt.getTime():0;
     var state=(comp.status&&comp.status.type&&comp.status.type.state)||"pre";
     var aSc=(away.score!=null&&away.score!=="")?String(away.score):"";
     var hSc=(home.score!=null&&home.score!=="")?String(home.score):"";
     return {
       away:nm(away),home:nm(home),awayLogo:logo(away),homeLogo:logo(home),
-      tip:tip,court:(comp.venue&&comp.venue.fullName)||"",
+      tip:tip,tipTs:tipTs,court:(comp.venue&&comp.venue.fullName)||"",
       phase:detectPhase(ev,comp),espnId:ev.id||"",
       state:state,aScore:state==="pre"?"":aSc,hScore:state==="pre"?"":hSc
     };
@@ -401,7 +449,7 @@ function addImportedGames(){
   sel.forEach(function(g,i){
     var gid=GAME_IDS[used+i];
     if(!gid)return;
-    var obj={away:g.away,home:g.home,awayLogo:g.awayLogo,homeLogo:g.homeLogo,tip:g.tip,court:g.court,phase:g.phase,espnId:g.espnId};
+    var obj={away:g.away,home:g.home,awayLogo:g.awayLogo,homeLogo:g.homeLogo,tip:g.tip,tipTs:g.tipTs||0,court:g.court,phase:g.phase,espnId:g.espnId};
     ST.games[day][gid]=obj;
     if(DB)DB.ref(BASE+"/games/"+day+"/"+gid).set(obj);
     if(g.aScore!==""&&g.hScore!==""){
@@ -578,41 +626,63 @@ function bindDayBar(){
   var add=document.querySelector("#day-bar [data-addday]");if(add)add.onclick=addDay;
 }
 
+function gameCardHTML(day,gid){
+  var g=ST.games[day][gid],w=gameWinner(day,gid),r=(ST.results[day]||{})[gid]||{};
+  var picks=((ST.picks[day]||{})[ukey(ST.user)])||{},mine=picks[gid];
+  var ph=gamePhase(day,gid),isT=phaseIsTourney(ph),val=phasePoints(ph);
+  var locked=gameLocked(day,gid);
+  var ptsCls="",ptsTxt="";
+  if(w){ if(mine===w){ptsCls="earned";ptsTxt="+"+val+" ✓";} else if(mine){ptsCls="miss";ptsTxt="0 ✗";} else{ptsCls="miss";ptsTxt="—";} }
+  var h='<div class="game-card'+(isT?" tourney":"")+'">';
+  h+='<div class="gc-head'+(isT?" tourney":"")+'"><span class="gc-label">'+(g.tip?x(g.tip):"Game")+(g.court?" · "+x(g.court):"")+'</span>';
+  if(isT)h+='<span class="gc-badge">'+x(phaseLabel(ph))+' · '+val+'×</span>';
+  if(w)h+='<span class="gc-pts '+ptsCls+'">'+ptsTxt+'</span>';
+  else if(locked)h+='<span class="gc-pts">🔒</span>';
+  h+='</div>';
+  ["away","home"].forEach(function(side){
+    var nm=g[side]||"",logo=(side==="away")?g.awayLogo:g.homeLogo;
+    var isWin=w===side,isLose=w&&w!==side;
+    var cls="team-pick";if(locked)cls+=" locked";if(mine===side&&!w)cls+=" sel";if(isWin)cls+=" win";if(isLose)cls+=" lose";
+    var sc=(side==="away")?r.aScore:r.hScore;
+    h+='<div class="'+cls+'" data-day="'+x(day)+'" data-gid="'+gid+'" data-side="'+side+'">';
+    h+='<div class="tp-left"><div class="tp-radio"></div>';
+    if(logo)h+='<img class="tp-logo" src="'+x(logo)+'" alt="">';
+    h+='<span class="tp-name">'+x(nm)+'</span></div>';
+    if(sc!==undefined&&sc!==null&&sc!=="")h+='<span class="tp-score">'+x(sc)+'</span>';
+    h+='</div>';
+  });
+  if(mine&&!w)h+='<div class="gc-foot">Your pick: <b>'+x(g[mine])+'</b></div>';
+  else if(!mine&&locked&&!w)h+='<div class="gc-foot" style="color:var(--red2)">No pick — locked</div>';
+  return h+'</div>';
+}
 function picksScreen(){
   if(!ST.dayIds.length)return '<div class="lb-note">No games posted yet.<br>Check back once the schedule is loaded.</div>';
-  var day=ST.curDay,gs=activeGames(day),locked=!!ST.locked[day];
-  var picks=((ST.picks[day]||{})[ukey(ST.user)])||{},s=dayScore(day,ST.user);
-  var h=dayBarHTML(false);
-  h+='<div class="lock-bar"><span class="lock-info">'+x(ST.dayLabels[day]||day)+'</span><div class="lock-chips">';
-  if(locked)h+='<span class="lchip done">🔒 Locked</span>';
-  else h+='<span class="lchip">'+s.made+'/'+gs.length+' picked</span>';
-  if(dayHasResults(day))h+='<span class="lchip live">'+s.pts+' pts</span>';
-  h+='</div></div>';
-  if(!gs.length)return h+'<div class="lb-note">No games on this day yet.</div>';
+  var groups=groupGamesByDate();
+  if(!groups.length)return '<div class="lb-note">No games on the board yet.</div>';
+  var t=totalScore(ST.user);
+  var totalGames=0,pickedGames=0;
+  groups.forEach(function(gr){gr.items.forEach(function(it){totalGames++;var pk=((ST.picks[it.dayId]||{})[ukey(ST.user)])||{};if(pk[it.gid])pickedGames++;});});
+  var h='<div class="lock-bar"><span class="lock-info">🏀 Full Tournament</span><div class="lock-chips">'+
+        '<span class="lchip">'+pickedGames+'/'+totalGames+' picked</span>'+
+        '<span class="lchip live">'+t.pts+' pts</span></div></div>';
   h+='<div class="games-wrap">';
-  gs.forEach(function(gid){
-    var g=ST.games[day][gid],w=gameWinner(day,gid),r=(ST.results[day]||{})[gid]||{},mine=picks[gid];
-    var ph=gamePhase(day,gid),isT=phaseIsTourney(ph),val=phasePoints(ph);
-    var ptsCls="",ptsTxt="";
-    if(w){ if(mine===w){ptsCls="earned";ptsTxt="+"+val+" ✓";} else if(mine){ptsCls="miss";ptsTxt="0 ✗";} else{ptsCls="miss";ptsTxt="—";} }
-    h+='<div class="game-card'+(isT?" tourney":"")+'">';
-    h+='<div class="gc-head'+(isT?" tourney":"")+'"><span class="gc-label">'+(g.tip?x(g.tip):"Game")+(g.court?" · "+x(g.court):"")+'</span>';
-    if(isT)h+='<span class="gc-badge">'+x(phaseLabel(ph))+' · '+val+'×</span>';
-    if(w)h+='<span class="gc-pts '+ptsCls+'">'+ptsTxt+'</span>';
-    h+='</div>';
-    ["away","home"].forEach(function(side){
-      var nm=g[side]||"",logo=(side==="away")?g.awayLogo:g.homeLogo;
-      var isWin=w===side,isLose=w&&w!==side;
-      var cls="team-pick";if(locked||w)cls+=" locked";if(mine===side&&!w)cls+=" sel";if(isWin)cls+=" win";if(isLose)cls+=" lose";
-      var sc=(side==="away")?r.aScore:r.hScore;
-      h+='<div class="'+cls+'" data-gid="'+gid+'" data-side="'+side+'">';
-      h+='<div class="tp-left"><div class="tp-radio"></div>';
-      if(logo)h+='<img class="tp-logo" src="'+x(logo)+'" alt="">';
-      h+='<span class="tp-name">'+x(nm)+'</span></div>';
-      if(sc!==undefined&&sc!==null&&sc!=="")h+='<span class="tp-score">'+x(sc)+'</span>';
+  groups.forEach(function(gr){
+    var label=dateKeyLabel(gr.key);
+    var isCollapsed=!!ST.collapsed[gr.key];
+    // per-date pick progress
+    var dGames=gr.items.length,dPicked=0,dLocked=0;
+    gr.items.forEach(function(it){var pk=((ST.picks[it.dayId]||{})[ukey(ST.user)])||{};if(pk[it.gid])dPicked++;if(gameLocked(it.dayId,it.gid))dLocked++;});
+    var anyT=gr.items.some(function(it){return phaseIsTourney(gamePhase(it.dayId,it.gid));});
+    h+='<div class="date-group">';
+    h+='<button class="date-hdr'+(anyT?" tourney":"")+'" data-datekey="'+x(gr.key)+'">'+
+       '<span class="date-hdr-caret">'+(isCollapsed?"▸":"▾")+'</span>'+
+       '<span class="date-hdr-title">'+x(label)+'</span>'+
+       '<span class="date-hdr-meta">'+dPicked+'/'+dGames+(dLocked?' · 🔒'+dLocked:'')+'</span></button>';
+    if(!isCollapsed){
+      h+='<div class="date-body">';
+      gr.items.forEach(function(it){ h+=gameCardHTML(it.dayId,it.gid); });
       h+='</div>';
-    });
-    if(mine&&!w)h+='<div class="gc-foot">Your pick: <b>'+x(g[mine])+'</b></div>';
+    }
     h+='</div>';
   });
   return h+'</div>';
@@ -620,7 +690,10 @@ function picksScreen(){
 function bindPicks(){
   document.querySelectorAll(".team-pick[data-gid]").forEach(function(el){
     if(el.classList.contains("locked"))return;
-    el.onclick=function(){pickGame(el.getAttribute("data-gid"),el.getAttribute("data-side"));};
+    el.onclick=function(){pickGame(el.getAttribute("data-day"),el.getAttribute("data-gid"),el.getAttribute("data-side"));};
+  });
+  document.querySelectorAll(".date-hdr[data-datekey]").forEach(function(el){
+    el.onclick=function(){var k=el.getAttribute("data-datekey");ST.collapsed[k]=!ST.collapsed[k];draw();};
   });
 }
 
@@ -631,7 +704,7 @@ function standingsScreen(){
   });
   rows.sort(function(a,b){if(b.pts!==a.pts)return b.pts-a.pts;if(b.correct!==a.correct)return b.correct-a.correct;return a.wrong-b.wrong;});
   var maxP=rows.length?Math.max(1,rows[0].pts):1;
-  var h=dayBarHTML(false)+'<div class="lb-wrap">';
+  var h='<div class="lb-wrap">';
   if(!rows.length)return h+'<div class="lb-note">No players yet.</div></div>';
   rows.forEach(function(r,i){
     var medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"";
@@ -719,6 +792,8 @@ function bindAdmin(){
 
 loadData();
 draw();
+// Re-render every 30s so games auto-lock at their tip-off time
+setInterval(function(){ if(!PUBLIC_VIEW&&ST.user&&ST.page==="picks") draw(); else if(ST.page==="standings") draw(); },30000);
 </script>
 </body>
 </html>
