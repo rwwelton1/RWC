@@ -610,9 +610,12 @@ function submitPicks(){
 // Get a golfer's overall score (live or admin-entered)
 function golferScore(pname){
   var live=liveScores[normName(pname)];
-  if(live){ return {score:live.score,cut:live.cut,rounds:live.rounds||{}}; }
-  var sc=ST.scores[pname]||{};
-  return {score:sc.score,cut:sc.cut,rounds:sc.rounds||{}};
+  // Check ST.scores by display name first, then by ukey (in case GOLFERS wasn't loaded when scores arrived)
+  var sc=ST.scores[pname]||ST.scores[ukey(pname)]||(ST._rawScores&&ST._rawScores[ukey(pname)])||{};
+  // Admin cut always wins — overrides ESPN
+  var isCut = (sc.cut===true) || (live&&live.cut);
+  if(live){ return {score:isCut?null:live.score, cut:isCut, rounds:live.rounds||{}}; }
+  return {score:isCut?null:sc.score, cut:isCut, rounds:sc.rounds||{}};
 }
 
 function entryTotal(picks, picksObj){
@@ -1091,9 +1094,11 @@ function renderAdmin(){
   h+='</div>';
   h+='<div class="section-label">Enter Scores (to par)</div>';
   h+='<div class="adm-card">';
-  h+='<div class="adm-title">Live Scoring';
-  if(TOURNAMENT.type==="daily") h+=' <span style="font-size:9px;font-weight:700;color:var(--blue)">· enter per-round scores for daily pool</span>';
-  h+='</div>';
+  h+='<div class="adm-title" style="display:flex;align-items:center;justify-content:space-between">Live Scoring';
+  h+='<div style="display:flex;gap:6px">';
+  if(TOURNAMENT.type==="daily") h+='<span style="font-size:9px;font-weight:700;color:var(--blue)">enter round scores</span>';
+  h+='<button id="b-sort-score" style="font-size:8px;font-weight:800;padding:2px 7px;border-radius:5px;border:1.5px solid var(--border2);background:#fff;cursor:pointer;font-family:inherit">Sort</button>';
+  h+='</div></div>';
   var _isDailyPool = TOURNAMENT.type==="daily";
   for(var i=0;i<GOLFERS.length;i++){
     var g=GOLFERS[i];
@@ -1959,10 +1964,15 @@ function loadData(){
     DB.ref(BASE+"/scores").on("value",function(sn){
       var raw=sn.val()||{};
       ST.scores={};
+      ST._rawScores=raw; // keep raw keyed by ukey for fallback lookup
       for(var k in raw){
+        // Match by ukey against GOLFERS if loaded
+        var matched=false;
         for(var i=0;i<GOLFERS.length;i++){
-          if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];break;}
+          if(ukey(GOLFERS[i].name)===k){ST.scores[GOLFERS[i].name]=raw[k];matched=true;break;}
         }
+        // Fallback: also store by raw key so cut flags work before GOLFERS loads
+        if(!matched) ST.scores[k]=raw[k];
       }
       draw();
     });
