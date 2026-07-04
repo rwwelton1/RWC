@@ -150,6 +150,7 @@ a{color:inherit;text-decoration:none}
 <div id="toast"></div>
 
 <script>
+var BASE = "wimbledon2026";
 var MASTER_PW = "Sloop";
 var PTS = {r32:2, r16:4, qf:8, sf:15, f:25, champ:40};
 var MAX_PTS = 32*2 + 16*4 + 8*8 + 4*15 + 2*25 + 1*40; // 342
@@ -225,8 +226,6 @@ var ALL_IDS=R32.map(function(m){return m.id;});
 var _params=new URLSearchParams(window.location.search);
 var GROUP_ID=_params.get("group")||null;
 var URL_USER=_params.get("user")||null;
-var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/wimbledon":"wimbledon2026";
-var GROUP_ADMIN_PW=null;
 
 var ST={page:"leaderboard",user:URL_USER,viewUser:null,admin:false,picks:{},results:{},locked:{},bracketRound:0};
 var PARTS=URL_USER?[URL_USER]:[];
@@ -305,98 +304,6 @@ function calcRoundCorrect(user,rnd){
 }
 function pickCount(user){return Object.keys((ST.picks||{})[ukey(user)]||{}).length;}
 
-// ── ESPN FETCH ────────────────────────────────────────────────────────────────
-function fetchESPN(){
-  var statusEl=document.getElementById("espn-status");
-  if(statusEl)statusEl.textContent="Fetching from ESPN...";
-  // Wimbledon 2026: June 30 – July 13
-  var url="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=200";
-  fetch(url).then(function(r){return r.json();}).then(function(data){
-    var filled=0,skipped=0;
-    var events=(data.events||data.sports&&data.sports[0]&&data.sports[0].leagues&&data.sports[0].leagues[0]&&data.sports[0].leagues[0].events)||[];
-    // Also try top-level competitions
-    if(!events.length&&data.competitions) events=data.competitions;
-
-    // Build a flat list of completed matches: {playerA, playerB, winner}
-    var matches=[];
-    events.forEach(function(ev){
-      var comps=ev.competitions||ev.matches||[];
-      if(!comps.length&&ev.competitors) comps=[ev]; // single match event
-      comps.forEach(function(comp){
-        var competitors=comp.competitors||comp.players||[];
-        if(competitors.length<2)return;
-        var status=(comp.status&&comp.status.type&&comp.status.type.name)||"";
-        var completed=status==="STATUS_FINAL"||status==="FINAL"||(comp.status&&comp.status.type&&comp.status.type.completed);
-        if(!completed)return;
-        var p0=competitors[0],p1=competitors[1];
-        var name0=(p0.athlete&&(p0.athlete.shortName||p0.athlete.displayName))||p0.displayName||"";
-        var name1=(p1.athlete&&(p1.athlete.shortName||p1.athlete.displayName))||p1.displayName||"";
-        var won0=p0.winner,won1=p1.winner;
-        if(name0&&name1&&(won0||won1)){
-          matches.push({a:name0,b:name1,winner:won0?name0:name1});
-        }
-      });
-    });
-
-    // Also check nested rounds inside events
-    events.forEach(function(ev){
-      (ev.rounds||[]).forEach(function(rnd){
-        (rnd.matches||rnd.competitions||[]).forEach(function(comp){
-          var competitors=comp.competitors||[];
-          if(competitors.length<2)return;
-          var completed=comp.status&&comp.status.type&&comp.status.type.completed;
-          if(!completed)return;
-          var p0=competitors[0],p1=competitors[1];
-          var name0=(p0.athlete&&(p0.athlete.shortName||p0.athlete.displayName))||"";
-          var name1=(p1.athlete&&(p1.athlete.shortName||p1.athlete.displayName))||"";
-          var won0=p0.winner;
-          if(name0&&name1)(matches.push({a:name0,b:name1,winner:won0?name0:name1}));
-        });
-      });
-    });
-
-    if(!matches.length){
-      if(statusEl)statusEl.textContent="No completed matches found yet.";
-      return;
-    }
-
-    // Match ESPN names to our R32 player names (fuzzy last-name match)
-    function lastName(n){return n.split(" ").slice(-1)[0].toLowerCase();}
-    function matchName(espnName, ourName){
-      var en=espnName.toLowerCase(),on=ourName.toLowerCase();
-      if(en===on)return true;
-      if(on.indexOf(en)>=0||en.indexOf(on)>=0)return true;
-      if(lastName(espnName)===lastName(ourName))return true;
-      return false;
-    }
-
-    var allMids=R32.map(function(m){return m.id;});
-    ["r16","qf","sf","f","champ"].forEach(function(r){TREE[r].forEach(function(m){allMids.push(m.id);});});
-
-    matches.forEach(function(espnMatch){
-      allMids.forEach(function(mid){
-        if(getR(mid))return; // already set
-        var teams=getTeams(mid);
-        var tA=teams[0],tB=teams[1];
-        if(!tA||!tB)return;
-        var aMatchesA=matchName(espnMatch.a,tA)||matchName(espnMatch.b,tA);
-        var aMatchesB=matchName(espnMatch.a,tB)||matchName(espnMatch.b,tB);
-        if(!aMatchesA||!aMatchesB)return;
-        // Both teams match this ESPN match — set the result
-        var winnerOur=matchName(espnMatch.winner,tA)?tA:tB;
-        saveR(mid,winnerOur);
-        filled++;
-      });
-    });
-
-    if(statusEl)statusEl.textContent="Done! Filled "+filled+" result"+(filled!==1?"s":"")+(skipped?" ("+skipped+" skipped)":"")+" from ESPN.";
-    if(filled>0)draw();
-  }).catch(function(err){
-    if(statusEl)statusEl.textContent="Error fetching ESPN: "+err.message;
-    console.error("ESPN fetch error",err);
-  });
-}
-
 var _lastDataHash = null;
 function _dataHash(d){
   try{return JSON.stringify({p:d.picks||{},r:d.results||{},l:d.locked||{}});}catch(e){return "";}
@@ -413,14 +320,10 @@ function _onData(d){
 function loadData(){
   if(!DB){draw();return;}
   if(GROUP_ID){
-    // Read full group node to get players AND adminPw in one call
-    DB.ref("groups/"+GROUP_ID).once("value",function(sn){
-      var g=sn.val()||{};
-      var players=g.players||[];
+    DB.ref("groups/"+GROUP_ID+"/players").once("value",function(sn){
+      var players=sn.val()||[];
       if(players.length) PARTS=players;
       else if(URL_USER&&PARTS.indexOf(URL_USER)<0) PARTS=[URL_USER];
-      GROUP_ADMIN_PW=g.adminPw||g.groupAdminPw||null;
-      // Now subscribe to pool data at groups/GROUP_ID/data/wimbledon
       DB.ref(BASE).on("value",function(sn2){_onData(sn2.val()||{});});
     });
   } else {
@@ -751,9 +654,9 @@ function renderAdmin(){
   // ESPN fetch button
   h+='<div class="adm-sec-label">&#127935; ESPN Auto-Fill Results</div>';
   h+='<div class="adm-card" style="display:flex;flex-direction:column;gap:8px">';
-  h+='<div style="font-size:9px;color:var(--muted);line-height:1.6">Fetch completed match results from ESPN and auto-fill all rounds. Only fills matches not yet set.</div>';
-  h+='<button id="b-fetch-espn" style="padding:11px;border-radius:10px;font-size:12px;font-weight:900;border:2px solid var(--border);background:var(--green-bg);color:var(--green);font-family:\'Nunito\',sans-serif;cursor:pointer;box-shadow:4px 4px 0 var(--border)">&#8635; Fetch from ESPN</button>';
-  h+='<div id="espn-status" style="font-size:9px;font-weight:700;color:var(--muted);min-height:16px"></div>';
+  h+='<div style="font-size:9px;color:var(--muted);line-height:1.6">Fetch completed Wimbledon match results from ESPN and auto-fill winners. Only fills matches not already set — never touches picks.</div>';
+  h+='<button id="b-fetch-espn" style="padding:11px;border-radius:10px;font-size:12px;font-weight:900;border:2px solid var(--border);background:var(--green-bg);color:var(--green);font-family:\'Nunito\',sans-serif;cursor:pointer;box-shadow:4px 4px 0 var(--border)">&#8635; Fetch Results from ESPN</button>';
+  h+='<div id="espn-status" style="font-size:9px;font-weight:700;color:var(--muted);min-height:14px"></div>';
   h+='</div>';
 
   // Player locks
@@ -810,6 +713,98 @@ function renderAdmin(){
   return h;
 }
 
+
+// ── ESPN FETCH ────────────────────────────────────────────────────────────────
+function fetchESPN(){
+  var statusEl=document.getElementById("espn-status");
+  function setStatus(msg){if(statusEl)statusEl.textContent=msg;}
+  setStatus("Fetching from ESPN…");
+
+  // Fetch the full ATP scoreboard covering Wimbledon fortnight
+  var url="https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20260629-20260713&limit=500";
+  fetch(url).then(function(r){return r.json();}).then(function(data){
+
+    // Walk: data.events[] → find Wimbledon → groupings[] → mens-singles → competitions[]
+    var competitions=[];
+    (data.events||[]).forEach(function(ev){
+      // Filter to Wimbledon only
+      var name=(ev.name||ev.shortName||"").toLowerCase();
+      if(name.indexOf("wimbledon")<0) return;
+      (ev.groupings||[]).forEach(function(g){
+        var slug=(g.grouping&&g.grouping.slug)||"";
+        // Only Men's Singles
+        if(slug.indexOf("mens-singles")<0&&slug.indexOf("men-singles")<0) return;
+        (g.competitions||[]).forEach(function(comp){competitions.push(comp);});
+      });
+    });
+
+    if(!competitions.length){
+      setStatus("No Wimbledon men's singles matches found yet. Check back once play starts.");
+      return;
+    }
+
+    var filled=0;
+
+    function lastName(n){return(n||"").split(" ").slice(-1)[0].toLowerCase().replace(/[^a-z]/g,"");}
+    function nameMatch(espnName, ourName){
+      var en=(espnName||"").toLowerCase(), on=(ourName||"").toLowerCase();
+      if(en===on) return true;
+      // shortName "J. Sinner" vs "Jannik Sinner" — check last name
+      if(lastName(espnName)===lastName(ourName)) return true;
+      // partial: one contains the other
+      if(en.indexOf(on)>=0||on.indexOf(en)>=0) return true;
+      return false;
+    }
+
+    // Build flat list of completed match results
+    var results=[];
+    competitions.forEach(function(comp){
+      var completed=comp.status&&comp.status.type&&comp.status.type.completed;
+      if(!completed) return;
+      var comps=comp.competitors||[];
+      if(comps.length<2) return;
+      var p0=comps[0],p1=comps[1];
+      var n0=(p0.athlete&&(p0.athlete.fullName||p0.athlete.shortName))||"";
+      var n1=(p1.athlete&&(p1.athlete.fullName||p1.athlete.shortName))||"";
+      var winner=p0.winner?n0:p1.winner?n1:"";
+      if(n0&&n1&&winner) results.push({a:n0,b:n1,winner:winner});
+    });
+
+    if(!results.length){
+      setStatus("Wimbledon found but no completed men's singles matches yet.");
+      return;
+    }
+
+    // Match against our bracket
+    var allMids=R32.map(function(m){return m.id;});
+    ["r16","qf","sf","f","champ"].forEach(function(r){TREE[r].forEach(function(m){allMids.push(m.id);});});
+
+    results.forEach(function(espnMatch){
+      allMids.forEach(function(mid){
+        if(getR(mid)) return; // already set, don't overwrite
+        var teams=getTeams(mid);
+        var tA=teams[0],tB=teams[1];
+        if(!tA||!tB) return;
+        var aMatchA=nameMatch(espnMatch.a,tA)||nameMatch(espnMatch.b,tA);
+        var aMatchB=nameMatch(espnMatch.a,tB)||nameMatch(espnMatch.b,tB);
+        if(!aMatchA||!aMatchB) return;
+        var winnerOur=nameMatch(espnMatch.winner,tA)?tA:tB;
+        saveR(mid,winnerOur);
+        filled++;
+      });
+    });
+
+    var msg="Done — "+filled+" result"+(filled!==1?"s":"")+" filled from "+results.length+" completed matches.";
+    if(!filled) msg="Matched "+results.length+" ESPN results but none lined up with unset bracket slots.";
+    setStatus(msg);
+    if(filled>0) draw();
+
+  }).catch(function(err){
+    setStatus("ESPN fetch error: "+err.message);
+    console.error("ESPN fetch",err);
+  });
+}
+
 // ── LOGO ──────────────────────────────────────────────────────────────────────
 var LOGO_TEXT=[{fill:"#ffffff",stroke:"#111111"},{fill:"#e8c840",stroke:"#111111"},{fill:"#fdf8ee",stroke:"#0a2088"},{fill:"#ff8fb3",stroke:"#111111"},{fill:"#8ed1ff",stroke:"#111111"},{fill:"#9ef2c8",stroke:"#111111"},{fill:"#ffd166",stroke:"#3a2a00"},{fill:"#ffffff",stroke:"#4c1d95"}];
 var LOGO_SHADOW=[{near:"#111111",trail:["#1a4fd6","#0a2088","#060e44"]},{near:"#111111",trail:["#d62839","#8b0000","#4a0000"]},{near:"#111111",trail:["#2d8a4e","#1a5c33","#0d2e1a"]},{near:"#1e1033",trail:["#7c3aed","#4c1d95","#2e1065"]},{near:"#3a1a00",trail:["#f97316","#c2410c","#7c2d12"]},{near:"#111111",trail:["#64748b","#334155","#1e293b"]},{near:"#111111",trail:["#e8c840","#b89a00","#5c4d00"]}];
@@ -852,7 +847,7 @@ function bind(){
   if(el)el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="leaderboard";draw();return;}
     var pw=prompt("Admin password:");if(pw===null)return;
-    if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){ST.admin=true;draw();}else toast("Wrong password");
+    if(pw===MASTER_PW){ST.admin=true;draw();}else toast("Wrong password");
   });
 
   // Bracket picks
