@@ -175,7 +175,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 <body>
 
 <div class="topbar">
-  <div class="topbar-left"><span class="app-name" style="font-size:16px">🏀</span></div>
+  <div class="topbar-left"><a href="index.html" title="Back to Scorecery hub" style="display:flex;align-items:center;justify-content:center;text-decoration:none;background:#ffffff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);padding:3px 7px;gap:3px;line-height:1"><span style="font-size:12px;font-weight:900;color:var(--muted)">&#8592;</span><span style="font-size:16px">🏀</span></a></div>
   <div class="topbar-center">
     <div class="app-name"><span class="scorecery-logo" style="font-size:15px">Scorecery</span></div>
     <span class="app-sub">NBA Summer League · Las Vegas</span>
@@ -234,6 +234,7 @@ var ST={
   importLoading:false,
   importError:"",
   bulkLoading:false,
+  bulkError:"",
   collapsed:{}
 };
 
@@ -467,69 +468,85 @@ function addImportedGames(){
   toast("✓ "+sel.length+" game"+(sel.length>1?"s":"")+" added");
   draw();
 }
-// ── One-shot: pull the ENTIRE tournament date range and file each game under its date ──
+// ── One-shot: pull the ENTIRE tournament and file each game under its date ──
 function espnDateKey(ev){
   var dt=ev&&ev.date?new Date(ev.date):null;
   if(!dt)return null;
   return dt.getFullYear()+"-"+("0"+(dt.getMonth()+1)).slice(-2)+"-"+("0"+dt.getDate()).slice(-2);
 }
 function dayIdForDate(dateKey){ return "date_"+dateKey.replace(/-/g,""); } // stable & idempotent
+// list every YYYYMMDD between VEGAS_START and VEGAS_END inclusive
+function tournamentDates(){
+  var out=[];
+  var s=new Date(VEGAS_START+"T12:00:00"), e=new Date(VEGAS_END+"T12:00:00");
+  for(var d=new Date(s); d<=e; d.setDate(d.getDate()+1)){
+    out.push(d.getFullYear()+""+("0"+(d.getMonth()+1)).slice(-2)+""+("0"+d.getDate()).slice(-2));
+  }
+  return out;
+}
+// file one day's parsed games into state + Firebase (idempotent by espnId)
+function fileDayGames(dk,parsed){
+  var dayId=dayIdForDate(dk),n=0;
+  if(ST.dayIds.indexOf(dayId)===-1)ST.dayIds.push(dayId);
+  var d=new Date(dk+"T12:00:00");
+  ST.dayLabels[dayId]=d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+  if(!ST.games[dayId])ST.games[dayId]={};
+  var byEspn={};
+  activeGames(dayId).forEach(function(gid){var g=ST.games[dayId][gid];if(g&&g.espnId)byEspn[g.espnId]=gid;});
+  parsed.forEach(function(g){
+    var gid=byEspn[g.espnId];
+    if(!gid){ for(var i=0;i<GAME_IDS.length;i++){ if(!ST.games[dayId][GAME_IDS[i]]){gid=GAME_IDS[i];break;} } if(!gid)return; }
+    n++;
+    var obj={away:g.away,home:g.home,awayLogo:g.awayLogo,homeLogo:g.homeLogo,tip:g.tip,tipTs:g.tipTs||0,court:g.court,phase:g.phase,espnId:g.espnId};
+    ST.games[dayId][gid]=obj;
+    if(DB)DB.ref(BASE+"/games/"+dayId+"/"+gid).set(obj);
+    if(g.aScore!==""&&g.hScore!==""){
+      if(!ST.results[dayId])ST.results[dayId]={};
+      ST.results[dayId][gid]={aScore:g.aScore,hScore:g.hScore};
+      if(DB)DB.ref(BASE+"/results/"+dayId+"/"+gid).set({aScore:g.aScore,hScore:g.hScore});
+    }
+  });
+  if(DB)DB.ref(BASE+"/meta/dayLabels/"+dayId).set(ST.dayLabels[dayId]);
+  return n;
+}
 function loadFullTournament(){
-  var s=VEGAS_START.replace(/-/g,""), e=VEGAS_END.replace(/-/g,"");
-  ST.bulkLoading=true;ST.importError="";draw();
-  fetch(ESPN_URL+"?dates="+s+"-"+e+"&limit=400")
-    .then(function(r){return r.json();})
-    .then(function(data){
-      ST.bulkLoading=false;
-      var events=(data&&data.events)||[];
-      if(!events.length){ST.importError="No Vegas games found in "+VEGAS_START+" \u2192 "+VEGAS_END+".";draw();return;}
-      var byDate={};
-      events.forEach(function(ev){
-        var k=espnDateKey(ev);if(!k)return;
-        (byDate[k]=byDate[k]||[]).push(ev);
-      });
-      var dateKeys=Object.keys(byDate).sort();
-      var totalGames=0;
-      dateKeys.forEach(function(dk){
-        var dayId=dayIdForDate(dk);
-        if(ST.dayIds.indexOf(dayId)===-1){ ST.dayIds.push(dayId); }
-        var d=new Date(dk+"T12:00:00");
-        ST.dayLabels[dayId]=d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
-        if(!ST.games[dayId])ST.games[dayId]={};
-        var byEspn={};
-        activeGames(dayId).forEach(function(gid){var g=ST.games[dayId][gid];if(g&&g.espnId)byEspn[g.espnId]=gid;});
-        var parsed=parseEspn({events:byDate[dk]});
-        parsed.forEach(function(g){
-          var gid=byEspn[g.espnId];
-          if(!gid){
-            for(var i=0;i<GAME_IDS.length;i++){ if(!ST.games[dayId][GAME_IDS[i]]){gid=GAME_IDS[i];break;} }
-            if(!gid)return;
-          }
-          totalGames++;
-          var obj={away:g.away,home:g.home,awayLogo:g.awayLogo,homeLogo:g.homeLogo,tip:g.tip,tipTs:g.tipTs||0,court:g.court,phase:g.phase,espnId:g.espnId};
-          ST.games[dayId][gid]=obj;
-          if(DB)DB.ref(BASE+"/games/"+dayId+"/"+gid).set(obj);
-          if(g.aScore!==""&&g.hScore!==""){
-            if(!ST.results[dayId])ST.results[dayId]={};
-            ST.results[dayId][gid]={aScore:g.aScore,hScore:g.hScore};
-            if(DB)DB.ref(BASE+"/results/"+dayId+"/"+gid).set({aScore:g.aScore,hScore:g.hScore});
-          }
+  var dates=tournamentDates();
+  ST.bulkLoading=true;ST.bulkError="";draw();
+  // Fetch each date's single-date scoreboard (the request that already works),
+  // because the Summer League endpoint doesn't honor date ranges reliably.
+  var results=new Array(dates.length), done=0, failures=0;
+  dates.forEach(function(ds,idx){
+    fetch(ESPN_URL+"?dates="+ds+"&limit=100")
+      .then(function(r){return r.json();})
+      .then(function(data){ results[idx]={ds:ds,events:(data&&data.events)||[]}; })
+      .catch(function(){ failures++; results[idx]={ds:ds,events:[]}; })
+      .then(function(){
+        done++;
+        if(done!==dates.length)return;
+        // all requests settled — merge
+        ST.bulkLoading=false;
+        var totalGames=0, daysWithGames=0;
+        results.forEach(function(res){
+          if(!res||!res.events.length)return;
+          var dk=res.ds.slice(0,4)+"-"+res.ds.slice(4,6)+"-"+res.ds.slice(6,8);
+          var parsed=parseEspn({events:res.events});
+          var added=fileDayGames(dk,parsed);
+          if(added)daysWithGames++;
+          totalGames+=added;
         });
+        ST.dayIds.sort();
+        if(DB)DB.ref(BASE+"/meta/dayIds").set(ST.dayIds);
+        if(!ST.curDay&&ST.dayIds.length)ST.curDay=ST.dayIds[ST.dayIds.length-1];
+        if(!totalGames){
+          ST.bulkError=(failures===dates.length)
+            ? "Could not reach ESPN. Check connection and retry."
+            : "No Vegas games found in "+VEGAS_START+" \u2192 "+VEGAS_END+" yet.";
+        } else {
+          toast("\u2713 Loaded "+totalGames+" games across "+daysWithGames+" days"+(failures?(" ("+failures+" date"+(failures>1?"s":"")+" failed)"):""));
+        }
+        draw();
       });
-      ST.dayIds.sort();
-      if(DB){
-        DB.ref(BASE+"/meta/dayIds").set(ST.dayIds);
-        dateKeys.forEach(function(dk){var id=dayIdForDate(dk);DB.ref(BASE+"/meta/dayLabels/"+id).set(ST.dayLabels[id]);});
-      }
-      if(!ST.curDay)ST.curDay=ST.dayIds[ST.dayIds.length-1];
-      toast("\u2713 Loaded "+totalGames+" games across "+dateKeys.length+" days");
-      draw();
-    })
-    .catch(function(){
-      ST.bulkLoading=false;
-      ST.importError="Could not reach ESPN for the full range. Retry, or use single-date import.";
-      draw();
-    });
+  });
 }
 
 function refreshScores(){
@@ -797,9 +814,9 @@ function standingsScreen(){
 function bulkLoadBox(){
   var h='<div class="imp-box" style="border-color:var(--purple);box-shadow:3px 3px 0 var(--purple)">';
   h+='<div style="font-size:11px;font-weight:900;color:var(--purple);margin-bottom:3px">⚡ One-Tap Setup</div>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);line-height:1.5;margin-bottom:9px">Pulls the entire Las Vegas schedule ('+x(VEGAS_START)+' → '+x(VEGAS_END)+') from ESPN and files every game under its date automatically. Safe to run again anytime — it updates scores and adds new games without duplicating.</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);line-height:1.5;margin-bottom:9px">Pulls every day of the Las Vegas schedule ('+x(VEGAS_START)+' → '+x(VEGAS_END)+') from ESPN and files each game under its date automatically. Safe to run again anytime — it updates scores and adds new games without duplicating.</div>';
   h+='<button class="adm-btn btn-purple" id="bulk-load" style="width:100%;padding:11px;font-size:11px"'+(ST.bulkLoading?" disabled":"")+'>'+(ST.bulkLoading?"Loading full tournament…":"🏀 Load Full Tournament")+'</button>';
-  if(ST.importError&&ST.bulkLoading===false)h+='<div style="text-align:center;padding:8px 0 0;font-size:10px;color:var(--red2);font-weight:800">'+x(ST.importError)+'</div>';
+  if(ST.bulkError&&ST.bulkLoading===false)h+='<div style="text-align:center;padding:8px 0 0;font-size:10px;color:var(--red2);font-weight:800">'+x(ST.bulkError)+'</div>';
   return h+'</div>';
 }
 function adminScreen(){
