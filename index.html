@@ -6411,15 +6411,21 @@ function loadAllGroups(cb) {
   // Refresh from Firebase if cache is stale or missing
   if(_groupsCache && now - _groupsCacheTime < 30000) return;
   if(DB) {
+    var _settled = false;
+    function _resolve(groups){
+      if(_settled) return; _settled = true;
+      _groupsCache = groups; _groupsCacheTime = Date.now(); cb(_groupsCache);
+    }
+    // Safety net: if neither callback fires within 6s (e.g. a permission-denied that
+    // silently stalls, or a dropped connection), resolve to an empty list so the
+    // "Find a Group" table shows its empty state instead of hanging on "Loading…".
+    var _timer = setTimeout(function(){ _resolve(_groupsCache || []); }, 6000);
     DB.ref("groups").once("value", function(sn){
-      var val = sn.val()||{};
-      _groupsCache = Object.values(val);
-      _groupsCacheTime = Date.now();
-      cb(_groupsCache);
+      clearTimeout(_timer);
+      _resolve(Object.values(sn.val()||{}));
     }, function(err){
-      // Read failed or denied — resolve with an empty list so the UI never hangs on "Loading…"
-      if(!_groupsCache){ _groupsCache = []; _groupsCacheTime = Date.now(); }
-      cb(_groupsCache);
+      clearTimeout(_timer);
+      _resolve(_groupsCache || []);
     });
   } else if(!_groupsCache) cb([]);
 }
