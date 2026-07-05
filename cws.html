@@ -239,7 +239,7 @@ var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var PUBLIC_VIEW=(function(){ return /[?&]public=1/.test(location.search); })();
 var GROUP_ADMIN_PW=null;
-var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cws2026":"cws2026";
+var BASE=GROUP_ID?"groups/"+GROUP_ID+"/data/cws2026":"legacy/cws2026";
 var MASTER_PW="Sloop"; // default, overwritten by Firebase on load
 
 var COLORS={
@@ -357,7 +357,7 @@ function getMyOwnP(gid){if(!ST.user)return null;return ((ST.picks||{})[ukey(ST.u
 function getSlot(gid){return getR(gid)||getP(gid)||null;}
 function saveP(gid,v){if(!ST.user||!DB)return;DB.ref(BASE+"/picks/"+ukey(ST.user)+"/"+gid).set(v);}
 function removeP(gid){if(!ST.user||!DB)return;DB.ref(BASE+"/picks/"+ukey(ST.user)+"/"+gid).remove();}
-function saveR(gid,v){if(!DB)return;v?DB.ref(BASE+"/results/"+gid).set(v):DB.ref(BASE+"/results/"+gid).remove();setTimeout(syncScoresToGroup,500);}
+function saveR(gid,v){if(!DB)return;v?DB.ref(BASE+"/results/"+gid).set(v):DB.ref(BASE+"/results/"+gid).remove();}
 
 // ── Pod winner helpers ────────────────────────────────────
 function podTeams(pod){
@@ -389,14 +389,6 @@ function calcScore(user){
 }
 function totalPicks(user){return Object.keys((ST.picks||{})[ukey(user)]||{}).length;}
 
-function syncScoresToGroup(){
-  if(!DB||!GROUP_ID)return;
-  var scores={};
-  PARTS.forEach(function(p){ scores[ukey(p)]=calcScore(p); });
-  DB.ref("groups/"+GROUP_ID+"/data/cws2026/scores").set(scores);
-}
-
-
 // ── Firebase ─────────────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
@@ -421,9 +413,9 @@ function loadData(){
   }
   function s3(){
     DB.ref("globalSettings/masterPw").on("value",function(sn){ if(sn.val()) MASTER_PW=sn.val(); });
-    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();setTimeout(syncScoresToGroup,500);});
+    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();_restoreScroll();});
     DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};draw();_restoreScroll();});
-    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();setTimeout(syncScoresToGroup,500);});
+    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();_restoreScroll();});
   }
   s1();
 }
@@ -549,15 +541,14 @@ function renderScoresInto(){
   if(live.length) h+=section(live,"🔴 In Progress");
   h+=section(pre,"🕐 Upcoming");
   h+=section(done,"✓ Final");
-  h+='<div style="text-align:center;padding:10px 0 4px;font-size:7px;color:var(--dim)">Updated '+ago+'s ago &middot; pull to refresh &middot; via ESPN</div>';
+  h+='<div style="text-align:center;padding:10px 0 4px;font-size:7px;color:var(--dim)">Updated '+ago+'s ago &middot; auto-refreshes every 60s &middot; via ESPN</div>';
   el.innerHTML=h;
 }
 
 function startScoreRefresh(){
   clearInterval(_scTimer);
-  // Only fetch if no recent data
-  if(!_scData||Date.now()-_scLastFetch>300000) fetchScoreboard();
-  else renderScoreboard();
+  fetchScoreboard();
+  _scTimer=setInterval(function(){if(ST.page==="scores")fetchScoreboard();},60000);
 }
 function stopScoreRefresh(){clearInterval(_scTimer);_scTimer=null;}
 function tsHTML(name, seed, rec, gid, canPick){
@@ -1348,21 +1339,6 @@ function setGroupPublic(val){
 }
 
 loadData();
-// Pull-to-refresh for scores tab
-(function(){
-  var _ptrStartY=0,_ptrActive=false;
-  document.addEventListener("touchstart",function(e){
-    _ptrStartY=e.touches[0].clientY;
-    _ptrActive=(window.scrollY===0&&ST.page==="scores");
-  },{passive:true});
-  document.addEventListener("touchend",function(e){
-    if(!_ptrActive)return;
-    var dy=e.changedTouches[0].clientY-_ptrStartY;
-    if(dy>60) fetchScoreboard();
-    _ptrActive=false;
-  },{passive:true});
-})();
-
 </script>
 </body>
 </html>
