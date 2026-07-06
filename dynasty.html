@@ -460,6 +460,25 @@ function recordUserLeagueResult(won, isConfGame){
   if(isConfGame){ if(won)t.cw++; else t.cl++; }
 }
 // End-of-season rating drift: teams that beat their rating-expected record improve; others decline.
+// End-of-season league update: categorize each team by how last season went vs what their
+// rating expected, nudge their overall (and off/def) up or down by tier, then WIPE all records.
+// This is the core "living league" mechanic — records never accumulate because they reset here.
+function seasonTier(winPct, expPct){
+  var d = winPct - expPct;           // how far above/below expectation
+  if(d >=  0.22) return 3;           // great season
+  if(d >=  0.08) return 1;           // good season
+  if(d <= -0.22) return -3;          // bad season
+  if(d <= -0.08) return -1;          // poor season
+  return 0;                          // about as expected
+}
+function tierMove(tier){
+  // convert a tier into an overall-rating change, with a little randomness
+  if(tier=== 3) return rnd(2,3);
+  if(tier=== 1) return rnd(0,2);
+  if(tier===-1) return rnd(-2,0);
+  if(tier===-3) return rnd(-3,-2);
+  return rnd(-1,1);                  // as expected: hold, tiny noise
+}
 function driftLeagueRatings(){
   var L=ST.save.league; if(!L)return;
   Object.keys(L.teams).forEach(function(n){
@@ -467,14 +486,18 @@ function driftLeagueRatings(){
     var games=t.w+t.l;
     if(games){
       var winPct=t.w/games;
-      var expPct=Math.max(0.1,Math.min(0.9,(t.ovr-52)/45));
-      var delta=winPct-expPct;   // + = overperformed
-      var move=Math.round(delta*8 + rnd(-1,1));
+      var expPct=Math.max(0.1,Math.min(0.9,(t.ovr-52)/45)); // what this rating "should" win
+      var tier=seasonTier(winPct, expPct);
+      var move=tierMove(tier);
+      // gentle pull toward the middle (74) so ratings don't runaway to the extremes over many seasons
+      if(t.ovr>86 && move>0) move=Math.max(0,move-1);
+      if(t.ovr<62 && move<0) move=Math.min(0,move+1);
       t.off=Math.max(48,Math.min(99,t.off+move));
       t.def=Math.max(48,Math.min(99,t.def+move));
       t.ovr=Math.round((t.off+t.def)/2);
+      t.lastTier=tier; // remembered for flavor/labels if needed
     }
-    // ALWAYS reset season records (previously zero-game teams were skipped)
+    // wipe last season's records — every team starts the new season 0-0
     t.w=0; t.l=0; t.cw=0; t.cl=0;
   });
   L.week=0;
@@ -534,18 +557,18 @@ function loadData(){
       ST.save=v;
       if(!ST.save.league) ST.save.league=initLeague(); // migrate pre-league saves
       if(!ST.save.gameplan) ST.save.gameplan={offBalance:50, defBalance:50}; // migrate pre-gameplan saves
-      // repair bug: if the league recorded more games for your team than you've actually played
-      // this season, the per-season reset failed in an older build — resync all league records now.
-      if(ST.save.league && ST.save.league.teams[ST.save.school]){
-        var _mt=ST.save.league.teams[ST.save.school];
-        var _played=(ST.save.schedule||[]).filter(function(g){return g.result;}).length;
-        if((_mt.w+_mt.l) > _played+1){
-          Object.keys(ST.save.league.teams).forEach(function(n){
-            var t=ST.save.league.teams[n]; t.w=0;t.l=0;t.cw=0;t.cl=0;
-          });
-          // re-run league weeks up to the current week so standings reflect the season so far
-          var _wk=ST.save.week||0;
-          for(var _i=0;_i<_wk;_i++){ simLeagueWeek(ST.save.school); }
+      // repair bug: older builds failed to reset league records between seasons, so teams
+      // accumulated conference records across years (e.g. Boise 21-1). Detect ANY team whose
+      // games-played exceeds what one season allows, then resync the whole league to this season.
+      if(ST.save.league && ST.save.league.teams){
+        var _teams=ST.save.league.teams;
+        var _wkNow=ST.save.week||0;
+        var _maxGames=0;
+        Object.keys(_teams).forEach(function(n){ var t=_teams[n]; var g=t.w+t.l; if(g>_maxGames)_maxGames=g; });
+        // a real season is ~12 games; anything beyond ~14 means cross-season accumulation
+        if(_maxGames > 14){
+          Object.keys(_teams).forEach(function(n){ var t=_teams[n]; t.w=0;t.l=0;t.cw=0;t.cl=0; });
+          for(var _i=0;_i<_wkNow;_i++){ simLeagueWeek(ST.save.school); }
         }
       }
       // migrate rosters to have progression baselines
@@ -1943,8 +1966,11 @@ function startNextSeason(){
   s.expectWins=expectWinsFor(s.prestige);
   s.schedule=genSchedule({n:s.school,c:s.conf,p:s.prestige});
   s.budget=budgetFor(s.prestige,s.role);
-  // ensure THIS team's league record is clean for the new season (belt-and-suspenders vs drift timing)
-  if(s.league && s.league.teams[s.school]){ var mt=s.league.teams[s.school]; mt.w=0; mt.l=0; mt.cw=0; mt.cl=0; }
+  // Definitive fix: reset EVERY team's season W/L/conf record at the start of the new season.
+  // (Resetting only at drift-time was fragile — any path that skipped drift let records accumulate.)
+  if(s.league && s.league.teams){
+    Object.keys(s.league.teams).forEach(function(n){ var t=s.league.teams[n]; t.w=0; t.l=0; t.cw=0; t.cl=0; });
+  }
   ST.recruitClass=genRecruitClass(s.prestige); ST.signed={};
   ST.carousel=null; ST.post=null; s._post=null; s._postDone=false;
   ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false;
