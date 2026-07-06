@@ -32,6 +32,11 @@ a{color:inherit;text-decoration:none}
 .app-name{font-size:15px;font-weight:900;white-space:nowrap;letter-spacing:-.02em}
 .app-sub{font-size:9px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase;letter-spacing:.05em;margin-top:2px;display:block}
 .tag{background:var(--cream);border:2px solid var(--border);border-radius:20px;padding:3px 9px;font-size:9px;font-weight:800;box-shadow:2px 2px 0 var(--border)}
+.top-actions{display:flex;align-items:center;gap:5px}
+.top-btn{width:30px;height:30px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;background:#fff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);cursor:pointer;padding:0;line-height:1}
+.top-btn:active{transform:translate(2px,2px);box-shadow:none}
+.top-restart{color:var(--red2);font-size:16px;font-weight:900}
+@media(max-width:380px){.top-actions .tag{display:none}}
 .scorecery-logo{font-weight:900;color:#fff;text-transform:uppercase;letter-spacing:.05em;-webkit-text-stroke:3px #111;text-shadow:1px 1px 0 #111,2px 2px 0 #111,3px 3px 0 #111,5px 5px 0 #c9082a,7px 7px 0 #17408b,8px 8px 0 #0d2a5c;paint-order:stroke fill}
 
 .btn{border-radius:8px;padding:5px 12px;font-size:10px;font-weight:800;border:2px solid var(--border);box-shadow:2px 2px 0 var(--border);font-family:'Nunito',sans-serif;transition:transform .1s,box-shadow .1s}
@@ -414,17 +419,38 @@ function simLeagueGame(aName,bName,neutralHome){
 // The user's team result is recorded separately (from their real game).
 function simLeagueWeek(excludeName){
   var L=ST.save.league; if(!L)return;
-  var names=Object.keys(L.teams).filter(function(n){return n!==excludeName;});
-  // shuffle
-  for(var i=names.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var tmp=names[i];names[i]=names[j];names[j]=tmp; }
-  for(var k=0;k+1<names.length;k+=2){
-    var a=names[k], b=names[k+1];
-    var sameConf=L.teams[a].c===L.teams[b].c;
-    var r=simLeagueGame(a,b,false);
-    var loser=(r.w===a)?b:a;
-    L.teams[r.w].w++; L.teams[loser].l++;
-    if(sameConf){ L.teams[r.w].cw++; L.teams[loser].cl++; }
-  }
+  // Group non-user teams by conference and pair WITHIN each conference so everyone
+  // builds a realistic conference record (random global pairing produced 0-0 teams and noise).
+  var byConf={};
+  Object.keys(L.teams).forEach(function(n){
+    if(n===excludeName)return;
+    var c=L.teams[n].c;
+    (byConf[c]=byConf[c]||[]).push(n);
+  });
+  Object.keys(byConf).forEach(function(c){
+    var names=byConf[c];
+    // shuffle within conference
+    for(var i=names.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var tmp=names[i];names[i]=names[j];names[j]=tmp; }
+    for(var k=0;k+1<names.length;k+=2){
+      var a=names[k], b=names[k+1];
+      var r=simLeagueGame(a,b,false);
+      var loser=(r.w===a)?b:a;
+      L.teams[r.w].w++; L.teams[loser].l++;
+      L.teams[r.w].cw++; L.teams[loser].cl++;   // in-conference game
+    }
+    // if odd team out this week, give it a non-conference game (counts to overall, not conf)
+    if(names.length%2===1){
+      var odd=names[names.length-1];
+      // pick a random opponent from another conference
+      var others=Object.keys(L.teams).filter(function(n){return n!==excludeName&&n!==odd&&L.teams[n].c!==c;});
+      if(others.length){
+        var opp=others[Math.floor(Math.random()*others.length)];
+        var r2=simLeagueGame(odd,opp,false);
+        var los=(r2.w===odd)?opp:odd;
+        L.teams[r2.w].w++; L.teams[los].l++;   // overall only, no conf
+      }
+    }
+  });
   L.week++;
 }
 // Record the USER team's game result into the league standings.
@@ -438,16 +464,17 @@ function driftLeagueRatings(){
   var L=ST.save.league; if(!L)return;
   Object.keys(L.teams).forEach(function(n){
     var t=L.teams[n];
-    var games=t.w+t.l; if(!games)return;
-    var winPct=t.w/games;
-    // expected win pct from ovr (ovr 88≈.80, 64≈.30)
-    var expPct=Math.max(0.1,Math.min(0.9,(t.ovr-52)/45));
-    var delta=winPct-expPct;   // + = overperformed
-    var move=Math.round(delta*8 + rnd(-1,1));  // scale; small random noise
-    t.off=Math.max(48,Math.min(99,t.off+move));
-    t.def=Math.max(48,Math.min(99,t.def+move));
-    t.ovr=Math.round((t.off+t.def)/2);
-    // reset season records
+    var games=t.w+t.l;
+    if(games){
+      var winPct=t.w/games;
+      var expPct=Math.max(0.1,Math.min(0.9,(t.ovr-52)/45));
+      var delta=winPct-expPct;   // + = overperformed
+      var move=Math.round(delta*8 + rnd(-1,1));
+      t.off=Math.max(48,Math.min(99,t.off+move));
+      t.def=Math.max(48,Math.min(99,t.def+move));
+      t.ovr=Math.round((t.off+t.def)/2);
+    }
+    // ALWAYS reset season records (previously zero-game teams were skipped)
     t.w=0; t.l=0; t.cw=0; t.cl=0;
   });
   L.week=0;
@@ -507,6 +534,20 @@ function loadData(){
       ST.save=v;
       if(!ST.save.league) ST.save.league=initLeague(); // migrate pre-league saves
       if(!ST.save.gameplan) ST.save.gameplan={offBalance:50, defBalance:50}; // migrate pre-gameplan saves
+      // repair bug: if the league recorded more games for your team than you've actually played
+      // this season, the per-season reset failed in an older build — resync all league records now.
+      if(ST.save.league && ST.save.league.teams[ST.save.school]){
+        var _mt=ST.save.league.teams[ST.save.school];
+        var _played=(ST.save.schedule||[]).filter(function(g){return g.result;}).length;
+        if((_mt.w+_mt.l) > _played+1){
+          Object.keys(ST.save.league.teams).forEach(function(n){
+            var t=ST.save.league.teams[n]; t.w=0;t.l=0;t.cw=0;t.cl=0;
+          });
+          // re-run league weeks up to the current week so standings reflect the season so far
+          var _wk=ST.save.week||0;
+          for(var _i=0;_i<_wk;_i++){ simLeagueWeek(ST.save.school); }
+        }
+      }
       // migrate rosters to have progression baselines
       if(ST.save.roster) ST.save.roster.forEach(function(p){
         if(p.startOvr==null)p.startOvr=p.ovr;
@@ -918,10 +959,30 @@ function draw(){
 }
 function renderTop(){
   var r=document.getElementById("topbar-right");
-  if(ST.save) r.innerHTML='<span class="tag">'+x(ST.save.school)+' · '+ST.save.role+'</span>';
-  else r.innerHTML='<span class="tag">New Dynasty</span>';
+  if(ST.save){
+    r.innerHTML='<div class="top-actions">'+
+      '<button class="top-btn" id="top-save" title="Save game">💾</button>'+
+      '<button class="top-btn top-restart" id="top-restart" title="Restart dynasty">↺</button>'+
+      '<span class="tag">'+x(ST.save.school)+' · '+ST.save.role+'</span>'+
+      '</div>';
+  } else {
+    r.innerHTML='<span class="tag">New Dynasty</span>';
+  }
   var sub=document.getElementById("app-sub");
   if(sub) sub.textContent = ST.save ? ("CFB Dynasty · "+(ST.save.role==="HC"?"Head Coach":(ST.save.role==="DC"?"Defensive Coordinator":"Offensive Coordinator"))) : "CFB Dynasty";
+  // wire top-bar actions (renderTop runs on every draw)
+  var sv=document.getElementById("top-save");
+  if(sv)sv.onclick=function(){ persist(); toast("✓ Game saved"); };
+  var rs=document.getElementById("top-restart");
+  if(rs)rs.onclick=function(){ restartDynasty(); };
+}
+// Restart the whole dynasty from anywhere (with confirmation)
+function restartDynasty(){
+  if(!confirm("Restart your dynasty? This permanently erases your current save — career record, team, and league.")) return;
+  if(DB)DB.ref(BASE()).remove();
+  ST.save=null; ST.fired=null; ST.carousel=null; ST.post=null; ST.confchamp=null;
+  ST.screen="setup"; ST.setup={conf:"SEC",team:null,role:"OC"}; ST.seasonTab="week"; ST.planPick=null;
+  draw();
 }
 
 // ── Setup ────────────────────────────────────────────────
@@ -1142,13 +1203,17 @@ function top25Table(){
 function computeConfStandings(){
   var s=ST.save, L=s.league;
   var table=[];
+  // your REAL conference record straight from your played games (never out of sync)
+  var myCW=0, myCL=0;
+  s.schedule.forEach(function(g){
+    if(g.oc===s.conf && g.result){ if(g.result.us>g.result.them)myCW++; else myCL++; }
+  });
   if(L){
     Object.keys(L.teams).forEach(function(n){
       var t=L.teams[n];
       if(t.c!==s.conf) return;
       var isYou=(n===s.school);
-      // your conference record comes from your real games; others from the league sim
-      var cw=t.cw, cl=t.cl;
+      var cw=isYou?myCW:t.cw, cl=isYou?myCL:t.cl;
       table.push({name:n, p:t.p, you:isYou, cw:cw, cl:cl, ovr:t.ovr});
     });
   }
@@ -1879,6 +1944,8 @@ function startNextSeason(){
   s.expectWins=expectWinsFor(s.prestige);
   s.schedule=genSchedule({n:s.school,c:s.conf,p:s.prestige});
   s.budget=budgetFor(s.prestige,s.role);
+  // ensure THIS team's league record is clean for the new season (belt-and-suspenders vs drift timing)
+  if(s.league && s.league.teams[s.school]){ var mt=s.league.teams[s.school]; mt.w=0; mt.l=0; mt.cw=0; mt.cl=0; }
   ST.recruitClass=genRecruitClass(s.prestige); ST.signed={};
   ST.carousel=null; ST.post=null; s._post=null; s._postDone=false;
   ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false;
