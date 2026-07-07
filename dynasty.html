@@ -131,6 +131,21 @@ a{color:inherit;text-decoration:none}
 .rec-card-meta{font-size:10px;font-weight:700;color:var(--muted);margin-top:1px}
 .rec-recruit-btn{flex-shrink:0;font-size:11px;font-weight:900;background:var(--purple);color:#fff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);padding:6px 10px;cursor:pointer}
 .rec-recruit-btn:active{transform:translate(2px,2px);box-shadow:none}
+.rec-actions{display:flex;gap:6px;margin-top:9px}
+.rec-actions .rec-recruit-btn{flex:1;text-align:center}
+.rec-scout-btn{flex:1;font-size:11px;font-weight:900;background:#fff;color:var(--text);border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);padding:6px 10px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px}
+.rec-scout-btn:active{transform:translate(2px,2px);box-shadow:none}
+.rec-scout-tier{font-size:8px;font-weight:900;background:var(--cream);border-radius:8px;padding:0 5px}
+.rec-scouted{flex:1;font-size:10px;font-weight:800;color:var(--green);display:flex;align-items:center;justify-content:center;border:2px dashed var(--green);border-radius:8px}
+.fuzzy{color:var(--muted);font-weight:900}
+.fuzzy-q{display:inline-block;font-weight:900;color:var(--purple);background:var(--purple-bg);border-radius:4px;padding:0 4px;font-size:9px}
+.fit-dot{font-size:8px;font-weight:900;border-radius:5px;padding:1px 5px;border:1.5px solid}
+.fit-dot.great{color:var(--green);border-color:var(--green)}
+.fit-dot.ok{color:var(--gold-dark);border-color:var(--gold-dark)}
+.fit-dot.poor{color:var(--red2);border-color:var(--red2)}
+.rec-trait{font-size:9px;font-weight:900;border-radius:5px;padding:1px 6px;background:var(--cream);border:1.5px solid var(--border)}
+.rec-trait.gem{color:var(--blue);border-color:var(--blue);background:var(--blue-bg)}
+.rec-trait.bust{color:var(--red2);border-color:var(--red2)}
 .rec-badge{flex-shrink:0;font-size:9px;font-weight:900;border:2px solid var(--border);border-radius:6px;padding:3px 7px}
 .rec-badge.green{background:var(--green);color:#fff}
 .rec-badge.red{background:var(--red-bg);color:var(--red2)}
@@ -143,6 +158,14 @@ a{color:inherit;text-decoration:none}
 .rec-bar-fill.rival{background:#c9a24a}
 .rec-bar-val{font-size:9px;font-weight:900;width:20px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
 .rec-rivals{font-size:9px;font-weight:700;color:var(--muted);margin-top:5px}
+/* recruiting position filter wheel */
+.pos-wheel{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;margin-bottom:4px;-webkit-overflow-scrolling:touch}
+.pos-wheel::-webkit-scrollbar{display:none}
+.pos-chip{flex-shrink:0;display:flex;align-items:center;gap:5px;font-size:12px;font-weight:900;background:#fff;border:2px solid var(--border);border-radius:20px;box-shadow:2px 2px 0 var(--border);padding:6px 12px;cursor:pointer;white-space:nowrap}
+.pos-chip.active{background:var(--purple);color:#fff;border-color:var(--border)}
+.pos-chip:active{transform:translate(2px,2px);box-shadow:none}
+.pos-chip-n{font-size:9px;font-weight:900;background:var(--cream);color:var(--text);border-radius:10px;padding:0 6px;min-width:16px;text-align:center}
+.pos-chip.active .pos-chip-n{background:rgba(255,255,255,.85);color:var(--purple)}
 /* preseason */
 .tabbar-5 .tab-btn{font-size:10px;padding:8px 2px}
 .pre-card{background:#fff;border:2px solid var(--border);border-radius:11px;padding:11px 13px;box-shadow:2px 2px 0 var(--border);margin-bottom:10px}
@@ -691,6 +714,7 @@ var ST={
   editGame:null,    // index of non-conf game being edited (schedule tab)
   showScheme:false, // gameplan scheme panel expanded on week tab
   preTab:"overview", // active tab on the preseason screen
+  recruitPos:"ALL", // position filter on the recruiting board
   planPick:null
 };
 
@@ -765,20 +789,23 @@ function loadData(){
       });
       // migrate to season-long recruiting board
       if(!ST.save.board){ beginSeasonRecruiting(); ST.save._recruited=true; }
+      // migrate boards to have scouting fields
+      if(ST.save.board) ST.save.board.forEach(function(b){
+        if(b.scout==null){ b.scout=0; b.fuzzLo=Math.max(1,b.st-1); b.fuzzHi=Math.min(5,b.st+1); }
+      });
       if(!ST.save.archetype) ST.save.archetype="motivator"; // migrate pre-archetype saves
-      // migrate thin rosters (old 1-starter-per-position) up to realistic depth charts
+      // migrate rosters up to ~3 players per starting slot (deeper depth charts)
       if(ST.save.roster && ST.save.roster.length){
-        var _need={QB:1,RB:1,WR:3,TE:1,OL:5, DL:4,LB:3,CB:2,S:2};
+        var _starters={QB:1,RB:1,WR:3,TE:1,OL:5, DL:4,LB:3,CB:2,S:2};
         var _has={};
         ST.save.roster.forEach(function(p){ _has[p.pos]=(_has[p.pos]||0)+1; });
         var _pr=ST.save.prestige||3;
-        Object.keys(_need).forEach(function(pos){
-          // only fill positions this role actually uses (present in roster or role-appropriate)
+        Object.keys(_starters).forEach(function(pos){
           var roleUses = (ST.save.role==="HC") || (ST.save.role==="OC" && ["QB","RB","WR","TE","OL"].indexOf(pos)>=0) || (ST.save.role==="DC" && ["DL","LB","CB","S"].indexOf(pos)>=0);
           if(!roleUses) return;
-          var have=_has[pos]||0, want=_need[pos]+1; // starters + 1 backup
+          var have=_has[pos]||0, want=_starters[pos]*3; // ~3 per starting slot
           for(var k=have;k<want;k++){
-            var yr=(k<_need[pos])?pick(["SO","JR","SR"]):"FR";
+            var yr = (k<_starters[pos]) ? pick(["SO","JR","SR"]) : (k<_starters[pos]*2 ? pick(["FR","SO","JR"]) : pick(["FR","FR","SO"]));
             ST.save.roster.push(genPlayer(pos,_pr,yr));
           }
         });
@@ -828,11 +855,12 @@ function genStarterRoster(prestige, roleArg){
                 : offPos;
   uniquePos.forEach(function(pos){
     var starters=startersAt(pos);
-    // fill each starting slot with an upperclassman-ish player
-    for(var i=0;i<starters;i++){ r.push(genPlayer(pos,prestige)); }
-    // one freshman backup for depth at each position (more depth at big groups)
-    var backups = pos==="OL" ? 2 : (starters>=3 ? 2 : 1);
-    for(var b=0;b<backups;b++){ r.push(genPlayer(pos,prestige,"FR")); }
+    // For each starting slot, build a 4-year pipeline: one SR, one JR, one SO, one FR.
+    // This guarantees a proper freshman→senior mix at every position from year one.
+    var years=["SR","JR","SO","FR"];
+    for(var slot=0; slot<starters; slot++){
+      years.forEach(function(yr){ r.push(genPlayer(pos,prestige,yr)); });
+    }
   });
   return r;
 }
@@ -866,35 +894,88 @@ function recruitOvr(st){
 // Generate a board of prospects you pursue across the whole season. Each has an interest level
 // in you, a set of rival schools also recruiting them, and commits over time.
 function genRecruitBoard(prestige){
-  var poslist=rolePositions();
-  var size = (ST.save&&ST.save.role==="HC") ? 18 : 12;
+  // 3 prospects per STARTING SLOT — deep positions get more options (OL 5 starters → 15 prospects)
+  var offPos=["QB","RB","WR","TE","OL"];
+  var defPos=["DL","LB","CB","S"];
+  var positions = (ST.save&&ST.save.role==="DC") ? defPos
+                : (ST.save&&ST.save.role==="HC") ? offPos.concat(defPos)
+                : offPos;
   var board=[];
-  for(var i=0;i<size;i++){
-    var pos=pick(poslist);
-    var st=weightedStars(prestige);
-    var dev=Math.random()<0.18?"gem":(Math.random()<0.18?"bust":"normal");
-    // rivals: 1-3 other programs pursuing this prospect, weighted by their prestige
-    var nRivals=1+Math.floor(Math.random()*3);
-    var rivals=[];
-    var pool=FBS_TEAMS.filter(function(t){return t.n!==ST.save.school;});
-    for(var r=0;r<nRivals;r++){
-      var rv=pool.splice(Math.floor(Math.random()*pool.length),1)[0];
-      if(rv) rivals.push({name:rv.n, p:rv.p, interest: 20+Math.floor(Math.random()*25)});
+  positions.forEach(function(pos){
+    var count=startersAt(pos)*3; // QB 3, RB 3, WR 9, TE 3, OL 15, DL 12, LB 9, CB/S 6
+    for(var i=0;i<count;i++){
+      board.push(makeProspect(pos, prestige));
     }
-    // your starting interest scales a little with your prestige vs the prospect's stars
-    var startInterest = Math.max(5, Math.min(48, 25 + (prestige-st)*4 + rnd(-6,6) + (hasArch("recruiter")?10:0)));
-    board.push({
-      id:"r"+Math.random().toString(36).slice(2,8),
-      n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev,
-      interest:startInterest,   // your interest with this recruit (0-100)
-      rivals:rivals,            // competing schools
-      status:"open",            // open | committed | lost
-      committedTo:null
-    });
-  }
-  // sort by stars desc for display
+  });
   board.sort(function(a,b){ return b.st-a.st || b.ovr-a.ovr; });
   return board;
+}
+// Build a single prospect at a given position.
+function makeProspect(pos, prestige){
+  var st=weightedStars(prestige);
+  var dev=Math.random()<0.18?"gem":(Math.random()<0.18?"bust":"normal");
+  var nRivals=1+Math.floor(Math.random()*3);
+  var rivals=[];
+  var pool=FBS_TEAMS.filter(function(t){return t.n!==ST.save.school;});
+  for(var r=0;r<nRivals;r++){
+    var rv=pool.splice(Math.floor(Math.random()*pool.length),1)[0];
+    if(rv) rivals.push({name:rv.n, p:rv.p, interest: 20+Math.floor(Math.random()*25)});
+  }
+  var startInterest = Math.max(5, Math.min(48, 25 + (prestige-st)*4 + rnd(-6,6) + (hasArch("recruiter")?10:0)));
+  var lo=Math.max(1,st-1), hi=Math.min(5,st+1);
+  return {
+    id:"r"+Math.random().toString(36).slice(2,8),
+    n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev,
+    interest:startInterest,
+    rivals:rivals,
+    status:"open",
+    committedTo:null,
+    scout:0,
+    fuzzLo:lo, fuzzHi:hi
+  };
+}
+// Spend a point to scout a prospect — reveals more of their profile in tiers.
+function scoutProspect(id){
+  var s=ST.save, b=(s.board||[]).filter(function(x){return x.id===id;})[0];
+  if(!b || b.status!=="open"){ return; }
+  if(b.scout>=3){ toast("Fully scouted"); return; }
+  if((s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
+  s.recruitPtsLeft--;
+  b.scout++;
+  if(b.scout===1){ b.fuzzLo=b.st; b.fuzzHi=Math.min(5,b.st+ (Math.random()<0.5?0:1)); }
+  persist(); draw();
+}
+// What the stars display looks like at the current scout tier.
+function recruitStarsDisplay(b){
+  if(b.scout>=1){ return stars(b.st); }                 // exact stars once scouted
+  if(b.fuzzLo===b.fuzzHi){ return stars(b.fuzzLo); }
+  return '<span class="fuzzy">'+b.fuzzLo+'-'+b.fuzzHi+'★ <span class="fuzzy-q">?</span></span>'; // fuzzy range
+}
+// What the OVR display looks like at the current scout tier.
+function recruitOvrDisplay(b){
+  if(b.scout>=2){ return b.ovr+' OVR'; }                 // exact OVR at tier 2
+  if(b.scout>=1){ var lo=Math.max(50,b.ovr-4), hi=Math.min(82,b.ovr+4); return '~'+lo+'-'+hi+' OVR'; } // rough range
+  return '<span class="fuzzy-q">OVR ?</span>';           // unknown
+}
+// Does this recruit fit your scheme? (revealed at scout tier 2+). Compares the position's
+// natural scheme lean to your gameplan sliders.
+function recruitFit(b){
+  var gp=getGameplan();
+  // which side of the scheme does this position want?
+  var passPos=["QB","WR","TE"], runPos=["RB","OL"];
+  var blitzPos=["DL","LB"], coverPos=["CB","S"];
+  if(passPos.indexOf(b.pos)>=0){ return gp.offBalance<=45?"great":(gp.offBalance<=60?"ok":"poor"); }
+  if(runPos.indexOf(b.pos)>=0){ return gp.offBalance>=55?"great":(gp.offBalance>=40?"ok":"poor"); }
+  if(blitzPos.indexOf(b.pos)>=0){ return gp.defBalance>=55?"great":(gp.defBalance>=40?"ok":"poor"); }
+  if(coverPos.indexOf(b.pos)>=0){ return gp.defBalance<=45?"great":(gp.defBalance<=60?"ok":"poor"); }
+  return "ok";
+}
+// Dev-trait reveal at scout tier 3.
+function recruitTraitDisplay(b){
+  if(b.scout<3) return "";
+  if(b.dev==="gem")  return '<span class="rec-trait gem">💎 High ceiling</span>';
+  if(b.dev==="bust") return '<span class="rec-trait bust">⚠ Boom or bust</span>';
+  return '<span class="rec-trait">Steady</span>';
 }
 // Points you get to spend each week on recruiting
 function weeklyRecruitPoints(){
@@ -1172,28 +1253,56 @@ function recruitTab(){
   h+='<div class="rec-hdr"><div><div class="rec-hdr-num">'+pts+'</div><div class="rec-hdr-lbl">Points This Week</div></div>'+
      '<div style="text-align:right"><div class="rec-hdr-num" style="color:var(--green)">'+commits+'</div><div class="rec-hdr-lbl">Committed</div></div></div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Spend points on prospects to raise their interest. Rivals push back each week — land a commit by building a clear lead. Needs: <b>'+x(needStr)+'</b></div>';
+  // position filter wheel — chips for All + each position present on the board (with counts)
+  var posSet=[]; s.board.forEach(function(b){ if(posSet.indexOf(b.pos)<0)posSet.push(b.pos); });
+  // order positions naturally (offense then defense)
+  var POS_SEQ=["QB","RB","WR","TE","OL","DL","LB","CB","S"];
+  posSet.sort(function(a,b){ return POS_SEQ.indexOf(a)-POS_SEQ.indexOf(b); });
+  var activePos=ST.recruitPos||"ALL";
+  var openCount=function(pos){ return s.board.filter(function(b){ return b.status==="open" && (pos==="ALL"||b.pos===pos); }).length; };
+  h+='<div class="pos-wheel">';
+  h+='<button class="pos-chip'+(activePos==="ALL"?" active":"")+'" data-recpos="ALL">All <span class="pos-chip-n">'+openCount("ALL")+'</span></button>';
+  posSet.forEach(function(pos){
+    h+='<button class="pos-chip'+(activePos===pos?" active":"")+'" data-recpos="'+pos+'">'+pos+' <span class="pos-chip-n">'+openCount(pos)+'</span></button>';
+  });
+  h+='</div>';
   // sort: open (by interest desc) first, then committed, then lost
   var order={open:0,committed:1,lost:2};
-  var board=s.board.slice().sort(function(a,b){
-    if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
-    return b.interest-a.interest;
-  });
-  h+='<div class="scroll-list" style="max-height:52vh">';
+  var board=s.board.slice()
+    .filter(function(b){ return activePos==="ALL" || b.pos===activePos; })
+    .sort(function(a,b){
+      if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
+      return b.interest-a.interest;
+    });
+  h+='<div class="scroll-list" style="max-height:48vh">';
+  if(!board.length){ h+='<div style="padding:24px;text-align:center;font-weight:700;color:var(--muted)">No '+(activePos==="ALL"?"":activePos+" ")+'prospects on the board.</div>'; }
   board.forEach(function(b){
     var topRival=b.rivals.reduce(function(m,rv){return (!m||rv.interest>m.interest)?rv:m;},null);
     var rivalLead=topRival?topRival.interest:0;
-    var leading=b.interest>=rivalLead;
     var statusCls=b.status==="committed"?"committed":(b.status==="lost"?"lost":"");
     h+='<div class="rec-card '+statusCls+'">';
     h+='<div class="rec-card-top">';
     h+='<div class="rec-pos">'+b.pos+'</div>';
-    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+stars(b.st)+'</span> · '+b.ovr+' OVR</div></div>';
+    // name + scouting-gated stars/ovr
+    var fit = b.scout>=2 ? recruitFit(b) : null;
+    var fitPill = fit ? ' <span class="fit-dot '+fit+'">'+(fit==="great"?"★ Fits":fit==="ok"?"~ Fit":"✕ Fit")+'</span>' : '';
+    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+recruitStarsDisplay(b)+'</span> · '+recruitOvrDisplay(b)+fitPill+'</div>'+
+       (b.scout>=3?'<div style="margin-top:3px">'+recruitTraitDisplay(b)+'</div>':'')+'</div>';
     if(b.status==="committed") h+='<div class="rec-badge green">✓ COMMITTED</div>';
     else if(b.status==="lost") h+='<div class="rec-badge red">LOST · '+x(b.committedTo)+'</div>';
-    else h+='<button class="rec-recruit-btn" data-recruit="'+b.id+'">+ Recruit</button>';
     h+='</div>';
-    // interest bar (you vs top rival)
+    // action buttons: scout + recruit (both cost a point)
     if(b.status==="open"){
+      h+='<div class="rec-actions">';
+      if(b.scout<3){
+        var scoutLbl=["🔍 Scout","🔍 Scout more","🔍 Full report"][b.scout];
+        h+='<button class="rec-scout-btn" data-scout="'+b.id+'">'+scoutLbl+' <span class="rec-scout-tier">'+b.scout+'/3</span></button>';
+      } else {
+        h+='<div class="rec-scouted">✓ Fully scouted</div>';
+      }
+      h+='<button class="rec-recruit-btn" data-recruit="'+b.id+'">+ Recruit</button>';
+      h+='</div>';
+      // interest bar (you vs top rival)
       h+='<div class="rec-bars">';
       h+='<div class="rec-bar-row"><span class="rec-bar-lbl">You</span><div class="rec-bar"><div class="rec-bar-fill you" style="width:'+b.interest+'%"></div></div><span class="rec-bar-val">'+b.interest+'</span></div>';
       if(topRival){
@@ -2246,15 +2355,29 @@ function offseasonScreen(){
        '<div class="rr-yr">'+(grad?"GRADUATING":p.yr)+'</div><div class="rr-ovr">'+p.ovr+'</div></div>';
   });
 
-  // Recruiting class recap — who committed this season (they sign when you advance)
+  // Recruiting class recap — who committed, and who will actually make the roster (position caps)
   var commits=committedRecruits();
   if(commits.length){
-    h+='<div class="sec-title">🖊️ Recruiting Class <span class="pill">'+commits.length+' committed</span></div>';
-    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">These commits sign and join your roster as freshmen when you advance.</div>';
-    commits.slice().sort(function(a,b){return b.st-a.st||b.ovr-a.ovr;}).forEach(function(b){
-      h+='<div class="roster-row"><div class="rr-pos">'+b.pos+'</div>'+
+    // simulate the position-cap signing to flag who fits and who's over the limit
+    var capFor=function(pos){ return startersAt(pos)*4; };
+    var have={}; s.roster.forEach(function(p){ have[p.pos]=(have[p.pos]||0)+1; });
+    var sorted=commits.slice().sort(function(a,b){return b.st-a.st||b.ovr-a.ovr;});
+    var willSign=0, willCut=0;
+    var flags={};
+    sorted.forEach(function(b){
+      var cap=capFor(b.pos), cur=have[b.pos]||0;
+      if(cur<cap){ flags[b.id]="sign"; have[b.pos]=cur+1; willSign++; }
+      else { flags[b.id]="cut"; willCut++; }
+    });
+    h+='<div class="sec-title">🖊️ Recruiting Class <span class="pill">'+willSign+' signing</span></div>';
+    var note='These commits sign as freshmen when you advance.';
+    if(willCut>0) note+=' <b>'+willCut+'</b> more committed but your roster is full at their position — they won\u2019t make the cut.';
+    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">'+note+'</div>';
+    sorted.forEach(function(b){
+      var cut=(flags[b.id]==="cut");
+      h+='<div class="roster-row"'+(cut?' style="opacity:.5"':'')+'><div class="rr-pos">'+b.pos+'</div>'+
          '<div class="rr-name">'+x(b.n)+' <span class="rec-stars" style="font-size:10px">'+stars(b.st)+'</span></div>'+
-         '<div class="rr-yr" style="color:var(--green)">COMMIT</div><div class="rr-ovr">'+b.ovr+'</div></div>';
+         '<div class="rr-yr" style="color:'+(cut?"var(--red2)":"var(--green)")+'">'+(cut?"NO ROOM":"SIGNING")+'</div><div class="rr-ovr">'+b.ovr+'</div></div>';
     });
   } else {
     h+='<div class="sec-title">🖊️ Recruiting Class</div>';
@@ -2307,6 +2430,8 @@ function bind(){
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ko=q("#kickoff-season"); if(ko)ko.onclick=kickoffSeason;
   document.querySelectorAll("[data-recruit]").forEach(function(b){b.onclick=function(){ recruitProspect(b.getAttribute("data-recruit")); };});
+  document.querySelectorAll("[data-scout]").forEach(function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
+  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); draw(); };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
   var pw=q("#play-week"); if(pw)pw.onclick=playWeek;
   var toff=q("#to-postseason"); if(toff)toff.onclick=function(){ enterPostseason(); };
@@ -2340,6 +2465,7 @@ function beginSeasonRecruiting(){
   s.board=genRecruitBoard(s.prestige);
   s.recruitPtsLeft=weeklyRecruitPoints()+6; // preseason gives a head-start allotment
   s._signedThisYear=null;
+  ST.recruitPos="ALL"; // reset the board's position filter
 }
 // Enter the preseason setup hub before Week 1
 function enterPreseason(){
@@ -2558,14 +2684,25 @@ function startNextSeason(){
 // Add all committed recruits to the roster as freshmen (signing day)
 function signCommittedRecruits(){
   var s=ST.save; if(!s.board) return;
-  var count=0;
-  s.board.forEach(function(b){
-    if(b.status==="committed"){
+  // roster cap per position = 4 deep at each starting slot (a full FR→SR pipeline)
+  var capFor=function(pos){ return startersAt(pos)*4; };
+  var have={};
+  s.roster.forEach(function(p){ have[p.pos]=(have[p.pos]||0)+1; });
+  // sort commits best-first so, if a position is tight, the top prospects get the spots
+  var commits=s.board.filter(function(b){return b.status==="committed";})
+                     .sort(function(a,b){ return b.st-a.st || b.ovr-a.ovr; });
+  var signed=0, cut=0;
+  commits.forEach(function(b){
+    var cap=capFor(b.pos), cur=have[b.pos]||0;
+    if(cur<cap){
       s.roster.push({id:b.id,n:b.n,pos:b.pos,ovr:b.ovr,yr:"FR",dev:b.dev,st:b.st,startOvr:b.ovr,ssOvr:b.ovr,revealed:false});
-      count++;
+      have[b.pos]=cur+1; signed++;
+    } else {
+      cut++; // over-recruited at this position — they sign elsewhere / grayshirt out
     }
   });
-  s._signedThisYear=count;
+  s._signedThisYear=signed;
+  s._cutThisYear=cut;
 }
 
 // Generate coaching-carousel job openings.
