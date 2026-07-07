@@ -321,6 +321,8 @@ a{color:inherit;text-decoration:none}
 .scroll-list{max-height:56vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
 /* recruit board flows with the page (no nested scroll) so the last card never gets cut off */
 .rec-scroll{max-height:none;overflow:visible;padding-bottom:12px}
+/* roster & schedule flow with the page too — no capped inner scroll box */
+.flow-list{max-height:none;overflow:visible;padding-bottom:14px}
 .scroll-list::-webkit-scrollbar{width:0;display:none}
 .t25-conf{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
 /* roster view */
@@ -357,8 +359,10 @@ a{color:inherit;text-decoration:none}
 .gps-range{width:100%;-webkit-appearance:none;appearance:none;height:8px;border-radius:6px;background:linear-gradient(90deg,var(--blue-bg),var(--gold-bg));border:2px solid var(--border);outline:none}
 .gps-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:26px;height:26px;border-radius:50%;background:var(--purple);border:2px solid var(--border);box-shadow:1px 1px 0 var(--border);cursor:pointer}
 .gps-range::-moz-range-thumb{width:26px;height:26px;border-radius:50%;background:var(--purple);border:2px solid var(--border);cursor:pointer}
-.gps-ideal-track{position:relative;height:14px;margin-top:2px}
-.gps-ideal{position:absolute;font-size:8px;font-weight:900;color:var(--green);white-space:nowrap}
+.gps-ideal-track{position:relative;height:22px;margin-top:2px}
+.gps-ideal{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;line-height:1;color:var(--green)}
+.gps-ideal-tri{font-size:10px;font-weight:900}
+.gps-ideal-lbl{font-size:8px;font-weight:900;white-space:nowrap;margin-top:1px}
 .gps-tip{font-size:9px;font-weight:700;color:var(--muted);line-height:1.4;margin-top:6px}
 .scheme-readout{background:var(--cream);border:2px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px}
 .sr-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 0}
@@ -1262,11 +1266,7 @@ function bestAt(positions){
 // How well the offensive slider fits the roster → small rating bonus (0..~5)
 function offSchemeFit(){
   var gp=getGameplan();
-  var passStrength=(bestAt(["QB"])*1.3 + bestAt(["WR","TE"]))/2.3; // passing needs QB + receivers
-  var runStrength =(bestAt(["RB"]) + bestAt(["OL"])*1.2)/2.2;       // running needs RB + OL
-  // ideal slider: lean toward your stronger side. 0=pass,100=run
-  var idealRun = 50 + (runStrength-passStrength)*2.2;               // >50 if run is stronger
-  idealRun=Math.max(0,Math.min(100,idealRun));
+  var idealRun=idealOffBalance();                                  // same value the ▲ marker points at
   var miss=Math.abs(gp.offBalance - idealRun);                      // 0 = perfect fit
   var cap = (hasArch("offensive")||hasAbility("off2"))?8:5; // Offensive Mind or Scheme Guru: bigger payoff
   return Math.max(0, cap - miss/12);
@@ -1274,10 +1274,7 @@ function offSchemeFit(){
 // How well the defensive slider fits the roster
 function defSchemeFit(){
   var gp=getGameplan();
-  var blitzStrength=(bestAt(["DL"])*1.3 + bestAt(["LB"]))/2.3;      // pressure needs DL + LB
-  var coverStrength=(bestAt(["CB"])*1.2 + bestAt(["S"]))/2.2;       // coverage needs CB + S
-  var idealBlitz=50 + (blitzStrength-coverStrength)*2.2;            // >50 if pass rush is stronger
-  idealBlitz=Math.max(0,Math.min(100,idealBlitz));
+  var idealBlitz=idealDefBalance();                                // same value the ▲ marker points at
   var miss=Math.abs(gp.defBalance - idealBlitz);
   var cap = (hasArch("defensive")||hasAbility("def2"))?8:5; // Defensive Mind or Disguise: bigger payoff
   return Math.max(0, cap - miss/12);
@@ -1359,7 +1356,10 @@ function sliderRow(id, leftLbl, rightLbl, val, ideal, tip){
   var h='<div class="gp-slider">';
   h+='<div class="gps-top"><span>'+leftLbl+'</span><span class="gps-val">'+val+'</span><span>'+rightLbl+'</span></div>';
   h+='<input type="range" min="0" max="100" value="'+val+'" class="gps-range" data-slider="'+id+'">';
-  h+='<div class="gps-ideal-track"><div class="gps-ideal" style="left:calc('+ideal+'% - 40px)">▲ best fit</div></div>';
+  // Marker sits at the slider thumb's true center: origin 15px (2px border + 13px half-thumb),
+  // travel = full width minus 30px. translateX(-50%) centers the ▲ exactly on that point.
+  var frac=Math.max(0,Math.min(100,ideal))/100;
+  h+='<div class="gps-ideal-track"><div class="gps-ideal" style="left:calc(15px + (100% - 30px) * '+frac+')"><span class="gps-ideal-tri">▲</span><span class="gps-ideal-lbl">best fit</span></div></div>';
   h+='<div class="gps-tip">'+tip+'</div>';
   h+='</div>';
   return h;
@@ -1904,7 +1904,7 @@ function preseasonScreen(){
     if(ST.editGame!=null){ h+=scheduleEditor(ST.editGame); }
     else {
       h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Tap a <b>non-conference</b> game to change the opponent or flip home/away. Conference games are locked. Non-conf games are weeks 1-3.</div>';
-      h+='<div class="scroll-list">';
+      h+='<div class="flow-list">';
       s.schedule.forEach(function(gm,i){
         var editable=(!gm.conf);
         var cls="game-row"+(editable?" editable":"");
@@ -1920,7 +1920,7 @@ function preseasonScreen(){
     h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Set your team\u2019s scheme identity to match your roster\u2019s strengths. You can adjust this any time during the season too.</div>';
     h+=gameplanPanel();
   } else if(tab==="roster"){
-    h+='<div class="scroll-list">'+rosterTable()+'</div>';
+    h+='<div class="flow-list">'+rosterTable()+'</div>';
   }
   h+='</div>';
   return h+'</div>';
@@ -1976,7 +1976,7 @@ function seasonScreen(){
     if(ST.editGame!=null){ h+=scheduleEditor(ST.editGame); }
     else {
       h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Tap a <b>non-conference</b> game (before it\u2019s played) to change the opponent or flip home/away. Conference games are locked.</div>';
-      h+='<div class="scroll-list">';
+      h+='<div class="flow-list">';
       s.schedule.forEach(function(gm,i){
         var res=gm.result;
         var editable=(!gm.conf && !res && i>=s.week);
@@ -1994,7 +1994,7 @@ function seasonScreen(){
   } else if(tab==="standings"){
     h+=liveStandingsTable();
   } else if(tab==="roster"){
-    h+='<div class="scroll-list">'+rosterTable()+'</div>';
+    h+='<div class="flow-list">'+rosterTable()+'</div>';
   } else if(tab==="top25"){
     h+=top25Table();
   }
