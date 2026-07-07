@@ -166,6 +166,27 @@ a{color:inherit;text-decoration:none}
 .pos-chip:active{transform:translate(2px,2px);box-shadow:none}
 .pos-chip-n{font-size:9px;font-weight:900;background:var(--cream);color:var(--text);border-radius:10px;padding:0 6px;min-width:16px;text-align:center}
 .pos-chip.active .pos-chip-n{background:rgba(255,255,255,.85);color:var(--purple)}
+/* coaching tree */
+.xp-hdr{background:var(--gold-bg);border:2px solid var(--gold-dark);border-radius:12px;padding:14px;text-align:center;box-shadow:3px 3px 0 var(--border);margin-bottom:14px}
+.xp-num{font-size:34px;font-weight:900;color:var(--gold-dark);line-height:1}
+.xp-lbl{font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-top:2px}
+.xp-hint{font-size:10px;font-weight:700;color:var(--muted);margin-top:7px;line-height:1.45}
+.tree-branch{margin-bottom:14px}
+.tree-branch-h{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.tree-ico{width:30px;height:30px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:15px;border:2px solid;border-radius:8px}
+.tree-branch-name{font-size:14px;font-weight:900}
+.tree-chain{display:flex;align-items:stretch;gap:0}
+.tree-link{width:14px;flex-shrink:0;align-self:center;height:3px;background:var(--border2)}
+.tree-link.lit{background:var(--gold-dark)}
+.tree-node{flex:1;min-width:0;background:#fff;border:2px solid var(--border);border-radius:10px;box-shadow:2px 2px 0 var(--border);padding:8px 7px}
+.tree-node.avail{cursor:pointer;border-color:var(--purple)}
+.tree-node.avail:active{transform:translate(2px,2px);box-shadow:none}
+.tree-node.locked{opacity:.45}
+.tree-node.tooexp{opacity:.7}
+.tn-name{font-size:11px;font-weight:900;line-height:1.15}
+.tn-desc{font-size:8.5px;font-weight:700;color:var(--muted);margin-top:3px;line-height:1.3}
+.tn-cost{font-size:9px;font-weight:900;margin-top:5px;color:var(--purple)}
+.tn-owned{color:var(--green)}
 /* preseason */
 .tabbar-5 .tab-btn{font-size:10px;padding:8px 2px}
 .pre-card{background:#fff;border:2px solid var(--border);border-radius:11px;padding:11px 13px;box-shadow:2px 2px 0 var(--border);margin-bottom:10px}
@@ -285,6 +306,8 @@ a{color:inherit;text-decoration:none}
 .tab-btn.active{background:var(--gold);color:var(--text);box-shadow:1px 1px 0 var(--border)}
 .tab-body{min-height:60px}
 .scroll-list{max-height:56vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+/* recruit board flows with the page (no nested scroll) so the last card never gets cut off */
+.rec-scroll{max-height:none;overflow:visible;padding-bottom:12px}
 .scroll-list::-webkit-scrollbar{width:0;display:none}
 .t25-conf{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
 /* roster view */
@@ -731,6 +754,67 @@ var ARCHETYPES={
 function coachArch(){ return (ST.save&&ST.save.archetype)||"motivator"; }
 function hasArch(id){ return coachArch()===id; }
 
+// ── Coaching skill tree (webbed progression) ─────────────
+// 5 branches × 3 tiers. Tier 1 is open; tiers 2-3 need the prior skill in that branch.
+// Each skill costs Coach XP and grants a passive bonus checked via hasAbility().
+var COACH_TREE={
+  recruiting:{ name:"Recruiting", icon:"🎯", color:"#8a6fd6", skills:[
+    {id:"rec1", name:"Closer",        cost:2, desc:"+3 recruiting points every week."},
+    {id:"rec2", name:"Hot Board",     cost:4, desc:"Prospects start with higher interest in you."},
+    {id:"rec3", name:"Bird Dog",      cost:6, desc:"Your first scout on any prospect is free each week."}
+  ]},
+  development:{ name:"Development", icon:"📈", color:"#4a9d6e", skills:[
+    {id:"dev1", name:"Teacher",       cost:2, desc:"Players develop a bit faster each week."},
+    {id:"dev2", name:"Eye for Talent",cost:4, desc:"Hidden gems and busts reveal sooner."},
+    {id:"dev3", name:"Program Builder",cost:6,desc:"Bigger offseason growth for every player."}
+  ]},
+  offense:{ name:"Offense", icon:"⚡", color:"#d69a3a", skills:[
+    {id:"off1", name:"Play Caller",   cost:2, desc:"+2 to your offense on game day."},
+    {id:"off2", name:"Scheme Guru",   cost:4, desc:"Bigger payoff when your offensive scheme fits."},
+    {id:"off3", name:"Air Raid",      cost:6, desc:"+3 more offense — explosive scoring."}
+  ]},
+  defense:{ name:"Defense", icon:"🛡️", color:"#c14a4a", skills:[
+    {id:"def1", name:"Coordinator",   cost:2, desc:"+2 to your defense on game day."},
+    {id:"def2", name:"Disguise",      cost:4, desc:"Bigger payoff when your defensive scheme fits."},
+    {id:"def3", name:"Lockdown",      cost:6, desc:"+3 more defense — bend but don't break."}
+  ]},
+  program:{ name:"Program", icon:"🏛️", color:"#4a7dc1", skills:[
+    {id:"pro1", name:"Culture",       cost:2, desc:"Job security erodes more slowly."},
+    {id:"pro2", name:"Reputation",    cost:4, desc:"Better job offers appear in the carousel."},
+    {id:"pro3", name:"National Brand",cost:6, desc:"A standing recruiting & development boost."}
+  ]}
+};
+function coachXP(){ return (ST.save&&ST.save.coachXP)||0; }
+function hasAbility(id){ return (ST.save&&ST.save.abilities||[]).indexOf(id)>=0; }
+// Which tier index (0-2) is a skill within its branch?
+function skillTier(branchKey, id){
+  var sk=COACH_TREE[branchKey].skills; for(var i=0;i<sk.length;i++){ if(sk[i].id===id)return i; } return 0;
+}
+// A skill is unlockable if tier 0, or the prior tier in the same branch is already owned.
+function skillUnlockable(branchKey, id){
+  var t=skillTier(branchKey,id);
+  if(t===0) return true;
+  return hasAbility(COACH_TREE[branchKey].skills[t-1].id);
+}
+// Spend Coach XP to buy a skill.
+function buyCoachSkill(branchKey, id){
+  var s=ST.save; if(!s) return;
+  if(hasAbility(id)){ return; }
+  var skill=COACH_TREE[branchKey].skills[skillTier(branchKey,id)];
+  if(!skillUnlockable(branchKey,id)){ toast("Unlock the previous skill first"); return; }
+  if(coachXP() < skill.cost){ toast("Not enough Coach XP"); return; }
+  s.coachXP=coachXP()-skill.cost;
+  s.abilities=(s.abilities||[]); s.abilities.push(id);
+  toast("✓ Unlocked "+skill.name);
+  persist(); draw();
+}
+// Award Coach XP for a season's accomplishments.
+function awardCoachXP(n, reason){
+  var s=ST.save; if(!s) return;
+  s.coachXP=(s.coachXP||0)+n;
+  s._xpGainedThisYear=(s._xpGainedThisYear||0)+n;
+}
+
 // ── Save / load ──────────────────────────────────────────
 function newSave(team, role){
   var roster=genStarterRoster(team.p, role);
@@ -741,6 +825,7 @@ function newSave(team, role){
     roster:roster, schedule:genSchedule(team), history:[],
     careerWins:0, careerLosses:0, titles:0, seasonsPlayed:0, jobsHeld:1,
     abilities:[], budget:budgetFor(team.p, role),
+    coachXP:0,
     jobSecurity:60, missedYears:0
   };
   s.expectWins=expectWinsFor(team.p);
@@ -794,6 +879,8 @@ function loadData(){
         if(b.scout==null){ b.scout=0; b.fuzzLo=Math.max(1,b.st-1); b.fuzzHi=Math.min(5,b.st+1); }
       });
       if(!ST.save.archetype) ST.save.archetype="motivator"; // migrate pre-archetype saves
+      if(ST.save.coachXP==null) ST.save.coachXP=0; // migrate pre-tree saves
+      if(!ST.save.abilities) ST.save.abilities=[];
       // migrate rosters up to ~3 players per starting slot (deeper depth charts)
       if(ST.save.roster && ST.save.roster.length){
         var _starters={QB:1,RB:1,WR:3,TE:1,OL:5, DL:4,LB:3,CB:2,S:2};
@@ -921,7 +1008,7 @@ function makeProspect(pos, prestige){
     var rv=pool.splice(Math.floor(Math.random()*pool.length),1)[0];
     if(rv) rivals.push({name:rv.n, p:rv.p, interest: 20+Math.floor(Math.random()*25)});
   }
-  var startInterest = Math.max(5, Math.min(48, 25 + (prestige-st)*4 + rnd(-6,6) + (hasArch("recruiter")?10:0)));
+  var startInterest = Math.max(5, Math.min(48, 25 + (prestige-st)*4 + rnd(-6,6) + (hasArch("recruiter")?10:0) + (hasAbility("rec2")?8:0) + (hasAbility("pro3")?4:0)));
   var lo=Math.max(1,st-1), hi=Math.min(5,st+1);
   return {
     id:"r"+Math.random().toString(36).slice(2,8),
@@ -939,8 +1026,10 @@ function scoutProspect(id){
   var s=ST.save, b=(s.board||[]).filter(function(x){return x.id===id;})[0];
   if(!b || b.status!=="open"){ return; }
   if(b.scout>=3){ toast("Fully scouted"); return; }
-  if((s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
-  s.recruitPtsLeft--;
+  // Bird Dog skill: the first scout each week is free
+  var freeScout = hasAbility("rec3") && !s._usedFreeScout;
+  if(!freeScout && (s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
+  if(freeScout){ s._usedFreeScout=true; } else { s.recruitPtsLeft--; }
   b.scout++;
   if(b.scout===1){ b.fuzzLo=b.st; b.fuzzHi=Math.min(5,b.st+ (Math.random()<0.5?0:1)); }
   persist(); draw();
@@ -980,7 +1069,7 @@ function recruitTraitDisplay(b){
 // Points you get to spend each week on recruiting
 function weeklyRecruitPoints(){
   var s=ST.save;
-  return 8 + s.prestige*2 + (s.role==="HC"?4:0) + (hasArch("recruiter")?4:0); // Recruiter archetype bonus
+  return 8 + s.prestige*2 + (s.role==="HC"?4:0) + (hasArch("recruiter")?4:0) + (hasAbility("rec1")?3:0);
 }
 // Spend a point of recruiting effort on a prospect this week (raises your interest).
 function recruitProspect(id){
@@ -1014,7 +1103,7 @@ function advanceRecruitingWeek(){
     }
   });
   // refresh weekly points
-  s.recruitPtsLeft = weeklyRecruitPoints();
+  s.recruitPtsLeft = weeklyRecruitPoints(); s._usedFreeScout=false;
   persist();
 }
 function committedRecruits(){ return (ST.save.board||[]).filter(function(b){return b.status==="committed";}); }
@@ -1064,7 +1153,7 @@ function offenseRating(){
   var r=ST.save.roster;
   var tot=0,wsum=0;
   Object.keys(POS_WEIGHT).forEach(function(pos){ var w=POS_WEIGHT[pos]; tot+=posDepthOvr(r,pos)*w; wsum+=w; });
-  var abil = hasAbility("qbguru")?2:0;
+  var abil = (hasAbility("off1")?2:0) + (hasAbility("off3")?3:0); // Play Caller + Air Raid
   return Math.round(tot/wsum) + abil;
 }
 // Defense rating from your recruited defensive players (DC's unit)
@@ -1072,7 +1161,8 @@ function defenseRating(){
   var r=ST.save.roster;
   var tot=0,wsum=0;
   Object.keys(DEF_POS_WEIGHT).forEach(function(pos){ var w=DEF_POS_WEIGHT[pos]; tot+=posDepthOvr(r,pos)*w; wsum+=w; });
-  return Math.round(tot/wsum);
+  var abil = (hasAbility("def1")?2:0) + (hasAbility("def3")?3:0); // Coordinator + Lockdown
+  return Math.round(tot/wsum) + abil;
 }
 // The rating of the unit YOU coach (offense if OC, defense if DC; HC = team avg)
 function myUnitRating(){
@@ -1083,7 +1173,6 @@ function myUnitRating(){
 function cpuDefenseRating(oppPrestige){ return 58 + oppPrestige*6 + rnd(-4,4); }
 // The unit the CPU runs at your school (defense if you're OC, offense if you're DC), scales with prestige
 function cpuUnitRating(){ return 56 + ST.save.prestige*6; }
-function hasAbility(id){ return (ST.save.abilities||[]).indexOf(id)>=0; }
 
 // ── Gameplan sliders (standing scheme identity, set once) ─────────────
 // offBalance: 0 = all pass, 100 = all run.   defBalance: 0 = all coverage, 100 = all blitz.
@@ -1108,7 +1197,7 @@ function offSchemeFit(){
   var idealRun = 50 + (runStrength-passStrength)*2.2;               // >50 if run is stronger
   idealRun=Math.max(0,Math.min(100,idealRun));
   var miss=Math.abs(gp.offBalance - idealRun);                      // 0 = perfect fit
-  var cap = hasArch("strategist")?8:5;                             // Strategist: bigger scheme payoff
+  var cap = (hasArch("strategist")||hasAbility("off2"))?8:5; // Strategist or Scheme Guru: bigger payoff
   return Math.max(0, cap - miss/12);
 }
 // How well the defensive slider fits the roster
@@ -1119,7 +1208,7 @@ function defSchemeFit(){
   var idealBlitz=50 + (blitzStrength-coverStrength)*2.2;            // >50 if pass rush is stronger
   idealBlitz=Math.max(0,Math.min(100,idealBlitz));
   var miss=Math.abs(gp.defBalance - idealBlitz);
-  var cap = hasArch("strategist")?8:5;
+  var cap = (hasArch("strategist")||hasAbility("def2"))?8:5; // Strategist or Disguise: bigger payoff
   return Math.max(0, cap - miss/12);
 }
 // The scheme-fit bonus applied to a unit you control this game
@@ -1140,7 +1229,8 @@ function idealDefBalance(){
 // Development also gradually "reveals" a player's hidden dev trait.
 function developInSeason(){
   var s=ST.save; if(!s||!s.roster)return;
-  var dev2 = hasArch("developer"); // Talent Developer archetype
+  var dev2 = hasArch("developer") || hasAbility("dev1"); // faster growth (archetype or Teacher skill)
+  var revealFast = hasArch("developer") || hasAbility("dev2"); // Eye for Talent reveals sooner
   s.roster.forEach(function(p){
     // chance of a bump each week, weighted by youth and dev trait
     var youthBoost = p.yr==="FR"?0.30:(p.yr==="SO"?0.22:(p.yr==="JR"?0.14:0.08));
@@ -1151,8 +1241,8 @@ function developInSeason(){
       if(dev2 && gain>0) gain += 1;
       if(gain>0){ p.ovr=Math.min(99, p.ovr+gain); }
     }
-    // reveal the hidden trait once a player has developed enough evidence (sooner for developers)
-    var revealThresh = dev2?2:3;
+    // reveal the hidden trait once a player has developed enough evidence (sooner with Eye for Talent)
+    var revealThresh = revealFast?2:3;
     if(!p.revealed && (Math.abs(p.ovr-p.startOvr)>=revealThresh || p.yr==="JR" || p.yr==="SR")){
       if(p.dev!=="normal") p.revealed=true;
     }
@@ -1274,7 +1364,7 @@ function recruitTab(){
       if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
       return b.interest-a.interest;
     });
-  h+='<div class="scroll-list" style="max-height:48vh">';
+  h+='<div class="scroll-list rec-scroll">';
   if(!board.length){ h+='<div style="padding:24px;text-align:center;font-weight:700;color:var(--muted)">No '+(activePos==="ALL"?"":activePos+" ")+'prospects on the board.</div>'; }
   board.forEach(function(b){
     var topRival=b.rivals.reduce(function(m,rv){return (!m||rv.interest>m.interest)?rv:m;},null);
@@ -1493,6 +1583,7 @@ function draw(){
   if(ST.screen==="setup")      app.innerHTML=setupScreen();
   else if(ST.screen==="recruit")app.innerHTML=recruitScreen();
   else if(ST.screen==="preseason")app.innerHTML=preseasonScreen();
+  else if(ST.screen==="coachtree")app.innerHTML=coachTreeScreen();
   else if(ST.screen==="season") app.innerHTML=seasonScreen();
   else if(ST.screen==="live"){ app.innerHTML=liveScreen(); renderLiveScore(); }
   else if(ST.screen==="offseason")app.innerHTML=offseasonScreen();
@@ -1533,6 +1624,37 @@ function restartDynasty(){
 }
 
 // ── Setup ────────────────────────────────────────────────
+// ── Coaching skill tree screen ───────────────────────────
+function coachTreeScreen(){
+  var s=ST.save;
+  var h='<div class="wrap">';
+  h+='<div class="season-hd"><div class="shd-l"><b>Coaching Tree</b></div>'+
+     '<div class="shd-r"><span class="pill">'+ARCHETYPES[coachArch()].icon+' '+ARCHETYPES[coachArch()].name+'</span></div></div>';
+  h+='<div class="xp-hdr"><div class="xp-num">'+coachXP()+'</div><div class="xp-lbl">Coach XP available</div>'+
+     '<div class="xp-hint">Earn XP from wins, titles &amp; meeting expectations. Spend it to unlock abilities. Tier 1 is open; deeper skills need the one before them.</div></div>';
+  Object.keys(COACH_TREE).forEach(function(key){
+    var br=COACH_TREE[key];
+    h+='<div class="tree-branch">';
+    h+='<div class="tree-branch-h"><span class="tree-ico" style="background:'+br.color+'22;border-color:'+br.color+'">'+br.icon+'</span><span class="tree-branch-name">'+br.name+'</span></div>';
+    h+='<div class="tree-chain">';
+    br.skills.forEach(function(sk,i){
+      var owned=hasAbility(sk.id);
+      var unlockable=skillUnlockable(key,sk.id) && !owned;
+      var affordable=coachXP()>=sk.cost;
+      var cls="tree-node"+(owned?" owned":(unlockable?(affordable?" avail":" tooexp"):" locked"));
+      if(i>0) h+='<div class="tree-link'+(hasAbility(br.skills[i-1].id)?" lit":"")+'"></div>';
+      h+='<div class="'+cls+'"'+(unlockable?' data-skill="'+key+':'+sk.id+'"':'')+' style="'+(owned?"border-color:"+br.color+";background:"+br.color+"18":"")+'">'+
+         '<div class="tn-name">'+x(sk.name)+'</div>'+
+         '<div class="tn-desc">'+x(sk.desc)+'</div>'+
+         '<div class="tn-cost">'+(owned?'<span class="tn-owned">✓ Owned</span>':(unlockable?(affordable?'Unlock · '+sk.cost+' XP':sk.cost+' XP'):'🔒 Locked'))+'</div>'+
+         '</div>';
+    });
+    h+='</div></div>';
+  });
+  h+='<button class="bigbtn btn-gold" id="tree-back">Back →</button>';
+  return h+'</div>';
+}
+
 function setupScreen(){
   var confs=[]; FBS_TEAMS.forEach(function(t){ if(confs.indexOf(t.c)<0)confs.push(t.c); });
   var h='<div class="wrap">';
@@ -1665,6 +1787,7 @@ function preseasonScreen(){
        '<div class="pre-check-row"><span>🎯 Recruiting board</span><span class="pill">'+s.board.length+' prospects</span></div>'+
        '<div class="pre-check-row"><span>⚙️ Gameplan scheme</span><span class="pill">'+(s.role==="HC"?"Off + Def":s.role==="DC"?"Defense":"Offense")+'</span></div></div>';
     h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 10px;line-height:1.5">Use the tabs above to recruit and set your scheme. When you\u2019re ready, kick off the season.</div>';
+    h+='<button class="btn" id="open-tree" style="width:100%;margin-bottom:8px;padding:11px;font-size:13px;font-weight:900;background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border)">🌳 Coaching Tree <span class="pill" style="margin-left:6px">'+coachXP()+' XP</span></button>';
     h+='<button class="bigbtn btn-green" id="kickoff-season">Kick Off Season '+s.season+' →</button>';
   } else if(tab==="recruit"){
     h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Get a jump on recruiting — spend your preseason points to build early interest before rivals push hard.</div>';
@@ -2122,6 +2245,7 @@ function advancePlayoff(iWon){
   }
   if(P.round==="champ"){
     P.done=true; P.champion=me; // you win it all
+    ST.save._wonNatlThisYear=true; ST.save.natlTitles=(ST.save.natlTitles||0)+1;
     return;
   }
 }
@@ -2384,6 +2508,7 @@ function offseasonScreen(){
     h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px">No commits landed this season. Spend more recruiting points on the <b>Recruit</b> tab during the year to build a class.</div>';
   }
 
+  h+='<button class="btn" id="open-tree" style="width:100%;margin-bottom:8px;padding:11px;font-size:13px;font-weight:900;background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border)">🌳 Coaching Tree <span class="pill" style="margin-left:6px">'+coachXP()+' XP</span></button>';
   h+='<button class="bigbtn btn-green" id="advance-season">Advance to Season '+(s.season+1)+' →</button>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center;margin:8px 2px 0;line-height:1.5">Job offers come every offseason — the better your season, the better the jobs (including <b>Head Coach</b> promotions).</div>';
   h+='<div style="display:flex;gap:8px;margin-top:10px">'+
@@ -2428,6 +2553,9 @@ function bind(){
     sl.onchange=function(){ persist(); draw(); }; // on release: recompute fit pills + save
   });
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
+  var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
+  var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.treeFrom||"offseason"; draw(); };
+  document.querySelectorAll("[data-skill]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-skill").split(":"); buyCoachSkill(parts[0],parts[1]); };});
   var ko=q("#kickoff-season"); if(ko)ko.onclick=kickoffSeason;
   document.querySelectorAll("[data-recruit]").forEach(function(b){b.onclick=function(){ recruitProspect(b.getAttribute("data-recruit")); };});
   document.querySelectorAll("[data-scout]").forEach(function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
@@ -2463,7 +2591,7 @@ function startDynasty(){
 function beginSeasonRecruiting(){
   var s=ST.save;
   s.board=genRecruitBoard(s.prestige);
-  s.recruitPtsLeft=weeklyRecruitPoints()+6; // preseason gives a head-start allotment
+  s.recruitPtsLeft=weeklyRecruitPoints()+6; s._usedFreeScout=false; // preseason gives a head-start allotment
   s._signedThisYear=null;
   ST.recruitPos="ALL"; // reset the board's position filter
 }
@@ -2610,13 +2738,21 @@ function advanceSeason(){
   if(s.wins>=11){ s.titles++; toast("🏆 Conference title season!"); }
   s.history.push({season:s.season,wins:s.wins,losses:s.losses,school:s.school,expect:s.expectWins});
 
+  // ── Coach XP: earn from wins, meeting expectations, and postseason success ──
+  s._xpGainedThisYear=0;
+  awardCoachXP(Math.floor(s.wins/2), "wins");            // ~1 XP per 2 wins
+  if(s.wins>=s.expectWins) awardCoachXP(2, "met expectations");
+  if(s.wins>=11) awardCoachXP(3, "title season");        // strong season / conference title
+  if(s._wonNatlThisYear) awardCoachXP(5, "national title");
+
   // ── evaluate season vs expectation → adjust job security ──
+  var cult = hasAbility("pro1")?0.6:1; // Culture skill: security erodes more slowly
   var diff = s.wins - s.expectWins;
   if(diff>=2){ s.jobSecurity=Math.min(100,s.jobSecurity+20); s.missedYears=0; }
   else if(diff>=0){ s.jobSecurity=Math.min(100,s.jobSecurity+12); s.missedYears=0; }
-  else if(diff>=-1){ s.jobSecurity=Math.max(0,s.jobSecurity-8); s.missedYears=0; } // just missed = minor ding, no strike
-  else if(diff>=-3){ s.jobSecurity=Math.max(0,s.jobSecurity-16); s.missedYears++; }
-  else { s.jobSecurity=Math.max(0,s.jobSecurity-26); s.missedYears++; }
+  else if(diff>=-1){ s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(8*cult)); s.missedYears=0; }
+  else if(diff>=-3){ s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(16*cult)); s.missedYears++; }
+  else { s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(26*cult)); s.missedYears++; }
 
   // prestige drift
   if(s.wins>=10&&s.prestige<5)s.prestige++;
@@ -2629,7 +2765,7 @@ function advanceSeason(){
     if(p.yr==="SR")return;
     p.yr=YR_NEXT[p.yr]||p.yr;
     var dv = p.dev==="gem"?rnd(2,5):(p.dev==="bust"?rnd(-3,0):rnd(0,2));
-    if(hasArch("developer") && dv>=0) dv += rnd(1,2); // Talent Developer: stronger offseason growth
+    if((hasArch("developer")||hasAbility("dev3")||hasAbility("pro3")) && dv>=0) dv += rnd(1,2); // stronger offseason growth
     p.ovr=Math.max(50,Math.min(99,p.ovr+dv));
     if(p.dev!=="normal" && (p.yr==="JR"||p.yr==="SR"||Math.abs(p.ovr-(p.startOvr||p.ovr))>=3)) p.revealed=true;
     kept.push(p);
@@ -2675,7 +2811,7 @@ function startNextSeason(){
   }
   beginSeasonRecruiting();     // fresh recruiting board for the new season
   ST.carousel=null; s._carousel=null; ST.post=null; s._post=null; s._postDone=false;
-  ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false;
+  ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false; s._wonNatlThisYear=false;
   s._recruited=false;
   stampSeasonStart();
   persist();
@@ -2711,7 +2847,7 @@ function genCarousel(fired){
   var s=ST.save;
   var cur=s.prestige;
   var offers=[];
-  var over = s.wins - s.expectWins;          // how much you beat/missed expectations
+  var over = (s.wins - s.expectWins) + (hasAbility("pro2")?2:0); // Reputation skill: better offers appear
   var pool=FBS_TEAMS.filter(function(t){return t.n!==s.school;});
   function take(list){ if(!list.length)return null; var t=list.splice(Math.floor(Math.random()*list.length),1)[0]; pool=pool.filter(function(x){return x.n!==t.n;}); return t; }
   function cand(minP,maxP){ return pool.filter(function(t){return t.p>=minP&&t.p<=maxP;}); }
