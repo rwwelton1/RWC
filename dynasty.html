@@ -753,6 +753,9 @@ var ARCHETYPES={
 };
 function coachArch(){ return (ST.save&&ST.save.archetype)||"motivator"; }
 function hasArch(id){ return coachArch()===id; }
+// Each archetype starts with its matching branch's tier-1 skill already unlocked.
+var ARCH_START_SKILL={ recruiter:"rec1", developer:"dev1", strategist:"off1", motivator:"off1" };
+function archStartSkill(arch){ return ARCH_START_SKILL[arch||coachArch()]||null; }
 
 // ── Coaching skill tree (webbed progression) ─────────────
 // 5 branches × 3 tiers. Tier 1 is open; tiers 2-3 need the prior skill in that branch.
@@ -828,6 +831,9 @@ function newSave(team, role){
     coachXP:0,
     jobSecurity:60, missedYears:0
   };
+  // start with your archetype's matching tier-1 skill already unlocked
+  var startSkill=archStartSkill(s.archetype);
+  if(startSkill) s.abilities.push(startSkill);
   s.expectWins=expectWinsFor(team.p);
   s.league=initLeague();
   s.gameplan={offBalance:50, defBalance:50};
@@ -881,6 +887,9 @@ function loadData(){
       if(!ST.save.archetype) ST.save.archetype="motivator"; // migrate pre-archetype saves
       if(ST.save.coachXP==null) ST.save.coachXP=0; // migrate pre-tree saves
       if(!ST.save.abilities) ST.save.abilities=[];
+      // grant the archetype's tier-1 starting skill if missing
+      var _ss=archStartSkill(ST.save.archetype);
+      if(_ss && ST.save.abilities.indexOf(_ss)<0) ST.save.abilities.push(_ss);
       // migrate rosters up to ~3 players per starting slot (deeper depth charts)
       if(ST.save.roster && ST.save.roster.length){
         var _starters={QB:1,RB:1,WR:3,TE:1,OL:5, DL:4,LB:3,CB:2,S:2};
@@ -2581,6 +2590,9 @@ function startDynasty(){
   var carry = ST.save ? {careerWins:ST.save.careerWins,careerLosses:ST.save.careerLosses,titles:ST.save.titles,seasonsPlayed:ST.save.seasonsPlayed,abilities:ST.save.abilities} : null;
   ST.save=newSave(ST.setup.team, role);
   if(carry){ ST.save.careerWins=carry.careerWins; ST.save.careerLosses=carry.careerLosses; ST.save.titles=carry.titles; ST.save.seasonsPlayed=carry.seasonsPlayed; ST.save.abilities=carry.abilities; }
+  // make sure the chosen archetype's tier-1 skill is unlocked (carry may have replaced abilities)
+  var _ss=archStartSkill(ST.save.archetype);
+  if(_ss && ST.save.abilities.indexOf(_ss)<0) ST.save.abilities.push(_ss);
   beginSeasonRecruiting();
   ST.save._recruited=false; ST.save.week=0;
   stampSeasonStart();
@@ -2732,8 +2744,14 @@ function advanceSeason(){
     if(ST.carousel&&ST.carousel.length){ ST.screen="carousel"; draw(); return; }
     startNextSeason(); return;
   }
-  s.seasonsPlayed++;
+  s.seasonsPlayed=(s.seasonsPlayed||0)+1;
   s._evaluated=true;
+  // defensive: ensure fields exist on older saves so nothing below crashes
+  if(!s.history) s.history=[];
+  if(!s.abilities) s.abilities=[];
+  if(s.coachXP==null) s.coachXP=0;
+  if(!s.archetype) s.archetype="motivator";
+  if(s.titles==null) s.titles=0;
   // record title
   if(s.wins>=11){ s.titles++; toast("🏆 Conference title season!"); }
   s.history.push({season:s.season,wins:s.wins,losses:s.losses,school:s.school,expect:s.expectWins});
@@ -2899,10 +2917,11 @@ function genCarousel(fired){
 function takeJob(offer){
   var s=ST.save;
   var newRole = offer.role || s.role;
-  var carry={careerWins:s.careerWins,careerLosses:s.careerLosses,titles:s.titles,seasonsPlayed:s.seasonsPlayed,abilities:s.abilities,jobsHeld:(s.jobsHeld||1)+1,history:s.history};
+  var carry={careerWins:s.careerWins,careerLosses:s.careerLosses,titles:s.titles,seasonsPlayed:s.seasonsPlayed,abilities:s.abilities,jobsHeld:(s.jobsHeld||1)+1,history:s.history,coachXP:s.coachXP,archetype:s.archetype};
   var fresh=newSave({n:offer.n,c:offer.c,p:offer.p}, newRole);
   fresh.careerWins=carry.careerWins; fresh.careerLosses=carry.careerLosses; fresh.titles=carry.titles;
   fresh.seasonsPlayed=carry.seasonsPlayed; fresh.abilities=carry.abilities; fresh.jobsHeld=carry.jobsHeld;
+  fresh.coachXP=carry.coachXP||0; fresh.archetype=carry.archetype||fresh.archetype;
   fresh.history=carry.history; fresh.jobSecurity=55; // fresh mandate at a new job
   if(s.league) fresh.league=s.league; // the world continues — keep the living league
   ST.save=fresh; ST.fired=null; ST.carousel=null;
