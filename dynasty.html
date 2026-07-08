@@ -135,8 +135,12 @@ a{color:inherit;text-decoration:none}
 .rec-card.committed{background:var(--green-bg);border-color:var(--green)}
 .rec-card.lost{opacity:.5}
 .rec-card-top{display:flex;align-items:center;gap:9px}
-.rec-card-name{flex:1;font-size:13px;font-weight:900;min-width:0}
-.rec-card-meta{font-size:10px;font-weight:700;color:var(--muted);margin-top:1px}
+.rec-card[style*="border-left"] .rec-card-top[data-recexpand]{cursor:pointer}
+.rec-card.expanded{box-shadow:2px 2px 0 var(--border),0 0 0 2px var(--purple)}
+.rec-chev{font-size:12px;font-weight:900;color:var(--muted);flex-shrink:0;width:12px;text-align:center}
+.rec-detail{margin-top:2px}
+.rec-card-name{flex:1;font-size:13px;font-weight:900;min-width:0;line-height:1.1}
+.rec-card-meta{font-size:9.5px;font-weight:700;color:var(--muted);margin-top:3px;line-height:1.5}
 .rec-recruit-btn{flex-shrink:0;font-size:11px;font-weight:900;background:var(--purple);color:#fff;border:2px solid var(--border);border-radius:8px;box-shadow:2px 2px 0 var(--border);padding:6px 10px;cursor:pointer}
 .rec-recruit-btn:active{transform:translate(2px,2px);box-shadow:none}
 .rec-recruit-btn.maxed{background:var(--cream);color:var(--muted);border-color:var(--border2)}
@@ -183,7 +187,14 @@ a{color:inherit;text-decoration:none}
 .rec-bars{margin-top:9px;display:flex;flex-direction:column;gap:4px}
 .rec-bar-row{display:flex;align-items:center;gap:6px}
 .rec-bar-lbl{font-size:9px;font-weight:800;color:var(--muted);width:64px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rec-bar{flex:1;height:8px;background:var(--cream);border:1.5px solid var(--border);border-radius:5px;overflow:hidden}
+.rec-bar{flex:1;height:8px;background:var(--cream);border:1.5px solid var(--border);border-radius:5px;overflow:hidden;position:relative}
+.rec-thresh{position:absolute;left:70%;top:-1px;bottom:-1px;width:2px;background:var(--green);opacity:.55;z-index:1}
+.rec-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
+.battle{font-size:8.5px;font-weight:900;border-radius:6px;padding:2px 7px;white-space:nowrap}
+.battle.lead{background:var(--green-bg);color:var(--green)}
+.battle.ready{background:var(--gold-bg);color:var(--gold-dark)}
+.battle.behind{background:var(--red-bg);color:var(--red2)}
+.battle.contested{background:var(--cream);color:var(--muted);border:1.5px solid var(--border2)}
 .rec-bar-fill{height:100%;border-radius:3px}
 .rec-bar-fill.you{background:var(--purple)}
 .rec-bar-fill.rival{background:#c9a24a}
@@ -1408,6 +1419,15 @@ function recruitFit(b){
   if(!want) return "ok";                                  // your scheme doesn't emphasize this spot
   return want.indexOf(b.arch)>=0 ? "great" : "poor";       // right archetype for the system?
 }
+// Quick read on a recruiting battle → the status chip on each open prospect card.
+function battleStatus(you, rival){
+  if(you>=70 && you>=rival+8) return {cls:"ready", label:"★ Locking in"};
+  if(you>=rival+5) return {cls:"lead", label:"▲ Leading"};
+  if(rival>=you+5) return {cls:"behind", label:"▼ Behind"};
+  return {cls:"contested", label:"● Contested"};
+}
+// Rating used to sort the board: exact OVR once scouted (tier 2+), else a star-based estimate.
+function estOvr(b){ if(b.scout>=2) return b.ovr; return ({5:82,4:76,3:70,2:63,1:54}[b.st])||65; }
 // Dev-trait reveal at the final scout tier.
 function recruitTraitDisplay(b){
   if(b.scout<maxScoutTier()) return "";
@@ -1933,7 +1953,7 @@ function recruitTab(){
   var needStr=Object.keys(need).length?Object.keys(need).map(function(p){return need[p]+" "+p;}).join(" · "):"None graduating";
   var h='';
   h+='<div class="rec-hdr">'+
-     '<div><div class="rec-hdr-num">'+pts+'</div><div class="rec-hdr-lbl">Points/Wk</div></div>'+
+     '<div><div class="rec-hdr-num">'+pts+'</div><div class="rec-hdr-lbl">Points Left</div></div>'+
      '<div style="text-align:center"><div class="rec-hdr-num" style="color:var(--gold-dark)">'+fmtMoney(s.nilLeft)+'</div><div class="rec-hdr-lbl">💰 NIL Left</div></div>'+
      '<div style="text-align:right"><div class="rec-hdr-num" style="color:var(--green)">'+commits+'</div><div class="rec-hdr-lbl">Committed</div></div></div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Spend points on prospects to raise their interest. Rivals push back each week — land a commit by building a clear lead. Needs: <b>'+x(needStr)+'</b></div>';
@@ -1964,13 +1984,13 @@ function recruitTab(){
     if(activePos==="SCOUTED") return b.scout>0;
     return b.pos===activePos;
   };
-  // sort: open (by interest desc) first, then committed, then lost
+  // sort: open first (by rating — estimated until scouted), then committed, then lost
   var order={open:0,committed:1,lost:2};
   var board=s.board.slice()
     .filter(matchesFilter)
     .sort(function(a,b){
       if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
-      return b.interest-a.interest;
+      return estOvr(b)-estOvr(a) || b.interest-a.interest;
     });
   // When viewing your commits, show a position tracker: committed vs. graduating need.
   if(activePos==="COMMITTED"){
@@ -2000,21 +2020,36 @@ function recruitTab(){
   board.forEach(function(b){
     var topRival=b.rivals.reduce(function(m,rv){return (!m||rv.interest>m.interest)?rv:m;},null);
     var rivalLead=topRival?topRival.interest:0;
+    var open=(b.status==="open");
+    var expanded=(ST.recExpand===b.id && open);
     var statusCls=b.status==="committed"?"committed":(b.status==="lost"?"lost":"");
-    h+='<div class="rec-card '+statusCls+'">';
-    h+='<div class="rec-card-top">';
-    h+='<div class="rec-pos">'+b.pos+'</div>';
-    // name + scouting-gated stars/ovr
+    var col=posColor(b.pos);
+    h+='<div class="rec-card '+statusCls+(expanded?" expanded":"")+'" style="border-left:5px solid '+col+'">';
+    // ── collapsed summary row (tap to expand) ──
+    h+='<div class="rec-card-top"'+(open?' data-recexpand="'+b.id+'"':'')+'>';
+    h+='<div class="rec-pos" style="background:'+col+';color:#fff;border-color:'+col+'">'+b.pos+'</div>';
     var fit = recruitFit(b);
     var fitPill = fit ? ' <span class="fit-dot '+fit+'">'+(fit==="great"?"★ Fits":fit==="ok"?"~ Fit":"✕ Fit")+'</span>' : '';
-    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+recruitStarsDisplay(b)+'</span> · '+recruitOvrDisplay(b)+fitPill+'</div>'+
-       '<div style="margin-top:3px">'+archTag(b)+(b.scout>=maxScoutTier()?' '+recruitTraitDisplay(b):'')+'</div></div>';
-    if(b.status==="open") h+='<button class="rec-watch-btn'+(b.watch?" on":"")+'" data-watch="'+b.id+'" aria-label="Toggle watchlist">'+(b.watch?"⭐":"☆")+'</button>';
-    if(b.status==="committed") h+='<div class="rec-badge green">✓ COMMITTED</div>';
-    else if(b.status==="lost") h+='<div class="rec-badge red">LOST · '+x(b.committedTo)+'</div>';
-    h+='</div>';
-    // action buttons: scout + recruit (both cost a point)
-    if(b.status==="open"){
+    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+recruitStarsDisplay(b)+'</span> · '+recruitOvrDisplay(b)+fitPill+' '+archTag(b)+(b.scout>=maxScoutTier()?' '+recruitTraitDisplay(b):'')+'</div></div>';
+    h+='<div class="rec-right">';
+    if(open){
+      var bs=battleStatus(b.interest, rivalLead);
+      h+='<span class="battle '+bs.cls+'">'+bs.label+'</span>';
+      h+='<button class="rec-watch-btn'+(b.watch?" on":"")+'" data-watch="'+b.id+'" aria-label="Toggle watchlist">'+(b.watch?"⭐":"☆")+'</button>';
+      h+='<span class="rec-chev">'+(expanded?"▾":"▸")+'</span>';
+    } else if(b.status==="committed"){ h+='<div class="rec-badge green">✓ COMMITTED</div>'; }
+    else { h+='<div class="rec-badge red">LOST · '+x(b.committedTo)+'</div>'; }
+    h+='</div></div>';
+    // ── expanded detail ──
+    if(expanded){
+      h+='<div class="rec-detail">';
+      h+='<div class="rec-bars">';
+      h+='<div class="rec-bar-row"><span class="rec-bar-lbl">You</span><div class="rec-bar"><div class="rec-thresh" title="commit threshold"></div><div class="rec-bar-fill you" style="width:'+b.interest+'%"></div></div><span class="rec-bar-val">'+b.interest+'</span></div>';
+      if(topRival){
+        h+='<div class="rec-bar-row"><span class="rec-bar-lbl">'+x(topRival.name).slice(0,12)+'</span><div class="rec-bar"><div class="rec-bar-fill rival" style="width:'+rivalLead+'%"></div></div><span class="rec-bar-val">'+rivalLead+'</span></div>';
+      }
+      h+='</div>';
+      if(b.rivals.length>1) h+='<div class="rec-rivals">+'+(b.rivals.length-1)+' other school'+(b.rivals.length-1>1?"s":"")+' pursuing</div>';
       h+='<div class="rec-actions">';
       if(b.scout<maxScoutTier()){
         var isLast=(b.scout===maxScoutTier()-1);
@@ -2028,14 +2063,7 @@ function recruitTab(){
       h+='</div>';
       var ncommit=b.nil||0;
       h+='<button class="rec-nil-btn'+(ncommit>=15?" maxed":"")+'" data-nilopen="recruit:'+b.id+'">💰 '+(ncommit>=15?"NIL maxed":"Offer NIL")+(ncommit>0?' · '+fmtMoney(ncommit):'')+'</button>';
-      // interest bar (you vs top rival)
-      h+='<div class="rec-bars">';
-      h+='<div class="rec-bar-row"><span class="rec-bar-lbl">You</span><div class="rec-bar"><div class="rec-bar-fill you" style="width:'+b.interest+'%"></div></div><span class="rec-bar-val">'+b.interest+'</span></div>';
-      if(topRival){
-        h+='<div class="rec-bar-row"><span class="rec-bar-lbl">'+x(topRival.name).slice(0,12)+'</span><div class="rec-bar"><div class="rec-bar-fill rival" style="width:'+rivalLead+'%"></div></div><span class="rec-bar-val">'+rivalLead+'</span></div>';
-      }
       h+='</div>';
-      if(b.rivals.length>1) h+='<div class="rec-rivals">+'+(b.rivals.length-1)+' other school'+(b.rivals.length-1>1?"s":"")+' pursuing</div>';
     }
     h+='</div>';
   });
@@ -3374,8 +3402,9 @@ function bind(){
   var ko=q("#kickoff-season"); if(ko)ko.onclick=kickoffSeason;
   document.querySelectorAll("[data-recruit]").forEach(function(b){b.onclick=function(){ recruitProspect(b.getAttribute("data-recruit")); };});
   document.querySelectorAll("[data-scout]").forEach(function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
-  document.querySelectorAll("[data-watch]").forEach(function(b){b.onclick=function(){ toggleWatch(b.getAttribute("data-watch")); };});
-  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); draw(); };});
+  document.querySelectorAll("[data-watch]").forEach(function(b){b.onclick=function(e){ if(e)e.stopPropagation(); toggleWatch(b.getAttribute("data-watch")); };});
+  document.querySelectorAll("[data-recexpand]").forEach(function(b){b.onclick=function(){ var id=b.getAttribute("data-recexpand"); ST.recExpand=(ST.recExpand===id)?null:id; draw(); };});
+  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; draw(); };});
   document.querySelectorAll("[data-depthup]").forEach(function(b){b.onclick=function(){ moveDepth(b.getAttribute("data-depthup"),-1); };});
   document.querySelectorAll("[data-depthdn]").forEach(function(b){b.onclick=function(){ moveDepth(b.getAttribute("data-depthdn"),1); };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
