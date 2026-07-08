@@ -445,6 +445,22 @@ a{color:inherit;text-decoration:none}
 .tp-btn.broke{opacity:.5}
 .tp-signed{flex-shrink:0;font-size:10px;font-weight:900;color:var(--green)}
 .tp-lost{flex-shrink:0;font-size:9px;font-weight:800;color:var(--muted)}
+/* NIL slider bottom-sheet */
+#nil-overlay{display:none}
+#nil-overlay.show{display:block}
+.nil-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:98}
+.nil-sheet{position:fixed;left:0;right:0;bottom:0;z-index:99;background:#fff;border-top:3px solid var(--border);border-radius:18px 18px 0 0;box-shadow:0 -4px 0 var(--border);padding:16px 16px 22px;max-width:640px;margin:0 auto}
+.nil-sheet-h{font-size:12px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.04em}
+.nil-sheet-nm{font-size:15px;font-weight:900;margin-top:4px}
+.nil-sheet-nm span{display:block;font-size:9.5px;font-weight:800;color:var(--muted);margin-top:2px}
+.nil-sheet-amt{font-size:34px;font-weight:900;color:var(--gold-dark);text-align:center;margin:10px 0 2px;line-height:1}
+.nil-sheet-eff{font-size:11px;font-weight:800;color:var(--text);text-align:center;margin-bottom:12px}
+.nil-range{width:100%;height:30px;accent-color:var(--gold-dark)}
+.nil-sheet-scale{display:flex;justify-content:space-between;font-size:9px;font-weight:800;color:var(--muted);margin-top:2px}
+.nil-sheet-btns{display:flex;gap:10px;margin-top:16px}
+.nil-cancel{flex:1;padding:12px;font-size:12px;font-weight:900;background:#fff;color:var(--muted);border:2px solid var(--border);border-radius:11px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.nil-commit{flex:2;padding:12px;font-size:13px;font-weight:900;background:var(--gold);color:var(--text);border:2px solid var(--border);border-radius:11px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.nil-commit:active,.nil-cancel:active{transform:translate(2px,2px);box-shadow:none}
 .gp-card{background:#fff;border:2px solid var(--border);border-radius:12px;box-shadow:3px 3px 0 var(--border);padding:12px;margin-bottom:12px}
 .gp-card-h{font-size:13px;font-weight:900;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .fit-pill{font-size:9px;font-weight:900;border:1.5px solid;border-radius:6px;padding:2px 7px;white-space:nowrap}
@@ -481,6 +497,7 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(-
 
 <div id="app"></div>
 <div id="toast"></div>
+<div id="nil-overlay"></div>
 
 <script>
 // Comprehensive FBS team dataset (2025-26 alignment). p = prestige 1-5.
@@ -1040,7 +1057,7 @@ function newSave(team, role){
   s.league=initLeague();
   s.gameplan={offBalance:53, defBalance:50};
   s.offScheme="prostyle"; s.defScheme="base43";
-  s._lastWins=0; s.nilTotal=18+team.p*9; s.nilLeft=s.nilTotal;
+  s._lastWins=0; s.nilTotal=NIL_BASE[team.p]||8; s.nilLeft=s.nilTotal;
   return s;
 }
 // Season win expectation by program prestige (of a 12-game schedule)
@@ -1102,7 +1119,11 @@ function loadData(){
       if(!ST.save.facilities) ST.save.facilities={}; // migrate pre-facilities saves
       if(!ST.save.champHistory) ST.save.champHistory=[]; // migrate pre-history saves
       if(ST.save._lastWins==null) ST.save._lastWins=ST.save.wins||0;
-      if(ST.save.nilLeft==null){ ST.save.nilTotal=nilBudgetFor(); ST.save.nilLeft=ST.save.nilTotal; } // migrate pre-NIL saves
+      if(ST.save.nilLeft==null || ST.save._nilDollars==null){ // (re)set NIL to the dollar system
+        ST.save.nilTotal=nilBudgetFor(); ST.save.nilLeft=ST.save.nilTotal; ST.save._nilDollars=1;
+        if(ST.save.board) ST.save.board.forEach(function(b){ b.nil=0; });
+        if(ST.save.roster) ST.save.roster.forEach(function(p){ p.nilFund=0; });
+      }
       if(ST.save.legacyXP==null){ // best-effort lifetime XP = current + already spent on skills
         var _spent=0; (ST.save.abilities||[]).forEach(function(id){
           Object.keys(COACH_TREE).forEach(function(k){ COACH_TREE[k].skills.forEach(function(sk){ if(sk.id===id)_spent+=sk.cost; }); });
@@ -1707,10 +1728,15 @@ function schemeReadout(){
 }
 
 // ── Season-long recruiting tab ───────────────────────────
-// ── NIL (Phase 1: a resource — budget, recruit boosts, retention) ──────────
-// Your annual NIL budget scales with prestige, your NIL/Stadium facilities, and last
-// year's wins. Spend it to sway recruits and to keep your own stars from wanting out.
-function nilBudgetFor(){ var s=ST.save; return Math.round(18 + s.prestige*9 + facLvl("nil")*7 + facLvl("stadium")*3 + (s._lastWins||0)*2); }
+// ── NIL (real football $, anchored to public NIL trackers) ─────────────────
+// Football-only NIL budget in $millions, by program prestige, +facilities +last wins.
+// Anchors: elite ≈ $40M (Texas), solid P4 ≈ $11M (Wake), top G5 ≈ $11M (USF), G5 ≈ $4M (Tulsa).
+var NIL_BASE={1:4, 2:8, 3:12, 4:22, 5:36};
+// Position value weights — the NIL market pays QBs the most, then premium skill/pass-rush/corner.
+var NIL_POS_W={QB:1.9, WR:1.2, CB:1.15, DL:1.15, RB:1.05, S:0.95, LB:0.95, OL:0.9, TE:0.85};
+function fmtMoney(m){ m=m||0; if(m>=1) return "$"+(Math.round(m*10)/10)+"M"; if(m>0.0001) return "$"+Math.round(m*1000)+"K"; return "$0"; }
+function money2(m){ return Math.round((m||0)*100)/100; } // avoid float drift
+function nilBudgetFor(){ var s=ST.save; var base=NIL_BASE[s.prestige]||8; return money2(base + facLvl("nil")*2 + facLvl("stadium")*1 + (s._lastWins||0)*0.4); }
 // A rough "production" score from a player's season stats — productive players get noticed.
 function prodScore(p){
   var st=(p.stats&&p.stats.season)||{}, v=0;
@@ -1720,61 +1746,70 @@ function prodScore(p){
   v+=(st.tkl||0)/20 + (st.sack||0)*1.0 + (st.dint||0)*1.4;  // defense
   return v;
 }
-// How much NIL a roster player "expects" — driven by talent AND on-field production.
+// What a player is worth to keep, in $M — anchored to your PROGRAM'S NIL scale (like the
+// trackers): a star at a $40M blue blood commands far more than the same player at a $6M G5.
+// Share of the pool is driven by talent, position (QB premium), and starter role.
 function nilDemand(p){
-  if(!p) return 0;
-  var d=0;
-  if(p.ovr>=71) d=Math.round((p.ovr-70)*1.3);
-  if(p.dev==="gem") d+=4;
-  d+=Math.min(10, Math.round(prodScore(p))); // a productive player draws outside NIL interest
-  return Math.min(32, d);
+  if(!p || p.ovr<68) return 0;
+  var scale=nilBudgetFor();                                   // your program's pool ($M)
+  var talent=Math.max(0,(p.ovr-66)/300);                      // ~0 at 66 up to ~11% at 99
+  var share=talent*(NIL_POS_W[p.pos]||1)*(isStarterPlayer(p)?1:0.4);
+  if(p.dev==="gem") share*=1.12;
+  share=Math.min(0.14, share);                                // no one commands >14% of the pool
+  var d=scale*share + Math.min(1.5, prodScore(p)*0.18);       // production adds a little on top
+  return money2(d);
 }
 function isStarterPlayer(p){
   var atPos=depthOrder(ST.save.roster,p.pos), idx=-1;
   for(var i=0;i<atPos.length;i++){ if(atPos[i].id===p.id){ idx=i; break; } }
   return idx>=0 && idx<startersAt(p.pos);
 }
-// Portal-departure risk %: funding gap + playing time + how coveted/mobile the player is.
-function retentionRisk(p){
+// Portal-departure risk %; pass fundOverride to preview a hypothetical funding level.
+function retentionRisk(p, fundOverride){
   var dem=nilDemand(p); if(dem<=0) return null;
   if(p.yr==="SR") return 0; // seniors graduate rather than transfer, in our model
-  var fund=p.nilFund||0;
+  var fund=(fundOverride!=null?fundOverride:(p.nilFund||0));
   var base=(Math.max(0,dem-fund)/dem)*66;      // the funding gap is most of it
   if(!isStarterPlayer(p)){ base+=16; if(p.ovr>=78) base+=14; } // a buried blue-chip really wants to play
   if(p.yr==="SO"||p.yr==="JR") base+=6;        // underclassmen are more mobile
   return Math.max(0,Math.min(94,Math.round(base)));
 }
+// Interest a recruit gains from an NIL offer of $amt (M) — strong, but diminishing as they warm.
+function nilInterestGain(b, amt){ return Math.max(1, Math.round(amt*2.4*(1-(b.interest||0)/130))); }
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
-// Spend NIL to boost a recruit's interest (a premium lever, capped so it isn't pay-to-win).
-function allocNIL(id){
-  var s=ST.save, b=(s.board||[]).filter(function(x){return x.id===id;})[0];
-  if(!b||b.status!=="open") return;
-  if((b.nil||0)>=5){ toast("NIL offer maxed for this recruit"); return; }
-  var cost=6;
-  if((s.nilLeft||0)<cost){ toast("Not enough NIL budget"); return; }
-  s.nilLeft-=cost; b.nil=(b.nil||0)+1;
-  var gain=Math.max(3, Math.round(9 - (b.nil-1)*1.4 - b.interest/30));
-  b.interest=Math.min(100,b.interest+gain);
-  toast("💰 NIL offer to "+x(b.n)+" · +"+gain+" interest");
-  persist(); draw();
+// Open the NIL slider sheet for a recruit ("recruit") or a roster player ("retain").
+function openNIL(kind, id){
+  var s=ST.save;
+  var maxA;
+  if(kind==="recruit"){ var b=(s.board||[]).filter(function(x){return x.id===id;})[0]; if(!b)return; maxA=Math.max(0,Math.min(s.nilLeft, 15-(b.nil||0))); }
+  else { var p=(s.roster||[]).filter(function(x){return x.id===id;})[0]; if(!p)return; var dem=nilDemand(p); maxA=Math.max(0,Math.min(s.nilLeft, Math.max(dem*1.5,1)-(p.nilFund||0))); }
+  if(maxA<=0){ toast(kind==="recruit"?"NIL offer maxed for this recruit":"Fully funded"); return; }
+  ST.nilPick={kind:kind, id:id};
+  ST.nilPickVal=Math.min(maxA, kind==="recruit"?Math.min(2,maxA):Math.min(1,maxA));
+  draw();
 }
-// Fund a current player's NIL to lower their portal risk.
-function fundNIL(id){
-  var s=ST.save, p=(s.roster||[]).filter(function(x){return x.id===id;})[0];
-  if(!p) return;
-  var dem=nilDemand(p);
-  if((p.nilFund||0)>=dem){ toast(x(p.n)+" is fully funded"); return; }
-  var cost=4;
-  if((s.nilLeft||0)<cost){ toast("Not enough NIL budget"); return; }
-  s.nilLeft-=cost; p.nilFund=Math.min(dem,(p.nilFund||0)+cost);
-  toast("💰 Funded "+x(p.n)+" · "+p.nilFund+"/"+dem+" NIL");
-  persist(); draw();
+function nilPreview(kind,item,amt){
+  if(kind==="recruit"){ var g=nilInterestGain(item,amt); return "Interest "+item.interest+" → <b>"+Math.min(100,item.interest+g)+"</b> (+"+g+")"; }
+  var dem=nilDemand(item), nf=money2((item.nilFund||0)+amt), risk=retentionRisk(item, nf);
+  return "Funded "+fmtMoney(nf)+" / "+fmtMoney(dem)+" · portal risk → <b>"+risk+"%</b>";
+}
+function commitNIL(){
+  var np=ST.nilPick, s=ST.save, amt=Math.min(ST.nilPickVal||0, s.nilLeft||0);
+  if(!np || amt<=0){ ST.nilPick=null; ST.nilPickVal=null; draw(); return; }
+  if(np.kind==="recruit"){
+    var b=(s.board||[]).filter(function(x){return x.id===np.id;})[0];
+    if(b){ var g=nilInterestGain(b,amt); b.interest=Math.min(100,b.interest+g); b.nil=money2((b.nil||0)+amt); s.nilLeft=money2(s.nilLeft-amt); toast("💰 Offered "+fmtMoney(amt)+" to "+x(b.n)+" · +"+g+" interest"); }
+  } else {
+    var p=(s.roster||[]).filter(function(x){return x.id===np.id;})[0];
+    if(p){ p.nilFund=money2((p.nilFund||0)+amt); s.nilLeft=money2(s.nilLeft-amt); toast("💰 Funded "+x(p.n)+" · "+fmtMoney(p.nilFund)); }
+  }
+  ST.nilPick=null; ST.nilPickVal=null; persist(); draw();
 }
 // A compact NIL budget bar shown on the Recruit & Roster tabs.
 function nilBar(){
   var s=ST.save;
-  return '<div class="nil-bar"><span class="nil-ico">💰</span><span class="nil-amt">'+(s.nilLeft||0)+'</span>'+
-    '<span class="nil-lbl">of '+(s.nilTotal||0)+' NIL left this season</span></div>';
+  return '<div class="nil-bar"><span class="nil-ico">💰</span><span class="nil-amt">'+fmtMoney(s.nilLeft)+'</span>'+
+    '<span class="nil-lbl">of '+fmtMoney(s.nilTotal)+' NIL left this season</span></div>';
 }
 // Retention panel: your players who expect NIL, their funding, and portal risk.
 function retentionPanel(){
@@ -1783,15 +1818,15 @@ function retentionPanel(){
     .sort(function(a,b){ return (retentionRisk(b)||0)-(retentionRisk(a)||0); });
   var h='<div class="sec-title" style="margin:2px 2px 6px">💰 NIL &amp; Retention</div>';
   h+=nilBar();
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:6px 2px 8px;line-height:1.5">Fund your key players\u2019 NIL to keep them happy. Underfunded stars — especially buried or young ones — risk hitting the portal after the season.</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:6px 2px 8px;line-height:1.5">Give your key players the NIL they want to keep them. Underfunded stars — especially buried or young ones — risk hitting the portal after the season.</div>';
   if(!atRisk.length){ h+='<div style="font-size:11px;font-weight:700;color:var(--muted);padding:2px 2px 10px">No players are drawing NIL demand yet. Develop some talent and they\u2019ll show up here.</div>'; return h; }
   h+='<div class="conf-table" style="margin-bottom:12px">';
   atRisk.forEach(function(p){
-    var dem=nilDemand(p), fund=p.nilFund||0, risk=retentionRisk(p);
+    var dem=nilDemand(p), fund=money2(p.nilFund||0), risk=retentionRisk(p);
     var funded=(fund>=dem);
     h+='<div class="ret-row"><span class="ret-nm">'+x(p.n)+'<span class="ret-sub">'+p.pos+' · '+p.yr+' · '+p.ovr+' OVR'+(isStarterPlayer(p)?"":" · backup")+'</span></span>'+
-       '<span class="ret-mid"><span class="ret-risk '+(risk>=60?"hi":(risk>=30?"md":"lo"))+'">'+riskLabel(risk)+' '+risk+'%</span><span class="ret-fund">'+fund+'/'+dem+' NIL</span></span>'+
-       (funded?'<span class="ret-ok">✓</span>':'<button class="ret-btn" data-fund="'+p.id+'">+ Fund</button>')+
+       '<span class="ret-mid"><span class="ret-risk '+(risk>=60?"hi":(risk>=30?"md":"lo"))+'">'+riskLabel(risk)+' '+risk+'%</span><span class="ret-fund">'+fmtMoney(fund)+' / '+fmtMoney(dem)+'</span></span>'+
+       (funded?'<span class="ret-ok">✓</span>':'<button class="ret-btn" data-nilopen="retain:'+p.id+'">Give</button>')+
        '</div>';
   });
   h+='</div>';
@@ -1807,7 +1842,7 @@ function recruitTab(){
   var h='';
   h+='<div class="rec-hdr">'+
      '<div><div class="rec-hdr-num">'+pts+'</div><div class="rec-hdr-lbl">Points/Wk</div></div>'+
-     '<div style="text-align:center"><div class="rec-hdr-num" style="color:var(--gold-dark)">'+(s.nilLeft||0)+'</div><div class="rec-hdr-lbl">💰 NIL Left</div></div>'+
+     '<div style="text-align:center"><div class="rec-hdr-num" style="color:var(--gold-dark)">'+fmtMoney(s.nilLeft)+'</div><div class="rec-hdr-lbl">💰 NIL Left</div></div>'+
      '<div style="text-align:right"><div class="rec-hdr-num" style="color:var(--green)">'+commits+'</div><div class="rec-hdr-lbl">Committed</div></div></div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Spend points on prospects to raise their interest. Rivals push back each week — land a commit by building a clear lead. Needs: <b>'+x(needStr)+'</b></div>';
   // position filter wheel — chips for All + each position present on the board (with counts)
@@ -1898,8 +1933,8 @@ function recruitTab(){
       }
       h+='<button class="rec-recruit-btn" data-recruit="'+b.id+'">+ Recruit</button>';
       h+='</div>';
-      var nlvl=b.nil||0;
-      h+='<button class="rec-nil-btn'+(nlvl>=5?" maxed":"")+'" data-nil="'+b.id+'">💰 '+(nlvl>=5?"NIL maxed":"Offer NIL")+(nlvl>0?' · '+nlvl+'/5':'')+'</button>';
+      var ncommit=b.nil||0;
+      h+='<button class="rec-nil-btn'+(ncommit>=15?" maxed":"")+'" data-nilopen="recruit:'+b.id+'">💰 '+(ncommit>=15?"NIL maxed":"Offer NIL")+(ncommit>0?' · '+fmtMoney(ncommit):'')+'</button>';
       // interest bar (you vs top rival)
       h+='<div class="rec-bars">';
       h+='<div class="rec-bar-row"><span class="rec-bar-lbl">You</span><div class="rec-bar"><div class="rec-bar-fill you" style="width:'+b.interest+'%"></div></div><span class="rec-bar-val">'+b.interest+'</span></div>';
@@ -2124,6 +2159,32 @@ function draw(){
   else if(ST.screen==="fired")    app.innerHTML=firedScreen();
   else app.innerHTML=setupScreen();
   bind();
+  renderNilOverlay();
+}
+// Bottom-sheet slider for giving any dollar amount of NIL to a recruit or player.
+function renderNilOverlay(){
+  var el=document.getElementById("nil-overlay"); if(!el) return;
+  var np=ST.nilPick, s=ST.save;
+  if(!np || !s){ el.innerHTML=""; el.className=""; return; }
+  var kind=np.kind, item, name, sub, maxA;
+  if(kind==="recruit"){ item=(s.board||[]).filter(function(b){return b.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.ovr+" OVR est · "+(item.arch||""); maxA=Math.max(0,Math.min(s.nilLeft,15-(item.nil||0))); }
+  else { item=(s.roster||[]).filter(function(p){return p.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.yr+" · "+item.ovr+" OVR · wants "+fmtMoney(nilDemand(item)); maxA=Math.max(0,Math.min(s.nilLeft,Math.max(nilDemand(item)*1.5,1)-(item.nilFund||0))); }
+  var val=Math.min(ST.nilPickVal!=null?ST.nilPickVal:1, maxA);
+  el.innerHTML='<div class="nil-backdrop" id="nil-backdrop"></div><div class="nil-sheet">'+
+    '<div class="nil-sheet-h">'+(kind==="recruit"?"💰 NIL Offer":"💰 Retention Fund")+'</div>'+
+    '<div class="nil-sheet-nm">'+x(name)+'<span>'+x(sub)+'</span></div>'+
+    '<div class="nil-sheet-amt" id="nil-amt">'+fmtMoney(val)+'</div>'+
+    '<div class="nil-sheet-eff" id="nil-eff">'+nilPreview(kind,item,val)+'</div>'+
+    '<input type="range" min="0" max="'+maxA+'" step="0.25" value="'+val+'" id="nil-slider" class="nil-range">'+
+    '<div class="nil-sheet-scale"><span>$0</span><span>'+fmtMoney(maxA)+' available</span></div>'+
+    '<div class="nil-sheet-btns"><button class="nil-cancel" id="nil-cancel">Cancel</button><button class="nil-commit" id="nil-commit">Commit '+fmtMoney(val)+'</button></div>'+
+    '</div>';
+  el.className="show";
+  var sl=document.getElementById("nil-slider");
+  sl.oninput=function(){ ST.nilPickVal=parseFloat(sl.value); document.getElementById("nil-amt").textContent=fmtMoney(ST.nilPickVal); document.getElementById("nil-eff").innerHTML=nilPreview(kind,item,ST.nilPickVal); document.getElementById("nil-commit").textContent="Commit "+fmtMoney(ST.nilPickVal); };
+  document.getElementById("nil-cancel").onclick=function(){ ST.nilPick=null; ST.nilPickVal=null; draw(); };
+  document.getElementById("nil-backdrop").onclick=function(){ ST.nilPick=null; ST.nilPickVal=null; draw(); };
+  document.getElementById("nil-commit").onclick=commitNIL;
 }
 function renderTop(){
   var r=document.getElementById("topbar-right");
@@ -3213,8 +3274,7 @@ function bind(){
   };});
   var ed=q("#edit-done"); if(ed)ed.onclick=function(){ ST.editGame=null; draw(); };
   document.querySelectorAll("[data-scheme]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-scheme").split(":"); setScheme(parts[0],parts[1]); };});
-  document.querySelectorAll("[data-nil]").forEach(function(b){b.onclick=function(){ allocNIL(b.getAttribute("data-nil")); };});
-  document.querySelectorAll("[data-fund]").forEach(function(b){b.onclick=function(){ fundNIL(b.getAttribute("data-fund")); };});
+  document.querySelectorAll("[data-nilopen]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-nilopen").split(":"); openNIL(parts[0],parts[1]); };});
   document.querySelectorAll("[data-signtransfer]").forEach(function(b){b.onclick=function(){ signTransfer(b.getAttribute("data-signtransfer")); };});
   var pdn=q("#portal-done"); if(pdn)pdn.onclick=finishPortal;
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
@@ -3289,7 +3349,7 @@ function genPortalPool(){
     var st=weightedStars(s.prestige);
     var ovr=Math.max(64,Math.min(91, recruitOvr(st)+rnd(2,9))); // arrive ready to play, above HS level
     var dev=Math.random()<0.14?"gem":(Math.random()<0.2?"bust":"normal");
-    var price=Math.max(4, Math.round((ovr-62)*1.1)+(dev==="gem"?4:0)+rnd(-2,3));
+    var price=Math.max(0.25, Math.min(6, money2((ovr-62)*0.13*(NIL_POS_W[pos]||1) + (dev==="gem"?0.6:0) + rnd(-3,4)*0.08)));
     var pool2=FBS_TEAMS.filter(function(t){return t.n!==s.school;});
     pool.push({id:"tp"+Math.random().toString(36).slice(2,7), n:genName(), pos:pos, yr:yr, ovr:ovr, arch:rollArch(pos), dev:dev, pot:rollPotential(ovr,dev), price:price, rival:pick(pool2).n, status:"open"});
   }
@@ -3314,7 +3374,7 @@ function signTransfer(id){
     if(worst && worst.ovr < t.ovr){ s.roster=s.roster.filter(function(p){return p.id!==worst.id;}); toast("Cut "+x(worst.n)+" ("+worst.ovr+") to make room"); }
     else { toast("Roster full at "+t.pos+" — and this isn\u2019t an upgrade. Cut someone first."); return; }
   }
-  s.nilLeft-=t.price;
+  s.nilLeft=money2(s.nilLeft-t.price);
   s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(t.dev!=="normal"),nilFund:0});
   t.status="signed";
   s.jobSecurity=Math.min(100,(s.jobSecurity||60)+2); // a portal splash excites the fanbase
@@ -3353,7 +3413,7 @@ function portalScreen(){
     var afford=(s.nilLeft||0)>=t.price;
     var badge = t.status==="signed" ? '<span class="tp-signed">✓ Signed</span>'
              : t.status==="lost" ? '<span class="tp-lost">Committed to '+x(t.rival).slice(0,10)+'</span>'
-             : '<button class="tp-btn'+(afford?"":" broke")+'" data-signtransfer="'+t.id+'">Sign · '+t.price+'</button>';
+             : '<button class="tp-btn'+(afford?"":" broke")+'" data-signtransfer="'+t.id+'">Sign · '+fmtMoney(t.price)+'</button>';
     h+='<div class="tp-row'+(t.status!=="open"?" done":"")+'"><span class="tp-pos" style="background:'+posColor(t.pos)+'">'+t.pos+'</span>'+
        '<span class="tp-nm">'+x(t.n)+'<span class="tp-sub">'+t.yr+' · '+t.ovr+' OVR · '+x(t.arch||"")+(t.dev==="gem"?' 💎':(t.dev==="bust"?' 🐢':''))+'</span></span>'+
        badge+'</div>';
