@@ -145,6 +145,8 @@ a{color:inherit;text-decoration:none}
 .fit-dot.poor{color:var(--red2);border-color:var(--red2)}
 .rec-trait{font-size:9px;font-weight:900;border-radius:5px;padding:1px 6px;background:var(--cream);border:1.5px solid var(--border)}
 .rec-trait.gem{color:var(--blue);border-color:var(--blue);background:var(--blue-bg)}
+.rec-trait.elite{color:var(--gold-dark);border-color:var(--gold-dark);background:var(--gold-bg)}
+.rec-trait.pro{color:var(--green);border-color:var(--green);background:var(--green-bg)}
 .rec-trait.bust{color:var(--red2);border-color:var(--red2)}
 .arch-tag{display:inline-block;font-size:8.5px;font-weight:900;color:var(--muted);background:var(--cream);border:1.5px solid var(--border2);border-radius:5px;padding:1px 6px}
 .scheme-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px}
@@ -394,6 +396,8 @@ a{color:inherit;text-decoration:none}
 .ros-empty{font-size:11px;font-weight:700;color:var(--muted);padding:4px}
 .dev-badge{font-size:8px;font-weight:900;border-radius:4px;padding:0 4px;vertical-align:middle}
 .dev-badge.gem{background:var(--blue-bg);color:var(--blue)}
+.dev-badge.elite{background:var(--gold-bg);color:var(--gold-dark)}
+.dev-badge.pro{background:var(--green-bg);color:var(--green)}
 .dev-badge.bust{opacity:.7}
 .prog{font-size:9px;font-weight:900}
 .prog.up{color:var(--green)}
@@ -1096,13 +1100,18 @@ function loadData(){
         }
       }
       // migrate rosters to have progression baselines
+      var _DEVMAP={gem:"pro", normal:"standard", bust:"slow"};
       if(ST.save.roster) ST.save.roster.forEach(function(p){
+        if(_DEVMAP[p.dev]){ p.dev=_DEVMAP[p.dev]; p.pot=null; } // convert legacy trait; re-roll ceiling below
+        if(!DEV_TRAITS[p.dev]) p.dev="standard";
         if(p.startOvr==null)p.startOvr=p.ovr;
         if(p.ssOvr==null)p.ssOvr=p.ovr;
-        if(p.revealed==null)p.revealed=(p.dev!=="normal"&&(p.yr==="JR"||p.yr==="SR"));
-        if(p.pot==null)p.pot=Math.max(p.ovr, rollPotential(p.startOvr, p.dev||"normal")); // give existing players a ceiling (never below their current rating)
+        if(p.revealed==null)p.revealed=(!devInfo(p.dev).hidden&&(p.yr==="JR"||p.yr==="SR"));
+        if(p.pot==null)p.pot=Math.max(p.ovr, rollPotential(p.startOvr, p.dev)); // give existing players a ceiling (never below their current rating)
         if(!p.arch)p.arch=rollArch(p.pos); // give existing players a playstyle archetype
       });
+      // migrate board & portal legacy traits too
+      if(ST.save.board) ST.save.board.forEach(function(b){ if(_DEVMAP[b.dev]) b.dev=_DEVMAP[b.dev]; });
       // migrate to season-long recruiting board
       if(!ST.save.board){ beginSeasonRecruiting(); ST.save._recruited=true; }
       // migrate boards to have scouting fields
@@ -1187,10 +1196,41 @@ function genOvr(base){ return Math.max(55,Math.min(99, base+rnd(-6,6))); }
 // A player's development ceiling, fixed at creation and scaled to BOTH dev trait and
 // starting talent. A raw 60 gem tops out well short of a blue-chip gem; only elite
 // starters ever push toward 99. This is what stops every gem from maxing out.
+// ── Development traits (5-tier) ─────────────────────────────
+// Two independent knobs: growth SPEED (xp mult) and growth CEILING (headroom, hard cap).
+// Growth tapers near the ceiling and the ceiling never drops below a player's current rating.
+var DEV_TRAITS={
+  elite:   {name:"Elite",    mult:1.8, cap:99, head:[13,18], off:[2,4], badge:"⭐ Elite", cls:"elite", hidden:false},
+  pro:     {name:"Pro",      mult:1.4, cap:96, head:[10,14], off:[1,3], badge:"🔥 Pro",   cls:"pro",   hidden:false},
+  standard:{name:"Standard", mult:1.0, cap:91, head:[8,13],  off:[0,2], badge:"Steady",   cls:"std",   hidden:true},
+  slow:    {name:"Slow",     mult:0.75,cap:84, head:[5,9],   off:[0,1], badge:"🐢 Slow",  cls:"slow",  hidden:false},
+  bust:    {name:"Bust",     mult:0.5, cap:74, head:[2,6],   off:[0,1], badge:"⚠ Bust",   cls:"bust",  hidden:false}
+};
+var DEV_ORDER=["bust","slow","standard","pro","elite"];
+function devInfo(dev){ return DEV_TRAITS[dev]||DEV_TRAITS.standard; }
+function devMult(dev){ return devInfo(dev).mult; }
+function traitName(dev){ return devInfo(dev).name; }
+function nextTrait(dev){ var i=DEV_ORDER.indexOf(dev); return (i>=0 && i<DEV_ORDER.length-1)?DEV_ORDER[i+1]:dev; }
 function rollPotential(startOvr, dev){
-  var bonus = dev==="gem" ? rnd(11,21) : (dev==="bust" ? rnd(2,6) : rnd(5,11)); // gem ≈ 2× standard headroom, bust ≈ ½
-  return Math.max(startOvr, Math.min(99, startOvr + bonus));
+  var d=devInfo(dev), head=rnd(d.head[0],d.head[1]);
+  return Math.max(startOvr, Math.min(d.cap, startOvr+head));
 }
+// Star-weighted trait roll. Aggressive lean (5★ far likelier Elite/Pro), but low-star/G6
+// recruits keep a real diamond-in-the-rough shot so recruiting steals stay possible.
+function rollDevByStars(st){
+  var T={
+    5:[["elite",15],["pro",30],["standard",45],["slow",8],["bust",2]],
+    4:[["elite",7],["pro",20],["standard",55],["slow",15],["bust",3]],
+    3:[["elite",3],["pro",10],["standard",57],["slow",25],["bust",5]],
+    2:[["elite",1.5],["pro",6],["standard",50],["slow",33],["bust",9.5]],
+    1:[["elite",1],["pro",4],["standard",42],["slow",40],["bust",13]]
+  }[Math.max(1,Math.min(5,st||3))];
+  var r=Math.random()*100, acc=0;
+  for(var i=0;i<T.length;i++){ acc+=T[i][1]; if(r<acc) return T[i][0]; }
+  return "standard";
+}
+// Roster/CPU players have no star rating — derive a pseudo-star from overall.
+function rollDevGeneric(ovr){ var st=ovr>=82?4:(ovr>=74?3:(ovr>=66?2:1)); return rollDevByStars(st); }
 // ── Player archetypes (Phase 1: identity tags; scheme-fit wiring comes later) ──
 // A player's playstyle within a position. Purely descriptive for now — shown on the
 // roster and recruit board so you can build toward a scheme, with no sim effect yet.
@@ -1211,7 +1251,7 @@ function genPlayer(pos, prestige, year){
   var yr = year||pick(["FR","SO","JR","SR"]);
   // freshmen arrive raw; upperclassmen have developed
   var base = (yr==="FR") ? (52+prestige*4) : (58+prestige*5);
-  var dev = Math.random()<0.15 ? "gem" : (Math.random()<0.15 ? "bust" : "normal");
+  var dev = rollDevGeneric(ovr);
   var ovr = (yr==="FR") ? Math.max(50,Math.min(80, base+rnd(-3,4))) : genOvr(base);
   return {id:"p"+Math.random().toString(36).slice(2,8), n:genName(), pos:pos, ovr:ovr, yr:yr, dev:dev, arch:rollArch(pos), pot:rollPotential(ovr,dev), startOvr:ovr, ssOvr:ovr, revealed:false};
 }
@@ -1245,7 +1285,7 @@ function genRecruitClass(prestige, count){
     var pos=pick(poslist);
     var st=weightedStars(prestige);
     var base=52+st*7;
-    var dev=Math.random()<0.18?"gem":(Math.random()<0.18?"bust":"normal");
+    var dev=rollDevByStars(st);
     cls.push({id:"r"+Math.random().toString(36).slice(2,8), n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev, arch:rollArch(pos), cost:starCost(st)});
   }
   return cls;
@@ -1259,8 +1299,9 @@ function starCost(st){ return [0,4,8,15,26,40][st]; }
 // Incoming freshman rating by stars — recruits arrive RAW and develop over their career.
 // A 5★ comes in ~74-79 (high ceiling, not a finished product); a 2★ comes in ~58-63.
 function recruitOvr(st){
-  var base = 50 + st*5;          // 1★≈55, 2★≈60, 3★≈65, 4★≈70, 5★≈75
-  return Math.max(50, Math.min(82, base + rnd(-3,4))); // hard cap 82 for any freshman
+  // Base arrival rating by star, per the recruit-package table (peak comes later via dev trait).
+  var R={5:[80,85],4:[74,79],3:[68,73],2:[60,67],1:[50,59]}[Math.max(1,Math.min(5,st))]||[60,67];
+  return rnd(R[0],R[1]);
 }
 
 // ── Season-long recruiting board (CFB-style) ─────────────
@@ -1283,10 +1324,12 @@ function genRecruitBoard(prestige){
   board.sort(function(a,b){ return b.st-a.st || b.ovr-a.ovr; });
   return board;
 }
+// Conference appeal tier (recruits favor power leagues; the strongest most of all).
+var CONF_TIER={"SEC":3,"Big Ten":3,"Big 12":2,"ACC":2,"Pac-12":1,"American":1,"Independent":1,"Mountain West":0,"Sun Belt":0,"MAC":0,"C-USA":0};
 // Build a single prospect at a given position.
 function makeProspect(pos, prestige){
   var st=weightedStars(prestige);
-  var dev=Math.random()<0.18?"gem":(Math.random()<0.18?"bust":"normal");
+  var dev=rollDevByStars(st);
   var nRivals=1+Math.floor(Math.random()*3);
   var rivals=[];
   var pool=FBS_TEAMS.filter(function(t){return t.n!==ST.save.school;});
@@ -1294,7 +1337,14 @@ function makeProspect(pos, prestige){
     var rv=pool.splice(Math.floor(Math.random()*pool.length),1)[0];
     if(rv) rivals.push({name:rv.n, p:rv.p, interest: 20+Math.floor(Math.random()*25)});
   }
-  var startInterest = Math.max(5, Math.min(60, 25 + (prestige-st)*4 + rnd(-6,6) + (hasArch("recruiter")?8:0) + (hasAbility("rec2")?8:0) + (hasAbility("rec5")?10:0) + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0) + facLvl("academics")*3 + facLvl("stadium")*2));
+  // Fit window: a recruit is warmest on programs at HIS level (he'll play), cooler when the
+  // program is a reach (won't play) or beneath him (why step down). Prestige & conference still pull.
+  var expected = 1.2 + prestige*0.66;                        // star level this program typically lands
+  var fit = Math.max(0, 1 - Math.abs(st - expected)/2.5);    // 1 at a perfect fit
+  var confBonus = (CONF_TIER[ST.save.conf]||0)*2;            // power/top-league appeal
+  var startInterest = Math.max(5, Math.min(66, 14 + prestige*3 + Math.round(fit*16) + confBonus + rnd(-5,5)
+    + (hasArch("recruiter")?8:0) + (hasAbility("rec2")?8:0) + (hasAbility("rec5")?10:0) + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0)
+    + facLvl("academics")*3 + facLvl("stadium")*2));
   var lo=Math.max(1,st-1), hi=Math.min(5,st+1);
   return {
     id:"r"+Math.random().toString(36).slice(2,8),
@@ -1351,8 +1401,10 @@ function recruitFit(b){
 // Dev-trait reveal at the final scout tier.
 function recruitTraitDisplay(b){
   if(b.scout<maxScoutTier()) return "";
-  if(b.dev==="gem")  return '<span class="rec-trait gem">💎 High ceiling</span>';
-  if(b.dev==="bust") return '<span class="rec-trait bust">🐢 Slow developer</span>';
+  if(b.dev==="elite") return '<span class="rec-trait elite">⭐ Elite ceiling</span>';
+  if(b.dev==="pro")   return '<span class="rec-trait pro">🔥 Pro developer</span>';
+  if(b.dev==="slow")  return '<span class="rec-trait bust">🐢 Slow developer</span>';
+  if(b.dev==="bust")  return '<span class="rec-trait bust">⚠ Bust risk</span>';
   return '<span class="rec-trait">Steady</span>';
 }
 // Points you get to spend each week on recruiting
@@ -1387,7 +1439,7 @@ function advanceRecruitingWeek(){
     // rivals gain interest each week (higher-prestige rivals push harder; blue-chip gems draw a frenzy)
     b.rivals.forEach(function(rv){
       var push = Math.max(1, Math.round(rv.p*0.9) + rnd(-1,2));
-      if(b.dev==="gem") push += rnd(3,5); // every program covets a hidden gem — they get poached fast
+      if(b.dev==="elite"||b.dev==="pro") push += rnd(3,5); // every program covets a high-ceiling prospect — poached fast
       rv.interest = Math.min(100, rv.interest + push);
     });
     // your interest naturally cools a touch if you ignore them (already handled by rivals rising)
@@ -1602,19 +1654,31 @@ function developInSeason(){
       if(dev2) youthBoost += 0.12; // developer grows players faster
       if(hasAbility("dev4")) youthBoost += 0.10; // Master Motivator: faster still
       if(facLvl("training")>0) youthBoost += 0.04*facLvl("training"); // Training Facilities
-      var devMult = p.dev==="gem"?2 : (p.dev==="bust"?0.5 : 1); // gem ≈ 2× standard, bust ≈ ½
+      var dmult = devMult(p.dev); // Elite 1.8 → Bust 0.5
       var nearCap = Math.min(1, head/6); // taper the final points so nobody snaps to their ceiling
-      if(Math.random() < youthBoost*devMult*nearCap){
+      if(Math.random() < youthBoost*dmult*nearCap){
         var gain = 1;
         if(dev2) gain += 1;
         if(hasAbility("dev4")) gain += 1;
         p.ovr=Math.min(pot, p.ovr+gain);
       }
     }
+    // breakout: a small weekly chance to jump up a dev tier — much higher for players who start a lot
+    if(p.dev!=="elite"){
+      var starting=isStarterPlayer(p);
+      var upC=(starting?0.014:0.003) + (facLvl("training")>0?0.002:0); // starters break out ~5x as often
+      if(p.yr==="FR"||p.yr==="SO") upC*=1.3; // young players have more runway to pop
+      if(Math.random()<upC){
+        p.dev=nextTrait(p.dev);
+        p.pot=Math.max(p.pot||0, rollPotential(p.startOvr!=null?p.startOvr:p.ovr, p.dev));
+        if(!devInfo(p.dev).hidden) p.revealed=true;
+        if(starting) toast("📈 "+x(p.n)+" is turning into a "+traitName(p.dev)+" developer!");
+      }
+    }
     // reveal the hidden trait once a player has developed enough evidence (sooner with Eye for Talent)
     var revealThresh = revealFast?2:3;
     if(!p.revealed && (Math.abs(p.ovr-p.startOvr)>=revealThresh || p.yr==="JR" || p.yr==="SR")){
-      if(p.dev!=="normal") p.revealed=true;
+      if(!devInfo(p.dev).hidden) p.revealed=true;
     }
   });
 }
@@ -1734,6 +1798,13 @@ function schemeReadout(){
 var NIL_BASE={1:4, 2:8, 3:12, 4:22, 5:36};
 // Position value weights — the NIL market pays QBs the most, then premium skill/pass-rush/corner.
 var NIL_POS_W={QB:1.9, WR:1.2, CB:1.15, DL:1.15, RB:1.05, S:0.95, LB:0.95, OL:0.9, TE:0.85};
+// Per-position annual pay bands ($M) at a P4-elite scale: [starterLo, starterHi, depthLo, depthHi].
+// Everything scales down by program NIL pool (a G6 pays a fraction of these).
+var POS_PAY={
+  QB:[1.5,3.5,0.05,0.10], WR:[0.8,2.0,0.025,0.05], DL:[0.7,1.7,0.02,0.04],
+  OL:[0.4,1.0,0.015,0.03], RB:[0.4,1.0,0.015,0.03], CB:[0.4,1.0,0.015,0.03],
+  S:[0.3,1.0,0.015,0.03], TE:[0.3,0.8,0.015,0.03], LB:[0.3,0.7,0.015,0.03]
+};
 function fmtMoney(m){ m=m||0; if(m>=1) return "$"+(Math.round(m*10)/10)+"M"; if(m>0.0001) return "$"+Math.round(m*1000)+"K"; return "$0"; }
 function money2(m){ return Math.round((m||0)*100)/100; } // avoid float drift
 function nilBudgetFor(){ var s=ST.save; var base=NIL_BASE[s.prestige]||8; return money2(base + facLvl("nil")*2 + facLvl("stadium")*1 + (s._lastWins||0)*0.4); }
@@ -1746,17 +1817,23 @@ function prodScore(p){
   v+=(st.tkl||0)/20 + (st.sack||0)*1.0 + (st.dint||0)*1.4;  // defense
   return v;
 }
-// What a player is worth to keep, in $M — anchored to your PROGRAM'S NIL scale (like the
-// trackers): a star at a $40M blue blood commands far more than the same player at a $6M G5.
-// Share of the pool is driven by talent, position (QB premium), and starter role.
+// What a player is worth to keep, in $M — anchored to the position pay bands, scaled by your
+// program's NIL pool. A P4 starting QB lands in the $1.5–3.5M band; the same player at a G6
+// (much smaller pool) commands a fraction, matching public NIL trackers.
 function nilDemand(p){
-  if(!p || p.ovr<68) return 0;
-  var scale=nilBudgetFor();                                   // your program's pool ($M)
-  var talent=Math.max(0,(p.ovr-66)/300);                      // ~0 at 66 up to ~11% at 99
-  var share=talent*(NIL_POS_W[p.pos]||1)*(isStarterPlayer(p)?1:0.4);
-  if(p.dev==="gem") share*=1.12;
-  share=Math.min(0.14, share);                                // no one commands >14% of the pool
-  var d=scale*share + Math.min(1.5, prodScore(p)*0.18);       // production adds a little on top
+  if(!p || p.ovr<66) return 0;
+  var pay=POS_PAY[p.pos]||POS_PAY.LB;
+  var poolF=Math.max(0.1, Math.min(1.15, nilBudgetFor()/36));   // P4-elite pool ($36M) = 1.0
+  var d;
+  if(isStarterPlayer(p)){
+    var tT=Math.max(0,Math.min(1,(p.ovr-70)/23));               // 70→band floor, 93→band ceiling
+    d=(pay[0]+(pay[1]-pay[0])*tT)*poolF;
+  } else {
+    var bT=Math.max(0,Math.min(1,(p.ovr-62)/20));
+    d=(pay[2]+(pay[3]-pay[2])*bT)*(0.5+poolF*0.5);              // depth deals are less pool-sensitive
+  }
+  if(p.dev==="elite") d*=1.15; else if(p.dev==="pro") d*=1.08;  // ascending stars cost more
+  d+=Math.min(0.5, prodScore(p)*0.05);                          // production nudges toward the top of the band
   return money2(d);
 }
 function isStarterPlayer(p){
@@ -1814,7 +1891,7 @@ function nilBar(){
 // Retention panel: your players who expect NIL, their funding, and portal risk.
 function retentionPanel(){
   var s=ST.save;
-  var atRisk=(s.roster||[]).filter(function(p){ return nilDemand(p)>0 && p.yr!=="SR"; })
+  var atRisk=(s.roster||[]).filter(function(p){ return nilDemand(p)>=0.15 && p.yr!=="SR"; })
     .sort(function(a,b){ return (retentionRisk(b)||0)-(retentionRisk(a)||0); });
   var h='<div class="sec-title" style="margin:2px 2px 6px">💰 NIL &amp; Retention</div>';
   h+=nilBar();
@@ -1956,8 +2033,10 @@ var POS_ORDER_OFF=["QB","RB","WR","TE","OL"];
 var POS_ORDER_DEF=["DL","LB","CB","S"];
 function devBadge(p){
   if(!p.revealed) return "";
-  if(p.dev==="gem")  return ' <span class="dev-badge gem">💎 Gem</span>';
-  if(p.dev==="bust") return ' <span class="dev-badge bust">🐢 Slow</span>';
+  if(p.dev==="elite") return ' <span class="dev-badge elite">⭐ Elite</span>';
+  if(p.dev==="pro")   return ' <span class="dev-badge pro">🔥 Pro</span>';
+  if(p.dev==="slow")  return ' <span class="dev-badge bust">🐢 Slow</span>';
+  if(p.dev==="bust")  return ' <span class="dev-badge bust">⚠ Bust</span>';
   return "";
 }
 function progArrow(delta){
@@ -3179,7 +3258,7 @@ function offseasonScreen(){
     var grad=p.yr==="SR";
     var cut=!!p.cut;
     h+='<div class="roster-row'+(grad?" grad":(cut?" cut":""))+'"><div class="rr-pos">'+p.pos+'</div>'+
-       '<div class="rr-name">'+x(p.n)+(p.dev==="gem"?' 💎':(p.dev==="bust"?'':''))+'</div>'+
+       '<div class="rr-name">'+x(p.n)+(p.dev==='elite'?' ⭐':(p.dev==='pro'?' 🔥':''))+'</div>'+
        '<div class="rr-yr">'+(grad?"GRADUATING":(cut?"CUT":p.yr))+'</div><div class="rr-ovr">'+p.ovr+'</div>'+
        (grad?'':'<button class="rr-cut'+(cut?' undo':'')+'" data-cut="'+p.id+'">'+(cut?"Undo":"Cut")+'</button>')+
        '</div>';
@@ -3348,8 +3427,9 @@ function genPortalPool(){
     var yr=pick(["SO","JR","JR","SR"]);
     var st=weightedStars(s.prestige);
     var ovr=Math.max(64,Math.min(91, recruitOvr(st)+rnd(2,9))); // arrive ready to play, above HS level
-    var dev=Math.random()<0.14?"gem":(Math.random()<0.2?"bust":"normal");
-    var price=Math.max(0.25, Math.min(6, money2((ovr-62)*0.13*(NIL_POS_W[pos]||1) + (dev==="gem"?0.6:0) + rnd(-3,4)*0.08)));
+    var dev=rollDevByStars(st);
+    var pay=POS_PAY[pos]||POS_PAY.LB, tT=Math.max(0,Math.min(1,(ovr-70)/23));
+    var price=Math.max(0.15, Math.min(pay[1], money2((pay[0]+(pay[1]-pay[0])*tT)*0.8 + ((dev==="elite"||dev==="pro")?0.3:0))));
     var pool2=FBS_TEAMS.filter(function(t){return t.n!==s.school;});
     pool.push({id:"tp"+Math.random().toString(36).slice(2,7), n:genName(), pos:pos, yr:yr, ovr:ovr, arch:rollArch(pos), dev:dev, pot:rollPotential(ovr,dev), price:price, rival:pick(pool2).n, status:"open"});
   }
@@ -3375,7 +3455,7 @@ function signTransfer(id){
     else { toast("Roster full at "+t.pos+" — and this isn\u2019t an upgrade. Cut someone first."); return; }
   }
   s.nilLeft=money2(s.nilLeft-t.price);
-  s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(t.dev!=="normal"),nilFund:0});
+  s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(!devInfo(t.dev).hidden),nilFund:0});
   t.status="signed";
   s.jobSecurity=Math.min(100,(s.jobSecurity||60)+2); // a portal splash excites the fanbase
   toast("✅ Signed "+x(t.n)+" · "+t.ovr+" OVR "+t.pos);
@@ -3415,7 +3495,7 @@ function portalScreen(){
              : t.status==="lost" ? '<span class="tp-lost">Committed to '+x(t.rival).slice(0,10)+'</span>'
              : '<button class="tp-btn'+(afford?"":" broke")+'" data-signtransfer="'+t.id+'">Sign · '+fmtMoney(t.price)+'</button>';
     h+='<div class="tp-row'+(t.status!=="open"?" done":"")+'"><span class="tp-pos" style="background:'+posColor(t.pos)+'">'+t.pos+'</span>'+
-       '<span class="tp-nm">'+x(t.n)+'<span class="tp-sub">'+t.yr+' · '+t.ovr+' OVR · '+x(t.arch||"")+(t.dev==="gem"?' 💎':(t.dev==="bust"?' 🐢':''))+'</span></span>'+
+       '<span class="tp-nm">'+x(t.n)+'<span class="tp-sub">'+t.yr+' · '+t.ovr+' OVR · '+x(t.arch||"")+(t.dev==='elite'?' ⭐':(t.dev==='pro'?' 🔥':(t.dev==='slow'?' 🐢':(t.dev==='bust'?' ⚠':''))))+'</span></span>'+
        badge+'</div>';
   });
   h+='</div>';
@@ -3757,7 +3837,7 @@ function advanceSeason(){
     p.yr=YR_NEXT[p.yr]||p.yr;
     var pot = Math.max(p.pot!=null?p.pot:99, p.ovr); // ceiling (never below current, for old saves)
     var head = pot - p.ovr;
-    var dv = p.dev==="gem"?rnd(1,3):(p.dev==="bust"?rnd(0,1):rnd(0,2)); // gem ≈ 2× standard, bust ≈ ½
+    var doff=devInfo(p.dev).off; var dv = rnd(doff[0],doff[1]); // Elite up to +4, Bust ~0-1
     if(dv>0){
       if((hasArch("developer")||hasAbility("dev3")||hasAbility("pro3"))) dv += rnd(1,2); // stronger offseason growth
       if(hasAbility("dev5")) dv += rnd(1,2); // Dynasty Pipeline
@@ -3766,7 +3846,7 @@ function advanceSeason(){
       dv = Math.min(dv, head); // never grow past the ceiling
     }
     p.ovr=Math.max(50,Math.min(99,p.ovr+dv));
-    if(p.dev!=="normal" && (p.yr==="JR"||p.yr==="SR"||Math.abs(p.ovr-(p.startOvr||p.ovr))>=3)) p.revealed=true;
+    if(!devInfo(p.dev).hidden && (p.yr==="JR"||p.yr==="SR"||Math.abs(p.ovr-(p.startOvr||p.ovr))>=3)) p.revealed=true;
     kept.push(p);
   });
   s.roster=kept;
