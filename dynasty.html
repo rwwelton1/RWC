@@ -848,6 +848,19 @@ function driftLeagueRatings(){
   });
   L.week=0; L.confSched=null; L.confRemain=null; // force a fresh conference schedule next season
 }
+// Two-way portal traffic across the league: blue bloods net-gain talent, smaller programs
+// net-lose it, with noise. Keeps the world churning (and opponents' difficulty shifting).
+function simLeaguePortal(){
+  var L=ST.save.league; if(!L||!L.teams) return;
+  Object.keys(L.teams).forEach(function(n){
+    if(n===ST.save.school) return; // your own roster is handled by the real portal
+    var t=L.teams[n];
+    var swing=Math.round((t.p-3)*0.6 + rnd(-2,2)); // prestige tilts who wins the portal
+    t.off=Math.max(46,Math.min(99,(t.off||70)+swing));
+    t.def=Math.max(46,Math.min(99,(t.def||70)+swing));
+    t.ovr=Math.round((t.off+t.def)/2);
+  });
+}
 
 var ST={
   screen:"loading",
@@ -1698,22 +1711,38 @@ function schemeReadout(){
 // Your annual NIL budget scales with prestige, your NIL/Stadium facilities, and last
 // year's wins. Spend it to sway recruits and to keep your own stars from wanting out.
 function nilBudgetFor(){ var s=ST.save; return Math.round(18 + s.prestige*9 + facLvl("nil")*7 + facLvl("stadium")*3 + (s._lastWins||0)*2); }
-// How much NIL a roster player "expects" — stars and blue-chip talents want more.
-function nilDemand(p){ if(!p||p.ovr<71) return 0; var d=Math.round((p.ovr-70)*1.3); if(p.dev==="gem")d+=4; return Math.min(24,d); }
+// A rough "production" score from a player's season stats — productive players get noticed.
+function prodScore(p){
+  var st=(p.stats&&p.stats.season)||{}, v=0;
+  v+=(st.py||0)/320 + (st.ptd||0)*0.7;                      // passing
+  v+=(st.ry||0)/230 + (st.rtd||0)*0.9;                      // rushing
+  v+=(st.recy||0)/230 + (st.rectd||0)*0.9;                  // receiving
+  v+=(st.tkl||0)/20 + (st.sack||0)*1.0 + (st.dint||0)*1.4;  // defense
+  return v;
+}
+// How much NIL a roster player "expects" — driven by talent AND on-field production.
+function nilDemand(p){
+  if(!p) return 0;
+  var d=0;
+  if(p.ovr>=71) d=Math.round((p.ovr-70)*1.3);
+  if(p.dev==="gem") d+=4;
+  d+=Math.min(10, Math.round(prodScore(p))); // a productive player draws outside NIL interest
+  return Math.min(32, d);
+}
 function isStarterPlayer(p){
   var atPos=depthOrder(ST.save.roster,p.pos), idx=-1;
   for(var i=0;i<atPos.length;i++){ if(atPos[i].id===p.id){ idx=i; break; } }
   return idx>=0 && idx<startersAt(p.pos);
 }
-// Portal-departure risk % (used for display now; drives real departures in Phase 2).
+// Portal-departure risk %: funding gap + playing time + how coveted/mobile the player is.
 function retentionRisk(p){
   var dem=nilDemand(p); if(dem<=0) return null;
   if(p.yr==="SR") return 0; // seniors graduate rather than transfer, in our model
   var fund=p.nilFund||0;
-  var base=(Math.max(0,dem-fund)/dem)*68;      // the funding gap is most of it
-  if(!isStarterPlayer(p)) base+=16;            // buried talent looks to leave
+  var base=(Math.max(0,dem-fund)/dem)*66;      // the funding gap is most of it
+  if(!isStarterPlayer(p)){ base+=16; if(p.ovr>=78) base+=14; } // a buried blue-chip really wants to play
   if(p.yr==="SO"||p.yr==="JR") base+=6;        // underclassmen are more mobile
-  return Math.max(0,Math.min(92,Math.round(base)));
+  return Math.max(0,Math.min(94,Math.round(base)));
 }
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
 // Spend NIL to boost a recruit's interest (a premium lever, capped so it isn't pay-to-win).
@@ -3288,6 +3317,7 @@ function signTransfer(id){
   s.nilLeft-=t.price;
   s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(t.dev!=="normal"),nilFund:0});
   t.status="signed";
+  s.jobSecurity=Math.min(100,(s.jobSecurity||60)+2); // a portal splash excites the fanbase
   toast("✅ Signed "+x(t.n)+" · "+t.ovr+" OVR "+t.pos);
   // rivals are working the portal too — a top target may commit elsewhere
   var others=(s._portalPool||[]).filter(function(x){return x.status==="open";});
@@ -3301,6 +3331,8 @@ function portalScreen(){
   h+='<div class="season-hd"><div class="shd-l"><b>🔄 Transfer Portal</b> · '+(2026+(s.seasonsPlayed||0))+'</div></div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Instant-impact upperclassmen — sign them with NIL to plug holes now. Rivals are shopping too, so top targets can commit elsewhere.</div>';
   h+=nilBar();
+  if(s._portalSecHit>0) h+='<div style="font-size:10px;font-weight:800;color:var(--red2);margin:8px 2px 0">📉 Losing key players cost you '+s._portalSecHit+' job security. Reload through the portal to win the fans back — each signing helps.</div>';
+  h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin:8px 2px 0;line-height:1.5">Rival programs worked the portal too — the league\u2019s balance has shifted for next season.</div>';
   // departures
   var out=s._portalOut||[];
   h+='<div class="sec-title" style="margin:12px 2px 6px">Departures'+(out.length?' ('+out.length+')':'')+'</div>';
@@ -3681,6 +3713,7 @@ function advanceSeason(){
   s._portalOut=departed; // players who transferred out — shown in the portal window
   // living league: teams' ratings drift based on how they performed vs their rating
   driftLeagueRatings();
+  simLeaguePortal(); // rivals work the portal too — the league's balance shifts
 
   // ── firing check: hot seat + missed expectations two+ years, or rock-bottom security ──
   var fired = (s.jobSecurity<=0) || (s.jobSecurity<25 && s.missedYears>=2);
@@ -3691,6 +3724,10 @@ function advanceSeason(){
     persist();
     ST.screen="fired"; draw(); return;
   }
+  // portal fallout: losing notable players dents fan confidence (applied after the firing check)
+  var sigOut=departed.filter(function(d){return d.ovr>=75;}).length;
+  s._portalSecHit=Math.min(18, sigOut*4);
+  if(s._portalSecHit>0) s.jobSecurity=Math.max(1, s.jobSecurity - s._portalSecHit);
 
   // ── carousel: offers may appear if you're doing well ──
   ST.carousel=genCarousel(false);
