@@ -331,6 +331,22 @@ a{color:inherit;text-decoration:none}
 .pbp-row.score{border-color:var(--border);box-shadow:2px 2px 0 var(--border)}
 .pbp-row.score .pbp-desc{font-weight:900}
 .pbp-row.turn .pbp-badge{color:var(--red2)}
+.ls-wrap{background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:8px 10px;margin-bottom:10px}
+.ls-hd{display:flex;align-items:center;justify-content:space-between;padding-bottom:6px;margin-bottom:4px;border-bottom:2px solid var(--border2)}
+.ls-team{flex:0 0 58px;font-size:10px;font-weight:900;text-align:center}
+.ls-mid{flex:1;text-align:center;font-size:8px;font-weight:900;color:var(--muted);letter-spacing:.08em}
+.ls-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0}
+.ls-v{flex:0 0 58px;text-align:center;font-size:12px;font-weight:900;font-variant-numeric:tabular-nums;color:var(--muted)}
+.ls-v.win{color:var(--text)}
+.ls-l{flex:1;text-align:center;font-size:8.5px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.ls-sec{font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:8px 2px 4px}
+.ls-tbl{background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border);overflow:hidden;margin-bottom:6px}
+.ls-prow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 9px;border-bottom:1.5px solid var(--border2)}
+.ls-prow:last-child{border-bottom:none}
+.ls-pn{font-size:11px;font-weight:800;display:flex;align-items:center;gap:5px;min-width:0}
+.ls-pp{font-size:7.5px;font-weight:900;color:var(--muted);background:var(--border2);border-radius:4px;padding:1px 4px}
+.ls-ps{flex-shrink:0;font-size:9px;font-weight:800;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ls-empty{font-size:10px;font-weight:700;color:var(--muted);text-align:center;padding:18px 8px}
 .tactics{background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:9px;margin:10px 2px 0}
 .tac-row{display:flex;align-items:center;gap:7px;margin-bottom:6px}
 .tac-lbl{flex-shrink:0;width:52px;font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -1049,7 +1065,7 @@ var ST={
   preTab:"overview", // active tab on the preseason screen
   recruitPos:"ALL", // position filter on the recruiting board
   planPick:null,
-  feedMode:"all",  // live play-by-play: "all" (full log) or "scoring"
+  feedMode:"all",  // live game tab: "all" (full log) | "scoring" | "stats"
   simSpeed:"normal", // sim speed: fast | normal | slow
   swapPick:null,   // roster depth chart: id of the player picked for a tap-to-swap
   G:null           // live game state (resumable); not persisted — a reload restarts the week
@@ -1731,7 +1747,20 @@ function myUnitRating(){
 }
 function cpuDefenseRating(oppPrestige){ return 58 + oppPrestige*6 + rnd(-4,4); }
 // The unit the CPU runs at your school (defense if you're OC, offense if you're DC), scales with prestige
-function cpuUnitRating(){ return 56 + ST.save.prestige*6; }
+// The rating of the unit you DON'T coach. It has to come from the same place the
+// opponent's rating does — the league table, seeded from TEAM_RATINGS and drifting
+// with results. The old `56 + prestige*6` was a crude stand-in that ran ~12 points
+// light for a prestige-1 program and ~9 light for a prestige-2 one, so an OC at
+// Wake Forest fielded a fictional 68 defense instead of its real 80.
+// `side` is "off" or "def".
+function cpuUnitRating(side){
+  var s=ST.save;
+  var t=leagueTeam(s.school);
+  if(t){ var v=(side==="def")?t.def:t.off; if(v!=null) return v; }
+  var r=TEAM_RATINGS[s.school];
+  if(r) return (side==="def")?r.d:r.o;
+  return 56 + s.prestige*6;   // unknown school (custom/legacy save)
+}
 
 // ── Gameplan sliders (standing scheme identity, set once) ─────────────
 // offBalance: 0 = all pass, 100 = all run.   defBalance: 0 = all coverage, 100 = all blitz.
@@ -2485,6 +2514,35 @@ function mergeMods(a,b){
 // Aggression on 4th down: hurry-up teams chasing the game go for it more often.
 function tacticFourthBias(tempo){ return tempo==="hurry"?0.22:(tempo==="burn"?-0.08:0); }
 
+// ── Scheme fit reacts to your tactics ────────────────────
+// offSchemeFit()/defSchemeFit() are frozen into your rating at kickoff. Half of
+// that fit is `tendency` — how close your scheme's lean sits to what your
+// PERSONNEL wants. Tactics move your effective lean, so calling against your own
+// roster has to cost you, and calling toward it has to pay. We recompute only the
+// tendency half and hand back the DELTA from the frozen value.
+var DEF_TAC_LEAN={blitz:+26, standard:0, prevent:-24};
+function tendencyAt(lean, ideal){ return Math.max(0, 1 - Math.abs(lean-ideal)/55); }
+// `cap` is the same ceiling offSchemeFit() used, so the delta lives on that scale.
+// SCHEME_TACTIC_W scales it: at 1.0 the swing is ~1 OVR and barely registers
+// against EDGE_DIV=42. At 2.0 the worst mismatch costs ~2.2 OVR — felt, but still
+// only a third of what a 10-point rating edge is worth.
+var SCHEME_TACTIC_W=2.0;
+function schemeFitDelta(side, tactics){
+  var s=ST.save; if(!s) return 0;
+  if(side==="off"){
+    if(s.role==="DC") return 0;              // you don't coach this unit
+    var sc=offScheme(), ideal=idealOffBalance();
+    var eff=tacticLean(sc.lean, tactics.off);
+    var cap = hasAbility("off5")?11:((hasArch("offensive")||hasAbility("off2"))?8:5);
+    return (tendencyAt(eff,ideal)-tendencyAt(sc.lean,ideal))*0.4*cap*SCHEME_TACTIC_W;
+  }
+  if(s.role==="OC") return 0;
+  var dsc=defScheme(), dideal=idealDefBalance();
+  var deff=clampN(dsc.lean+(DEF_TAC_LEAN[tactics.def]||0), 2, 98);
+  var dcap = hasAbility("def5")?11:((hasArch("defensive")||hasAbility("def2"))?8:5);
+  return (tendencyAt(deff,dideal)-tendencyAt(dsc.lean,dideal))*0.4*dcap*SCHEME_TACTIC_W;
+}
+
 function dClock(res, tempo){
   var t=PACE*((TEMPO_TACTICS[tempo]||TEMPO_TACTICS.normal).pace);
   if(res.incomplete) return Math.max(3, Math.round(rnd(5,8)*t));
@@ -2534,6 +2592,7 @@ function newGameState(teamA, teamB){
     poss:poss, half2:1-poss, half:0,
     clock:1800, yl:25, down:1, dist:10,
     done:false, guard:0,
+    userGame:false,   // set true only for games the user actually coaches
     tactics:{off:"balanced", tempo:"normal", def:"standard"}
   };
 }
@@ -2564,6 +2623,13 @@ function simUntil(G, stopQ){
     var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
     var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
     var lean=tacticLean(teams[poss].lean, oT.off);
+    // Calling against your own personnel erodes your scheme fit for that snap;
+    // calling toward it earns some back. Only the user's coached unit is affected.
+    // CPU-vs-CPU league games never touch the user's roster or schemes.
+    if(G.userGame){
+      if(poss===0) edge += schemeFitDelta("off", oT);
+      if(def===0)  edge -= schemeFitDelta("def", dT);  // a better-fit defense lowers the offense's edge
+    }
 
     if(G.down===4){
       var dec=fourthDown(G.yl,G.dist,G.clock,q,margin,tacticFourthBias(oT.tempo));
@@ -2677,8 +2743,8 @@ function myRatings(){
   var offFit=offSchemeFit(), defFit=defSchemeFit();
   var off, def;
   if(role==="HC"){     off=offenseRating()+offFit;  def=defenseRating()+defFit; }
-  else if(role==="DC"){ off=cpuUnitRating();        def=defenseRating()+defFit; }
-  else {                off=offenseRating()+offFit; def=cpuUnitRating(); }
+  else if(role==="DC"){ off=cpuUnitRating("off");    def=defenseRating()+defFit; }
+  else {                off=offenseRating()+offFit; def=cpuUnitRating("def"); }
   return {off:off, def:def, ovr:(off+def)/2};
 }
 // Raw team strength for the scoreboard — NO scheme fit, so it sits on the same
@@ -2687,8 +2753,8 @@ function myRatings(){
 // numbers for the same unit on the same screen.
 function myRatingsDisplay(){
   var role=ST.save.role;
-  var off = (role==="DC") ? cpuUnitRating() : offenseRating();
-  var def = (role==="OC") ? cpuUnitRating() : defenseRating();
+  var off = (role==="DC") ? cpuUnitRating("off") : offenseRating();
+  var def = (role==="OC") ? cpuUnitRating("def") : defenseRating();
   return {off:Math.round(off), def:Math.round(def), ovr:Math.round((off+def)/2)};
 }
 
@@ -2822,6 +2888,10 @@ function buildPlayByPlay(drivePlays, usName, themName){
               // a fumble at the 1 gained what it gained.
               yards:(p.snap?((!p.turnover && p.yl+p.yards>=100)?(100-p.yl):p.yards):0),
               scored:(p.snap?(!p.turnover && p.yl+p.yards>=100):false),
+              // down-and-distance, so the stats tab can derive third-down conversions
+              down:(p.snap?p.down:0), dist:(p.snap?p.dist:0),
+              firstDown:(p.snap && !p.turnover && p.kind!=="punt" && p.kind!=="fgatt" &&
+                         (p.yl+p.yards>=100 || p.yards>=p.dist)),
               ballP:(at?at.ballP:null), qbP:(at?at.qbP:null)});
   });
   // stable sort by clock; snap rows precede the score they produced
@@ -3323,10 +3393,12 @@ function liveScreen(){
   // button below it would be off-screen for the entire game.
   h+='<button class="bigbtn btn-ghost" id="live-btn" style="margin-top:10px">Skip Ahead ⏩</button>';
   h+='<button class="btn" id="live-sim-final" style="width:100%;margin-top:7px;padding:9px;font-size:11px;font-weight:800;background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border)">⏭️ Sim to Final</button>';
-  h+='<div class="feed-hd"><div class="sec-title" style="margin:0">Play-by-Play</div>'+
+  if(ST.feedMode!=="scoring" && ST.feedMode!=="stats") ST.feedMode="all";
+  h+='<div class="feed-hd"><div class="sec-title" id="feed-title" style="margin:0">'+(ST.feedMode==="stats"?"Box Score":"Play-by-Play")+'</div>'+
      '<div class="feed-toggle">'+
-       '<button class="ft-btn'+(ST.feedMode!=="scoring"?" on":"")+'" data-feedmode="all">Full Log</button>'+
+       '<button class="ft-btn'+(ST.feedMode==="all"?" on":"")+'" data-feedmode="all">Full Log</button>'+
        '<button class="ft-btn'+(ST.feedMode==="scoring"?" on":"")+'" data-feedmode="scoring">Scoring</button>'+
+       '<button class="ft-btn'+(ST.feedMode==="stats"?" on":"")+'" data-feedmode="stats">Stats</button>'+
      '</div></div>';
   h+='<div id="live-feed" class="pbp-feed"><div class="pbp-row" style="justify-content:center;color:var(--muted)">Kickoff…</div></div>';
   return h+'</div>';
@@ -3469,6 +3541,7 @@ function playConfChampGame(){
   var game={opp:opp.name, oc:s.conf, op:opp.p, home:(Math.random()<0.5)};
   var setup=gameSetup(game);
   ST.G=newGameState(setup.us, setup.them);
+  ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
   ST.weekResult={us:0,them:0,oppName:opp.name,edge:setup.edge,oppDefType:"",off:setup.off,home:game.home,pbp:[],
@@ -3892,6 +3965,7 @@ function playPostGame(){
   var game={opp:oppName, oc:"", op:oppP, home:home};
   var setup=gameSetup(game);
   ST.G=newGameState(setup.us, setup.them);
+  ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
   ST.weekResult={us:0,them:0,oppName:oppName,edge:setup.edge,oppDefType:"",off:setup.off,home:home,pbp:[],
@@ -4167,9 +4241,12 @@ function bind(){
     ST.feedMode=b.getAttribute("data-feedmode");
     document.querySelectorAll("[data-feedmode]").forEach(function(o){
       o.classList.toggle("on", o.getAttribute("data-feedmode")===ST.feedMode); });
+    var ft=document.getElementById("feed-title");
+    if(ft) ft.textContent=(ST.feedMode==="stats")?"Box Score":"Play-by-Play";
+    if(ST.live) ST.live.shownMode=null;   // force a rebuild into the new mode
     renderLiveScore();   // re-render in place; no full draw()
     // slow mode paces against the VISIBLE plays, so filtering changes the cadence
-    if(ST.live && !ST.live.done && simSpeed().holdMs) resumeLiveSim();
+    if(ST.live && !ST.live.done && simSpeed().holdMs) resumeLiveSim();  // cadence depends on visible plays
   };});
   document.querySelectorAll("[data-simspeed]").forEach(function(b){b.onclick=function(){
     ST.simSpeed=b.getAttribute("data-simspeed");
@@ -4494,29 +4571,136 @@ function recordGameStats(res, opp, pbp){
   if(s.role==="DC"||s.role==="HC") genDefenseBox(res.them, opp, res.driveStats);
 }
 // Accumulate per-player offensive stats by walking our own snaps.
-function boxFromPlays(pbp, opp){
-  if(!pbp || !pbp.length) return;
+// Tally per-player offensive stats from a play-by-play. PURE — mutates nothing.
+// Used both for the final box score and for the live stats tab, which passes only
+// the plays revealed so far so it never spoils what hasn't been shown.
+function tallyFromPlays(pbp){
   var acc={}, order=[];
   function bucket(pl){
     if(!pl) return null;
     if(!acc[pl.id]){ acc[pl.id]={p:pl, pa:0,pc:0,py:0,ptd:0,pint:0, rc:0,ry:0,rtd:0, rec:0,recy:0,rectd:0}; order.push(pl.id); }
     return acc[pl.id];
   }
-  pbp.forEach(function(e){
+  (pbp||[]).forEach(function(e){
     if(e.team!=="us" || e.scoring) return;   // scoring rows carry no snap data
-    var ball=bucket(e.ballP), qb=bucket(e.qbP);
+    // Only bucket a player a branch will actually credit. Bucketing up front used
+    // to create empty entries on SACK rows (no branch handles them), which then
+    // credited a "game played" to a receiver who never touched the ball.
     if(e.kind==="RUN" || e.kind==="FUM"){
+      var ball=bucket(e.ballP);
       if(ball){ ball.rc++; ball.ry+=e.yards; if(e.scored && e.kind==="RUN") ball.rtd++; }
     } else if(e.kind==="PASS"){
+      var qb=bucket(e.qbP), tgt=bucket(e.ballP);
       if(qb){ qb.pa++; qb.pc++; qb.py+=e.yards; if(e.scored) qb.ptd++; }
-      if(ball && ball!==qb){ ball.rec++; ball.recy+=e.yards; if(e.scored) ball.rectd++; }
+      if(tgt && tgt!==qb){ tgt.rec++; tgt.recy+=e.yards; if(e.scored) tgt.rectd++; }
     } else if(e.kind==="INC"){
-      if(qb) qb.pa++;
+      var q2=bucket(e.qbP); if(q2) q2.pa++;
     } else if(e.kind==="INT"){
-      if(qb){ qb.pa++; qb.pint++; }
+      var q3=bucket(e.qbP); if(q3){ q3.pa++; q3.pint++; }
     }
-    // SACK: not an attempt, and no per-player sack-yardage field in the schema
+    // SACK / PUNT / FGA: nobody is credited, so nobody is bucketed
   });
+  return {acc:acc, order:order};
+}
+// Team stats derived from the plays REVEALED so far, for both sides. G.stats holds
+// the finished game, so using it live would spoil a score you haven't watched yet.
+function teamStatsFromPlays(pbp){
+  function blank(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,sacks:0,
+    ints:0,fums:0,punts:0,fga:0,fgm:0,thirdAtt:0,thirdConv:0,pts:0}; }
+  var t={us:blank(), them:blank()};
+  (pbp||[]).forEach(function(e){
+    var s=t[e.team];
+    if(e.scoring){ s.pts+=e.pts; if(e.kind==="FG")s.fgm++; return; }
+    if(e.kind==="FGA"){ s.fga++; return; }
+    if(e.kind==="PUNT"){ s.punts++; return; }
+    s.plays++;
+    if(e.down===3){ s.thirdAtt++; if(e.firstDown) s.thirdConv++; }
+    if(e.kind==="RUN"||e.kind==="FUM"){ s.rushYds+=e.yards; if(e.kind==="FUM")s.fums++; }
+    else if(e.kind==="SACK"){ s.sacks++; s.passYds+=e.yards; }   // sacks are not attempts
+    else if(e.kind==="INT"){ s.att++; s.ints++; }
+    else if(e.kind==="INC"){ s.att++; }
+    else if(e.kind==="PASS"){ s.att++; s.comp++; s.passYds+=e.yards; }
+  });
+  return t;
+}
+// The Stats tab: a team comparison, then your own players' box score. Everything
+// is derived from `revealed` — the plays actually shown — so a live box score
+// never gets ahead of the play-by-play.
+function liveStatsPanel(revealed){
+  var T=teamStatsFromPlays(revealed);
+  var usName=abbr(ST.save.school), themName=abbr(ST.weekResult.oppName);
+  if(!revealed || !revealed.length){
+    return '<div class="ls-empty">No plays yet — stats appear as the game unfolds.</div>';
+  }
+  function yds(s){ return s.rushYds+s.passYds; }
+  function third(s){ return s.thirdAtt ? (s.thirdConv+"/"+s.thirdAtt) : "0/0"; }
+  function cmp(s){ return s.att ? (s.comp+"/"+s.att) : "0/0"; }
+  // higher is better for all of these except turnovers
+  var rows=[
+    ["Points",      T.us.pts,        T.them.pts,       1],
+    ["Total Yards", yds(T.us),       yds(T.them),      1],
+    ["Rushing",     T.us.rushYds,    T.them.rushYds,   1],
+    ["Passing (net)", T.us.passYds,  T.them.passYds,   1],
+    ["Passing C/A", cmp(T.us),       cmp(T.them),      0],
+    ["Plays",       T.us.plays,      T.them.plays,     0],
+    ["3rd Down",    third(T.us),     third(T.them),    0],
+    ["Sacks Taken", T.us.sacks,      T.them.sacks,    -1],
+    ["Turnovers",   T.us.ints+T.us.fums, T.them.ints+T.them.fums, -1],
+    ["Punts",       T.us.punts,      T.them.punts,     0]
+  ];
+  var h='<div class="ls-wrap">';
+  h+='<div class="ls-hd"><span class="ls-team">'+x(usName)+'</span>'+
+     '<span class="ls-mid">TEAM</span><span class="ls-team">'+x(themName)+'</span></div>';
+  rows.forEach(function(r){
+    var a=r[1], b=r[2], dir=r[3];
+    var lead="", trail="";
+    if(dir!==0 && typeof a==="number"){
+      if(a!==b){ var usBetter=(dir>0)?(a>b):(a<b); if(usBetter)lead="win"; else trail="win"; }
+    }
+    h+='<div class="ls-row"><span class="ls-v '+lead+'">'+a+'</span>'+
+       '<span class="ls-l">'+r[0]+'</span>'+
+       '<span class="ls-v '+trail+'">'+b+'</span></div>';
+  });
+  h+='</div>';
+
+  // your players
+  var t=tallyFromPlays(revealed), acc=t.acc, order=t.order;
+  var pass=[], rush=[], recv=[];
+  order.forEach(function(id){
+    var a=acc[id];
+    if(a.pa)  pass.push(a);
+    if(a.rc)  rush.push(a);
+    if(a.rec) recv.push(a);
+  });
+  rush.sort(function(a,b){return b.ry-a.ry;});
+  recv.sort(function(a,b){return b.recy-a.recy;});
+  function section(title, list, fmt){
+    if(!list.length) return "";
+    var o='<div class="ls-sec">'+title+'</div><div class="ls-tbl">';
+    list.forEach(function(a){
+      o+='<div class="ls-prow"><span class="ls-pn">'+x(a.p.n)+'<span class="ls-pp">'+a.p.pos+'</span></span>'+
+         '<span class="ls-ps">'+fmt(a)+'</span></div>';
+    });
+    return o+'</div>';
+  }
+  // A QB's passing yards are gross; the team line above is net of sack losses.
+  h+=section("Passing", pass, function(a){
+    return a.pc+"/"+a.pa+" · "+a.py+" yd · "+a.ptd+" TD"+(a.pint?" · "+a.pint+" INT":"");
+  });
+  h+=section("Rushing", rush, function(a){
+    return a.rc+" car · "+a.ry+" yd"+(a.rtd?" · "+a.rtd+" TD":"");
+  });
+  h+=section("Receiving", recv, function(a){
+    return a.rec+" rec · "+a.recy+" yd"+(a.rectd?" · "+a.rectd+" TD":"");
+  });
+  if(!pass.length && !rush.length && !recv.length){
+    h+='<div class="ls-empty">Your offense hasn\u2019t taken a snap yet.</div>';
+  }
+  return h;
+}
+function boxFromPlays(pbp, opp){
+  if(!pbp || !pbp.length) return;
+  var t=tallyFromPlays(pbp), acc=t.acc, order=t.order;
   order.forEach(function(id){
     var a=acc[id];
     var st={g:1};
@@ -4601,6 +4785,7 @@ function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
   var setup=gameSetup(g);
   ST.G=newGameState(setup.us, setup.them);
+  ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
   ST.weekResult={us:0, them:0, oppName:g.opp, edge:setup.edge, oppDefType:"", off:setup.off,
@@ -4727,7 +4912,7 @@ function resumeLiveSim(){
 // Hidden rows are skipped, so "Scoring" doesn't crawl through 150 invisible snaps.
 function startSlowSim(r, sp){
   var target=ST.live.target||3600;
-  function visible(p){ return ST.feedMode!=="scoring" || p.scoring; }
+  function visible(p){ return ST.feedMode!=="scoring" || p.scoring; }  // "stats" paces like the full log
   var stamps={}, n=0;
   for(var i=0;i<r.pbp.length;i++){
     var p=r.pbp[i];
@@ -4791,6 +4976,16 @@ function renderLiveScore(){
   if(qEl)qEl.textContent = fmtGameClock(li.elapsed);
   // filter to the active feed mode, then cap: a full log is ~145 plays and
   // rebuilding all of them every tick janks the animation.
+  // Stats mode reads the SAME revealed slice, so it can never show a stat from a
+  // play you haven't watched yet.
+  if(ST.feedMode==="stats"){
+    if(feedEl && (revealed.length!==li.shownCount || li.shownMode!==ST.feedMode)){
+      li.shownCount=revealed.length; li.shownMode=ST.feedMode;
+      feedEl.className="";                       // not a pbp feed
+      feedEl.innerHTML=liveStatsPanel(revealed);
+    }
+  } else {
+  if(feedEl) feedEl.className="pbp-feed";
   var scoringOnly=(ST.feedMode==="scoring");
   var shown=scoringOnly?revealed.filter(function(p){return p.scoring;}):revealed;
   var MAX_ROWS=60;
@@ -4818,6 +5013,7 @@ function renderLiveScore(){
     if(!rows) rows='<div class="pbp-row" style="justify-content:center;color:var(--muted)">Kickoff…</div>';
     feedEl.innerHTML=rows;
   }
+  }   // end pbp branch
   var endEl=document.getElementById("live-endstat");
   if(endEl){
     if(li.done){
