@@ -328,6 +328,13 @@ a{color:inherit;text-decoration:none}
 .pbp-feed{display:flex;flex-direction:column;gap:5px;min-height:60px}
 .pbp-row{display:flex;align-items:center;gap:7px;background:#fff;border:2px solid var(--border2);border-radius:8px;padding:6px 9px;animation:pbpIn .3s ease}
 .pbp-row.mine{background:var(--gold-bg);border-color:var(--gold-dark)}
+.pbp-row.score{border-color:var(--border);box-shadow:2px 2px 0 var(--border)}
+.pbp-row.score .pbp-desc{font-weight:900}
+.pbp-row.turn .pbp-badge{color:var(--red2)}
+.feed-hd{display:flex;align-items:center;justify-content:space-between;margin:12px 2px 6px;gap:8px}
+.feed-toggle{display:flex;gap:0;border:2px solid var(--border);border-radius:9px;overflow:hidden;box-shadow:2px 2px 0 var(--border)}
+.ft-btn{font-size:9.5px;font-weight:900;padding:5px 10px;background:#fff;border:none;cursor:pointer;color:var(--muted);white-space:nowrap}
+.ft-btn.on{background:var(--gold);color:var(--text)}
 .pbp-row.miss{opacity:.6}
 .pbp-row.miss .pbp-desc{color:var(--muted)}
 .pbp-q{font-size:8px;font-weight:900;color:var(--muted);width:16px;flex-shrink:0}
@@ -927,7 +934,8 @@ var ST={
   showScheme:false, // gameplan scheme panel expanded on week tab
   preTab:"overview", // active tab on the preseason screen
   recruitPos:"ALL", // position filter on the recruiting board
-  planPick:null
+  planPick:null,
+  feedMode:"all"   // live play-by-play: "all" (full log) or "scoring"
 };
 
 function BASE(){ return "pools/dynasty/"+ukey(ST.user); }
@@ -2219,7 +2227,9 @@ function dPass(edge, obvious){
   if(Math.random()>=compP) return {yards:0, turnover:false, kind:"pass", incomplete:true};
   var y=(obvious?5.4:6.8)+e*1.9+Math.abs(gauss())*(obvious?5.2:6.0);
   if(Math.random()<0.05) y+=Math.abs(gauss())*20;           // explosive
-  return {yards:Math.round(y), turnover:false, kind:"pass", incomplete:false};
+  y=Math.round(y);
+  if(y<1) y=rnd(1,3);   // a caught ball never loses ground; that's a sack, not a completion
+  return {yards:y, turnover:false, kind:"pass", incomplete:false};
 }
 function dClock(res){
   if(res.incomplete) return Math.round(rnd(5,8)*PACE);
@@ -2276,6 +2286,7 @@ function simDrives(teamA, teamB){
         var dec=fourthDown(yl,dist,clock,q,margin);
         if(dec==="punt"){
           stats[poss].punts++;
+          plays.push({t:poss,q:q,clock:qc,down:4,dist:dist,yl:yl,kind:"punt",yards:0,pts:0,snap:true});
           var net=clampN(Math.round(42+gauss()*8),25,62);
           var ny=(yl+net>=100)?20:(100-(yl+net));
           clock-=rnd(12,20);
@@ -2283,6 +2294,7 @@ function simDrives(teamA, teamB){
         }
         if(dec==="fg"){
           var fd=fgDist(yl); stats[poss].fga++; clock-=rnd(6,12);
+          plays.push({t:poss,q:q,clock:qc,down:4,dist:dist,yl:yl,kind:"fgatt",yards:0,pts:0,snap:true,d:fd});
           if(Math.random()<fgProb(fd)){
             stats[poss].fgm++; S[poss]+=3;
             plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
@@ -2300,6 +2312,11 @@ function simDrives(teamA, teamB){
       var obvious=(down>=3 && dist>=6);
       var res=(call==="run")?dRun(edge):dPass(edge,obvious);
       stats[poss].plays++;
+      // full ticker: capture the down-and-distance snapshot BEFORE the ball moves
+      var snap={t:poss, q:q, clock:qc, down:down, dist:dist, yl:yl,
+                kind:res.kind, yards:res.yards, incomplete:res.incomplete,
+                turnover:res.turnover, fourth:(down===4), pts:0, snap:true};
+      plays.push(snap);
       if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
       else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; } // sacks are NOT attempts
       else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
@@ -2417,34 +2434,106 @@ function goesForTwo(down, q){
   return Math.random()<0.10;                 // too early to chase points
 }
 
-// Dress the drive engine's real scoring plays as a play-by-play feed.
-// The score is NOT reconstructed here — these events already produced it.
-function buildPlayByPlay(drivePlays, usName, themName){
-  var TD_DESC=["%P punches it in","%P breaks free for a TD","%P finds the end zone","deep strike — TOUCHDOWN %P","%P walks in untouched","QB keeper, %P scores","%P takes the screen to the house"];
-  var FG_DESC=["%P drills the field goal","%P's field goal is good","%P splits the uprights"];
-  var usPlayers=(ST.save?ST.save.roster:[]).filter(function(p){return p.pos!=="OL";});
-  function nm(team){ if(team==="us"&&usPlayers.length)return pick(usPlayers).n; return genName(); }
-  function fill(t,team){ return t.replace("%P", nm(team)); }
+// ── Play attribution ─────────────────────────────────────
+// Pick a real player from your depth chart, weighted toward starters.
+var DEPTH_W=[0.55,0.28,0.12,0.05];
+function pickDepth(pos){
+  var d=depthOrder(ST.save.roster,pos);
+  if(!d.length) return null;
+  var r=Math.random(), acc=0;
+  for(var i=0;i<d.length && i<DEPTH_W.length;i++){ acc+=DEPTH_W[i]; if(r<acc) return d[i]; }
+  return d[0];
+}
+// Who touched the ball? Only our own roster is named; opponents get a generated
+// name since we don't model their rosters.
+// A game's named cast. The starting QB takes nearly every snap, so he is fixed
+// for the game rather than re-rolled per play; the opponent gets one QB name too.
+function newCast(){
+  var qb=depthOrder(ST.save.roster,"QB")[0];
+  return {usQB: qb?qb.n:genName(), oppQB: genName()};
+}
+function attribute(p, cast){
+  if(p.t!==0){
+    // we don't model opposing rosters — one QB, generated skill players
+    var b=genName(), guard=0;
+    while(b===cast.oppQB && guard++<6) b=genName();   // never throw to yourself
+    return {ball:b, qb:cast.oppQB};
+  }
+  var qn=cast.usQB;
+  if(p.kind==="run"){
+    var qbP=depthOrder(ST.save.roster,"QB")[0];
+    var keeper=(Math.random()<0.14);                    // QB keepers happen
+    var carrier= keeper ? qbP : pickDepth("RB");
+    return {ball:carrier?carrier.n:genName(), qb:qn};
+  }
+  if(p.kind==="pass"){
+    var r=Math.random();
+    var tgt = r<0.62 ? pickDepth("WR") : (r<0.84 ? pickDepth("TE") : pickDepth("RB"));
+    var t=tgt?tgt.n:genName();
+    if(t===qn) t=genName();                             // never throw to yourself
+    return {ball:t, qb:qn};
+  }
+  return {ball:qn, qb:qn};
+}
+// "OKLA 34" / "UNT 41" — field position in broadcast form.
+function fieldPos(yl, usAb, themAb){
+  if(yl===50) return "50";
+  return (yl<50 ? usAb : themAb)+" "+(yl<50 ? yl : 100-yl);
+}
+function ordDown(d){ return ["","1st","2nd","3rd","4th"][d]||String(d); }
 
+// Dress the drive engine's real plays as a play-by-play feed.
+// The score is NOT reconstructed here — these events already produced it.
+// Every row carries `scoring:true|false` so the UI can filter to scoring plays.
+function buildPlayByPlay(drivePlays, usName, themName){
+  var usAb=abbr(usName), themAb=abbr(themName);
+  var cast=newCast();
   var out=[], ut=0, tt=0;
   drivePlays.forEach(function(p){
     var team=(p.t===0)?"us":"them";
+    var off=(p.t===0)?usAb:themAb, def=(p.t===0)?themAb:usAb;
     if(team==="us") ut+=p.pts; else tt+=p.pts;
-    // absolute seconds from kickoff; p.clock counts DOWN within the quarter
     var elapsed=(p.q-1)*900 + (900-p.clock);
     var mm=Math.floor(p.clock/60), ss=p.clock%60;
-    var desc;
-    if(p.kind==="TD")          desc=fill(pick(TD_DESC),team);
-    else if(p.kind==="FG")     desc=fill(pick(FG_DESC),team)+" from "+p.d;
-    else if(p.kind==="FGMISS") desc=p.d+"-yard field goal is no good";
-    else if(p.kind==="XP")     desc=p.good?"extra point is good":"extra point is NO GOOD";
-    else if(p.kind==="2PT")    desc=p.good?fill("%P converts the two-point try",team):"two-point try is stuffed";
-    else                       desc="safety";
-    if(p.ot) desc="OT"+p.ot+" — "+desc;
+    var desc, kind=p.kind, scoring=false;
+
+    if(p.snap){
+      // ── a normal snap: down, distance, field position, result ──
+      var at=attribute(p,cast);
+      var spot=fieldPos(p.yl, off, def);
+      var sit=ordDown(p.down)+" & "+((p.yl+p.dist>=100)?"Goal":p.dist)+" at "+spot;
+      // a gain can't extend past the goal line — cap it for the log
+      var gain=Math.min(p.yards, 100-p.yl);
+      var scored=(p.yl+p.yards>=100);
+      if(p.kind==="punt"){ desc=sit+" — punt away"; kind="PUNT"; }
+      else if(p.kind==="fgatt"){ desc=sit+" — "+p.d+"-yard field goal attempt"; kind="FGA"; }
+      else if(p.kind==="sack"){ desc=sit+" — "+at.qb+" SACKED for "+p.yards; kind="SACK"; }
+      else if(p.kind==="int"){ desc=sit+" — INTERCEPTED, "+at.qb+" picked off"; kind="INT"; }
+      else if(p.kind==="run"){
+        var v=p.turnover?" — FUMBLE, "+at.ball+" loses it":
+              " — "+at.ball+" "+(gain<0?"stuffed for "+gain:gain+" yard rush")+(scored?", TOUCHDOWN":"");
+        desc=sit+v; kind=p.turnover?"FUM":"RUN";
+      }
+      else if(p.incomplete){ desc=sit+" — "+at.qb+" incomplete to "+at.ball; kind="INC"; }
+      else { desc=sit+" — "+at.qb+" to "+at.ball+" for "+gain+(scored?", TOUCHDOWN":""); kind="PASS"; }
+    } else {
+      // ── a scoring event ──
+      scoring=true;
+      if(p.kind==="TD")          desc="TOUCHDOWN "+off;
+      else if(p.kind==="FG")     desc=p.d+"-yard field goal is GOOD";
+      else if(p.kind==="FGMISS") desc=p.d+"-yard field goal is no good";
+      else if(p.kind==="XP")     desc=p.good?"extra point is good":"extra point is NO GOOD";
+      else if(p.kind==="2PT")    desc=p.good?"two-point conversion is GOOD":"two-point try is stuffed";
+      else                       desc="SAFETY";
+      if(p.ot) desc="OT"+p.ot+" — "+desc;
+    }
     out.push({q:p.q, clock:mm+":"+(ss<10?"0"+ss:ss), elapsed:elapsed, team:team,
-              kind:p.kind, pts:p.pts, good:p.good, usTot:ut, themTot:tt, desc:desc});
+              kind:kind, pts:p.pts, good:p.good, scoring:scoring,
+              usTot:ut, themTot:tt, desc:desc});
   });
-  out.sort(function(a,b){return a.elapsed-b.elapsed;});
+  // stable sort by clock; snap rows precede the score they produced
+  out.forEach(function(p,i){ p._i=i; });
+  out.sort(function(a,b){ return (a.elapsed-b.elapsed) || (a._i-b._i); });
   var u2=0,t2=0;
   out.forEach(function(p){ if(p.team==="us")u2+=p.pts; else t2+=p.pts; p.usTot=u2; p.themTot=t2; });
   return out;
@@ -2927,7 +3016,11 @@ function liveScreen(){
   h+='<div class="sb-team"><div class="sb-name">'+x(r.oppName)+'</div><div class="sb-score" id="live-them">0</div><div class="sb-tag">'+(r.home?"AWAY":"HOME")+'</div><div class="sb-rtg">O '+osb.off+' · D '+osb.def+' · '+osb.ovr+' OVR</div></div>';
   h+='</div>';
   h+='<div id="live-endstat"></div>';
-  h+='<div class="sec-title" style="margin-top:12px">Scoring Plays</div>';
+  h+='<div class="feed-hd"><div class="sec-title" style="margin:0">Play-by-Play</div>'+
+     '<div class="feed-toggle">'+
+       '<button class="ft-btn'+(ST.feedMode!=="scoring"?" on":"")+'" data-feedmode="all">Full Log</button>'+
+       '<button class="ft-btn'+(ST.feedMode==="scoring"?" on":"")+'" data-feedmode="scoring">Scoring</button>'+
+     '</div></div>';
   h+='<div id="live-feed" class="pbp-feed"><div class="pbp-row" style="justify-content:center;color:var(--muted)">Kickoff…</div></div>';
   h+='<button class="bigbtn btn-ghost" id="live-btn">Skip to Final ⏩</button>';
   return h+'</div>';
@@ -3698,6 +3791,12 @@ function bind(){
   document.querySelectorAll("[data-nilopen]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-nilopen").split(":"); openNIL(parts[0],parts[1]); };});
   document.querySelectorAll("[data-signtransfer]").forEach(function(b){b.onclick=function(){ signTransfer(b.getAttribute("data-signtransfer")); };});
   document.querySelectorAll("[data-retainplayer]").forEach(function(b){b.onclick=function(){ retainPlayer(b.getAttribute("data-retainplayer")); };});
+  document.querySelectorAll("[data-feedmode]").forEach(function(b){b.onclick=function(){
+    ST.feedMode=b.getAttribute("data-feedmode");
+    document.querySelectorAll("[data-feedmode]").forEach(function(o){
+      o.classList.toggle("on", o.getAttribute("data-feedmode")===ST.feedMode); });
+    renderLiveScore();   // re-render in place; no full draw()
+  };});
   var pdn=q("#portal-done"); if(pdn)pdn.onclick=finishPortal;
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
@@ -4114,6 +4213,8 @@ function fmtGameClock(elapsed){
   return "Q"+q+" · "+mm+":"+(ss<10?"0"+ss:ss);
 }
 // Update just the live DOM (avoid full redraw so the feed animates smoothly)
+var PBP_BADGE={TD:"🏈 TD",FG:"🥅 FG",FGMISS:"❌ FG",FGA:"🥅 ATT",SFTY:"＋ SFTY",
+  RUN:"🏃 RUN",PASS:"🎯 PASS",INC:"· INC",SACK:"💥 SACK",INT:"🔄 INT",FUM:"🔄 FUM",PUNT:"🦶 PUNT"};
 function renderLiveScore(){
   var r=ST.weekResult, li=ST.live;
   // plays revealed so far = those whose elapsed <= current game clock
@@ -4127,24 +4228,34 @@ function renderLiveScore(){
   if(usEl){ if(usEl.textContent!=String(us)){ usEl.classList.add("bump"); setTimeout(function(){usEl.classList.remove("bump");},220); } usEl.textContent=us; }
   if(themEl){ if(themEl.textContent!=String(them)){ themEl.classList.add("bump"); setTimeout(function(){themEl.classList.remove("bump");},220); } themEl.textContent=them; }
   if(qEl)qEl.textContent = fmtGameClock(li.elapsed);
-  // only rebuild feed when a new play has appeared (keeps animation cheap, no flicker)
-  if(feedEl && revealed.length!==li.shownCount){
-    li.shownCount=revealed.length;
+  // filter to the active feed mode, then cap: a full log is ~145 plays and
+  // rebuilding all of them every tick janks the animation.
+  var scoringOnly=(ST.feedMode==="scoring");
+  var shown=scoringOnly?revealed.filter(function(p){return p.scoring;}):revealed;
+  var MAX_ROWS=60;
+  var slice=shown.slice(Math.max(0,shown.length-MAX_ROWS));
+  // rebuild when a new play appears OR the mode changed
+  if(feedEl && (shown.length!==li.shownCount || li.shownMode!==ST.feedMode)){
+    li.shownCount=shown.length; li.shownMode=ST.feedMode;
     var rows="";
-    for(var j=revealed.length-1;j>=0;j--){
-      var p=revealed[j];
+    for(var j=slice.length-1;j>=0;j--){
+      var p=slice[j];
       var mine=p.team==="us";
-      var badge=p.kind==="TD"?"🏈 TD":(p.kind==="FG"?"🥅 FG":
-                p.kind==="XP"?(p.good?"🦵 XP":"❌ XP"):
-                p.kind==="2PT"?(p.good?"➋ 2PT":"❌ 2PT"):"＋ SFTY");
-      var miss=(p.kind==="XP"||p.kind==="2PT") && !p.good;
+      var badge=PBP_BADGE[p.kind]||"·";
+      if(p.kind==="XP")  badge=p.good?"🦵 XP":"❌ XP";
+      if(p.kind==="2PT") badge=p.good?"➋ 2PT":"❌ 2PT";
+      var miss=(p.kind==="XP"||p.kind==="2PT"||p.kind==="FGMISS") && !p.good;
+      var big=p.scoring;
+      var turn=(p.kind==="INT"||p.kind==="FUM");
       var teamLbl = mine ? abbr(ST.save.school) : abbr(ST.weekResult.oppName);
-      rows+='<div class="pbp-row'+(mine?" mine":"")+(miss?" miss":"")+'"><span class="pbp-q">Q'+p.q+'</span>'+
+      rows+='<div class="pbp-row'+(mine?" mine":"")+(miss?" miss":"")+(big?" score":"")+(turn?" turn":"")+'">'+
+            '<span class="pbp-q">Q'+p.q+'</span>'+
             '<span class="pbp-badge">'+badge+'</span>'+
             '<span class="pbp-desc"><b>'+x(teamLbl)+'</b> · '+x(p.desc)+'</span>'+
             '<span class="pbp-sc">'+p.usTot+'-'+p.themTot+'</span></div>';
     }
-    if(rows) feedEl.innerHTML=rows;
+    if(!rows) rows='<div class="pbp-row" style="justify-content:center;color:var(--muted)">Kickoff…</div>';
+    feedEl.innerHTML=rows;
   }
   var endEl=document.getElementById("live-endstat");
   if(endEl){
