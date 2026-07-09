@@ -2265,7 +2265,7 @@ function callPlay(down,dist,yl,clock,q,margin,lean){
   if(clock<90 && margin<=0) runP-=0.35;
   return Math.random()<clampN(runP,0.05,0.92)?"run":"pass";
 }
-function blankSide(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,to:0,punts:0,sacks:0,
+function blankSide(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,to:0,ints:0,fums:0,punts:0,sacks:0,
   fga:0,fgm:0,thirdAtt:0,thirdConv:0}; }
 
 // teams: [{off,def,lean}] — returns {a,b,plays[],stats[]}
@@ -2325,6 +2325,7 @@ function simDrives(teamA, teamB){
 
       if(res.turnover){
         stats[poss].to++;
+        if(res.kind==="int") stats[poss].ints++; else stats[poss].fums++;
         var spot=clampN(yl+res.yards,1,99);
         poss=def; yl=clampN(100-spot,1,99); down=1; dist=10; continue;
       }
@@ -2450,30 +2451,30 @@ function pickDepth(pos){
 // for the game rather than re-rolled per play; the opponent gets one QB name too.
 function newCast(){
   var qb=depthOrder(ST.save.roster,"QB")[0];
-  return {usQB: qb?qb.n:genName(), oppQB: genName()};
+  return {usQB: qb?qb.n:genName(), usQBp: qb||null, oppQB: genName()};
 }
+// Returns display names AND the actual roster objects (ours only), so the
+// play-by-play and the box score describe the SAME events.
 function attribute(p, cast){
   if(p.t!==0){
     // we don't model opposing rosters — one QB, generated skill players
     var b=genName(), guard=0;
     while(b===cast.oppQB && guard++<6) b=genName();   // never throw to yourself
-    return {ball:b, qb:cast.oppQB};
+    return {ball:b, qb:cast.oppQB, ballP:null, qbP:null};
   }
-  var qn=cast.usQB;
+  var qbP=cast.usQBp, qn=cast.usQB;
   if(p.kind==="run"){
-    var qbP=depthOrder(ST.save.roster,"QB")[0];
-    var keeper=(Math.random()<0.14);                    // QB keepers happen
+    var keeper=(qbP && Math.random()<0.14);           // QB keepers happen
     var carrier= keeper ? qbP : pickDepth("RB");
-    return {ball:carrier?carrier.n:genName(), qb:qn};
+    return {ball:carrier?carrier.n:genName(), qb:qn, ballP:carrier||null, qbP:qbP};
   }
   if(p.kind==="pass"){
     var r=Math.random();
     var tgt = r<0.62 ? pickDepth("WR") : (r<0.84 ? pickDepth("TE") : pickDepth("RB"));
-    var t=tgt?tgt.n:genName();
-    if(t===qn) t=genName();                             // never throw to yourself
-    return {ball:t, qb:qn};
+    if(tgt && qbP && tgt.id===qbP.id) tgt=null;       // never throw to yourself
+    return {ball:tgt?tgt.n:genName(), qb:qn, ballP:tgt||null, qbP:qbP};
   }
-  return {ball:qn, qb:qn};
+  return {ball:qn, qb:qn, ballP:qbP, qbP:qbP};
 }
 // "OKLA 34" / "UNT 41" — field position in broadcast form.
 function fieldPos(yl, usAb, themAb){
@@ -2495,16 +2496,16 @@ function buildPlayByPlay(drivePlays, usName, themName){
     if(team==="us") ut+=p.pts; else tt+=p.pts;
     var elapsed=(p.q-1)*900 + (900-p.clock);
     var mm=Math.floor(p.clock/60), ss=p.clock%60;
-    var desc, kind=p.kind, scoring=false;
+    var desc, kind=p.kind, scoring=false, at=null;
 
     if(p.snap){
       // ── a normal snap: down, distance, field position, result ──
-      var at=attribute(p,cast);
+      at=attribute(p,cast);
       var spot=fieldPos(p.yl, off, def);
       var sit=ordDown(p.down)+" & "+((p.yl+p.dist>=100)?"Goal":p.dist)+" at "+spot;
-      // a gain can't extend past the goal line — cap it for the log
-      var gain=Math.min(p.yards, 100-p.yl);
-      var scored=(p.yl+p.yards>=100);
+      // a gain is capped at the goal line only when the play actually scored
+      var scored=(!p.turnover && p.yl+p.yards>=100);
+      var gain=scored?(100-p.yl):p.yards;
       if(p.kind==="punt"){ desc=sit+" — punt away"; kind="PUNT"; }
       else if(p.kind==="fgatt"){ desc=sit+" — "+p.d+"-yard field goal attempt"; kind="FGA"; }
       else if(p.kind==="sack"){ desc=sit+" — "+at.qb+" SACKED for "+p.yards; kind="SACK"; }
@@ -2529,7 +2530,13 @@ function buildPlayByPlay(drivePlays, usName, themName){
     }
     out.push({q:p.q, clock:mm+":"+(ss<10?"0"+ss:ss), elapsed:elapsed, team:team,
               kind:kind, pts:p.pts, good:p.good, scoring:scoring,
-              usTot:ut, themTot:tt, desc:desc});
+              usTot:ut, themTot:tt, desc:desc,
+              // raw event data the box score is derived from.
+              // Yardage is capped at the goal line only when the play actually scored;
+              // a fumble at the 1 gained what it gained.
+              yards:(p.snap?((!p.turnover && p.yl+p.yards>=100)?(100-p.yl):p.yards):0),
+              scored:(p.snap?(!p.turnover && p.yl+p.yards>=100):false),
+              ballP:(at?at.ballP:null), qbP:(at?at.qbP:null)});
   });
   // stable sort by clock; snap rows precede the score they produced
   out.forEach(function(p,i){ p._i=i; });
@@ -4012,59 +4019,22 @@ function addStat(p, obj){
 function logGame(p, opp, line){ ensureStats(p); p.gamelog.push({wk:ST.save.week+1, opp:opp, line:line}); }
 function _norm(w){ var t=w.reduce(function(a,b){return a+b;},0)||1; return w.map(function(x){return x/t;}); }
 function _apportion(total, fracs){ var o=fracs.map(function(f){return Math.max(0,Math.round(total*f));}); var d=total-o.reduce(function(a,b){return a+b;},0); if(o.length)o[0]=Math.max(0,o[0]+d); return o; }
-// Turn your offense's points into a passing/rushing/receiving box score.
-function genOffenseBox(pts, opp){
-  var s=ST.save, sc=offScheme();
-  var top=function(pos,n){ return depthOrder(s.roster,pos).slice(0,n||1); };
-  var passShare=Math.max(0.28, Math.min(0.74,(100-sc.lean)/100));
-  var totYds=Math.round(Math.max(170,Math.min(650, 250+(pts-24)*9+rnd(-40,40))));
-  var passYds=Math.round(totYds*passShare), rushYds=totYds-passYds;
-  var tds=Math.max(0,Math.round((pts-rnd(0,6))/7)); // offensive TDs (some points come from FGs)
-  var passTD=Math.round(tds*passShare), rushTD=Math.max(0,tds-passTD);
-  var comp=0;
-  var qb=top("QB",1)[0];
-  if(qb){
-    comp=Math.max(8,Math.round(passYds/(11+Math.random()*3)));
-    var att=Math.max(comp+2,Math.round(comp/(0.54+Math.random()*0.14)));
-    var pint=Math.random()<0.32?rnd(1,2):0;
-    var qbRush=0,qbCar=0,qbRuTD=0;
-    if(qb.arch==="Dual-Threat" && rushYds>30){ qbRush=Math.round(rushYds*(0.30+Math.random()*0.15)); rushYds-=qbRush; qbCar=rnd(7,13); if(rushTD>0&&Math.random()<0.5){qbRuTD=1;rushTD--;} }
-    addStat(qb,{pa:att,pc:comp,py:passYds,ptd:passTD,pint:pint,rc:qbCar,ry:qbRush,rtd:qbRuTD,g:1});
-    logGame(qb,opp,"PASS "+comp+"/"+att+" "+passYds+"yd "+passTD+"TD"+(pint?" "+pint+"INT":"")+(qbRush?" · RUSH "+qbRush+"yd"+(qbRuTD?" "+qbRuTD+"TD":""):""));
-  }
-  var rbs=top("RB",2);
-  if(rbs.length){
-    var rw=rbs.map(function(p,i){ var b=i===0?0.7:0.3; if(p.arch==="Power Back")b*=1.12; if(p.arch==="Receiving Back")b*=0.88; return b; });
-    var ryS=_apportion(rushYds,_norm(rw)), carS=_apportion(Math.max(rbs.length*6,Math.round(rushYds/4.4)),_norm(rw));
-    rbs.forEach(function(p,i){
-      var rtd=(i===0)?rushTD:0;
-      addStat(p,{rc:carS[i],ry:ryS[i],rtd:rtd,g:1});
-      logGame(p,opp,"RUSH "+carS[i]+"car "+ryS[i]+"yd"+(rtd?" "+rtd+"TD":""));
-    });
-  }
-  var recvs=top("WR",3).concat(top("TE",1));
-  if(recvs.length && comp>0){
-    var cw=recvs.map(function(p,i){ var b=i===0?0.34:(i===1?0.26:(i===2?0.18:0.14)); if(p.arch==="Possession"||p.arch==="Slot"||p.arch==="Receiving TE")b*=1.15; if(p.arch==="Vertical Threat")b*=0.85; if(p.arch==="Blocking TE")b*=0.5; return b; });
-    var recS=_apportion(comp,_norm(cw));
-    var yw=recvs.map(function(p,i){ return cw[i]*(p.arch==="Vertical Threat"?1.5:1); });
-    var yS=_apportion(passYds,_norm(yw));
-    var tdLeft=passTD;
-    recvs.forEach(function(p,i){
-      if(recS[i]<=0 && yS[i]<=0) return;
-      var rtd=0; if(tdLeft>0 && (i<2 || Math.random()<0.4)){ rtd=1; tdLeft--; }
-      addStat(p,{rec:recS[i],recy:yS[i],rectd:rtd,g:1});
-      logGame(p,opp,"REC "+recS[i]+" "+yS[i]+"yd"+(rtd?" "+rtd+"TD":""));
-    });
-  }
-}
 // Turn points allowed into a defensive box score across your starters.
-function genDefenseBox(ptsAllowed, opp){
+// `oppStats` is the opposing offense's real per-play totals from the drive engine:
+// the sacks they took are ours, the passes they threw away are our takeaways.
+function genDefenseBox(ptsAllowed, opp, driveStats){
   var s=ST.save, sc=defScheme();
   var top=function(pos,n){ return depthOrder(s.roster,pos).slice(0,n); };
+  var o=(driveStats && driveStats[1]) ? driveStats[1] : null;
   var perf=Math.max(0,Math.min(1,(30-ptsAllowed)/30));
-  var totTkl=rnd(52,66);
-  var sacks=Math.max(0,Math.round(1+perf*3+(sc.lean>60?1:0)+(Math.random()<0.5?1:0)));
-  var tfls=rnd(3,7), ints=(Math.random()<(0.22+perf*0.5))?rnd(1,2):0, pbus=rnd(2,6);
+  // Real counts where the engine has them; estimates only where it doesn't model the event.
+  var totTkl = o ? Math.max(30, Math.round(o.plays*0.78)) : rnd(52,66);
+  var sacks  = o ? o.sacks : Math.max(0,Math.round(1+perf*3+(sc.lean>60?1:0)+(Math.random()<0.5?1:0)));
+  var ints   = o ? o.ints  : ((Math.random()<(0.22+perf*0.5))?rnd(1,2):0);
+  var fums   = o ? o.fums  : 0;
+  // TFLs and PBUs aren't modelled play-by-play; scale them to real activity.
+  var tfls = sacks + (o ? Math.round(o.plays*0.05) : rnd(3,7));
+  var pbus = o ? Math.max(1, Math.round((o.att-o.comp)*0.35)) : rnd(2,6);
   var groups=[
     {pos:"LB",tkl:1.5,sack:sc.lean>55?0.8:0.4,int:0.4,tfl:1.0,pbu:0.4},
     {pos:"S", tkl:1.1,sack:0.1,int:1.0,tfl:0.3,pbu:0.9},
@@ -4080,18 +4050,58 @@ function genDefenseBox(ptsAllowed, opp){
     });
   });
   if(!players.length) return;
-  var tA=_apportion(totTkl,_norm(tW)),sA=_apportion(sacks,_norm(sW)),fA=_apportion(tfls,_norm(fW)),iA=_apportion(ints,_norm(iW)),pA=_apportion(pbus,_norm(pW));
+  var tA=_apportion(totTkl,_norm(tW)),sA=_apportion(sacks,_norm(sW)),fA=_apportion(tfls,_norm(fW)),iA=_apportion(ints,_norm(iW)),pA=_apportion(pbus,_norm(pW)),uA=_apportion(fums,_norm(fW));
   players.forEach(function(p,i){
-    addStat(p,{tkl:tA[i],sack:sA[i],tfl:fA[i],dint:iA[i],pbu:pA[i],g:1});
-    var parts=[tA[i]+" tkl"]; if(sA[i])parts.push(sA[i]+" sack"); if(fA[i])parts.push(fA[i]+" TFL"); if(iA[i])parts.push(iA[i]+" INT"); if(pA[i])parts.push(pA[i]+" PBU");
+    addStat(p,{tkl:tA[i],sack:sA[i],tfl:fA[i],dint:iA[i],pbu:pA[i],ff:uA[i],g:1});
+    var parts=[tA[i]+" tkl"]; if(sA[i])parts.push(sA[i]+" sack"); if(fA[i])parts.push(fA[i]+" TFL"); if(iA[i])parts.push(iA[i]+" INT"); if(uA[i])parts.push(uA[i]+" FF"); if(pA[i])parts.push(pA[i]+" PBU");
     logGame(p,opp,parts.join(", "));
   });
 }
 // Generate + record a game's box score for the unit(s) you coach.
-function recordGameStats(res, opp){
+// Build the box score from the plays that actually happened.
+// The play-by-play and the stat line are now two views of one event stream.
+function recordGameStats(res, opp, pbp){
   var s=ST.save;
-  if(s.role==="OC"||s.role==="HC") genOffenseBox(res.us, opp);
-  if(s.role==="DC"||s.role==="HC") genDefenseBox(res.them, opp);
+  if(s.role==="OC"||s.role==="HC") boxFromPlays(pbp, opp);
+  if(s.role==="DC"||s.role==="HC") genDefenseBox(res.them, opp, res.driveStats);
+}
+// Accumulate per-player offensive stats by walking our own snaps.
+function boxFromPlays(pbp, opp){
+  if(!pbp || !pbp.length) return;
+  var acc={}, order=[];
+  function bucket(pl){
+    if(!pl) return null;
+    if(!acc[pl.id]){ acc[pl.id]={p:pl, pa:0,pc:0,py:0,ptd:0,pint:0, rc:0,ry:0,rtd:0, rec:0,recy:0,rectd:0}; order.push(pl.id); }
+    return acc[pl.id];
+  }
+  pbp.forEach(function(e){
+    if(e.team!=="us" || e.scoring) return;   // scoring rows carry no snap data
+    var ball=bucket(e.ballP), qb=bucket(e.qbP);
+    if(e.kind==="RUN" || e.kind==="FUM"){
+      if(ball){ ball.rc++; ball.ry+=e.yards; if(e.scored && e.kind==="RUN") ball.rtd++; }
+    } else if(e.kind==="PASS"){
+      if(qb){ qb.pa++; qb.pc++; qb.py+=e.yards; if(e.scored) qb.ptd++; }
+      if(ball && ball!==qb){ ball.rec++; ball.recy+=e.yards; if(e.scored) ball.rectd++; }
+    } else if(e.kind==="INC"){
+      if(qb) qb.pa++;
+    } else if(e.kind==="INT"){
+      if(qb){ qb.pa++; qb.pint++; }
+    }
+    // SACK: not an attempt, and no per-player sack-yardage field in the schema
+  });
+  order.forEach(function(id){
+    var a=acc[id];
+    var st={g:1};
+    if(a.pa){ st.pa=a.pa; st.pc=a.pc; st.py=a.py; st.ptd=a.ptd; st.pint=a.pint; }
+    if(a.rc){ st.rc=a.rc; st.ry=a.ry; st.rtd=a.rtd; }
+    if(a.rec){ st.rec=a.rec; st.recy=a.recy; st.rectd=a.rectd; }
+    addStat(a.p, st);
+    var parts=[];
+    if(a.pa)  parts.push("PASS "+a.pc+"/"+a.pa+" "+a.py+"yd"+(a.ptd?" "+a.ptd+"TD":"")+(a.pint?" "+a.pint+"INT":""));
+    if(a.rc)  parts.push("RUSH "+a.rc+"car "+a.ry+"yd"+(a.rtd?" "+a.rtd+"TD":""));
+    if(a.rec) parts.push("REC "+a.rec+" "+a.recy+"yd"+(a.rectd?" "+a.rectd+"TD":""));
+    if(parts.length) logGame(a.p, opp, parts.join(" · "));
+  });
 }
 // Reset per-season stats for returning players at the start of a new season (career persists).
 function resetSeasonStats(){ (ST.save.roster||[]).forEach(function(p){ if(p.stats)p.stats.season={}; p.gamelog=[]; }); }
@@ -4165,7 +4175,7 @@ function playWeek(){
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
   // living league: record your result + advance every other team one week
   recordUserLeagueResult(won, g.oc===s.conf);
-  recordGameStats(res, g.opp); // synthesize this game's player box score
+  recordGameStats(res, g.opp, pbp); // box score derived from the plays that happened
   simLeagueWeek(s.school);
   developInSeason();
   advanceRecruitingWeek(); // rivals push, commits happen, new weekly points
