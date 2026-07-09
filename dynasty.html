@@ -153,16 +153,16 @@ a{color:inherit;text-decoration:none}
 .rec-scouted{flex:1;font-size:10px;font-weight:800;color:var(--green);display:flex;align-items:center;justify-content:center;border:2px dashed var(--green);border-radius:8px}
 .fuzzy{color:var(--muted);font-weight:900}
 .fuzzy-q{display:inline-block;font-weight:900;color:var(--purple);background:var(--purple-bg);border-radius:4px;padding:0 4px;font-size:9px}
-.fit-dot{font-size:8px;font-weight:900;border-radius:5px;padding:1px 5px;border:1.5px solid}
+.fit-dot{font-size:8px;font-weight:900;border-radius:5px;padding:1px 5px;border:1.5px solid;white-space:nowrap;display:inline-block}
 .fit-dot.great{color:var(--green);border-color:var(--green)}
 .fit-dot.ok{color:var(--gold-dark);border-color:var(--gold-dark)}
 .fit-dot.poor{color:var(--red2);border-color:var(--red2)}
-.rec-trait{font-size:9px;font-weight:900;border-radius:5px;padding:1px 6px;background:var(--cream);border:1.5px solid var(--border)}
+.rec-trait{font-size:9px;font-weight:900;border-radius:5px;padding:1px 6px;background:var(--cream);border:1.5px solid var(--border);white-space:nowrap;display:inline-block}
 .rec-trait.gem{color:var(--blue);border-color:var(--blue);background:var(--blue-bg)}
 .rec-trait.elite{color:var(--gold-dark);border-color:var(--gold-dark);background:var(--gold-bg)}
 .rec-trait.pro{color:var(--green);border-color:var(--green);background:var(--green-bg)}
 .rec-trait.bust{color:var(--red2);border-color:var(--red2)}
-.arch-tag{display:inline-block;font-size:8.5px;font-weight:900;color:var(--muted);background:var(--cream);border:1.5px solid var(--border2);border-radius:5px;padding:1px 6px}
+.arch-tag{display:inline-block;font-size:8.5px;font-weight:900;color:var(--muted);background:var(--cream);border:1.5px solid var(--border2);border-radius:5px;padding:1px 6px;white-space:nowrap}
 .scheme-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px}
 .scheme-chip{font-size:10px;font-weight:900;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border);background:#fff;padding:6px 10px;cursor:pointer}
 .scheme-chip:active{transform:translate(2px,2px);box-shadow:none}
@@ -1431,10 +1431,10 @@ function estOvr(b){ if(b.scout>=2) return b.ovr; return ({5:82,4:76,3:70,2:63,1:
 // Dev-trait reveal at the final scout tier.
 function recruitTraitDisplay(b){
   if(b.scout<maxScoutTier()) return "";
-  if(b.dev==="elite") return '<span class="rec-trait elite">⭐ Elite ceiling</span>';
-  if(b.dev==="pro")   return '<span class="rec-trait pro">🔥 Pro developer</span>';
-  if(b.dev==="slow")  return '<span class="rec-trait bust">🐢 Slow developer</span>';
-  if(b.dev==="bust")  return '<span class="rec-trait bust">⚠ Bust risk</span>';
+  if(b.dev==="elite") return '<span class="rec-trait elite">⭐ Elite</span>';
+  if(b.dev==="pro")   return '<span class="rec-trait pro">🔥 Pro</span>';
+  if(b.dev==="slow")  return '<span class="rec-trait bust">🐢 Slow</span>';
+  if(b.dev==="bust")  return '<span class="rec-trait bust">⚠ Bust</span>';
   return '<span class="rec-trait">Steady</span>';
 }
 // Points you get to spend each week on recruiting
@@ -1455,6 +1455,7 @@ function recruitProspect(id){
   // Tuned so closing a recruit takes ~7-9 clicks — you can seriously pursue ~10 targets a year.
   var gain = Math.max(3, 8 - Math.floor(b.st*0.7) - Math.floor(b.interest/22));
   b.interest = Math.min(100, b.interest + gain);
+  if(b.interest>=100){ b.status="committed"; b.committedTo=s.school; toast("🎉 "+x(b.n)+" committed to you!"); }
   persist(); draw();
 }
 // Add/remove a prospect from your watchlist (the ⭐ Watch filter). Free — costs no points.
@@ -1477,15 +1478,19 @@ function advanceRecruitingWeek(){
       if(b.dev==="elite"||b.dev==="pro") push += rnd(3,5); // every program covets a high-ceiling prospect — poached fast
       rv.interest = Math.min(100, rv.interest + push);
     });
-    // your interest naturally cools a touch if you ignore them (already handled by rivals rising)
-    // COMMITMENT check: whoever is clearly ahead and past the threshold lands the commit
+    // COMMITMENT: the leader gets more likely to land the recruit as interest climbs toward 100
     var topRival = b.rivals.reduce(function(m,rv){ return (!m||rv.interest>m.interest)?rv:m; }, null);
     var rivalLead = topRival ? topRival.interest : 0;
-    if(b.interest>=70 && b.interest>=rivalLead+8){
-      b.status="committed"; b.committedTo=s.school;
-    } else if(rivalLead>=72 && rivalLead>b.interest+12){
-      // a rival lands them → lost, unless you're still close
-      b.status="lost"; b.committedTo=topRival.name;
+    var youLead = b.interest >= rivalLead;
+    var leaderInt = Math.max(b.interest, rivalLead);
+    var margin = Math.abs(b.interest - rivalLead);
+    var commitToLeader=function(){ if(youLead){ b.status="committed"; b.committedTo=s.school; } else { b.status="lost"; b.committedTo=topRival.name; } };
+    if(leaderInt>=100){ commitToLeader(); } // maxed interest → instant commit
+    else if(leaderInt>=66){
+      var base=(leaderInt-64)/36;                        // 0 at 64 → ~1 near 100
+      var marg=Math.max(0.2, Math.min(1,(margin+3)/14)); // a clear lead lands them; a dead heat lingers
+      var p=Math.max(0, Math.min(0.95, base*marg));      // weekly commit chance
+      if(Math.random()<p) commitToLeader();
     }
   });
   // refresh weekly points
@@ -1887,17 +1892,20 @@ function retentionRisk(p, fundOverride){
   return Math.max(0,Math.min(94,Math.round(base)));
 }
 // Interest a recruit gains from an NIL offer of $amt (M) — strong, but diminishing as they warm.
-function nilInterestGain(b, amt){ return Math.max(1, Math.round(amt*2.4*(1-(b.interest||0)/130))); }
+// Interest per $1M by star rating — blue-chips are expensive to buy, low-stars are cheap.
+// 5★ ≈ +1 per $250K; a 1★ moves far more per dollar.
+function nilRate(st){ return ({5:4,4:7,3:11,2:16,1:22}[Math.max(1,Math.min(5,st||3))]); }
+function nilInterestGain(b, amt){ return Math.round(amt * nilRate(b.st)); }
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
 // Open the NIL slider sheet for a recruit ("recruit") or a roster player ("retain").
 function openNIL(kind, id){
   var s=ST.save;
   var maxA;
-  if(kind==="recruit"){ var b=(s.board||[]).filter(function(x){return x.id===id;})[0]; if(!b)return; maxA=Math.max(0,Math.min(s.nilLeft, 15-(b.nil||0))); }
+  if(kind==="recruit"){ var b=(s.board||[]).filter(function(x){return x.id===id;})[0]; if(!b)return; maxA=Math.max(0,Math.min(s.nilLeft, 8, 15-(b.nil||0))); }
   else { var p=(s.roster||[]).filter(function(x){return x.id===id;})[0]; if(!p)return; var dem=nilDemand(p); maxA=Math.max(0,Math.min(s.nilLeft, Math.max(dem*1.5,1)-(p.nilFund||0))); }
   if(maxA<=0){ toast(kind==="recruit"?"NIL offer maxed for this recruit":"Fully funded"); return; }
   ST.nilPick={kind:kind, id:id};
-  ST.nilPickVal=Math.min(maxA, kind==="recruit"?Math.min(2,maxA):Math.min(1,maxA));
+  ST.nilPickVal=0; // always start at $0
   draw();
 }
 function nilPreview(kind,item,amt){
@@ -1910,7 +1918,7 @@ function commitNIL(){
   if(!np || amt<=0){ ST.nilPick=null; ST.nilPickVal=null; draw(); return; }
   if(np.kind==="recruit"){
     var b=(s.board||[]).filter(function(x){return x.id===np.id;})[0];
-    if(b){ var g=nilInterestGain(b,amt); b.interest=Math.min(100,b.interest+g); b.nil=money2((b.nil||0)+amt); s.nilLeft=money2(s.nilLeft-amt); toast("💰 Offered "+fmtMoney(amt)+" to "+x(b.n)+" · +"+g+" interest"); }
+    if(b){ var g=nilInterestGain(b,amt); b.interest=Math.min(100,b.interest+g); b.nil=money2((b.nil||0)+amt); s.nilLeft=money2(s.nilLeft-amt); toast("💰 Offered "+fmtMoney(amt)+" to "+x(b.n)+" · +"+g+" interest"); if(b.interest>=100){ b.status="committed"; b.committedTo=s.school; toast("🎉 "+x(b.n)+" committed to you!"); } }
   } else {
     var p=(s.roster||[]).filter(function(x){return x.id===np.id;})[0];
     if(p){ p.nilFund=money2((p.nilFund||0)+amt); s.nilLeft=money2(s.nilLeft-amt); toast("💰 Funded "+x(p.n)+" · "+fmtMoney(p.nilFund)); }
@@ -2290,15 +2298,17 @@ function renderNilOverlay(){
   var np=ST.nilPick, s=ST.save;
   if(!np || !s){ el.innerHTML=""; el.className=""; return; }
   var kind=np.kind, item, name, sub, maxA;
-  if(kind==="recruit"){ item=(s.board||[]).filter(function(b){return b.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.ovr+" OVR est · "+(item.arch||""); maxA=Math.max(0,Math.min(s.nilLeft,15-(item.nil||0))); }
+  if(kind==="recruit"){ item=(s.board||[]).filter(function(b){return b.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.ovr+" OVR est · "+(item.arch||""); maxA=Math.max(0,Math.min(s.nilLeft,8,15-(item.nil||0))); }
   else { item=(s.roster||[]).filter(function(p){return p.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.yr+" · "+item.ovr+" OVR · wants "+fmtMoney(nilDemand(item)); maxA=Math.max(0,Math.min(s.nilLeft,Math.max(nilDemand(item)*1.5,1)-(item.nilFund||0))); }
-  var val=Math.min(ST.nilPickVal!=null?ST.nilPickVal:1, maxA);
+  var val=Math.min(ST.nilPickVal!=null?ST.nilPickVal:0, maxA);
+  var step=(kind==="recruit" && item)?(1/nilRate(item.st)):0.01; // recruit: each notch = +1 interest
+  if(kind==="recruit"){ val=Math.round(val*nilRate(item.st))/nilRate(item.st); } // snap default to a notch
   el.innerHTML='<div class="nil-backdrop" id="nil-backdrop"></div><div class="nil-sheet">'+
     '<div class="nil-sheet-h">'+(kind==="recruit"?"💰 NIL Offer":"💰 Retention Fund")+'</div>'+
     '<div class="nil-sheet-nm">'+x(name)+'<span>'+x(sub)+'</span></div>'+
     '<div class="nil-sheet-amt" id="nil-amt">'+fmtMoney(val)+'</div>'+
     '<div class="nil-sheet-eff" id="nil-eff">'+nilPreview(kind,item,val)+'</div>'+
-    '<input type="range" min="0" max="'+maxA+'" step="0.25" value="'+val+'" id="nil-slider" class="nil-range">'+
+    '<input type="range" min="0" max="'+maxA+'" step="'+step+'" value="'+val+'" id="nil-slider" class="nil-range">'+
     '<div class="nil-sheet-scale"><span>$0</span><span>'+fmtMoney(maxA)+' available</span></div>'+
     '<div class="nil-sheet-btns"><button class="nil-cancel" id="nil-cancel">Cancel</button><button class="nil-commit" id="nil-commit">Commit '+fmtMoney(val)+'</button></div>'+
     '</div>';
