@@ -2634,117 +2634,144 @@ function newGameState(teamA, teamB){
     tactics:{off:"balanced", tempo:"normal", def:"standard"}
   };
 }
+// Advance the game by exactly ONE snap and return where that left us:
+//   "stop"   — the next snap belongs to a later quarter than stopQ (hand control back)
+//   "done"   — regulation (and any OT) is over
+//   "played" — a snap was run; call again to continue
+// Because the tactics are re-read here on every single snap (tacticsOf → G.tactics,
+// the very object the tactic buttons mutate), driving this one snap at a time makes
+// mid-quarter tactic changes take effect on the very next play.
+function simSnap(G, stopQ){
+  if(G.done) return "done";
+  if(G.clock<=0){                    // half over
+    if(G.half===0){ G.half=1; G.poss=G.half2; G.clock=1800; G.yl=25; G.down=1; G.dist=10; G.guard=0; }
+    else { finishRegulation(G); return "done"; }
+  }
+  if(G.guard++>900){ finishRegulation(G); return "done"; }
+
+  var q=(G.half===0)?(G.clock>900?1:2):(G.clock>900?3:4);
+  if(stopQ && q>stopQ) return "stop";   // rolled into the next quarter — hand control back
+
+  var qc=G.clock>900?G.clock-900:G.clock;
+  var poss=G.poss, def=1-poss;
+  var S=G.S, plays=G.plays, stats=G.stats, teams=G.teams;
+  var edge=teams[poss].off-teams[def].def;
+  var margin=S[poss]-S[def];
+
+  // whose tactics apply: the ball-carrier's offense, the other side's defense.
+  // The DEFENDER'S OWN tempo choice fatigues him — hurry-up means his offense
+  // kept giving the ball back, so he never got off the field.
+  var oT=tacticsOf(G,poss), dT=tacticsOf(G,def);
+  var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
+  var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
+  var lean=tacticLean(teams[poss].lean, oT.off);
+  // Calling against your own personnel erodes your scheme fit for that snap;
+  // calling toward it earns some back. Only the user's coached unit is affected.
+  // CPU-vs-CPU league games never touch the user's roster or schemes.
+  if(G.userGame){
+    if(poss===0) edge += schemeFitDelta("off", oT);
+    if(def===0)  edge -= schemeFitDelta("def", dT);  // a better-fit defense lowers the offense's edge
+  }
+
+  if(G.down===4){
+    var dec=fourthDown(G.yl,G.dist,G.clock,q,margin,tacticFourthBias(oT.tempo));
+    if(dec==="punt"){
+      stats[poss].punts++;
+      plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"punt",yards:0,pts:0,snap:true});
+      var net=clampN(Math.round(42+gauss()*8),25,62);
+      var ny=(G.yl+net>=100)?20:(100-(G.yl+net));
+      G.clock-=rnd(12,20);
+      G.poss=def; G.yl=clampN(ny,1,99); G.down=1; G.dist=10; return "played";
+    }
+    if(dec==="fg"){
+      var fd=fgDist(G.yl); stats[poss].fga++; G.clock-=rnd(6,12);
+      plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"fgatt",yards:0,pts:0,snap:true,d:fd});
+      if(Math.random()<fgProb(fd)){
+        stats[poss].fgm++; S[poss]+=3;
+        plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
+        G.poss=def; G.yl=25; G.clock-=rnd(4,8);
+      } else {
+        plays.push({t:poss,kind:"FGMISS",pts:0,q:q,clock:qc,d:fd});
+        G.poss=def; G.yl=clampN(100-G.yl,1,99);
+      }
+      G.down=1; G.dist=10; return "played";
+    }
+    // "go" falls through to a live play
+  }
+
+  var call=callPlay(G.down,G.dist,G.yl,G.clock,q,margin,lean);
+  var obvious=(G.down>=3 && G.dist>=6);
+  var res=(call==="run")?dRun(edge,dm):dPass(edge,obvious,dm,aggro);
+  stats[poss].plays++;
+  var snap={t:poss, q:q, clock:qc, down:G.down, dist:G.dist, yl:G.yl,
+            kind:res.kind, yards:res.yards, incomplete:res.incomplete,
+            turnover:res.turnover, fourth:(G.down===4), pts:0, snap:true};
+  plays.push(snap);
+  if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
+  else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; }
+  else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
+  if(G.down===3) stats[poss].thirdAtt++;
+  G.clock-=dClock(res, oT.tempo);
+
+  if(res.turnover){
+    stats[poss].to++;
+    if(res.kind==="int") stats[poss].ints++; else stats[poss].fums++;
+    var spot=clampN(G.yl+res.yards,1,99);
+    G.poss=def; G.yl=clampN(100-spot,1,99); G.down=1; G.dist=10; return "played";
+  }
+  var gained=res.yards; G.yl+=gained;
+
+  if(G.yl<=0){                                  // safety
+    S[def]+=2; plays.push({t:def,kind:"SFTY",pts:2,q:q,clock:qc});
+    G.poss=def; G.yl=25; G.down=1; G.dist=10; return "played";
+  }
+  if(G.yl>=100){                                // touchdown
+    S[poss]+=6;
+    if(G.down===3) stats[poss].thirdConv++;
+    plays.push({t:poss,kind:"TD",pts:6,q:q,clock:qc});
+    var deficit=S[def]-(S[poss]-6);
+    if(goesForTwo(deficit,q)){
+      var ok=Math.random()<TWO_RATE; if(ok)S[poss]+=2;
+      plays.push({t:poss,kind:"2PT",pts:ok?2:0,good:ok,q:q,clock:qc});
+    } else {
+      var ok2=Math.random()<XP_RATE; if(ok2)S[poss]+=1;
+      plays.push({t:poss,kind:"XP",pts:ok2?1:0,good:ok2,q:q,clock:qc});
+    }
+    G.clock-=rnd(4,8);
+    G.poss=def; G.yl=25; G.down=1; G.dist=10; return "played";
+  }
+  if(gained>=G.dist){                           // first down
+    if(G.down===3) stats[poss].thirdConv++;
+    G.down=1; G.dist=Math.min(10,100-G.yl);
+  } else {
+    G.down++; G.dist-=gained;
+    if(G.down>4){ G.poss=def; G.yl=clampN(100-G.yl,1,99); G.down=1; G.dist=10; }
+  }
+  return "played";
+}
 // Run the game forward until the end of quarter `stopQ` (1..4), or to the final
-// whistle when stopQ is falsy. Returns when the clock crosses that boundary.
+// whistle when stopQ is falsy. Batch driver — used for CPU games and "Sim to Final".
 function simUntil(G, stopQ){
   if(G.done) return G;
-  while(!G.done){
-    if(G.clock<=0){                    // half over
-      if(G.half===0){ G.half=1; G.poss=G.half2; G.clock=1800; G.yl=25; G.down=1; G.dist=10; G.guard=0; }
-      else { finishRegulation(G); return G; }
-    }
-    if(G.guard++>900){ finishRegulation(G); return G; }
-
-    var q=(G.half===0)?(G.clock>900?1:2):(G.clock>900?3:4);
-    if(stopQ && q>stopQ) return G;     // rolled into the next quarter — hand control back
-
-    var qc=G.clock>900?G.clock-900:G.clock;
-    var poss=G.poss, def=1-poss;
-    var S=G.S, plays=G.plays, stats=G.stats, teams=G.teams;
-    var edge=teams[poss].off-teams[def].def;
-    var margin=S[poss]-S[def];
-
-    // whose tactics apply: the ball-carrier's offense, the other side's defense.
-    // The DEFENDER'S OWN tempo choice fatigues him — hurry-up means his offense
-    // kept giving the ball back, so he never got off the field.
-    var oT=tacticsOf(G,poss), dT=tacticsOf(G,def);
-    var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
-    var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
-    var lean=tacticLean(teams[poss].lean, oT.off);
-    // Calling against your own personnel erodes your scheme fit for that snap;
-    // calling toward it earns some back. Only the user's coached unit is affected.
-    // CPU-vs-CPU league games never touch the user's roster or schemes.
-    if(G.userGame){
-      if(poss===0) edge += schemeFitDelta("off", oT);
-      if(def===0)  edge -= schemeFitDelta("def", dT);  // a better-fit defense lowers the offense's edge
-    }
-
-    if(G.down===4){
-      var dec=fourthDown(G.yl,G.dist,G.clock,q,margin,tacticFourthBias(oT.tempo));
-      if(dec==="punt"){
-        stats[poss].punts++;
-        plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"punt",yards:0,pts:0,snap:true});
-        var net=clampN(Math.round(42+gauss()*8),25,62);
-        var ny=(G.yl+net>=100)?20:(100-(G.yl+net));
-        G.clock-=rnd(12,20);
-        G.poss=def; G.yl=clampN(ny,1,99); G.down=1; G.dist=10; continue;
-      }
-      if(dec==="fg"){
-        var fd=fgDist(G.yl); stats[poss].fga++; G.clock-=rnd(6,12);
-        plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"fgatt",yards:0,pts:0,snap:true,d:fd});
-        if(Math.random()<fgProb(fd)){
-          stats[poss].fgm++; S[poss]+=3;
-          plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
-          G.poss=def; G.yl=25; G.clock-=rnd(4,8);
-        } else {
-          plays.push({t:poss,kind:"FGMISS",pts:0,q:q,clock:qc,d:fd});
-          G.poss=def; G.yl=clampN(100-G.yl,1,99);
-        }
-        G.down=1; G.dist=10; continue;
-      }
-      // "go" falls through to a live play
-    }
-
-    var call=callPlay(G.down,G.dist,G.yl,G.clock,q,margin,lean);
-    var obvious=(G.down>=3 && G.dist>=6);
-    var res=(call==="run")?dRun(edge,dm):dPass(edge,obvious,dm,aggro);
-    stats[poss].plays++;
-    var snap={t:poss, q:q, clock:qc, down:G.down, dist:G.dist, yl:G.yl,
-              kind:res.kind, yards:res.yards, incomplete:res.incomplete,
-              turnover:res.turnover, fourth:(G.down===4), pts:0, snap:true};
-    plays.push(snap);
-    if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
-    else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; }
-    else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
-    if(G.down===3) stats[poss].thirdAtt++;
-    G.clock-=dClock(res, oT.tempo);
-
-    if(res.turnover){
-      stats[poss].to++;
-      if(res.kind==="int") stats[poss].ints++; else stats[poss].fums++;
-      var spot=clampN(G.yl+res.yards,1,99);
-      G.poss=def; G.yl=clampN(100-spot,1,99); G.down=1; G.dist=10; continue;
-    }
-    var gained=res.yards; G.yl+=gained;
-
-    if(G.yl<=0){                                  // safety
-      S[def]+=2; plays.push({t:def,kind:"SFTY",pts:2,q:q,clock:qc});
-      G.poss=def; G.yl=25; G.down=1; G.dist=10; continue;
-    }
-    if(G.yl>=100){                                // touchdown
-      S[poss]+=6;
-      if(G.down===3) stats[poss].thirdConv++;
-      plays.push({t:poss,kind:"TD",pts:6,q:q,clock:qc});
-      var deficit=S[def]-(S[poss]-6);
-      if(goesForTwo(deficit,q)){
-        var ok=Math.random()<TWO_RATE; if(ok)S[poss]+=2;
-        plays.push({t:poss,kind:"2PT",pts:ok?2:0,good:ok,q:q,clock:qc});
-      } else {
-        var ok2=Math.random()<XP_RATE; if(ok2)S[poss]+=1;
-        plays.push({t:poss,kind:"XP",pts:ok2?1:0,good:ok2,q:q,clock:qc});
-      }
-      G.clock-=rnd(4,8);
-      G.poss=def; G.yl=25; G.down=1; G.dist=10; continue;
-    }
-    if(gained>=G.dist){                           // first down
-      if(G.down===3) stats[poss].thirdConv++;
-      G.down=1; G.dist=Math.min(10,100-G.yl);
-    } else {
-      G.down++; G.dist-=gained;
-      if(G.down>4){ G.poss=def; G.yl=clampN(100-G.yl,1,99); G.down=1; G.dist=10; }
-    }
-  }
+  var st;
+  do { st=simSnap(G, stopQ); } while(st==="played");
   return G;
+}
+// Game time (seconds, 0..3600) the engine has actually simulated so far.
+function engineElapsed(G){ return (G.half*1800) + (1800 - Math.max(0,G.clock)); }
+// Generate snaps until the engine has simulated up to game-time `upto`, or hits the
+// stop boundary for this stretch, or the game ends. Returns how many raw plays were
+// added. Tactics are read inside simSnap, so a change made a moment ago lands here.
+function simLiveTo(G, stopQ, upto){
+  var added=0, guard=0;
+  while(!G.done && guard++<900){
+    if(engineElapsed(G)>=upto && G.clock>0) break;   // caught up (no pending clock flip)
+    var before=G.plays.length;
+    var st=simSnap(G, stopQ);
+    added += (G.plays.length-before);
+    if(st==="stop"||st==="done") break;
+  }
+  return added;
 }
 // Overtime — no ties. OT scores are emitted as plays so the feed matches the final.
 function finishRegulation(G){
@@ -4681,7 +4708,7 @@ function liveStatsPanel(revealed){
     ["Points",      T.us.pts,        T.them.pts,       1],
     ["Total Yards", yds(T.us),       yds(T.them),      1],
     ["Rushing",     T.us.rushYds,    T.them.rushYds,   1],
-    ["Passing (net)", T.us.passYds,  T.them.passYds,   1],
+    ["Passing",     T.us.passYds,    T.them.passYds,   1],
     ["Passing C/A", cmp(T.us),       cmp(T.them),      0],
     ["Plays",       T.us.plays,      T.them.plays,     0],
     ["3rd Down",    third(T.us),     third(T.them),    0],
@@ -4956,23 +4983,26 @@ function playWeek(){
   ST.screen="live"; draw();
   runQuarter();
 }
-// Play through the end of the current quarter, then pause for tactics.
+// Play the current quarter LIVE. Plays are NOT pre-simulated — they're generated one
+// snap at a time as the game clock reveals them (see resumeLiveSim → simLiveTo). Since
+// every snap re-reads your tactics, a call you change mid-quarter takes effect on the
+// very next play. The quarter (or, for Q4, the game) ends only when the clock runs out.
 function runQuarter(){
   var G=ST.G; if(!G) return;
   var q=ST.live.quarter;
-  simUntil(G, q>=4?0:q);
-  ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
-  ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
-  // The engine may have run clear to the final whistle — Q4 has no "next quarter"
-  // to stop at, so simUntil plays it all out and sets G.done. But the UI must NOT
-  // go "done" yet: doing so flashes VICTORY/DEFEAT and hides the tactics panel the
-  // instant the fourth quarter begins, instead of letting it animate down to 0:00
-  // like every other quarter. Remember the sim is complete, but stay live until the
-  // clock actually reaches the end — onLiveStretchEnd() records the result then.
-  ST.live.simComplete=G.done;
+  ST.live.stopQ = (q>=4 ? 0 : q);          // 0 → no "next quarter" to stop at: play to the whistle
+  ST.live.finalStretch = (ST.live.stopQ===0);
   ST.live.done=false;
-  ST.live.paused=!G.done;
-  startLiveSim();     // reveal what just happened, at the chosen speed
+  ST.live.paused=false;
+  startLiveSim();
+}
+// Rebuild the play-by-play feed from whatever the engine has generated so far.
+// Cheap enough to call whenever a new snap is produced; the reveal is clamped to the
+// game clock, so this never surfaces a play before its time.
+function rebuildLivePbp(){
+  var G=ST.G, r=ST.weekResult; if(!G||!r) return;
+  r.pbp=buildPlayByPlay(G.plays, ST.save.school, r.oppName);
+  r.us=G.S[0]; r.them=G.S[1];
 }
 // Skip straight to the final whistle, tactics locked as they are.
 function simToFinal(){
@@ -4981,7 +5011,7 @@ function simToFinal(){
   simUntil(G, 0);
   ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
   ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
-  ST.live.simComplete=true; ST.live.done=true; ST.live.paused=false; ST.live.quarter=4;
+  ST.live.done=true; ST.live.paused=false; ST.live.finalStretch=true; ST.live.quarter=4;
   finishGameSim();
   ST.live.elapsed=3600;
   renderLiveScore();
@@ -5049,29 +5079,40 @@ var SIM_SPEEDS={
 function simSpeed(){ return SIM_SPEEDS[ST.simSpeed] || SIM_SPEEDS.normal; }
 function startLiveSim(){
   stopLiveSim();
-  var r=ST.weekResult, li=ST.live;
-  // reveal ceiling for this stretch: the end of the quarter just simulated, or the
-  // final whistle once the whole game has been computed (the Q4 stretch)
-  li.target = (li.done||li.simComplete) ? 3600 : (li.quarter*900);
-  if(!r.pbp||!r.pbp.length){ li.elapsed=li.target; onLiveStretchEnd(); return; }
-  try{ if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
-    li.elapsed=li.target; onLiveStretchEnd(); return; } }catch(e){}
+  var li=ST.live;
+  // reveal ceiling for this stretch: the end of the quarter being played, or the final
+  li.target = li.finalStretch ? 3600 : (li.quarter*900);
+  // Reduced motion: skip the animation, but still generate this stretch live so the
+  // tactics set at the break apply as its snaps are produced, then reveal it at once.
+  var reduce=false;
+  try{ reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }catch(e){}
+  if(reduce){
+    if(ST.G && !ST.G.done) simLiveTo(ST.G, li.stopQ, li.target);
+    rebuildLivePbp();
+    li.elapsed=li.target; onLiveStretchEnd(); return;
+  }
   resumeLiveSim();
 }
 // Start (or restart) the ticker at the CURRENT speed, from the CURRENT clock.
 // Called on kickoff and again whenever the user changes speed mid-game.
 function resumeLiveSim(){
   stopLiveSim();
-  var r=ST.weekResult;
-  if(!r || !r.pbp || !r.pbp.length || !ST.live) return;
-  if(ST.live.elapsed>=(ST.live.target||3600)) return;   // this stretch is fully revealed
+  var r=ST.weekResult, li=ST.live;
+  if(!r || !li) return;
+  var target=li.target||3600;
+  if(li.elapsed>=target) return;   // this stretch is fully revealed
   var sp=simSpeed();
   if(sp.holdMs){ startSlowSim(r, sp); return; }
-  var target=ST.live.target||3600;
   var perTick=3600/(sp.gameMs/LIVE_TICK_MS); // game-seconds advanced per frame
-  ST.live.timer=setInterval(function(){
-    ST.live.elapsed+=perTick;
-    if(ST.live.elapsed>=target){ ST.live.elapsed=target; stopLiveSim(); onLiveStretchEnd(); return; }
+  li.timer=setInterval(function(){
+    li.elapsed+=perTick;
+    if(li.elapsed>=target) li.elapsed=target;
+    // Generate the game up to where the clock now sits. Tactics are read as each snap
+    // is produced HERE — so a call the user just changed lands on the next play.
+    if(ST.G && !ST.G.done){
+      if(simLiveTo(ST.G, li.stopQ, li.elapsed)) rebuildLivePbp();
+    }
+    if(li.elapsed>=target){ stopLiveSim(); onLiveStretchEnd(); return; }
     renderLiveScore();
   }, LIVE_TICK_MS);
 }
@@ -5079,46 +5120,61 @@ function resumeLiveSim(){
 // then hold. Plays sharing an instant (a TD and its extra point) reveal together.
 // Hidden rows are skipped, so "Scoring" doesn't crawl through 150 invisible snaps.
 function startSlowSim(r, sp){
-  var target=ST.live.target||3600;
-  function visible(p){ return ST.feedMode!=="scoring" || p.scoring; }  // "stats" paces like the full log
-  var stamps={}, n=0;
-  for(var i=0;i<r.pbp.length;i++){
-    var p=r.pbp[i];
-    if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p) && !stamps[p.elapsed]){ stamps[p.elapsed]=1; n++; }
-  }
-  if(!n){ ST.live.elapsed=target; onLiveStretchEnd(); return; }
-  // hold long enough to read; stretch it when there are too few stops for the run
-  // to feel slower than the faster modes
-  var hold=Math.max(sp.holdMs, Math.min(sp.maxHoldMs, Math.round(sp.minTotalMs/n)));
-  ST.live.timer=setInterval(function(){
-    var next=null;
-    for(var i=0;i<r.pbp.length;i++){
-      var p=r.pbp[i];
-      if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p)){ next=p; break; }
+  var li=ST.live, target=li.target||3600;
+  // In the Scoring feed only score events are shown, so slow mode holds on those and
+  // sims straight through the invisible snaps between them. Elsewhere every snap holds.
+  function rawVisible(rp){ return ST.feedMode!=="scoring" || !rp.snap; }
+  var hold=sp.holdMs;
+  li.timer=setInterval(function(){
+    var G=ST.G;
+    if(!G || li.elapsed>=target){ stopLiveSim(); li.elapsed=target; onLiveStretchEnd(); return; }
+    // Advance the sim until a play the user can actually see is produced (or the
+    // stretch/game ends). Tactics are read as these snaps generate.
+    var stampElapsed=null, produced=false, guard=0;
+    while(!G.done && guard++<900){
+      if(engineElapsed(G)>=target && G.clock>0) break;
+      var before=G.plays.length;
+      var st=simSnap(G, li.stopQ);
+      if(G.plays.length>before){
+        produced=true;
+        for(var k=before;k<G.plays.length;k++){
+          var rp=G.plays[k];
+          if(rawVisible(rp)) stampElapsed=(rp.q-1)*900+(900-rp.clock);
+        }
+      }
+      if(st==="stop"||st==="done") break;
+      if(stampElapsed!=null) break;   // reached a visible play — hold on it
     }
-    if(next==null){ ST.live.elapsed=target; stopLiveSim(); onLiveStretchEnd(); return; }
-    ST.live.elapsed=next.elapsed;
+    if(produced) rebuildLivePbp();
+    if(stampElapsed!=null) li.elapsed=Math.min(target, Math.max(li.elapsed, stampElapsed));
+    else li.elapsed=target;           // nothing left to show → run out the stretch
+    if(li.elapsed>=target){ stopLiveSim(); onLiveStretchEnd(); return; }
     renderLiveScore();
   }, hold);
 }
 function stopLiveSim(){ if(ST.live&&ST.live.timer){ clearInterval(ST.live.timer); ST.live.timer=null; } }
-// A reveal stretch just reached its clock ceiling. If the engine had already run
-// to the final whistle (simComplete), the game is NOW truly over: record it, flip
-// into the done state, and let renderLiveScore paint VICTORY/DEFEAT + the Continue
-// button. Otherwise this is just a quarter break — repaint and the break panel
-// (with the tactics pickers) surfaces on its own.
+// A reveal stretch just reached its clock ceiling. On the FINAL stretch the game is
+// now over: make sure it's fully simulated, record it, flip into the done state, and
+// let renderLiveScore paint VICTORY/DEFEAT + the Continue button. Otherwise it's just
+// a quarter break — repaint and the break panel (with the tactics pickers) surfaces.
 function onLiveStretchEnd(){
   var li=ST.live; if(!li) return;
-  if(li.simComplete && !li.done){
+  if(li.finalStretch && ST.G && !ST.G.done){ simUntil(ST.G, 0); rebuildLivePbp(); }  // belt & suspenders
+  if(ST.G && ST.G.done && !li.done){
     li.done=true; li.paused=false;
+    rebuildLivePbp();
     finishGameSim();
   }
   renderLiveScore();
 }
-// Skip the animation for THIS stretch — jump to the quarter break, or the final.
+// Skip the animation for THIS stretch — sim the rest of it at once (tactics locked as
+// they are), then jump to the quarter break, or the final whistle.
 function skipLive(){
   stopLiveSim();
-  ST.live.elapsed=ST.live.target||3600;
+  var li=ST.live;
+  if(ST.G && !ST.G.done) simLiveTo(ST.G, li.stopQ, li.target||3600);
+  rebuildLivePbp();
+  li.elapsed=li.target||3600;
   onLiveStretchEnd();
 }
 function finishLive(){
