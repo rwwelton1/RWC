@@ -4963,9 +4963,15 @@ function runQuarter(){
   simUntil(G, q>=4?0:q);
   ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
   ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
-  ST.live.done=G.done;
+  // The engine may have run clear to the final whistle — Q4 has no "next quarter"
+  // to stop at, so simUntil plays it all out and sets G.done. But the UI must NOT
+  // go "done" yet: doing so flashes VICTORY/DEFEAT and hides the tactics panel the
+  // instant the fourth quarter begins, instead of letting it animate down to 0:00
+  // like every other quarter. Remember the sim is complete, but stay live until the
+  // clock actually reaches the end — onLiveStretchEnd() records the result then.
+  ST.live.simComplete=G.done;
+  ST.live.done=false;
   ST.live.paused=!G.done;
-  if(G.done) finishGameSim();
   startLiveSim();     // reveal what just happened, at the chosen speed
 }
 // Skip straight to the final whistle, tactics locked as they are.
@@ -4975,7 +4981,7 @@ function simToFinal(){
   simUntil(G, 0);
   ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
   ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
-  ST.live.done=true; ST.live.paused=false; ST.live.quarter=4;
+  ST.live.simComplete=true; ST.live.done=true; ST.live.paused=false; ST.live.quarter=4;
   finishGameSim();
   ST.live.elapsed=3600;
   renderLiveScore();
@@ -5044,11 +5050,12 @@ function simSpeed(){ return SIM_SPEEDS[ST.simSpeed] || SIM_SPEEDS.normal; }
 function startLiveSim(){
   stopLiveSim();
   var r=ST.weekResult, li=ST.live;
-  // reveal ceiling for this stretch: the end of the quarter just simulated
-  li.target = li.done ? 3600 : (li.quarter*900);
-  if(!r.pbp||!r.pbp.length){ li.elapsed=li.target; renderLiveScore(); return; }
+  // reveal ceiling for this stretch: the end of the quarter just simulated, or the
+  // final whistle once the whole game has been computed (the Q4 stretch)
+  li.target = (li.done||li.simComplete) ? 3600 : (li.quarter*900);
+  if(!r.pbp||!r.pbp.length){ li.elapsed=li.target; onLiveStretchEnd(); return; }
   try{ if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
-    li.elapsed=li.target; renderLiveScore(); return; } }catch(e){}
+    li.elapsed=li.target; onLiveStretchEnd(); return; } }catch(e){}
   resumeLiveSim();
 }
 // Start (or restart) the ticker at the CURRENT speed, from the CURRENT clock.
@@ -5064,7 +5071,7 @@ function resumeLiveSim(){
   var perTick=3600/(sp.gameMs/LIVE_TICK_MS); // game-seconds advanced per frame
   ST.live.timer=setInterval(function(){
     ST.live.elapsed+=perTick;
-    if(ST.live.elapsed>=target){ ST.live.elapsed=target; stopLiveSim(); }
+    if(ST.live.elapsed>=target){ ST.live.elapsed=target; stopLiveSim(); onLiveStretchEnd(); return; }
     renderLiveScore();
   }, LIVE_TICK_MS);
 }
@@ -5079,7 +5086,7 @@ function startSlowSim(r, sp){
     var p=r.pbp[i];
     if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p) && !stamps[p.elapsed]){ stamps[p.elapsed]=1; n++; }
   }
-  if(!n){ ST.live.elapsed=target; renderLiveScore(); return; }
+  if(!n){ ST.live.elapsed=target; onLiveStretchEnd(); return; }
   // hold long enough to read; stretch it when there are too few stops for the run
   // to feel slower than the faster modes
   var hold=Math.max(sp.holdMs, Math.min(sp.maxHoldMs, Math.round(sp.minTotalMs/n)));
@@ -5089,17 +5096,30 @@ function startSlowSim(r, sp){
       var p=r.pbp[i];
       if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p)){ next=p; break; }
     }
-    if(next==null){ ST.live.elapsed=target; stopLiveSim(); renderLiveScore(); return; }
+    if(next==null){ ST.live.elapsed=target; stopLiveSim(); onLiveStretchEnd(); return; }
     ST.live.elapsed=next.elapsed;
     renderLiveScore();
   }, hold);
 }
 function stopLiveSim(){ if(ST.live&&ST.live.timer){ clearInterval(ST.live.timer); ST.live.timer=null; } }
+// A reveal stretch just reached its clock ceiling. If the engine had already run
+// to the final whistle (simComplete), the game is NOW truly over: record it, flip
+// into the done state, and let renderLiveScore paint VICTORY/DEFEAT + the Continue
+// button. Otherwise this is just a quarter break — repaint and the break panel
+// (with the tactics pickers) surfaces on its own.
+function onLiveStretchEnd(){
+  var li=ST.live; if(!li) return;
+  if(li.simComplete && !li.done){
+    li.done=true; li.paused=false;
+    finishGameSim();
+  }
+  renderLiveScore();
+}
 // Skip the animation for THIS stretch — jump to the quarter break, or the final.
 function skipLive(){
   stopLiveSim();
   ST.live.elapsed=ST.live.target||3600;
-  renderLiveScore();
+  onLiveStretchEnd();
 }
 function finishLive(){
   stopLiveSim();
