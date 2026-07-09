@@ -2185,43 +2185,213 @@ function moveDepth(id, dir){
   if(window.requestAnimationFrame){ window.requestAnimationFrame(function(){ window.scrollTo(0, sy); }); }
 }
 
+
+// =====================================================
+// DRIVE ENGINE — possession-first football sim
+// Nobody decides the final score. We simulate plays; each mutates
+// {down, dist, yl, clock, poss}. The score is whatever falls out.
+// yl = yards from the OFFENSE's own goal line; yl>=100 is a touchdown.
+// =====================================================
+var XP_RATE=0.95, TWO_RATE=0.45;
+var EDGE_DIV=42;   // how sharply a rating advantage bends play outcomes (tune me)
+var PACE=1.00;     // >1 = fewer plays per drive (tune points-per-drive here)
+
+// Box-Muller: yardage is normal-ish with a fat right tail.
+function gauss(){ var u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+function clampN(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+function dRun(edge){
+  var e=edge/EDGE_DIV;
+  var y=(4.75+e*1.6)+gauss()*4.7;
+  if(Math.random()<0.058+e*0.02) y+=Math.abs(gauss())*16;   // breakaway
+  y=Math.round(y); if(y<-6)y=-6;
+  return {yards:y, turnover:Math.random()<(0.011-e*0.003), kind:"run", incomplete:false};
+}
+// `obvious` = 3rd/4th & long: the defense knows a throw is coming and defends the sticks.
+function dPass(edge, obvious){
+  var e=edge/EDGE_DIV;
+  if(Math.random()<clampN(0.062-e*0.02+(obvious?0.030:0),0.02,0.16))
+    return {yards:-rnd(4,9), turnover:false, kind:"sack", incomplete:false};
+  var compP=clampN(0.625+e*0.10-(obvious?0.075:0),0.30,0.82);
+  var intP =clampN(0.026-e*0.010+(obvious?0.012:0),0.008,0.060);
+  if(Math.random()<intP)   return {yards:0, turnover:true,  kind:"int",  incomplete:true};
+  if(Math.random()>=compP) return {yards:0, turnover:false, kind:"pass", incomplete:true};
+  var y=(obvious?5.4:6.8)+e*1.9+Math.abs(gauss())*(obvious?5.2:6.0);
+  if(Math.random()<0.05) y+=Math.abs(gauss())*20;           // explosive
+  return {yards:Math.round(y), turnover:false, kind:"pass", incomplete:false};
+}
+function dClock(res){
+  if(res.incomplete) return Math.round(rnd(5,8)*PACE);
+  if(res.kind==="run") return Math.round(rnd(24,36)*PACE);
+  return Math.round(rnd(18,32)*PACE);
+}
+function fgDist(yl){ return (100-yl)+17; }
+function fgProb(d){ return d<=29?0.96:d<=39?0.88:d<=46?0.76:d<=52?0.60:d<=57?0.42:0.22; }
+
+function fourthDown(yl,dist,clock,q,margin){
+  var d=fgDist(yl);
+  var desperate=(q>=4 && margin<0 && clock<300);
+  var mustGo   =(q>=4 && margin<-8 && clock<240);
+  if(mustGo && yl>40) return "go";
+  if(yl>=60 && dist<=2 && !desperate) return Math.random()<0.62?"go":(d<=52?"fg":"punt");
+  if(d<=52 && yl>=55){
+    if(desperate && dist<=4 && yl>=70) return Math.random()<0.5?"go":"fg";
+    return "fg";
+  }
+  if(yl>=65 && dist<=4 && Math.random()<0.35) return "go";
+  if(desperate && dist<=6) return "go";
+  if(yl<35) return "punt";
+  return (dist<=1 && Math.random()<0.45)?"go":"punt";
+}
+// `lean` 0..100 (low = pass-heavy), matching OFF_SCHEMES / gameplan.offBalance.
+function callPlay(down,dist,yl,clock,q,margin,lean){
+  var runP=lean/100;
+  if(down===3 && dist>=7) runP-=0.42; else if(down===3 && dist<=2) runP+=0.22;
+  if(down===2 && dist>=9) runP-=0.12;
+  if(yl>=95) runP+=0.18;                                   // goal line
+  if(q>=4 && margin>7  && clock<420) runP+=0.35;           // milk the clock
+  if(q>=4 && margin<-7 && clock<420) runP-=0.40;           // must throw
+  if(clock<90 && margin<=0) runP-=0.35;
+  return Math.random()<clampN(runP,0.05,0.92)?"run":"pass";
+}
+function blankSide(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,to:0,punts:0,sacks:0,
+  fga:0,fgm:0,thirdAtt:0,thirdConv:0}; }
+
+// teams: [{off,def,lean}] — returns {a,b,plays[],stats[]}
+function simDrives(teamA, teamB){
+  var S=[0,0], teams=[teamA,teamB], plays=[], stats=[blankSide(),blankSide()];
+  var poss=Math.random()<0.5?0:1, half2=1-poss;
+  for(var half=0; half<2; half++){
+    if(half===1) poss=half2;
+    var clock=1800, yl=25, down=1, dist=10, guard=0;
+    while(clock>0 && guard++<400){
+      var q=(half===0)?(clock>900?1:2):(clock>900?3:4);
+      var qc=clock>900?clock-900:clock;            // seconds left in THIS quarter
+      var def=1-poss;
+      var edge=teams[poss].off-teams[def].def;
+      var margin=S[poss]-S[def];
+
+      if(down===4){
+        var dec=fourthDown(yl,dist,clock,q,margin);
+        if(dec==="punt"){
+          stats[poss].punts++;
+          var net=clampN(Math.round(42+gauss()*8),25,62);
+          var ny=(yl+net>=100)?20:(100-(yl+net));
+          clock-=rnd(12,20);
+          poss=def; yl=clampN(ny,1,99); down=1; dist=10; continue;
+        }
+        if(dec==="fg"){
+          var fd=fgDist(yl); stats[poss].fga++; clock-=rnd(6,12);
+          if(Math.random()<fgProb(fd)){
+            stats[poss].fgm++; S[poss]+=3;
+            plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
+            poss=def; yl=25; clock-=rnd(4,8);
+          } else {
+            plays.push({t:poss,kind:"FGMISS",pts:0,q:q,clock:qc,d:fd});
+            poss=def; yl=clampN(100-yl,1,99);
+          }
+          down=1; dist=10; continue;
+        }
+        // "go" falls through to a live play
+      }
+
+      var call=callPlay(down,dist,yl,clock,q,margin,teams[poss].lean);
+      var obvious=(down>=3 && dist>=6);
+      var res=(call==="run")?dRun(edge):dPass(edge,obvious);
+      stats[poss].plays++;
+      if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
+      else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; } // sacks are NOT attempts
+      else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
+      if(down===3) stats[poss].thirdAtt++;
+      clock-=dClock(res);
+
+      if(res.turnover){
+        stats[poss].to++;
+        var spot=clampN(yl+res.yards,1,99);
+        poss=def; yl=clampN(100-spot,1,99); down=1; dist=10; continue;
+      }
+      var gained=res.yards; yl+=gained;
+
+      if(yl<=0){                                   // safety
+        S[def]+=2; plays.push({t:def,kind:"SFTY",pts:2,q:q,clock:qc});
+        poss=def; yl=25; down=1; dist=10; continue;
+      }
+      if(yl>=100){                                 // touchdown
+        S[poss]+=6;
+        if(down===3) stats[poss].thirdConv++;
+        plays.push({t:poss,kind:"TD",pts:6,q:q,clock:qc});
+        var deficit=S[def]-(S[poss]-6);
+        if(goesForTwo(deficit,q)){
+          var ok=Math.random()<TWO_RATE; if(ok)S[poss]+=2;
+          plays.push({t:poss,kind:"2PT",pts:ok?2:0,good:ok,q:q,clock:qc});
+        } else {
+          var ok2=Math.random()<XP_RATE; if(ok2)S[poss]+=1;
+          plays.push({t:poss,kind:"XP",pts:ok2?1:0,good:ok2,q:q,clock:qc});
+        }
+        clock-=rnd(4,8);
+        poss=def; yl=25; down=1; dist=10; continue;
+      }
+      if(gained>=dist){                            // first down
+        if(down===3) stats[poss].thirdConv++;
+        down=1; dist=Math.min(10,100-yl);
+      } else {
+        down++; dist-=gained;
+        if(down>4){ poss=def; yl=clampN(100-yl,1,99); down=1; dist=10; }  // turnover on downs
+      }
+    }
+  }
+  // overtime — no ties. OT scores are emitted as plays so the feed matches the final.
+  var ot=0;
+  while(S[0]===S[1] && ot++<6){
+    for(var t=0;t<2;t++){
+      var r=Math.random()+(teams[t].off-teams[1-t].def)/200;
+      if(r>0.72){ S[t]+=7; plays.push({t:t,kind:"TD",pts:6,q:4,clock:0,ot:ot});
+                  plays.push({t:t,kind:"XP",pts:1,good:true,q:4,clock:0,ot:ot}); }
+      else if(r>0.42){ S[t]+=3; plays.push({t:t,kind:"FG",pts:3,q:4,clock:0,d:rnd(28,45),ot:ot}); }
+    }
+  }
+  if(S[0]===S[1]){ var w=Math.random()<0.5?0:1; S[w]+=3;
+    plays.push({t:w,kind:"FG",pts:3,q:4,clock:0,d:rnd(28,45),ot:ot}); }
+  return {a:S[0], b:S[1], plays:plays, stats:stats};
+}
+
 function simGame(game, plan){
   var oppT=leagueTeam(game.opp);
   var oppOff = oppT ? oppT.off : (58+game.op*6+rnd(-4,4));
   var oppDef = oppT ? oppT.def : cpuDefenseRating(game.op);
   var homeAdj = game.home?(3+facLvl("stadium")):-1;
-  // scheme-fit bonuses come from your STANDING gameplan sliders matching your roster (not per-game guessing)
-  var offFit = offSchemeFit();  // 0..~5, helps you score
-  var defFit = defSchemeFit();  // 0..~5, helps you stop them
-  // (Offensive/Defensive Mind's +2 game-day boost is baked into offenseRating/defenseRating via off1/def1)
+  var offFit = offSchemeFit();  // 0..~11, helps you score
+  var defFit = defSchemeFit();  // 0..~11, helps you stop them
 
-  var ourPts, oppPts, myUnit, usedFit;
+  // Fold coaching, scheme fit, and home field into the unit ratings the drive
+  // engine actually plays with. Scheme now acts THROUGH playcalling and
+  // efficiency rather than as a flat bonus on a predetermined final score.
+  var myOff, myDef, myUnit, usedFit;
   if(ST.save.role==="HC"){
-    // YOU control BOTH units → offense drives your points (offFit), defense limits theirs (defFit)
-    var hcOff=offenseRating(), hcDef=defenseRating();
-    myUnit=Math.round((hcOff+hcDef)/2);
+    myOff=offenseRating()+offFit; myDef=defenseRating()+defFit;
+    myUnit=Math.round((offenseRating()+defenseRating())/2);
     usedFit=Math.round((offFit+defFit)/2*10)/10;
-    ourPts=Math.max(3, Math.round((hcOff - oppDef + offFit + homeAdj)/3 + 21 + rnd(-7,7)));
-    oppPts=Math.max(3, Math.round((oppOff - hcDef - defFit - (game.home?2:0))/3 + 21 + rnd(-7,7)));
   } else if(ST.save.role==="DC"){
-    // YOU control defense → defFit limits the opponent's points; your offense is CPU
+    myOff=cpuUnitRating(); myDef=defenseRating()+defFit;
     myUnit=defenseRating(); usedFit=defFit;
-    var ourOff=cpuUnitRating();
-    oppPts=Math.max(3, Math.round((oppOff - myUnit - defFit - (game.home?2:0))/3 + 21 + rnd(-7,7)));
-    ourPts=Math.max(3, Math.round((ourOff - oppDef + homeAdj)/3 + 21 + rnd(-7,7)));
   } else {
-    // YOU control offense → offFit drives your points; your defense is CPU
+    myOff=offenseRating()+offFit; myDef=cpuUnitRating();
     myUnit=offenseRating(); usedFit=offFit;
-    var ourDef=cpuUnitRating();
-    ourPts=Math.max(3, Math.round((myUnit - oppDef + offFit + homeAdj)/3 + 21 + rnd(-7,7)));
-    oppPts=Math.max(3, Math.round((oppOff - ourDef - (game.home?2:0))/3 + 21 + rnd(-7,7)));
   }
-  // no ties — overtime decides
-  if(ourPts===oppPts){
-    var favUs = (myUnit + usedFit + homeAdj) >= (ST.save.role==="DC"?oppOff:oppDef)+20;
-    if(favUs) ourPts += pick([3,3,7]); else oppPts += pick([3,3,7]);
-  }
-  return {us:ourPts, them:oppPts, edge:usedFit>=3, oppDefType:"", off:myUnit, fit:usedFit};
+  myOff+=homeAdj; myDef+=homeAdj;   // home field lifts both units
+
+  var us  ={off:myOff,  def:myDef,  lean:getGameplan().offBalance};
+  var them={off:oppOff, def:oppDef, lean:oppT?oppLean(game.opp):50};
+
+  var g=simDrives(us, them);
+  return {us:g.a, them:g.b, edge:usedFit>=3, oppDefType:"", off:myUnit, fit:usedFit,
+          drivePlays:g.plays, driveStats:g.stats};
+}
+// A CPU team's run/pass identity — stable per school, derived from its name.
+function oppLean(name){
+  var h=0; for(var i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))&0xffff;
+  return 32 + (h%37);   // 32..68, a believable spread of offensive identities
 }
 
 // Break a final score into a believable sequence of scoring plays across 4 quarters.
@@ -2229,7 +2399,7 @@ function simGame(game, plan){
 // ── Conversion logic ────────────────────────────────────
 // A touchdown is 6. The scoring team then kicks the extra point (~95%) or, when the
 // math calls for it, goes for two from the 2-yard line (~45%).
-var XP_RATE=0.95, TWO_RATE=0.45;
+// (XP_RATE / TWO_RATE are declared with the drive engine above.)
 // `down` = the scoring team's deficit BEFORE the touchdown's 6 points (negative = leading).
 // `after` = down - 6 = the deficit once the TD is on the board, before the conversion.
 // The classic chart calls, all of which a kick cannot resolve:
@@ -2247,98 +2417,37 @@ function goesForTwo(down, q){
   return Math.random()<0.10;                 // too early to chase points
 }
 
-function buildPlayByPlay(usFinal, themFinal, usName, themName){
-  // Skeleton of scoring drives per team: 6 = touchdown, 3 = field goal, 2 = safety.
-  // Conversions are resolved LATER, in timeline order, against the live score.
-  function toDrives(total){
-    var plays=[], left=total;
-    while(left>=3){
-      if(left>=10 && Math.random()<0.72){ plays.push(6); left-=7; }      // TD, assume XP for budgeting
-      else if(left>=7 && Math.random()<0.6){ plays.push(6); left-=7; }
-      else if(left>=6 && Math.random()<0.45){ plays.push(6); left-=6; }  // TD, no XP budgeted
-      else { plays.push(3); left-=3; }
-    }
-    if(left===2) plays.push(2);   // safety
-    else if(left===1 && plays.length){ /* absorbed by a conversion */ }
-    else if(left>0) plays.push(3);
-    if(!plays.length) plays.push(3);
-    return plays;
-  }
+// Dress the drive engine's real scoring plays as a play-by-play feed.
+// The score is NOT reconstructed here — these events already produced it.
+function buildPlayByPlay(drivePlays, usName, themName){
   var TD_DESC=["%P punches it in","%P breaks free for a TD","%P finds the end zone","deep strike — TOUCHDOWN %P","%P walks in untouched","QB keeper, %P scores","%P takes the screen to the house"];
   var FG_DESC=["%P drills the field goal","%P's field goal is good","%P splits the uprights"];
   var usPlayers=(ST.save?ST.save.roster:[]).filter(function(p){return p.pos!=="OL";});
-  function nm(team){
-    if(team==="us"&&usPlayers.length)return pick(usPlayers).n;
-    return genName();
-  }
+  function nm(team){ if(team==="us"&&usPlayers.length)return pick(usPlayers).n; return genName(); }
   function fill(t,team){ return t.replace("%P", nm(team)); }
 
-  var usPlays=toDrives(usFinal).map(function(p){return {team:"us",pts:p};});
-  var themPlays=toDrives(themFinal).map(function(p){return {team:"them",pts:p};});
-  // interleave possessions somewhat randomly but fairly
-  var all=[]; var a=usPlays, b=themPlays, ai=0, bi=0;
-  while(ai<a.length||bi<b.length){
-    if(ai>=a.length){all.push(b[bi++]);continue;}
-    if(bi>=b.length){all.push(a[ai++]);continue;}
-    if(Math.random()<0.5)all.push(a[ai++]); else all.push(b[bi++]);
-  }
-  // assign each play to a quarter + descending clock, build running totals
-  var n=all.length, ut=0, tt=0, out=[];
-  var qCount={1:0,2:0,3:0,4:0};
-  all.forEach(function(pl,i){ var qq=Math.min(4,Math.floor(i/Math.max(1,n)*4)+1); qCount[qq]++; });
-  var qSeen={1:0,2:0,3:0,4:0};
-  all.forEach(function(pl,i){
-    var q=Math.min(4, Math.floor(i/Math.max(1,n)*4)+1);
-    qSeen[q]++;
-    // clock descends from ~15:00 to ~0:00 across the plays in this quarter
-    var frac=qSeen[q]/(qCount[q]+1);
-    var totalSec=Math.round(900*(1-frac)) - rnd(0,25);
-    if(totalSec<0)totalSec=rnd(0,40);
-    var mm=Math.floor(totalSec/60), ss=totalSec%60;
-    var clock=mm+":"+(ss<10?"0"+ss:ss);
-    var elapsed=(q-1)*900 + (900-totalSec); // absolute seconds from kickoff (0..3600)
-    if(pl.team==="us")ut+=pl.pts; else tt+=pl.pts;
-    var kind = pl.pts===6?"TD":(pl.pts===3?"FG":"SFTY");
-    var desc = pl.pts===6? fill(pick(TD_DESC),pl.team) : (pl.pts===3? fill(pick(FG_DESC),pl.team) : "safety");
-    out.push({q:q,clock:clock,elapsed:elapsed,team:pl.team,kind:kind,pts:pl.pts,usTot:ut,themTot:tt,desc:desc});
-    if(pl.pts!==6) return;  // only a touchdown earns a conversion attempt
-    // deficit the scoring team faced BEFORE this touchdown
-    var mine=(pl.team==="us")?ut:tt, theirs=(pl.team==="us")?tt:ut;
-    var down=(theirs-(mine-6));
-    var two=goesForTwo(down,q), good, cpts, ckind, cdesc;
-    if(two){
-      good=Math.random()<TWO_RATE; cpts=good?2:0; ckind="2PT";
-      cdesc=good? fill("%P converts the two-point try",pl.team) : "two-point try is stuffed";
-    } else {
-      good=Math.random()<XP_RATE; cpts=good?1:0; ckind="XP";
-      cdesc=good? "extra point is good" : "extra point is NO GOOD";
-    }
-    if(pl.team==="us")ut+=cpts; else tt+=cpts;
-    out.push({q:q,clock:clock,elapsed:elapsed+1,team:pl.team,kind:ckind,pts:cpts,
-              usTot:ut,themTot:tt,desc:cdesc,good:good});
+  var out=[], ut=0, tt=0;
+  drivePlays.forEach(function(p){
+    var team=(p.t===0)?"us":"them";
+    if(team==="us") ut+=p.pts; else tt+=p.pts;
+    // absolute seconds from kickoff; p.clock counts DOWN within the quarter
+    var elapsed=(p.q-1)*900 + (900-p.clock);
+    var mm=Math.floor(p.clock/60), ss=p.clock%60;
+    var desc;
+    if(p.kind==="TD")          desc=fill(pick(TD_DESC),team);
+    else if(p.kind==="FG")     desc=fill(pick(FG_DESC),team)+" from "+p.d;
+    else if(p.kind==="FGMISS") desc=p.d+"-yard field goal is no good";
+    else if(p.kind==="XP")     desc=p.good?"extra point is good":"extra point is NO GOOD";
+    else if(p.kind==="2PT")    desc=p.good?fill("%P converts the two-point try",team):"two-point try is stuffed";
+    else                       desc="safety";
+    if(p.ot) desc="OT"+p.ot+" — "+desc;
+    out.push({q:p.q, clock:mm+":"+(ss<10?"0"+ss:ss), elapsed:elapsed, team:team,
+              kind:p.kind, pts:p.pts, good:p.good, usTot:ut, themTot:tt, desc:desc});
   });
-  // ensure timeline is strictly increasing (interleave randomness can invert)
   out.sort(function(a,b){return a.elapsed-b.elapsed;});
-  // recompute running totals in timeline order
   var u2=0,t2=0;
   out.forEach(function(p){ if(p.team==="us")u2+=p.pts; else t2+=p.pts; p.usTot=u2; p.themTot=t2; });
-  // The drives are authoritative: conversions can land a point or two off the rating target,
-  // so publish the score the plays actually produced.
-  out.finalUs=u2; out.finalThem=t2;
   return out;
-}
-// Rebuild a play-by-play until it yields a score consistent with who should have won.
-// (A missed XP must never silently flip the result of simGame.)
-function buildPlayByPlayFor(usFinal, themFinal, usName, themName){
-  var want = usFinal>themFinal ? 1 : (usFinal<themFinal ? -1 : 0);
-  var best=null;
-  for(var i=0;i<24;i++){
-    var pbp=buildPlayByPlay(usFinal,themFinal,usName,themName);
-    var got = pbp.finalUs>pbp.finalThem ? 1 : (pbp.finalUs<pbp.finalThem ? -1 : 0);
-    if(got===want) return pbp;
-    if(!best) best=pbp;
-  }
-  return best; // vanishingly rare; caller re-derives the result from the plays
 }
 
 // =====================================================
@@ -2960,8 +3069,7 @@ function playConfChampGame(){
   var opp = C.top2[0].name===s.school ? C.top2[1] : C.top2[0];
   var game={opp:opp.name, oc:s.conf, op:opp.p, home:(Math.random()<0.5)};
   var res=simGame(game, ST.planPick||"pro");
-  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,opp.name);
-  res.us=pbp.finalUs; res.them=pbp.finalThem; // conversions decide the final margin
+  var pbp=buildPlayByPlay(res.drivePlays,s.school,opp.name);
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
   ST.weekResult={us:res.us,them:res.them,oppName:opp.name,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:game.home,pbp:pbp,
@@ -3385,8 +3493,7 @@ function playPostGame(){
   else { var o=myNextOpponent(); oppName=P.bracket.bySeed[o.seed].name; oppP=P.bracket.bySeed[o.seed].p; home=(P.round==="r1"&&P.mySeed<o.seed); }
   var game={opp:oppName, oc:"", op:oppP, home:home};
   var res=simGame(game, ST.planPick||"pro");
-  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,oppName);
-  res.us=pbp.finalUs; res.them=pbp.finalThem;
+  var pbp=buildPlayByPlay(res.drivePlays,s.school,oppName);
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
   ST.weekResult={us:res.us,them:res.them,oppName:oppName,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:home,pbp:pbp,
@@ -3953,8 +4060,7 @@ function playerStatDetail(id){
 function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
   var res=simGame(g, null);
-  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,g.opp);
-  res.us=pbp.finalUs; res.them=pbp.finalThem; // conversions decide the final margin
+  var pbp=buildPlayByPlay(res.drivePlays,s.school,g.opp);
   g.result={us:res.us,them:res.them};
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
