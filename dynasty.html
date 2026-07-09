@@ -328,6 +328,8 @@ a{color:inherit;text-decoration:none}
 .pbp-feed{display:flex;flex-direction:column;gap:5px;min-height:60px}
 .pbp-row{display:flex;align-items:center;gap:7px;background:#fff;border:2px solid var(--border2);border-radius:8px;padding:6px 9px;animation:pbpIn .3s ease}
 .pbp-row.mine{background:var(--gold-bg);border-color:var(--gold-dark)}
+.pbp-row.miss{opacity:.6}
+.pbp-row.miss .pbp-desc{color:var(--muted)}
 .pbp-q{font-size:8px;font-weight:900;color:var(--muted);width:16px;flex-shrink:0}
 .pbp-badge{font-size:9px;font-weight:900;flex-shrink:0;width:44px}
 .pbp-desc{flex:1;font-size:10px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
@@ -356,16 +358,18 @@ a{color:inherit;text-decoration:none}
 .role-tag.hc{background:var(--purple-bg);color:var(--purple)}
 .role-tag.oc{background:var(--blue-bg);color:var(--blue)}
 /* playoff bracket */
-.bracket{display:flex;gap:8px;margin-bottom:12px}
-.brk-col{flex:1;min-width:0}
-.brk-h{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
-.brk-pair{margin-bottom:7px;border-left:2px solid var(--border2);padding-left:5px}
+.bracket{display:flex;gap:6px;margin-bottom:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
+.brk-col{flex:0 0 118px;min-width:0;display:flex;flex-direction:column;justify-content:space-around}
+.brk-h{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;text-align:center}
+.brk-pair{margin:5px 0;border-left:2px solid var(--border2);padding-left:5px}
 .brk-team{display:flex;align-items:center;gap:5px;background:#fff;border:2px solid var(--border);border-radius:7px;padding:5px 7px;margin-bottom:4px;box-shadow:1px 1px 0 var(--border)}
 .brk-team.me{background:var(--gold-bg);border-color:var(--gold-dark)}
 .brk-team.won{background:var(--green-bg);border-color:var(--green)}
 .brk-team.lost{opacity:.4}
+.brk-team.tbd{opacity:.35;border-style:dashed;box-shadow:none}
 .brk-seed{font-size:9px;font-weight:900;color:var(--muted);width:14px;flex-shrink:0}
 .brk-name{font-size:10px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brk-champ{margin-top:8px;text-align:center;font-size:10px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:2px solid var(--gold-dark);border-radius:8px;padding:6px 4px;box-shadow:2px 2px 0 var(--border)}
 /* conference standings */
 .conf-table{background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);overflow:hidden}
 .conf-row{display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1.5px solid var(--border2)}
@@ -459,6 +463,7 @@ a{color:inherit;text-decoration:none}
 .ret-btn:active{transform:translate(2px,2px);box-shadow:none}
 /* transfer portal */
 .tp-gone{flex-shrink:0;font-size:10px;font-weight:900;color:var(--red2)}
+.ret-row.done{opacity:.55}
 .tp-row{display:flex;align-items:center;gap:9px;padding:8px 9px;border-bottom:1.5px solid var(--border2)}
 .tp-row:last-child{border-bottom:none}
 .tp-row.done{opacity:.55}
@@ -1196,8 +1201,8 @@ function loadData(){
       ST.post = v._post || null;
       ST.confchamp = v._confchamp || null;
       ST.carousel = v._carousel || null;
-      if(ST.confchamp && !ST.confchamp.done){ ST.screen="confchamp"; }
-      else if(ST.post && !ST.post.done){ ST.screen = ST.post.mode==="bowl" ? "bowl" : "bracket"; }
+      if(ST.confchamp && !ST.confchamp.done){ ST.screen="season"; ST.seasonTab="week"; }
+      else if(ST.post && !ST.post.done){ ST.screen="season"; ST.seasonTab="week"; }
       else if(ST.carousel && ST.carousel.length){ ST.screen="carousel"; } // pending job offers survive reload
       else if(v.week>=v.schedule.length && !v._postDone){ draw(); if(ST.confchamp&&ST.confchamp.done){ enterPostseason(); } else { enterConfChampionship(); } return; }
       else if(v.week>=v.schedule.length){ ST.screen="offseason"; }
@@ -1484,7 +1489,14 @@ function advanceRecruitingWeek(){
     var youLead = b.interest >= rivalLead;
     var leaderInt = Math.max(b.interest, rivalLead);
     var margin = Math.abs(b.interest - rivalLead);
-    var commitToLeader=function(){ if(youLead){ b.status="committed"; b.committedTo=s.school; } else { b.status="lost"; b.committedTo=topRival.name; } };
+    var commitToLeader=function(){
+      if(youLead){ b.status="committed"; b.committedTo=s.school; }
+      else {
+        b.status="lost"; b.committedTo=topRival.name;
+        // he signed elsewhere — the NIL you pledged him never gets paid, so it returns to the pot
+        if(b.nil>0){ s.nilLeft=money2((s.nilLeft||0)+b.nil); toast("↩️ "+fmtMoney(b.nil)+" NIL freed up — "+x(b.n)+" chose "+x(topRival.name)); }
+      }
+    };
     if(leaderInt>=100){ commitToLeader(); } // maxed interest → instant commit
     else if(leaderInt>=66){
       var base=(leaderInt-64)/36;                        // 0 at 64 → ~1 near 100
@@ -1891,6 +1903,15 @@ function retentionRisk(p, fundOverride){
   if(p.yr==="SO"||p.yr==="JR") base+=6;        // underclassmen are more mobile
   return Math.max(0,Math.min(94,Math.round(base)));
 }
+// Cost to pull a departing player back out of the portal. Their unmet demand, plus a
+// premium for the mess — stars and buried blue-chips cost the most to talk down.
+function retainPrice(p){
+  var dem=nilDemand(p), gap=Math.max(0.2, dem-(p.nilFund||0));
+  var mult=1.5 + Math.max(0,(p.ovr-72))*0.035;              // an 85 OVR runs ~1.95x the gap
+  if(!isStarterPlayer(p)) mult+=0.35;                        // he wants snaps, not just money
+  if(p.dev==="elite") mult+=0.25; else if(p.dev==="pro") mult+=0.12;
+  return Math.max(0.25, money2(gap*mult));
+}
 // Interest a recruit gains from an NIL offer of $amt (M) — strong, but diminishing as they warm.
 // Interest per $1M by star rating — blue-chips are expensive to buy, low-stars are cheap.
 // 5★ ≈ +1 per $250K; a 1★ moves far more per dollar.
@@ -2205,20 +2226,42 @@ function simGame(game, plan){
 
 // Break a final score into a believable sequence of scoring plays across 4 quarters.
 // Returns [{q, clock, team:'us'|'them', kind, pts, usTot, themTot, desc}]
+// ── Conversion logic ────────────────────────────────────
+// A touchdown is 6. The scoring team then kicks the extra point (~95%) or, when the
+// math calls for it, goes for two from the 2-yard line (~45%).
+var XP_RATE=0.95, TWO_RATE=0.45;
+// `down` = the scoring team's deficit BEFORE the touchdown's 6 points (negative = leading).
+// `after` = down - 6 = the deficit once the TD is on the board, before the conversion.
+// The classic chart calls, all of which a kick cannot resolve:
+//   trail by 8 -> after  2 : two-point conversion TIES the game
+//   trail by 5 -> after -1 : leading by 1; two makes it a field-goal game (3)
+//   trail by 2 -> after -4 : leading by 4; two makes it a touchdown game (6)
+//   trail by 1 -> after -5 : leading by 5; two makes it a two-score game (7)
+// Late in the game these are near-automatic; early on, coaches take the point.
+function goesForTwo(down, q){
+  var after = down - 6;
+  var chartCall = (after===2 || after===-1 || after===-4 || after===-5);
+  if(!chartCall) return Math.random()<0.04;  // rare gamble / analytics call
+  if(q>=4) return Math.random()<0.85;        // 4th quarter: take the points that matter
+  if(q===3) return Math.random()<0.35;
+  return Math.random()<0.10;                 // too early to chase points
+}
+
 function buildPlayByPlay(usFinal, themFinal, usName, themName){
-  function toScores(total){
-    // decompose points into TDs(7), FGs(3), 2pt(2) — summing EXACTLY to total (never overshoot)
+  // Skeleton of scoring drives per team: 6 = touchdown, 3 = field goal, 2 = safety.
+  // Conversions are resolved LATER, in timeline order, against the live score.
+  function toDrives(total){
     var plays=[], left=total;
-    while(left>0){
-      if(left>=7 && Math.random()<0.7){ plays.push(7); left-=7; }
-      else if(left>=6 && Math.random()<0.5){ plays.push(6); left-=6; } // TD, missed XP
-      else if(left>=3 && (left===3 || left>=6 ? Math.random()<0.6 : true)){ plays.push(3); left-=3; }
-      else if(left>=7){ plays.push(7); left-=7; }
-      else if(left>=6){ plays.push(6); left-=6; }
-      else if(left>=3){ plays.push(3); left-=3; }
-      else if(left===2){ plays.push(2); left-=2; }
-      else { plays.push(left); left=0; } // 1 leftover -> safety, keeps sum exact
+    while(left>=3){
+      if(left>=10 && Math.random()<0.72){ plays.push(6); left-=7; }      // TD, assume XP for budgeting
+      else if(left>=7 && Math.random()<0.6){ plays.push(6); left-=7; }
+      else if(left>=6 && Math.random()<0.45){ plays.push(6); left-=6; }  // TD, no XP budgeted
+      else { plays.push(3); left-=3; }
     }
+    if(left===2) plays.push(2);   // safety
+    else if(left===1 && plays.length){ /* absorbed by a conversion */ }
+    else if(left>0) plays.push(3);
+    if(!plays.length) plays.push(3);
     return plays;
   }
   var TD_DESC=["%P punches it in","%P breaks free for a TD","%P finds the end zone","deep strike — TOUCHDOWN %P","%P walks in untouched","QB keeper, %P scores","%P takes the screen to the house"];
@@ -2230,8 +2273,8 @@ function buildPlayByPlay(usFinal, themFinal, usName, themName){
   }
   function fill(t,team){ return t.replace("%P", nm(team)); }
 
-  var usPlays=toScores(usFinal).map(function(p){return {team:"us",pts:p};});
-  var themPlays=toScores(themFinal).map(function(p){return {team:"them",pts:p};});
+  var usPlays=toDrives(usFinal).map(function(p){return {team:"us",pts:p};});
+  var themPlays=toDrives(themFinal).map(function(p){return {team:"them",pts:p};});
   // interleave possessions somewhat randomly but fairly
   var all=[]; var a=usPlays, b=themPlays, ai=0, bi=0;
   while(ai<a.length||bi<b.length){
@@ -2255,16 +2298,47 @@ function buildPlayByPlay(usFinal, themFinal, usName, themName){
     var clock=mm+":"+(ss<10?"0"+ss:ss);
     var elapsed=(q-1)*900 + (900-totalSec); // absolute seconds from kickoff (0..3600)
     if(pl.team==="us")ut+=pl.pts; else tt+=pl.pts;
-    var kind = pl.pts>=6?"TD":(pl.pts===3?"FG":(pl.pts===2?"2PT":"SFTY"));
-    var desc = pl.pts>=6? fill(pick(TD_DESC),pl.team) : (pl.pts===3? fill(pick(FG_DESC),pl.team) : "two-point conversion");
+    var kind = pl.pts===6?"TD":(pl.pts===3?"FG":"SFTY");
+    var desc = pl.pts===6? fill(pick(TD_DESC),pl.team) : (pl.pts===3? fill(pick(FG_DESC),pl.team) : "safety");
     out.push({q:q,clock:clock,elapsed:elapsed,team:pl.team,kind:kind,pts:pl.pts,usTot:ut,themTot:tt,desc:desc});
+    if(pl.pts!==6) return;  // only a touchdown earns a conversion attempt
+    // deficit the scoring team faced BEFORE this touchdown
+    var mine=(pl.team==="us")?ut:tt, theirs=(pl.team==="us")?tt:ut;
+    var down=(theirs-(mine-6));
+    var two=goesForTwo(down,q), good, cpts, ckind, cdesc;
+    if(two){
+      good=Math.random()<TWO_RATE; cpts=good?2:0; ckind="2PT";
+      cdesc=good? fill("%P converts the two-point try",pl.team) : "two-point try is stuffed";
+    } else {
+      good=Math.random()<XP_RATE; cpts=good?1:0; ckind="XP";
+      cdesc=good? "extra point is good" : "extra point is NO GOOD";
+    }
+    if(pl.team==="us")ut+=cpts; else tt+=cpts;
+    out.push({q:q,clock:clock,elapsed:elapsed+1,team:pl.team,kind:ckind,pts:cpts,
+              usTot:ut,themTot:tt,desc:cdesc,good:good});
   });
   // ensure timeline is strictly increasing (interleave randomness can invert)
   out.sort(function(a,b){return a.elapsed-b.elapsed;});
   // recompute running totals in timeline order
   var u2=0,t2=0;
   out.forEach(function(p){ if(p.team==="us")u2+=p.pts; else t2+=p.pts; p.usTot=u2; p.themTot=t2; });
+  // The drives are authoritative: conversions can land a point or two off the rating target,
+  // so publish the score the plays actually produced.
+  out.finalUs=u2; out.finalThem=t2;
   return out;
+}
+// Rebuild a play-by-play until it yields a score consistent with who should have won.
+// (A missed XP must never silently flip the result of simGame.)
+function buildPlayByPlayFor(usFinal, themFinal, usName, themName){
+  var want = usFinal>themFinal ? 1 : (usFinal<themFinal ? -1 : 0);
+  var best=null;
+  for(var i=0;i<24;i++){
+    var pbp=buildPlayByPlay(usFinal,themFinal,usName,themName);
+    var got = pbp.finalUs>pbp.finalThem ? 1 : (pbp.finalUs<pbp.finalThem ? -1 : 0);
+    if(got===want) return pbp;
+    if(!best) best=pbp;
+  }
+  return best; // vanishingly rare; caller re-derives the result from the plays
 }
 
 // =====================================================
@@ -2283,9 +2357,8 @@ function draw(){
   else if(ST.screen==="season") app.innerHTML=seasonScreen();
   else if(ST.screen==="live"){ app.innerHTML=liveScreen(); renderLiveScore(); }
   else if(ST.screen==="offseason")app.innerHTML=offseasonScreen();
-  else if(ST.screen==="bracket")  app.innerHTML=bracketScreen();
-  else if(ST.screen==="confchamp")app.innerHTML=confChampScreen();
-  else if(ST.screen==="bowl")     app.innerHTML=bowlScreen();
+  // legacy screen names — postseason now lives inside the season screen's Week tab
+  else if(ST.screen==="bracket"||ST.screen==="confchamp"||ST.screen==="bowl"){ ST.seasonTab=ST.seasonTab||"week"; app.innerHTML=seasonScreen(); }
   else if(ST.screen==="carousel") app.innerHTML=carouselScreen();
   else if(ST.screen==="fired")    app.innerHTML=firedScreen();
   else app.innerHTML=setupScreen();
@@ -2608,9 +2681,11 @@ function seasonScreen(){
   var unit=myUnitRating();
   var unitLbl=isHC?"TEAM":(isDC?"DEF":"OFF");
   var tab=ST.seasonTab||"week";
+  var PC=postContext();
   var h='<div class="wrap">';
   // compact header row
-  h+='<div class="season-hd"><div class="shd-l"><b>Wk '+Math.min(s.week+1,s.schedule.length)+'</b> · Season '+s.season+' · '+(2026+(s.seasonsPlayed||0))+'</div>'+
+  var wkLbl = PC ? '<b>'+PC.wk+'</b> · '+x(PC.label) : '<b>Wk '+Math.min(s.week+1,s.schedule.length)+'</b>';
+  h+='<div class="season-hd"><div class="shd-l">'+wkLbl+' · Season '+s.season+' · '+(2026+(s.seasonsPlayed||0))+'</div>'+
      '<div class="shd-r"><span class="pill">'+s.wins+'-'+s.losses+'</span> <span class="pill">'+unitLbl+' '+unit+'</span></div></div>';
 
   // tab bar
@@ -2626,7 +2701,11 @@ function seasonScreen(){
 
   h+='<div class="tab-body">';
   if(tab==="week"){
-    if(g){
+    if(PC){
+      h+= PC.kind==="confchamp" ? confChampBody()
+        : PC.kind==="bowl"      ? bowlBody()
+        : bracketBody();
+    } else if(g){
       h+='<div class="result-card" style="padding:13px;margin-bottom:10px"><div class="vs" style="margin:0 0 4px">Week '+(s.week+1)+(g.home?' · HOME':' · AWAY')+'</div>';
       h+='<div class="score" style="font-size:20px">vs '+x(g.opp)+'</div>';
       h+='<div class="vs">'+x(g.oc)+' · '+stars(g.op)+'</div>';
@@ -2635,8 +2714,7 @@ function seasonScreen(){
       h+='</div>';
       h+=schemeReadout();
       h+='<button class="bigbtn btn-purple" id="play-week" style="background:var(--purple);color:#fff;margin-top:2px">Play Week '+(s.week+1)+' →</button>';
-      h+='<button class="btn" id="toggle-scheme" style="width:100%;margin-top:8px;padding:9px;font-size:11px;font-weight:800;background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border)">'+(ST.showScheme?"Hide":"Adjust")+' Gameplan Scheme '+(ST.showScheme?"▲":"▼")+'</button>';
-      if(ST.showScheme){ h+='<div style="margin-top:10px">'+gameplanPanel()+'</div>'; }
+      h+=schemeToggle();
     } else {
       h+='<div class="result-card" style="padding:16px;margin-bottom:10px"><div style="font-size:14px;font-weight:900">Regular Season Complete</div>'+
          '<p style="font-size:11px;font-weight:700;color:var(--muted);margin-top:5px">Final record: '+s.wins+'-'+s.losses+'. Time to see where you stand.</p></div>';
@@ -2661,6 +2739,7 @@ function seasonScreen(){
         else h+='<div class="game-res" style="color:var(--dim)">—</div>';
         h+='</div>';
       });
+      h+=postseasonScheduleRows();
       h+='</div>';
     }
   } else if(tab==="standings"){
@@ -2679,6 +2758,36 @@ function seasonScreen(){
 function tabBtn(id,label){
   var active=(ST.seasonTab||"week")===id;
   return '<button class="tab-btn'+(active?" active":"")+'" data-tab="'+id+'">'+label+'</button>';
+}
+// Extra schedule rows for the conf title game, bowl, or playoff run.
+function postseasonScheduleRows(){
+  var s=ST.save, h='';
+  function row(tag,opp,sub,res,live){
+    var cls="game-row"+(res?(res.us>res.them?" win":" loss"):"");
+    var out='<div class="'+cls+'"><div class="game-wk" style="font-size:9px">'+tag+'</div>'+
+      '<div class="game-opp">'+x(opp)+'<div class="oc">'+x(sub)+'</div></div>';
+    out+= res ? '<div class="game-res '+(res.us>res.them?"w":"l")+'">'+(res.us>res.them?"W":"L")+' '+res.us+'-'+res.them+'</div>'
+         : live ? '<div class="game-res" style="color:var(--purple)">▶ NEXT</div>'
+         : '<div class="game-res" style="color:var(--dim)">—</div>';
+    return out+'</div>';
+  }
+  var C=ST.confchamp;
+  if(C && C.youIn){
+    var copp=C.top2[0].name===s.school?C.top2[1]:C.top2[0];
+    var cres=(C.done&&C.result&&C.result.us!=null)?{us:C.result.us,them:C.result.them}:null;
+    h+=row("CONF",copp.name,s.conf+" Championship",cres,!C.done);
+  }
+  var P=ST.post;
+  if(P && P.mode==="bowl"){ h+=row("BOWL",P.opp,P.bowlName,P.done?P.result:null,!P.done); }
+  if(P && P.mode==="playoff"){
+    (P.log||[]).forEach(function(e){ h+=row("CFP",e.opp,roundLabel(e.round),e.result,false); });
+    if(!P.done){
+      var opp=myNextOpponent();
+      var on=opp.seed?P.bracket.bySeed[opp.seed].name:"TBD";
+      h+=row("CFP",on,roundLabel(P.round)+" · #"+P.mySeed+" seed",null,true);
+    }
+  }
+  return h;
 }
 // Live conference standings mid-season (reuses computeConfStandings)
 function liveStandingsTable(){
@@ -2843,7 +2952,7 @@ function enterConfChampionship(){
     s._userConfChampName=champ.result.winner; // remember your conference's champion for league history
   }
   ST.confchamp=champ; s._confchamp=champ;
-  ST.screen="confchamp"; persist(); draw();
+  ST.screen="season"; ST.seasonTab="week"; persist(); draw();
 }
 // You play the conference title game (live sim) — opponent is the other top-2 team
 function playConfChampGame(){
@@ -2851,9 +2960,10 @@ function playConfChampGame(){
   var opp = C.top2[0].name===s.school ? C.top2[1] : C.top2[0];
   var game={opp:opp.name, oc:s.conf, op:opp.p, home:(Math.random()<0.5)};
   var res=simGame(game, ST.planPick||"pro");
+  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,opp.name);
+  res.us=pbp.finalUs; res.them=pbp.finalThem; // conversions decide the final margin
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
-  var pbp=buildPlayByPlay(res.us,res.them,s.school,opp.name);
   ST.weekResult={us:res.us,them:res.them,oppName:opp.name,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:game.home,pbp:pbp,
                  postseason:true, confchamp:true, roundName:s.conf+" Championship"};
   ST.live={elapsed:0,shownCount:0,done:false,timer:null};
@@ -2864,25 +2974,26 @@ function playConfChampGame(){
 function finishConfChampGame(){
   var s=ST.save, C=ST.confchamp, won=ST._confWon;
   C.done=true;
-  C.result={winner: won?s.school:(C.top2[0].name===s.school?C.top2[1].name:C.top2[0].name), auto:false};
+  C.result={winner: won?s.school:(C.top2[0].name===s.school?C.top2[1].name:C.top2[0].name), auto:false,
+            us:(ST.weekResult?ST.weekResult.us:null), them:(ST.weekResult?ST.weekResult.them:null)};
   C.wonTitle=won;
   s._userConfChampName=C.result.winner; // remember your conference's champion for league history
   if(won){ s.titles=(s.titles||0)+1; s.confTitles=(s.confTitles||0)+1; s.jobSecurity=Math.min(100,s.jobSecurity+8); s._wonConfThisYear=true; }
   s._confchamp=C;
   ST.weekResult=null; ST.live=null; ST.planPick=null;
-  ST.screen="confchamp"; persist(); draw();
+  ST.screen="season"; ST.seasonTab="week"; persist(); draw();
 }
 function roundLabelConf(){ return ST.save.conf+" Championship"; }
-function confChampScreen(){
-  var s=ST.save, C=ST.confchamp;
-  var h='<div class="wrap">';
+// Body-only — rendered inside the Week tab of the season screen.
+function confChampBody(){
+  var s=ST.save, C=ST.confchamp, h='';
   if(!C.done && C.youIn){
     var opp=C.top2[0].name===s.school?C.top2[1]:C.top2[0];
     h+='<div class="hero" style="text-align:center"><h1>🏆 '+x(s.conf)+' Championship</h1>'+
        '<p>You finished top-2 in the '+x(s.conf)+'! Beat <b>'+x(opp.name)+'</b> ('+stars(opp.p)+') to win the conference — it boosts your playoff seeding and counts as a title.</p></div>';
     h+=confStandingsTable();
     h+='<button class="bigbtn btn-purple" id="play-confchamp" style="background:var(--purple);color:#fff">Play '+x(s.conf)+' Championship →</button>';
-    return h+'</div>';
+    return h;
   }
   // done (either you played, or auto-resolved)
   var iWon=C.result&&C.result.winner===s.school;
@@ -2892,7 +3003,7 @@ function confChampScreen(){
             ((C.result?x(C.result.winner):"?")+" won the "+x(s.conf)+" title."+(C.youIn?" Tough loss in the final.":" You didn\u2019t qualify this year.")))+'</p></div>';
   h+=confStandingsTable();
   h+='<button class="bigbtn btn-gold" id="confchamp-continue">Continue to Postseason →</button>';
-  return h+'</div>';
+  return h;
 }
 function confStandingsTable(){
   var s=ST.save, C=ST.confchamp;
@@ -2930,7 +3041,7 @@ function enterPostseason(){
     : ( w>=11 && s._wonConfThisYear );   // G5: only the conf champ with a great record sneaks in
   if(makePlayoff){
     setupPlayoff();
-    ST.screen="bracket"; persist(); draw(); return;
+    ST.screen="season"; ST.seasonTab="week"; persist(); draw(); return;
   }
   if(w>=6){
     // bowl game
@@ -2938,7 +3049,7 @@ function enterPostseason(){
     var oppP = Math.max(1, Math.min(5, s.prestige + rnd(-1,1)));
     var opp = pickOpponent(oppP);
     ST.post={mode:"bowl", bowlName:pick(pool), opp:opp.n, oc:opp.c, op:opp.p, done:false, result:null};
-    ST.screen="bowl"; persist(); draw(); return;
+    ST.screen="season"; ST.seasonTab="week"; persist(); draw(); return;
   }
   // no bowl (losing record)
   ST.post=null;
@@ -3044,8 +3155,13 @@ function myNextOpponent(){
 function advancePlayoff(iWon){
   var P=ST.post, B=P.bracket, me=P.mySeed;
   if(!iWon){
-    // you're eliminated — resolve rest of bracket for flavor, then bowl-less offseason
+    // you're eliminated — the team that just beat you advances in your place
     P.done=true; P.eliminated=true;
+    var beat=myNextOpponent().seed;
+    if(P.round==="r1"){ var oi=myNextOpponent().idx; B.results["r1_"+oi]=beat; }
+    else if(P.round==="qf"){ resolveQuarterfinals(beat); }
+    else if(P.round==="sf"){ resolveSemifinal(beat); }
+    else if(P.round==="champ"){ B.champWinner=beat; }
     resolveRestOfBracket();
     return;
   }
@@ -3069,7 +3185,7 @@ function advancePlayoff(iWon){
     return;
   }
   if(P.round==="champ"){
-    P.done=true; P.champion=me; // you win it all
+    P.done=true; P.champion=me; B.champWinner=me; // you win it all
     ST.save._wonNatlThisYear=true; ST.save.natlTitles=(ST.save.natlTitles||0)+1;
     ST.save._natlChampName=ST.save.school;
     return;
@@ -3116,22 +3232,27 @@ function resolveSemifinal(myWinSeed){
   P._champOpp=otherWinner;
 }
 function resolveRestOfBracket(){
-  // best-effort fill so the bracket view shows a champion even if you lost
+  // best-effort fill so the bracket view shows a full, finished bracket even if you lost
   var P=ST.post,B=P.bracket;
   B.r1.forEach(function(pr,i){ if(B.results["r1_"+i]==null)B.results["r1_"+i]=cpuGame(pr.a,pr.b); });
   if(!B.qfWinners) resolveQuarterfinals(-99);
   var w1=B.qfWinners[1],w4=B.qfWinners[4],w2=B.qfWinners[2],w3=B.qfWinners[3];
-  var sf1=cpuGame(w1,w4), sf2=cpuGame(w2,w3);
-  P.finalChamp=cpuGame(sf1,sf2);
-  var cf=(P.field||[]).filter(function(x){return x.seed===P.finalChamp;})[0];
+  if(!B._sfPairs) B._sfPairs=[{a:w1,b:w4},{a:w2,b:w3}];
+  // keep any semifinal already decided (you may have won yours before losing the final)
+  if(!B.sfWinners) B.sfWinners=[];
+  if(B.sfWinners[0]==null) B.sfWinners[0]=cpuGame(B._sfPairs[0].a,B._sfPairs[0].b);
+  if(B.sfWinners[1]==null) B.sfWinners[1]=cpuGame(B._sfPairs[1].a,B._sfPairs[1].b);
+  if(B.champWinner==null) B.champWinner=cpuGame(B.sfWinners[0],B.sfWinners[1]);
+  P.champion=B.champWinner;
+  P.finalChamp=B.champWinner; // legacy alias
+  var cf=(P.field||[]).filter(function(x){return x.seed===P.champion;})[0];
   ST.save._natlChampName = cf?cf.name:(ST.save._natlChampName||null); // remember the champ for league history
 }
 
 // ── Postseason screens ───────────────────────────────────
 function roundLabel(r){ return {r1:"First Round",qf:"Quarterfinal",sf:"Semifinal",champ:"National Championship"}[r]||r; }
-function bracketScreen(){
-  var P=ST.post, s=ST.save;
-  var h='<div class="wrap">';
+function bracketBody(){
+  var P=ST.post, s=ST.save, h='';
   if(P.done){
     var wonNatty = P.champion===P.mySeed;
     h+='<div class="hero" style="text-align:center;'+(wonNatty?'background:var(--gold-bg);border-color:var(--gold-dark)':'')+'">'+
@@ -3140,7 +3261,7 @@ function bracketScreen(){
               ("Your run ended in the "+roundLabel(P.round)+". Still a playoff season to build on."))+'</p></div>';
     h+=bracketVisual();
     h+='<button class="bigbtn btn-gold" id="post-to-offseason">Continue to Offseason →</button>';
-    return h+'</div>';
+    return h;
   }
   var opp=myNextOpponent();
   var oppName = opp.seed?P.bracket.bySeed[opp.seed].name:"TBD";
@@ -3148,49 +3269,112 @@ function bracketScreen(){
   h+='<div class="hero" style="text-align:center"><h1>🏈 Playoff — '+roundLabel(P.round)+'</h1>'+
      '<p>You\u2019re the <b>#'+P.mySeed+' seed</b>'+(P.mySeed<=4&&P.round==="qf"?" (first-round bye)":"")+
      '. Next up: <b>#'+(opp.seed||"?")+' '+x(oppName)+'</b>.</p></div>';
+  if(opp.seed){
+    var og=oppRatings(oppName,oppP);
+    h+='<div class="result-card" style="padding:13px;margin-bottom:10px"><div class="vs" style="margin:0 0 4px">'+roundLabel(P.round)+'</div>'+
+       '<div class="score" style="font-size:20px">vs '+x(oppName)+'</div>'+
+       '<div class="vs">#'+opp.seed+' seed · '+stars(oppP)+'</div>'+
+       '<div class="opp-rtg"><div class="ort"><b>'+og.off+'</b><span>Off</span></div><div class="ort"><b>'+og.def+'</b><span>Def</span></div><div class="ort"><b>'+og.ovr+'</b><span>Overall</span></div></div></div>';
+    h+=schemeReadout();
+  }
   h+=bracketVisual();
   h+='<button class="bigbtn btn-purple" id="play-playoff" style="background:var(--purple);color:#fff">Play '+roundLabel(P.round)+' →</button>';
-  return h+'</div>';
+  h+=schemeToggle();
+  return h;
 }
+// Full 12-team bracket: First Round → Quarterfinals → Semifinals → Championship.
+// Renders whatever is known so far; undecided slots show as TBD.
 function bracketVisual(){
   var P=ST.post,B=P.bracket;
+  // QF pairings: bye seed vs the r1 winner that feeds it
+  var qfPairs=[ {bye:1,from:1}, {bye:4,from:0}, {bye:2,from:3}, {bye:3,from:2} ];
   var h='<div class="sec-title">The Bracket</div><div class="bracket">';
-  // byes
-  h+='<div class="brk-col"><div class="brk-h">Byes (1-4)</div>';
-  B.byeSeeds.forEach(function(sd){ h+=brkTeam(sd); });
-  h+='</div>';
-  // first round
-  h+='<div class="brk-col"><div class="brk-h">First Round</div>';
+
+  // ── First Round (seeds 5-12) ──
+  h+='<div class="brk-col"><div class="brk-h">First Rd</div>';
   B.r1.forEach(function(pr,i){
-    var wseed=B.results["r1_"+i];
-    h+='<div class="brk-pair">'+brkTeam(pr.a,wseed)+brkTeam(pr.b,wseed)+'</div>';
+    var w=B.results["r1_"+i];
+    h+='<div class="brk-pair">'+brkTeam(pr.a,w)+brkTeam(pr.b,w)+'</div>';
   });
-  h+='</div></div>';
+  h+='</div>';
+
+  // ── Quarterfinals (byes 1-4 enter here) ──
+  h+='<div class="brk-col"><div class="brk-h">Quarters</div>';
+  qfPairs.forEach(function(p){
+    var opp=B.results["r1_"+p.from];
+    var w=B.qfWinners?B.qfWinners[p.bye]:null;
+    h+='<div class="brk-pair">'+brkTeam(p.bye,w)+brkTeam(opp,w)+'</div>';
+  });
+  h+='</div>';
+
+  // ── Semifinals ──
+  var sp=B._sfPairs||[];
+  h+='<div class="brk-col"><div class="brk-h">Semis</div>';
+  [0,1].forEach(function(i){
+    var pr=sp[i]||{a:null,b:null};
+    var w=B.sfWinners?B.sfWinners[i]:null;
+    h+='<div class="brk-pair">'+brkTeam(pr.a,w)+brkTeam(pr.b,w)+'</div>';
+  });
+  h+='</div>';
+
+  // ── Championship ──
+  h+='<div class="brk-col"><div class="brk-h">Final</div>';
+  var f=B.sfWinners||[];
+  h+='<div class="brk-pair">'+brkTeam(f[0],B.champWinner)+brkTeam(f[1],B.champWinner)+'</div>';
+  if(B.champWinner!=null){
+    var cn=B.bySeed[B.champWinner];
+    h+='<div class="brk-champ">🏆 '+x(cn?cn.name:"?")+'</div>';
+  }
+  h+='</div>';
+
+  h+='</div>';
   return h;
 }
 function brkTeam(seed,winnerSeed){
-  var P=ST.post,B=P.bracket, f=B.bySeed[seed];
+  var P=ST.post,B=P.bracket;
+  if(seed==null) return '<div class="brk-team tbd"><span class="brk-seed">·</span><span class="brk-name">TBD</span></div>';
+  var f=B.bySeed[seed];
   var me=(seed===P.mySeed);
   var won=(winnerSeed!=null && winnerSeed===seed);
   var lost=(winnerSeed!=null && winnerSeed!==seed);
   return '<div class="brk-team'+(me?" me":"")+(won?" won":"")+(lost?" lost":"")+'">'+
     '<span class="brk-seed">'+seed+'</span><span class="brk-name">'+x(f?f.name:"?")+'</span></div>';
 }
-function bowlScreen(){
-  var P=ST.post, s=ST.save;
-  var h='<div class="wrap">';
+function bowlBody(){
+  var P=ST.post, s=ST.save, h='';
   if(P.done){
     var w=P.result.us>P.result.them;
     h+='<div class="hero" style="text-align:center;'+(w?'background:var(--green-bg);border-color:var(--green)':'')+'">'+
        '<h1>'+(w?"🎉 Bowl Win!":"Bowl Loss")+'</h1><p>'+x(P.bowlName)+': '+
        x(s.school)+' '+P.result.us+', '+x(P.opp)+' '+P.result.them+'.</p></div>';
     h+='<button class="bigbtn btn-gold" id="post-to-offseason">Continue to Offseason →</button>';
-    return h+'</div>';
+    return h;
   }
   h+='<div class="hero" style="text-align:center"><h1>🏆 '+x(P.bowlName)+'</h1>'+
      '<p>You didn\u2019t make the Playoff, but a strong season earned a bowl bid. Face <b>'+x(P.opp)+'</b> ('+stars(P.op)+') for pride and stats.</p></div>';
+  var og=oppRatings(P.opp,P.op);
+  h+='<div class="result-card" style="padding:13px;margin-bottom:10px"><div class="vs" style="margin:0 0 4px">'+x(P.bowlName)+'</div>'+
+     '<div class="score" style="font-size:20px">vs '+x(P.opp)+'</div>'+
+     '<div class="vs">'+x(P.oc)+' · '+stars(P.op)+'</div>'+
+     '<div class="opp-rtg"><div class="ort"><b>'+og.off+'</b><span>Off</span></div><div class="ort"><b>'+og.def+'</b><span>Def</span></div><div class="ort"><b>'+og.ovr+'</b><span>Overall</span></div></div></div>';
+  h+=schemeReadout();
   h+='<button class="bigbtn btn-purple" id="play-bowl" style="background:var(--purple);color:#fff">Play the '+x(P.bowlName)+' →</button>';
-  return h+'</div>';
+  h+=schemeToggle();
+  return h;
+}
+// Shared "Adjust Gameplan Scheme" toggle + panel (used by week, bowl, and playoff)
+function schemeToggle(){
+  var h='<button class="btn" id="toggle-scheme" style="width:100%;margin-top:8px;padding:9px;font-size:11px;font-weight:800;background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border)">'+(ST.showScheme?"Hide":"Adjust")+' Gameplan Scheme '+(ST.showScheme?"▲":"▼")+'</button>';
+  if(ST.showScheme){ h+='<div style="margin-top:10px">'+gameplanPanel()+'</div>'; }
+  return h;
+}
+// What postseason context (if any) the season screen should render in its Week tab.
+function postContext(){
+  // once a bowl/playoff exists it outranks the (already-resolved) conference title game
+  if(ST.post && ST.post.mode==="bowl") return {kind:"bowl", label:ST.post.bowlName, wk:"BOWL"};
+  if(ST.post && ST.post.mode==="playoff") return {kind:"playoff", label:roundLabel(ST.post.round), wk:"CFP"};
+  if(ST.confchamp) return {kind:"confchamp", label:ST.save.conf+" Championship", wk:"CONF"};
+  return null;
 }
 
 // Play a postseason game through the SAME live-sim machinery
@@ -3201,9 +3385,10 @@ function playPostGame(){
   else { var o=myNextOpponent(); oppName=P.bracket.bySeed[o.seed].name; oppP=P.bracket.bySeed[o.seed].p; home=(P.round==="r1"&&P.mySeed<o.seed); }
   var game={opp:oppName, oc:"", op:oppP, home:home};
   var res=simGame(game, ST.planPick||"pro");
+  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,oppName);
+  res.us=pbp.finalUs; res.them=pbp.finalThem;
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
-  var pbp=buildPlayByPlay(res.us,res.them,s.school,oppName);
   ST.weekResult={us:res.us,them:res.them,oppName:oppName,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:home,pbp:pbp,
                  postseason:true, roundName:(P.mode==="bowl"?P.bowlName:roundLabel(P.round))};
   ST.live={elapsed:0,shownCount:0,done:false,timer:null};
@@ -3218,13 +3403,16 @@ function finishPostGame(){
     P.done=true; P.result={us:ST.weekResult.us,them:ST.weekResult.them};
     if(won) ST.save.jobSecurity=Math.min(100,ST.save.jobSecurity+5);
     ST.weekResult=null; ST.live=null; ST.planPick=null;
-    ST.screen="bowl"; persist(); draw(); return;
+    ST.screen="season"; ST.seasonTab="week"; persist(); draw(); return;
   }
-  // playoff
+  // playoff — log the round you just played before the bracket advances
+  if(!P.log) P.log=[];
+  P.log.push({round:P.round, opp:(ST.weekResult.oppName||"?"),
+              result:{us:ST.weekResult.us, them:ST.weekResult.them}});
   advancePlayoff(won);
   if(P.done && P.champion===P.mySeed){ ST.save.titles=(ST.save.titles||0)+1; ST.save.jobSecurity=Math.min(100,ST.save.jobSecurity+15); }
   ST.weekResult=null; ST.live=null; ST.planPick=null;
-  ST.screen="bracket"; persist(); draw();
+  ST.screen="season"; ST.seasonTab="week"; persist(); draw();
 }
 
 // ── Coaching carousel ────────────────────────────────────
@@ -3402,6 +3590,7 @@ function bind(){
   document.querySelectorAll("[data-scheme]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-scheme").split(":"); setScheme(parts[0],parts[1]); };});
   document.querySelectorAll("[data-nilopen]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-nilopen").split(":"); openNIL(parts[0],parts[1]); };});
   document.querySelectorAll("[data-signtransfer]").forEach(function(b){b.onclick=function(){ signTransfer(b.getAttribute("data-signtransfer")); };});
+  document.querySelectorAll("[data-retainplayer]").forEach(function(b){b.onclick=function(){ retainPlayer(b.getAttribute("data-retainplayer")); };});
   var pdn=q("#portal-done"); if(pdn)pdn.onclick=finishPortal;
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
@@ -3512,6 +3701,32 @@ function signTransfer(id){
   if(others.length && Math.random()<0.4){ var snipe=others[rnd(0,Math.min(2,others.length-1))]; snipe.status="lost"; }
   persist(); draw();
 }
+// Pull one of your own out of the portal before he's gone for good.
+function retainPlayer(id){
+  var s=ST.save, out=s._portalOut||[];
+  var d=out.filter(function(o){return (o._p&&o._p.id)===id;})[0];
+  if(!d || d.status!=="open") return;
+  var price=d.retainPrice||0;
+  if((s.nilLeft||0)<price){ toast("Not enough NIL to keep "+x(d.n)); return; }
+  if(s.roster.filter(function(p){return p.pos===d.pos;}).length>=rosterSizeAt(d.pos)){
+    toast("Roster full at "+d.pos+" — cut someone first."); return;
+  }
+  s.nilLeft=money2(s.nilLeft-price);
+  var p=d._p;
+  p.nilFund=money2((p.nilFund||0)+price); // the money he wanted, finally
+  s.roster.push(p);
+  d.status="retained";
+  // win back some of the fan-confidence you lost when he announced
+  if(d.ovr>=75 && (s._portalSecHit||0)>0){
+    var back=Math.min(s._portalSecHit,4);
+    s._portalSecHit-=back; s.jobSecurity=Math.min(100,(s.jobSecurity||60)+back);
+  }
+  toast("🤝 Kept "+x(p.n)+" · "+p.ovr+" OVR "+p.pos);
+  // word travels: another departure may lock in with a rival while you're negotiating
+  var others=out.filter(function(o){return o.status==="open";});
+  if(others.length && Math.random()<0.35){ others[rnd(0,others.length-1)].status="gone"; }
+  persist(); draw();
+}
 function finishPortal(){ ST.save._inPortal=false; enterPreseason(); }
 function portalScreen(){
   var s=ST.save;
@@ -3523,13 +3738,20 @@ function portalScreen(){
   h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin:8px 2px 0;line-height:1.5">Rival programs worked the portal too — the league\u2019s balance has shifted for next season.</div>';
   // departures
   var out=s._portalOut||[];
+  var stillOpen=out.filter(function(o){return o.status==="open";}).length;
   h+='<div class="sec-title" style="margin:12px 2px 6px">Departures'+(out.length?' ('+out.length+')':'')+'</div>';
   if(!out.length){ h+='<div style="font-size:11px;font-weight:700;color:var(--muted);margin:0 2px 8px">You held onto everyone — no players entered the portal. Nicely funded.</div>'; }
   else {
+    if(stillOpen) h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">They\u2019ve entered — but they haven\u2019t signed anywhere. Meet the number and you can still keep them. Wait too long and a rival closes the deal.</div>';
     h+='<div class="conf-table" style="margin-bottom:6px">';
     out.forEach(function(p){
-      h+='<div class="ret-row"><span class="ret-nm">'+x(p.n)+'<span class="ret-sub">'+p.pos+' · '+p.yr+' · '+p.ovr+' OVR · '+x(p.arch||"")+'</span></span>'+
-         '<span class="tp-gone">→ portal</span></div>';
+      var st=p.status||"gone", canBuy=(st==="open" && p._p && p.retainPrice!=null);
+      var afford=(s.nilLeft||0)>=(p.retainPrice||0);
+      var badge = st==="retained" ? '<span class="tp-signed">✓ Kept</span>'
+               : canBuy ? '<button class="tp-btn'+(afford?"":" broke")+'" data-retainplayer="'+p._p.id+'">Keep · '+fmtMoney(p.retainPrice)+'</button>'
+               : '<span class="tp-gone">→ portal</span>';
+      h+='<div class="ret-row'+(st!=="open"?" done":"")+'"><span class="ret-nm">'+x(p.n)+'<span class="ret-sub">'+p.pos+' · '+p.yr+' · '+p.ovr+' OVR · '+x(p.arch||"")+'</span></span>'+
+         badge+'</div>';
     });
     h+='</div>';
   }
@@ -3731,6 +3953,8 @@ function playerStatDetail(id){
 function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
   var res=simGame(g, null);
+  var pbp=buildPlayByPlayFor(res.us,res.them,s.school,g.opp);
+  res.us=pbp.finalUs; res.them=pbp.finalThem; // conversions decide the final margin
   g.result={us:res.us,them:res.them};
   var won=res.us>res.them;
   if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
@@ -3740,7 +3964,6 @@ function playWeek(){
   simLeagueWeek(s.school);
   developInSeason();
   advanceRecruitingWeek(); // rivals push, commits happen, new weekly points
-  var pbp=buildPlayByPlay(res.us,res.them,s.school,g.opp);
   ST.weekResult={us:res.us,them:res.them,oppName:g.opp,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:g.home,pbp:pbp};
   ST.live={elapsed:0, shownCount:0, done:false, timer:null};
   s.week++;
@@ -3805,9 +4028,12 @@ function renderLiveScore(){
     for(var j=revealed.length-1;j>=0;j--){
       var p=revealed[j];
       var mine=p.team==="us";
-      var badge=p.kind==="TD"?"🏈 TD":(p.kind==="FG"?"🥅 FG":(p.kind==="2PT"?"➋ 2PT":"＋ SFTY"));
+      var badge=p.kind==="TD"?"🏈 TD":(p.kind==="FG"?"🥅 FG":
+                p.kind==="XP"?(p.good?"🦵 XP":"❌ XP"):
+                p.kind==="2PT"?(p.good?"➋ 2PT":"❌ 2PT"):"＋ SFTY");
+      var miss=(p.kind==="XP"||p.kind==="2PT") && !p.good;
       var teamLbl = mine ? abbr(ST.save.school) : abbr(ST.weekResult.oppName);
-      rows+='<div class="pbp-row'+(mine?" mine":"")+'"><span class="pbp-q">Q'+p.q+'</span>'+
+      rows+='<div class="pbp-row'+(mine?" mine":"")+(miss?" miss":"")+'"><span class="pbp-q">Q'+p.q+'</span>'+
             '<span class="pbp-badge">'+badge+'</span>'+
             '<span class="pbp-desc"><b>'+x(teamLbl)+'</b> · '+x(p.desc)+'</span>'+
             '<span class="pbp-sc">'+p.usTot+'-'+p.themTot+'</span></div>';
@@ -3848,8 +4074,9 @@ function advanceSeason(){
   if(s.coachXP==null) s.coachXP=0;
   if(!s.archetype) s.archetype="offensive";
   if(s.titles==null) s.titles=0;
-  // record title
-  if(s.wins>=11){ s.titles++; toast("🏆 Conference title season!"); }
+  // Titles are awarded where they're actually won — finishConfChampGame() for the conference,
+  // finishPostGame() for the natty. A big win total is not a championship.
+  if(s._wonConfThisYear) toast("🏆 "+x(s.conf)+" title season!");
   s.history.push({season:s.season,wins:s.wins,losses:s.losses,school:s.school,expect:s.expectWins});
   s._lastWins=s.wins; // feeds next season's NIL budget
   recordChampions(); // log this year's national & conference champions to the league history
@@ -3858,7 +4085,8 @@ function advanceSeason(){
   s._xpGainedThisYear=0;
   awardCoachXP(Math.floor(s.wins/2), "wins");            // ~1 XP per 2 wins
   if(s.wins>=s.expectWins) awardCoachXP(2, "met expectations");
-  if(s.wins>=11) awardCoachXP(3, "title season");        // strong season / conference title
+  if(s.wins>=11) awardCoachXP(2, "11-win season");       // a great year, title or not
+  if(s._wonConfThisYear) awardCoachXP(3, "conference title");
   if(s._wonNatlThisYear) awardCoachXP(5, "national title");
 
   // ── evaluate season vs expectation → adjust job security ──
@@ -3881,7 +4109,14 @@ function advanceSeason(){
   s.roster.forEach(function(p){
     if(p.yr==="SR"||p.cut)return; // seniors graduate; anyone you cut is released
     var risk=retentionRisk(p);
-    if(risk!=null && risk>0 && Math.random()*100<risk){ departed.push({n:p.n,pos:p.pos,ovr:p.ovr,arch:p.arch,yr:YR_NEXT[p.yr]||p.yr,dev:p.dev}); return; } // enters the transfer portal
+    if(risk!=null && risk>0 && Math.random()*100<risk){
+      // enters the transfer portal — but you get one shot to buy them back with NIL
+      var gone=JSON.parse(JSON.stringify(p));
+      gone.yr=YR_NEXT[p.yr]||p.yr;
+      departed.push({n:p.n,pos:p.pos,ovr:p.ovr,arch:p.arch,yr:gone.yr,dev:p.dev,
+        retainPrice:retainPrice(p), status:"open", _p:gone});
+      return;
+    }
     p.yr=YR_NEXT[p.yr]||p.yr;
     var pot = Math.max(p.pot!=null?p.pot:99, p.ovr); // ceiling (never below current, for old saves)
     var head = pot - p.ovr;
