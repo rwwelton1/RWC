@@ -331,6 +331,18 @@ a{color:inherit;text-decoration:none}
 .pbp-row.score{border-color:var(--border);box-shadow:2px 2px 0 var(--border)}
 .pbp-row.score .pbp-desc{font-weight:900}
 .pbp-row.turn .pbp-badge{color:var(--red2)}
+.tactics{background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:9px;margin:10px 2px 0}
+.tac-row{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.tac-lbl{flex-shrink:0;width:52px;font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.tac-pick{flex:1;display:flex;gap:0;border:2px solid var(--border);border-radius:8px;overflow:hidden}
+.tac-btn{flex:1;font-size:8.5px;font-weight:900;padding:6px 2px;background:#fff;border:none;cursor:pointer;color:var(--muted);white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:3px}
+.tac-btn.on{background:var(--purple);color:#fff}
+.tac-ico{font-size:10px}
+.tac-desc{font-size:8.5px;font-weight:700;color:var(--muted);line-height:1.6;margin-top:3px;padding-top:6px;border-top:1.5px solid var(--border2)}
+.qbreak{background:var(--gold-bg);border:2px solid var(--gold-dark);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:10px;margin:10px 2px 0;text-align:center}
+.qbreak-lbl{font-size:11px;font-weight:900;color:var(--gold-dark);letter-spacing:.06em}
+.qbreak-sc{font-size:15px;font-weight:900;margin-top:2px}
+.qbreak-note{font-size:9px;font-weight:700;color:var(--muted);margin-top:4px;line-height:1.5}
 .speed-row{display:flex;align-items:center;justify-content:space-between;margin:10px 2px 0;gap:8px}
 .speed-lbl{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .speed-pick{display:flex;border:2px solid var(--border);border-radius:9px;overflow:hidden;box-shadow:2px 2px 0 var(--border)}
@@ -709,6 +721,7 @@ function rosterCounts(mode){
   return out;
 }
 // How many bodies are we short of the minimum, by position?
+// Below the STARTING minimum — the red cells on the ledger. You can't field a lineup.
 function rosterShortfall(counts){
   var short={}, n=0;
   myPositions().forEach(function(pos){
@@ -718,6 +731,18 @@ function rosterShortfall(counts){
   });
   short._total=n;
   return short;
+}
+// Below the roster CAP — every empty spot, starter or bench. Walk-ons fill all of
+// them: a scholarship roster is always full, and an empty bench is not a roster.
+function rosterOpenings(counts){
+  var open={}, n=0;
+  myPositions().forEach(function(pos){
+    var c=counts[pos]; if(!c) return;
+    var gap=c.cap-c.have;
+    if(gap>0){ open[pos]=gap; n+=gap; }
+  });
+  open._total=n;
+  return open;
 }
 function rolePositions(){
   if(!ST.save)return POSITIONS;
@@ -1026,7 +1051,8 @@ var ST={
   planPick:null,
   feedMode:"all",  // live play-by-play: "all" (full log) or "scoring"
   simSpeed:"normal", // sim speed: fast | normal | slow
-  swapPick:null    // roster depth chart: id of the player picked for a tap-to-swap
+  swapPick:null,   // roster depth chart: id of the player picked for a tap-to-swap
+  G:null           // live game state (resumable); not persisted — a reload restarts the week
 };
 // (SIM_SPEEDS is declared further down; check literals so hoisting can't bite us)
 try{ var _ss=localStorage.getItem("dyn_simSpeed"); if(_ss==="fast"||_ss==="normal"||_ss==="slow") ST.simSpeed=_ss; }catch(e){}
@@ -2271,7 +2297,7 @@ function rosterTable(){
   else if(s.role==="HC"){ groups=[{t:"Offense",order:POS_ORDER_OFF},{t:"Defense",order:POS_ORDER_DEF}]; }
   else { groups=[{t:"Offense",order:POS_ORDER_OFF}]; }
   var h='';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 8px;line-height:1.5">Tap ▲▼ to set your depth chart. Starters play — promote a young gem over a veteran if you like.</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 8px;line-height:1.5">Tap a player, then tap another at the same position to swap them. Starters play — promote a young gem over a veteran if you like.</div>';
   groups.forEach(function(grp){
     h+='<div class="sec-title" style="margin:6px 2px 6px">'+grp.t+'</div>';
     h+='<div class="conf-table" style="margin-bottom:10px">';
@@ -2381,47 +2407,105 @@ function gauss(){ var u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.r
   return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
 function clampN(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-function dRun(edge){
+function dRun(edge, dm){
+  dm=dm||defMods("standard");
   var e=edge/EDGE_DIV;
-  var y=(4.75+e*1.6)+gauss()*4.7;
+  var y=(4.75+e*1.6+dm.runYds)+gauss()*4.7;   // soft fronts concede the run
   if(Math.random()<0.058+e*0.02) y+=Math.abs(gauss())*16;   // breakaway
   y=Math.round(y); if(y<-6)y=-6;
   return {yards:y, turnover:Math.random()<(0.011-e*0.003), kind:"run", incomplete:false};
 }
 // `obvious` = 3rd/4th & long: the defense knows a throw is coming and defends the sticks.
-function dPass(edge, obvious){
+function dPass(edge, obvious, dm, aggro){
+  dm=dm||defMods("standard"); aggro=aggro||0;
   var e=edge/EDGE_DIV;
-  if(Math.random()<clampN(0.062-e*0.02+(obvious?0.030:0),0.02,0.16))
+  if(Math.random()<clampN(0.062-e*0.02+(obvious?0.030:0)+dm.sack,0.02,0.20))
     return {yards:-rnd(4,9), turnover:false, kind:"sack", incomplete:false};
-  var compP=clampN(0.625+e*0.10-(obvious?0.075:0),0.30,0.82);
-  var intP =clampN(0.026-e*0.010+(obvious?0.012:0),0.008,0.060);
+  // "Air it out" means deeper throws: fewer completions, bigger when they land.
+  var compP=clampN(0.625+e*0.10-(obvious?0.075:0)+dm.comp-aggro*0.055,0.28,0.88);
+  var intP =clampN(0.026-e*0.010+(obvious?0.012:0)+dm.int+aggro*0.011,0.006,0.070);
   if(Math.random()<intP)   return {yards:0, turnover:true,  kind:"int",  incomplete:true};
   if(Math.random()>=compP) return {yards:0, turnover:false, kind:"pass", incomplete:true};
-  var y=(obvious?5.4:6.8)+e*1.9+Math.abs(gauss())*(obvious?5.2:6.0);
-  if(Math.random()<0.05) y+=Math.abs(gauss())*20;           // explosive
+  var y=(obvious?5.4:6.8)-(dm.shorten||0)+e*1.9+aggro*2.4+Math.abs(gauss())*(obvious?5.2:6.0);
+  if(Math.random()<clampN(0.05+dm.explosive+aggro*0.03,0.005,0.20)) y+=Math.abs(gauss())*20;
   y=Math.round(y);
   if(y<1) y=rnd(1,3);   // a caught ball never loses ground; that's a sack, not a completion
   return {yards:y, turnover:false, kind:"pass", incomplete:false};
 }
-function dClock(res){
-  if(res.incomplete) return Math.round(rnd(5,8)*PACE);
-  if(res.kind==="run") return Math.round(rnd(24,36)*PACE);
-  return Math.round(rnd(18,32)*PACE);
+// ── TACTICS ──────────────────────────────────────────────
+// Toggled any time during a live game; they take effect on the very next snap.
+// Each one buys something and costs something — no free wins.
+var OFF_TACTICS={
+  run:     {label:"Run the Ball", icon:"🏃", lean:+30, desc:"Ground game. Burns clock, but predictable on 3rd & long."},
+  balanced:{label:"Balanced",     icon:"⚖️", lean:0,   desc:"Take what the defense gives you."},
+  pass:    {label:"Air It Out",   icon:"🎯", lean:-32, desc:"Chunk plays and quick scores — and more interceptions."}
+};
+var TEMPO_TACTICS={
+  burn:    {label:"Burn Clock",   icon:"🐢", pace:1.34, desc:"Milk the play clock. Fewer possessions for everyone."},
+  normal:  {label:"Normal",       icon:"⏱️", pace:1.00, desc:"Standard tempo."},
+  hurry:   {label:"Hurry Up",     icon:"⚡", pace:0.62, desc:"Snap fast. More plays, but your defense stays on the field."}
+};
+var DEF_TACTICS={
+  blitz:   {label:"Blitz",        icon:"💥", desc:"Pressure the QB. More sacks, but big plays behind you."},
+  standard:{label:"Standard",     icon:"🛡️", desc:"Sound, balanced coverage."},
+  prevent: {label:"Prevent",      icon:"🚧", desc:"Guard the sticks. Gives up the short stuff, kills the deep ball."}
+};
+function tacticsOf(G, side){
+  // side 0 is the user's team; the CPU always plays it straight
+  if(side!==0 || !G || !G.tactics) return {off:"balanced", tempo:"normal", def:"standard"};
+  return G.tactics;
+}
+// Offensive tactics bend the run/pass lean. Defensive tactics belong to the team
+// NOT holding the ball, so they're looked up from the defender's side.
+function tacticLean(baseLean, off){
+  return clampN(baseLean + (OFF_TACTICS[off]||OFF_TACTICS.balanced).lean, 2, 98);
+}
+// How a defensive call reshapes the offense's outcome distribution.
+// Blitz trades coverage for pressure; prevent trades the short game for the deep
+// ball. Neither is free: the harness showed blitz strictly dominant and prevent
+// unplayable until the explosive/short-yardage costs were made to bite.
+function defMods(def){
+  // `shorten` clips the length of completed passes — the defining trait of a
+  // prevent look. It concedes the catch but not the yardage behind it.
+  if(def==="blitz")   return {sack:+0.040, comp:-0.034, explosive:+0.042, runYds:+0.90, int:+0.005, shorten:-0.2};
+  if(def==="prevent") return {sack:-0.020, comp:+0.040, explosive:-0.075, runYds:+0.60, int:-0.002, shorten:2.6};
+  return {sack:0, comp:0, explosive:0, runYds:0, int:0, shorten:0};
+}
+// Tempo has a defensive price. Hurry-up puts your defense back on the field with
+// no rest; burning clock keeps them fresh. Applied to the OPPOSING offense.
+function tempoFatigue(tempo){
+  if(tempo==="hurry") return {comp:+0.011, runYds:+0.30, explosive:+0.007};  // gassed defense
+  if(tempo==="burn")  return {comp:-0.010, runYds:-0.30, explosive:-0.008};  // rested defense
+  return {comp:0, runYds:0, explosive:0};
+}
+function mergeMods(a,b){
+  return {sack:(a.sack||0), comp:(a.comp||0)+(b.comp||0), explosive:(a.explosive||0)+(b.explosive||0),
+          runYds:(a.runYds||0)+(b.runYds||0), int:(a.int||0), shorten:(a.shorten||0)};
+}
+// Aggression on 4th down: hurry-up teams chasing the game go for it more often.
+function tacticFourthBias(tempo){ return tempo==="hurry"?0.22:(tempo==="burn"?-0.08:0); }
+
+function dClock(res, tempo){
+  var t=PACE*((TEMPO_TACTICS[tempo]||TEMPO_TACTICS.normal).pace);
+  if(res.incomplete) return Math.max(3, Math.round(rnd(5,8)*t));
+  if(res.kind==="run") return Math.max(6, Math.round(rnd(24,36)*t));
+  return Math.max(5, Math.round(rnd(18,32)*t));
 }
 function fgDist(yl){ return (100-yl)+17; }
 function fgProb(d){ return d<=29?0.96:d<=39?0.88:d<=46?0.76:d<=52?0.60:d<=57?0.42:0.22; }
 
-function fourthDown(yl,dist,clock,q,margin){
+function fourthDown(yl,dist,clock,q,margin,bias){
+  bias=bias||0;   // hurry-up teams go for it more; clock-burners less
   var d=fgDist(yl);
   var desperate=(q>=4 && margin<0 && clock<300);
   var mustGo   =(q>=4 && margin<-8 && clock<240);
   if(mustGo && yl>40) return "go";
-  if(yl>=60 && dist<=2 && !desperate) return Math.random()<0.62?"go":(d<=52?"fg":"punt");
+  if(yl>=60 && dist<=2 && !desperate) return Math.random()<clampN(0.62+bias,0.05,0.95)?"go":(d<=52?"fg":"punt");
   if(d<=52 && yl>=55){
     if(desperate && dist<=4 && yl>=70) return Math.random()<0.5?"go":"fg";
     return "fg";
   }
-  if(yl>=65 && dist<=4 && Math.random()<0.35) return "go";
+  if(yl>=65 && dist<=4 && Math.random()<clampN(0.35+bias,0.02,0.90)) return "go";
   if(desperate && dist<=6) return "go";
   if(yl<35) return "punt";
   return (dist<=1 && Math.random()<0.45)?"go":"punt";
@@ -2440,99 +2524,127 @@ function callPlay(down,dist,yl,clock,q,margin,lean){
 function blankSide(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,to:0,ints:0,fums:0,punts:0,sacks:0,
   fga:0,fgm:0,thirdAtt:0,thirdConv:0}; }
 
-// teams: [{off,def,lean}] — returns {a,b,plays[],stats[]}
-function simDrives(teamA, teamB){
-  var S=[0,0], teams=[teamA,teamB], plays=[], stats=[blankSide(),blankSide()];
-  var poss=Math.random()<0.5?0:1, half2=1-poss;
-  for(var half=0; half<2; half++){
-    if(half===1) poss=half2;
-    var clock=1800, yl=25, down=1, dist=10, guard=0;
-    while(clock>0 && guard++<400){
-      var q=(half===0)?(clock>900?1:2):(clock>900?3:4);
-      var qc=clock>900?clock-900:clock;            // seconds left in THIS quarter
-      var def=1-poss;
-      var edge=teams[poss].off-teams[def].def;
-      var margin=S[poss]-S[def];
+// A resumable game. `G` holds everything the loop used to keep in locals, so the
+// sim can stop at a quarter break, let the user change tactics, and pick up
+// exactly where it left off. teams: [{off,def,lean}] — index 0 is the user.
+function newGameState(teamA, teamB){
+  var poss=Math.random()<0.5?0:1;
+  return {
+    S:[0,0], teams:[teamA,teamB], plays:[], stats:[blankSide(),blankSide()],
+    poss:poss, half2:1-poss, half:0,
+    clock:1800, yl:25, down:1, dist:10,
+    done:false, guard:0,
+    tactics:{off:"balanced", tempo:"normal", def:"standard"}
+  };
+}
+// Run the game forward until the end of quarter `stopQ` (1..4), or to the final
+// whistle when stopQ is falsy. Returns when the clock crosses that boundary.
+function simUntil(G, stopQ){
+  if(G.done) return G;
+  while(!G.done){
+    if(G.clock<=0){                    // half over
+      if(G.half===0){ G.half=1; G.poss=G.half2; G.clock=1800; G.yl=25; G.down=1; G.dist=10; G.guard=0; }
+      else { finishRegulation(G); return G; }
+    }
+    if(G.guard++>900){ finishRegulation(G); return G; }
 
-      if(down===4){
-        var dec=fourthDown(yl,dist,clock,q,margin);
-        if(dec==="punt"){
-          stats[poss].punts++;
-          plays.push({t:poss,q:q,clock:qc,down:4,dist:dist,yl:yl,kind:"punt",yards:0,pts:0,snap:true});
-          var net=clampN(Math.round(42+gauss()*8),25,62);
-          var ny=(yl+net>=100)?20:(100-(yl+net));
-          clock-=rnd(12,20);
-          poss=def; yl=clampN(ny,1,99); down=1; dist=10; continue;
-        }
-        if(dec==="fg"){
-          var fd=fgDist(yl); stats[poss].fga++; clock-=rnd(6,12);
-          plays.push({t:poss,q:q,clock:qc,down:4,dist:dist,yl:yl,kind:"fgatt",yards:0,pts:0,snap:true,d:fd});
-          if(Math.random()<fgProb(fd)){
-            stats[poss].fgm++; S[poss]+=3;
-            plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
-            poss=def; yl=25; clock-=rnd(4,8);
-          } else {
-            plays.push({t:poss,kind:"FGMISS",pts:0,q:q,clock:qc,d:fd});
-            poss=def; yl=clampN(100-yl,1,99);
-          }
-          down=1; dist=10; continue;
-        }
-        // "go" falls through to a live play
+    var q=(G.half===0)?(G.clock>900?1:2):(G.clock>900?3:4);
+    if(stopQ && q>stopQ) return G;     // rolled into the next quarter — hand control back
+
+    var qc=G.clock>900?G.clock-900:G.clock;
+    var poss=G.poss, def=1-poss;
+    var S=G.S, plays=G.plays, stats=G.stats, teams=G.teams;
+    var edge=teams[poss].off-teams[def].def;
+    var margin=S[poss]-S[def];
+
+    // whose tactics apply: the ball-carrier's offense, the other side's defense.
+    // The DEFENDER'S OWN tempo choice fatigues him — hurry-up means his offense
+    // kept giving the ball back, so he never got off the field.
+    var oT=tacticsOf(G,poss), dT=tacticsOf(G,def);
+    var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
+    var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
+    var lean=tacticLean(teams[poss].lean, oT.off);
+
+    if(G.down===4){
+      var dec=fourthDown(G.yl,G.dist,G.clock,q,margin,tacticFourthBias(oT.tempo));
+      if(dec==="punt"){
+        stats[poss].punts++;
+        plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"punt",yards:0,pts:0,snap:true});
+        var net=clampN(Math.round(42+gauss()*8),25,62);
+        var ny=(G.yl+net>=100)?20:(100-(G.yl+net));
+        G.clock-=rnd(12,20);
+        G.poss=def; G.yl=clampN(ny,1,99); G.down=1; G.dist=10; continue;
       }
-
-      var call=callPlay(down,dist,yl,clock,q,margin,teams[poss].lean);
-      var obvious=(down>=3 && dist>=6);
-      var res=(call==="run")?dRun(edge):dPass(edge,obvious);
-      stats[poss].plays++;
-      // full ticker: capture the down-and-distance snapshot BEFORE the ball moves
-      var snap={t:poss, q:q, clock:qc, down:down, dist:dist, yl:yl,
-                kind:res.kind, yards:res.yards, incomplete:res.incomplete,
-                turnover:res.turnover, fourth:(down===4), pts:0, snap:true};
-      plays.push(snap);
-      if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
-      else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; } // sacks are NOT attempts
-      else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
-      if(down===3) stats[poss].thirdAtt++;
-      clock-=dClock(res);
-
-      if(res.turnover){
-        stats[poss].to++;
-        if(res.kind==="int") stats[poss].ints++; else stats[poss].fums++;
-        var spot=clampN(yl+res.yards,1,99);
-        poss=def; yl=clampN(100-spot,1,99); down=1; dist=10; continue;
-      }
-      var gained=res.yards; yl+=gained;
-
-      if(yl<=0){                                   // safety
-        S[def]+=2; plays.push({t:def,kind:"SFTY",pts:2,q:q,clock:qc});
-        poss=def; yl=25; down=1; dist=10; continue;
-      }
-      if(yl>=100){                                 // touchdown
-        S[poss]+=6;
-        if(down===3) stats[poss].thirdConv++;
-        plays.push({t:poss,kind:"TD",pts:6,q:q,clock:qc});
-        var deficit=S[def]-(S[poss]-6);
-        if(goesForTwo(deficit,q)){
-          var ok=Math.random()<TWO_RATE; if(ok)S[poss]+=2;
-          plays.push({t:poss,kind:"2PT",pts:ok?2:0,good:ok,q:q,clock:qc});
+      if(dec==="fg"){
+        var fd=fgDist(G.yl); stats[poss].fga++; G.clock-=rnd(6,12);
+        plays.push({t:poss,q:q,clock:qc,down:4,dist:G.dist,yl:G.yl,kind:"fgatt",yards:0,pts:0,snap:true,d:fd});
+        if(Math.random()<fgProb(fd)){
+          stats[poss].fgm++; S[poss]+=3;
+          plays.push({t:poss,kind:"FG",pts:3,q:q,clock:qc,d:fd});
+          G.poss=def; G.yl=25; G.clock-=rnd(4,8);
         } else {
-          var ok2=Math.random()<XP_RATE; if(ok2)S[poss]+=1;
-          plays.push({t:poss,kind:"XP",pts:ok2?1:0,good:ok2,q:q,clock:qc});
+          plays.push({t:poss,kind:"FGMISS",pts:0,q:q,clock:qc,d:fd});
+          G.poss=def; G.yl=clampN(100-G.yl,1,99);
         }
-        clock-=rnd(4,8);
-        poss=def; yl=25; down=1; dist=10; continue;
+        G.down=1; G.dist=10; continue;
       }
-      if(gained>=dist){                            // first down
-        if(down===3) stats[poss].thirdConv++;
-        down=1; dist=Math.min(10,100-yl);
+      // "go" falls through to a live play
+    }
+
+    var call=callPlay(G.down,G.dist,G.yl,G.clock,q,margin,lean);
+    var obvious=(G.down>=3 && G.dist>=6);
+    var res=(call==="run")?dRun(edge,dm):dPass(edge,obvious,dm,aggro);
+    stats[poss].plays++;
+    var snap={t:poss, q:q, clock:qc, down:G.down, dist:G.dist, yl:G.yl,
+              kind:res.kind, yards:res.yards, incomplete:res.incomplete,
+              turnover:res.turnover, fourth:(G.down===4), pts:0, snap:true};
+    plays.push(snap);
+    if(res.kind==="run"){ stats[poss].rushYds+=res.yards; }
+    else if(res.kind==="sack"){ stats[poss].sacks++; stats[poss].passYds+=res.yards; }
+    else { stats[poss].att++; if(!res.incomplete){ stats[poss].comp++; stats[poss].passYds+=res.yards; } }
+    if(G.down===3) stats[poss].thirdAtt++;
+    G.clock-=dClock(res, oT.tempo);
+
+    if(res.turnover){
+      stats[poss].to++;
+      if(res.kind==="int") stats[poss].ints++; else stats[poss].fums++;
+      var spot=clampN(G.yl+res.yards,1,99);
+      G.poss=def; G.yl=clampN(100-spot,1,99); G.down=1; G.dist=10; continue;
+    }
+    var gained=res.yards; G.yl+=gained;
+
+    if(G.yl<=0){                                  // safety
+      S[def]+=2; plays.push({t:def,kind:"SFTY",pts:2,q:q,clock:qc});
+      G.poss=def; G.yl=25; G.down=1; G.dist=10; continue;
+    }
+    if(G.yl>=100){                                // touchdown
+      S[poss]+=6;
+      if(G.down===3) stats[poss].thirdConv++;
+      plays.push({t:poss,kind:"TD",pts:6,q:q,clock:qc});
+      var deficit=S[def]-(S[poss]-6);
+      if(goesForTwo(deficit,q)){
+        var ok=Math.random()<TWO_RATE; if(ok)S[poss]+=2;
+        plays.push({t:poss,kind:"2PT",pts:ok?2:0,good:ok,q:q,clock:qc});
       } else {
-        down++; dist-=gained;
-        if(down>4){ poss=def; yl=clampN(100-yl,1,99); down=1; dist=10; }  // turnover on downs
+        var ok2=Math.random()<XP_RATE; if(ok2)S[poss]+=1;
+        plays.push({t:poss,kind:"XP",pts:ok2?1:0,good:ok2,q:q,clock:qc});
       }
+      G.clock-=rnd(4,8);
+      G.poss=def; G.yl=25; G.down=1; G.dist=10; continue;
+    }
+    if(gained>=G.dist){                           // first down
+      if(G.down===3) stats[poss].thirdConv++;
+      G.down=1; G.dist=Math.min(10,100-G.yl);
+    } else {
+      G.down++; G.dist-=gained;
+      if(G.down>4){ G.poss=def; G.yl=clampN(100-G.yl,1,99); G.down=1; G.dist=10; }
     }
   }
-  // overtime — no ties. OT scores are emitted as plays so the feed matches the final.
-  var ot=0;
+  return G;
+}
+// Overtime — no ties. OT scores are emitted as plays so the feed matches the final.
+function finishRegulation(G){
+  var S=G.S, teams=G.teams, plays=G.plays, ot=0;
   while(S[0]===S[1] && ot++<6){
     for(var t=0;t<2;t++){
       var r=Math.random()+(teams[t].off-teams[1-t].def)/200;
@@ -2543,13 +2655,21 @@ function simDrives(teamA, teamB){
   }
   if(S[0]===S[1]){ var w=Math.random()<0.5?0:1; S[w]+=3;
     plays.push({t:w,kind:"FG",pts:3,q:4,clock:0,d:rnd(28,45),ot:ot}); }
-  return {a:S[0], b:S[1], plays:plays, stats:stats};
+  G.done=true;
+}
+function gameResult(G){ return {a:G.S[0], b:G.S[1], plays:G.plays, stats:G.stats}; }
+
+// One-shot sim: used for CPU-vs-CPU league games, which have no tactics.
+function simDrives(teamA, teamB){
+  var G=newGameState(teamA, teamB);
+  simUntil(G, 0);
+  return gameResult(G);
 }
 
 // The offense/defense your team actually fields, resolved by role: you coach one
 // unit, the other is CPU-run. Scheme fit is baked in because it's what takes the
 // field; home-field advantage is not, since it's situational, not a team rating.
-// simGame() and the scoreboard both read this, so they can never drift apart.
+// gameSetup() and the scoreboard both read this, so they can never drift apart.
 // Exact (unrounded) values — scheme fit carries a decimal and the drive engine
 // is sensitive to it. Round only at the point of display.
 function myRatings(){
@@ -2572,37 +2692,6 @@ function myRatingsDisplay(){
   return {off:Math.round(off), def:Math.round(def), ovr:Math.round((off+def)/2)};
 }
 
-function simGame(game, plan){
-  var oppT=leagueTeam(game.opp);
-  var oppOff = oppT ? oppT.off : (58+game.op*6+rnd(-4,4));
-  var oppDef = oppT ? oppT.def : cpuDefenseRating(game.op);
-  var homeAdj = game.home?(3+facLvl("stadium")):-1;
-  var offFit = offSchemeFit();  // 0..~11, helps you score
-  var defFit = defSchemeFit();  // 0..~11, helps you stop them
-
-  // Fold coaching, scheme fit, and home field into the unit ratings the drive
-  // engine actually plays with. Scheme now acts THROUGH playcalling and
-  // efficiency rather than as a flat bonus on a predetermined final score.
-  var mine=myRatings();                 // role-aware; coached unit gets scheme fit
-  var myOff=mine.off, myDef=mine.def;
-  var myUnit, usedFit;                  // the ONE unit you're graded on
-  if(ST.save.role==="HC"){
-    myUnit=Math.round((offenseRating()+defenseRating())/2);
-    usedFit=Math.round((offFit+defFit)/2*10)/10;
-  } else if(ST.save.role==="DC"){
-    myUnit=defenseRating(); usedFit=defFit;
-  } else {
-    myUnit=offenseRating(); usedFit=offFit;
-  }
-  myOff+=homeAdj; myDef+=homeAdj;   // home field lifts both units
-
-  var us  ={off:myOff,  def:myDef,  lean:getGameplan().offBalance};
-  var them={off:oppOff, def:oppDef, lean:oppT?oppLean(game.opp):50};
-
-  var g=simDrives(us, them);
-  return {us:g.a, them:g.b, edge:usedFit>=3, oppDefType:"", off:myUnit, fit:usedFit,
-          drivePlays:g.plays, driveStats:g.stats};
-}
 // A CPU team's run/pass identity — stable per school, derived from its name.
 function oppLean(name){
   var h=0; for(var i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))&0xffff;
@@ -2757,7 +2846,7 @@ function draw(){
   else if(ST.screen==="history")  app.innerHTML=champHistoryScreen();
   else if(ST.screen==="portal")   app.innerHTML=portalScreen();
   else if(ST.screen==="season") app.innerHTML=seasonScreen();
-  else if(ST.screen==="live"){ app.innerHTML=liveScreen(); renderLiveScore(); }
+  else if(ST.screen==="live"){ if(!ST.G && !(ST.live&&ST.live.done)){ ST.screen="season"; ST.weekResult=null; ST.live=null; draw(); return; } app.innerHTML=liveScreen(); renderLiveScore(); }
   else if(ST.screen==="offseason")app.innerHTML=offseasonScreen();
   // legacy screen names — postseason now lives inside the season screen's Week tab
   else if(ST.screen==="bracket"||ST.screen==="confchamp"||ST.screen==="bowl"){ ST.seasonTab=ST.seasonTab||"week"; app.innerHTML=seasonScreen(); }
@@ -3222,6 +3311,8 @@ function liveScreen(){
   h+='<div class="sb-team"><div class="sb-name">'+x(r.oppName)+'</div><div class="sb-score" id="live-them">0</div><div class="sb-tag">'+(r.home?"AWAY":"HOME")+'</div><div class="sb-rtg">O '+osb.off+' · D '+osb.def+' · '+osb.ovr+' OVR</div></div>';
   h+='</div>';
   h+='<div id="live-endstat"></div>';
+  h+='<div id="live-break"></div>';
+  h+='<div id="live-tactics"></div>';
   // sim speed — changing it retimes from the current clock, never rewinds to kickoff
   h+='<div class="speed-row" id="live-speed"><span class="speed-lbl">Sim Speed</span><div class="speed-pick">';
   ["fast","normal","slow"].forEach(function(k){
@@ -3230,7 +3321,8 @@ function liveScreen(){
   h+='</div></div>';
   // Skip/Continue sits ABOVE the log — a full play-by-play runs ~170 rows, and a
   // button below it would be off-screen for the entire game.
-  h+='<button class="bigbtn btn-ghost" id="live-btn" style="margin-top:10px">Skip to Final ⏩</button>';
+  h+='<button class="bigbtn btn-ghost" id="live-btn" style="margin-top:10px">Skip Ahead ⏩</button>';
+  h+='<button class="btn" id="live-sim-final" style="width:100%;margin-top:7px;padding:9px;font-size:11px;font-weight:800;background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border)">⏭️ Sim to Final</button>';
   h+='<div class="feed-hd"><div class="sec-title" style="margin:0">Play-by-Play</div>'+
      '<div class="feed-toggle">'+
        '<button class="ft-btn'+(ST.feedMode!=="scoring"?" on":"")+'" data-feedmode="all">Full Log</button>'+
@@ -3375,16 +3467,15 @@ function playConfChampGame(){
   var s=ST.save, C=ST.confchamp;
   var opp = C.top2[0].name===s.school ? C.top2[1] : C.top2[0];
   var game={opp:opp.name, oc:s.conf, op:opp.p, home:(Math.random()<0.5)};
-  var res=simGame(game, ST.planPick||"pro");
-  var pbp=buildPlayByPlay(res.drivePlays,s.school,opp.name);
-  var won=res.us>res.them;
-  if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
-  ST.weekResult={us:res.us,them:res.them,oppName:opp.name,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:game.home,pbp:pbp,
-                 postseason:true, confchamp:true, roundName:s.conf+" Championship"};
-  ST.live={elapsed:0,shownCount:0,done:false,timer:null};
-  ST._confWon=won;
+  var setup=gameSetup(game);
+  ST.G=newGameState(setup.us, setup.them);
+  var st=s.tactics||{};
+  ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
+  ST.weekResult={us:0,them:0,oppName:opp.name,edge:setup.edge,oppDefType:"",off:setup.off,home:game.home,pbp:[],
+                 live:true, gameKey:"confchamp", postseason:true, confchamp:true, roundName:s.conf+" Championship"};
+  ST.live={elapsed:0,shownCount:0,done:false,timer:null,quarter:1,paused:false};
   persist();
-  ST.screen="live"; draw(); startLiveSim();
+  ST.screen="live"; draw(); runQuarter();
 }
 function finishConfChampGame(){
   var s=ST.save, C=ST.confchamp, won=ST._confWon;
@@ -3799,16 +3890,15 @@ function playPostGame(){
   if(P.mode==="bowl"){ oppName=P.opp; oppP=P.op; home=(Math.random()<0.5); }
   else { var o=myNextOpponent(); oppName=P.bracket.bySeed[o.seed].name; oppP=P.bracket.bySeed[o.seed].p; home=(P.round==="r1"&&P.mySeed<o.seed); }
   var game={opp:oppName, oc:"", op:oppP, home:home};
-  var res=simGame(game, ST.planPick||"pro");
-  var pbp=buildPlayByPlay(res.drivePlays,s.school,oppName);
-  var won=res.us>res.them;
-  if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
-  ST.weekResult={us:res.us,them:res.them,oppName:oppName,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:home,pbp:pbp,
-                 postseason:true, roundName:(P.mode==="bowl"?P.bowlName:roundLabel(P.round))};
-  ST.live={elapsed:0,shownCount:0,done:false,timer:null};
-  ST._postWon=won;
+  var setup=gameSetup(game);
+  ST.G=newGameState(setup.us, setup.them);
+  var st=s.tactics||{};
+  ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
+  ST.weekResult={us:0,them:0,oppName:oppName,edge:setup.edge,oppDefType:"",off:setup.off,home:home,pbp:[],
+                 live:true, gameKey:"post", postseason:true, roundName:(P.mode==="bowl"?P.bowlName:roundLabel(P.round))};
+  ST.live={elapsed:0,shownCount:0,done:false,timer:null,quarter:1,paused:false};
   persist();
-  ST.screen="live"; draw(); startLiveSim();
+  ST.screen="live"; draw(); runQuarter();
 }
 // Called by finishLive when the game was a postseason game
 function finishPostGame(){
@@ -3906,12 +3996,17 @@ function rosterLedger(mode, opts){
        '</div>';
   });
   h+='</div>';
+  var open=rosterOpenings(counts);
   var note;
   if(short._total>0){
-    note='<b style="color:var(--red2)">'+short._total+' player'+(short._total===1?'':'s')+' short of a full starting lineup.</b> '+
-         (opts.walkOnNote===false?'':'Anything still empty when the portal closes gets filled with walk-ons.');
+    note='<b style="color:var(--red2)">'+short._total+' player'+(short._total===1?'':'s')+' short of a full starting lineup.</b> ';
+  } else if(open._total>0){
+    note='Every position can field its starters. ';
   } else {
-    note='Every position can field its starters.';
+    note='<b>Roster is full.</b> Every spot is filled.';
+  }
+  if(open._total>0 && opts.walkOnNote!==false){
+    note+='<b>'+open._total+' open spot'+(open._total===1?'':'s')+'</b> — walk-ons fill whatever is still empty when the portal closes.';
   }
   h+='<div class="ldg-note">'+(opts.prefix||'')+note+'</div>';
   return h;
@@ -3952,7 +4047,8 @@ function offseasonScreen(){
        '<div class="flow-box res"><b>'+futureN+'</b><span>Returning</span></div>'+
      '</div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Recruits sign on top of this, then the portal opens — players may still transfer out.</div>';
-  h+=rosterLedger("future", {prefix:"Counts below exclude graduating seniors and anyone you cut. "});
+  // recruits sign into these spots BEFORE walk-ons ever arrive, so don't promise walk-ons here
+  h+=rosterLedger("future", {walkOnNote:false, prefix:"Counts below exclude graduating seniors and anyone you cut. Your class signs into these spots. "});
 
   h+='<div class="sec-title">Roster · Manage Cuts</div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">Graduating seniors free up their spots automatically. <b>Cut</b> a player to open room for a better signee below.</div>';
@@ -4220,20 +4316,29 @@ function retainPlayer(id){
 // Scholarship players leave; somebody still has to line up. Any position below its
 // minimum gets walk-ons — bottom-of-the-roster bodies with no ceiling. They keep
 // you from fielding four offensive linemen, and nothing more.
+// Scholarship players leave; somebody still has to line up — and somebody has to
+// back them up. Walk-ons fill EVERY empty spot up to the roster cap, not just the
+// starting slots: an empty bench is not a roster. They have no ceiling and no
+// development, so a roster full of them is a roster in trouble.
 function fillWalkOns(){
   var s=ST.save;
-  var short=rosterShortfall(rosterCounts("now"));
-  if(!short._total){ s._walkOns=null; return 0; }
+  var open=rosterOpenings(rosterCounts("now"));
+  if(!open._total){ s._walkOns=null; return 0; }
   var added=[];
   myPositions().forEach(function(pos){
-    var need=short[pos]||0;
+    var need=open[pos]||0;
+    var starters=startersAt(pos);
+    var have=(s.roster||[]).filter(function(p){return p.pos===pos;}).length;
     for(var i=0;i<need;i++){
-      var p=genPlayerAt(pos, rnd(52,60), pick(["FR","FR","SO"]));
+      // the ones forced into the starting lineup are marginally better than the
+      // bodies at the very bottom of the two-deep
+      var slot=have+i;                    // 0-indexed depth this walk-on will occupy
+      var ovr=(slot<starters)?rnd(55,62):rnd(50,57);
+      var p=genPlayerAt(pos, ovr, pick(["FR","FR","SO"]));
       p.walkOn=true;
       p.dev="bust";                       // no development upside
       p.pot=Math.min(p.pot, p.ovr+rnd(1,4));
       p.revealed=true;                    // nothing to discover
-      p.n=p.n;                            // keep the generated name
       s.roster.push(p);
       added.push(p);
     }
@@ -4259,14 +4364,18 @@ function portalScreen(){
 
   // ── what the roster needs, before you decide who to sign ──
   // (recomputed live: retaining a departure or signing a transfer updates it)
-  var short=rosterShortfall(rosterCounts("now"));
+  var counts=rosterCounts("now");
+  var short=rosterShortfall(counts), open=rosterOpenings(counts);
   h+='<div class="sec-title" style="margin:12px 2px 6px">📋 Roster Check</div>';
   h+=rosterLedger("now");
-  if(short._total>0){
-    var bits=[]; myPositions().forEach(function(pos){ if(short[pos]) bits.push(short[pos]+" "+pos); });
+  if(open._total>0){
+    var bits=[]; myPositions().forEach(function(pos){ if(open[pos]) bits.push(open[pos]+" "+pos); });
+    var urgent = short._total>0
+      ? '<b style="color:var(--red2)">'+short._total+'</b> of them would be forced into your starting lineup. '
+      : '';
     h+='<div style="font-size:10px;font-weight:800;color:var(--gold-dark);background:var(--gold-bg);border:2px solid var(--gold-dark);border-radius:9px;box-shadow:2px 2px 0 var(--border);padding:8px 10px;margin:0 2px 12px;line-height:1.5">'+
-       '🚶 <b>'+short._total+' walk-on'+(short._total===1?'':'s')+'</b> will join when you leave — '+x(bits.join(" · "))+
-       '. They fill out the depth chart, but they won\u2019t develop. Sign a transfer instead if you can afford one.</div>';
+       '🚶 <b>'+open._total+' walk-on'+(open._total===1?'':'s')+'</b> will fill the roster when you leave — '+x(bits.join(" · "))+
+       '. '+urgent+'They won\u2019t develop. Sign a transfer instead if you can afford one.</div>';
   }
   // departures
   var out=s._portalOut||[];
@@ -4485,25 +4594,90 @@ function playerStatDetail(id){
   else log.slice().reverse().forEach(function(gl){ h+='<div class="gl-row"><b>Wk '+gl.wk+'</b> vs '+x(gl.opp)+' — '+x(gl.line)+'</div>'; });
   return h;
 }
+// Build the live game but DON'T sim it. The score isn't known until the fourth
+// quarter ends, because your tactics decide it. Nothing is recorded up front:
+// wins, stats, and the league week all wait for finishGame().
 function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
-  var res=simGame(g, null);
-  var pbp=buildPlayByPlay(res.drivePlays,s.school,g.opp);
-  g.result={us:res.us,them:res.them};
-  var won=res.us>res.them;
-  if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
-  // living league: record your result + advance every other team one week
-  recordUserLeagueResult(won, g.oc===s.conf);
-  recordGameStats(res, g.opp, pbp); // box score derived from the plays that happened
-  simLeagueWeek(s.school);
-  developInSeason();
-  advanceRecruitingWeek(); // rivals push, commits happen, new weekly points
-  ST.weekResult={us:res.us,them:res.them,oppName:g.opp,edge:res.edge,oppDefType:res.oppDefType,off:res.off,home:g.home,pbp:pbp};
-  ST.live={elapsed:0, shownCount:0, done:false, timer:null};
-  s.week++;
+  var setup=gameSetup(g);
+  ST.G=newGameState(setup.us, setup.them);
+  var st=s.tactics||{};
+  ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
+  ST.weekResult={us:0, them:0, oppName:g.opp, edge:setup.edge, oppDefType:"", off:setup.off,
+                 home:g.home, pbp:[], live:true, gameKey:"week"};
+  ST.live={elapsed:0, shownCount:0, done:false, timer:null, quarter:1, paused:false};
   persist();
   ST.screen="live"; draw();
-  startLiveSim();
+  runQuarter();
+}
+// Play through the end of the current quarter, then pause for tactics.
+function runQuarter(){
+  var G=ST.G; if(!G) return;
+  var q=ST.live.quarter;
+  simUntil(G, q>=4?0:q);
+  ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
+  ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
+  ST.live.done=G.done;
+  ST.live.paused=!G.done;
+  if(G.done) finishGameSim();
+  startLiveSim();     // reveal what just happened, at the chosen speed
+}
+// Skip straight to the final whistle, tactics locked as they are.
+function simToFinal(){
+  var G=ST.G; if(!G || G.done) return;
+  stopLiveSim();
+  simUntil(G, 0);
+  ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
+  ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
+  ST.live.done=true; ST.live.paused=false; ST.live.quarter=4;
+  finishGameSim();
+  ST.live.elapsed=3600;
+  renderLiveScore();
+}
+// The whistle blows: NOW we record the result, stats, and advance the league.
+function finishGameSim(){
+  var G=ST.G, s=ST.save, r=ST.weekResult;
+  if(!G || r._recorded) return;
+  r._recorded=true;
+  var res={us:G.S[0], them:G.S[1], edge:r.edge, oppDefType:"", off:r.off,
+           drivePlays:G.plays, driveStats:G.stats};
+  if(r.gameKey==="week"){
+    var g=s.schedule[s.week];
+    g.result={us:res.us, them:res.them};
+    var won=res.us>res.them;
+    if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
+    recordUserLeagueResult(won, g.oc===s.conf);
+    recordGameStats(res, g.opp, r.pbp);
+    simLeagueWeek(s.school);
+    developInSeason();
+    advanceRecruitingWeek();
+    s.week++;
+  } else {
+    // conf title / bowl / playoff: the win still counts, the bracket resolves later
+    var won=res.us>res.them;
+    if(won){ s.wins++; s.careerWins++; } else { s.losses++; s.careerLosses++; }
+    recordGameStats(res, r.oppName, r.pbp);
+    if(r.gameKey==="confchamp") ST._confWon=won; else ST._postWon=won;
+  }
+  persist();
+}
+// Resolve the roles/ratings a game is played with (extracted from simGame).
+function gameSetup(game){
+  var oppT=leagueTeam(game.opp);
+  var oppOff = oppT ? oppT.off : (58+game.op*6+rnd(-4,4));
+  var oppDef = oppT ? oppT.def : cpuDefenseRating(game.op);
+  var homeAdj = game.home?(3+facLvl("stadium")):-1;
+  var offFit = offSchemeFit(), defFit = defSchemeFit();
+  var mine=myRatings();
+  var myUnit, usedFit;
+  if(ST.save.role==="HC"){ myUnit=Math.round((offenseRating()+defenseRating())/2); usedFit=Math.round((offFit+defFit)/2*10)/10; }
+  else if(ST.save.role==="DC"){ myUnit=defenseRating(); usedFit=defFit; }
+  else { myUnit=offenseRating(); usedFit=offFit; }
+  return {
+    us:  {off:mine.off+homeAdj, def:mine.def+homeAdj, lean:getGameplan().offBalance},
+    them:{off:oppOff, def:oppDef, lean:oppT?oppLean(game.opp):50},
+    edge:usedFit>=3, off:myUnit
+  };
 }
 // Continuous game-clock sim: clock runs smoothly 0->3600s; plays reveal as the clock passes them.
 // ── Sim speed ────────────────────────────────────────────
@@ -4523,11 +4697,12 @@ var SIM_SPEEDS={
 function simSpeed(){ return SIM_SPEEDS[ST.simSpeed] || SIM_SPEEDS.normal; }
 function startLiveSim(){
   stopLiveSim();
-  var r=ST.weekResult;
-  ST.live.elapsed=0; ST.live.shownCount=0; ST.live.done=false;
-  if(!r.pbp||!r.pbp.length){ ST.live.elapsed=3600; ST.live.done=true; renderLiveScore(); return; }
-  // reduced-motion: skip the ticking animation, show the final immediately
-  try{ if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){ ST.live.elapsed=3600; ST.live.done=true; renderLiveScore(); return; } }catch(e){}
+  var r=ST.weekResult, li=ST.live;
+  // reveal ceiling for this stretch: the end of the quarter just simulated
+  li.target = li.done ? 3600 : (li.quarter*900);
+  if(!r.pbp||!r.pbp.length){ li.elapsed=li.target; renderLiveScore(); return; }
+  try{ if(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+    li.elapsed=li.target; renderLiveScore(); return; } }catch(e){}
   resumeLiveSim();
 }
 // Start (or restart) the ticker at the CURRENT speed, from the CURRENT clock.
@@ -4535,13 +4710,15 @@ function startLiveSim(){
 function resumeLiveSim(){
   stopLiveSim();
   var r=ST.weekResult;
-  if(!r || !r.pbp || !r.pbp.length || !ST.live || ST.live.done) return;
+  if(!r || !r.pbp || !r.pbp.length || !ST.live) return;
+  if(ST.live.elapsed>=(ST.live.target||3600)) return;   // this stretch is fully revealed
   var sp=simSpeed();
   if(sp.holdMs){ startSlowSim(r, sp); return; }
+  var target=ST.live.target||3600;
   var perTick=3600/(sp.gameMs/LIVE_TICK_MS); // game-seconds advanced per frame
   ST.live.timer=setInterval(function(){
     ST.live.elapsed+=perTick;
-    if(ST.live.elapsed>=3600){ ST.live.elapsed=3600; ST.live.done=true; stopLiveSim(); }
+    if(ST.live.elapsed>=target){ ST.live.elapsed=target; stopLiveSim(); }
     renderLiveScore();
   }, LIVE_TICK_MS);
 }
@@ -4549,13 +4726,14 @@ function resumeLiveSim(){
 // then hold. Plays sharing an instant (a TD and its extra point) reveal together.
 // Hidden rows are skipped, so "Scoring" doesn't crawl through 150 invisible snaps.
 function startSlowSim(r, sp){
+  var target=ST.live.target||3600;
   function visible(p){ return ST.feedMode!=="scoring" || p.scoring; }
   var stamps={}, n=0;
   for(var i=0;i<r.pbp.length;i++){
     var p=r.pbp[i];
-    if(p.elapsed>ST.live.elapsed && visible(p) && !stamps[p.elapsed]){ stamps[p.elapsed]=1; n++; }
+    if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p) && !stamps[p.elapsed]){ stamps[p.elapsed]=1; n++; }
   }
-  if(!n){ ST.live.elapsed=3600; ST.live.done=true; renderLiveScore(); return; }
+  if(!n){ ST.live.elapsed=target; renderLiveScore(); return; }
   // hold long enough to read; stretch it when there are too few stops for the run
   // to feel slower than the faster modes
   var hold=Math.max(sp.holdMs, Math.min(sp.maxHoldMs, Math.round(sp.minTotalMs/n)));
@@ -4563,17 +4741,23 @@ function startSlowSim(r, sp){
     var next=null;
     for(var i=0;i<r.pbp.length;i++){
       var p=r.pbp[i];
-      if(p.elapsed>ST.live.elapsed && visible(p)){ next=p; break; }
+      if(p.elapsed>ST.live.elapsed && p.elapsed<=target && visible(p)){ next=p; break; }
     }
-    if(next==null){ ST.live.elapsed=3600; ST.live.done=true; stopLiveSim(); renderLiveScore(); return; }
+    if(next==null){ ST.live.elapsed=target; stopLiveSim(); renderLiveScore(); return; }
     ST.live.elapsed=next.elapsed;
     renderLiveScore();
   }, hold);
 }
 function stopLiveSim(){ if(ST.live&&ST.live.timer){ clearInterval(ST.live.timer); ST.live.timer=null; } }
-function skipLive(){ stopLiveSim(); ST.live.elapsed=3600; ST.live.done=true; renderLiveScore(); }
+// Skip the animation for THIS stretch — jump to the quarter break, or the final.
+function skipLive(){
+  stopLiveSim();
+  ST.live.elapsed=ST.live.target||3600;
+  renderLiveScore();
+}
 function finishLive(){
   stopLiveSim();
+  ST.G=null;   // the game is over; drop the resumable state
   if(ST.weekResult && ST.weekResult.confchamp){ finishConfChampGame(); return; }
   if(ST.weekResult && ST.weekResult.postseason){ finishPostGame(); return; }
   ST.weekResult=null; ST.live=null; ST.planPick=null;
@@ -4649,10 +4833,81 @@ function renderLiveScore(){
   // once the game's over there's nothing left to pace — drop the speed picker
   var spEl=document.getElementById("live-speed");
   if(spEl) spEl.style.display = li.done ? "none" : "";
+  // Three states: still animating this quarter, paused at the break, or final.
+  var atBreak = (!li.done && li.elapsed>=(li.target||3600));
   if(btnEl){
-    if(li.done){ btnEl.textContent=(ST.weekResult&&ST.weekResult.postseason?"See Result →":(ST.save.week<ST.save.schedule.length?"Continue →":"Finish Season →")); btnEl.className="bigbtn btn-gold"; btnEl.onclick=finishLive; }
-    else { btnEl.textContent="Skip to Final ⏩"; btnEl.className="bigbtn btn-ghost"; btnEl.onclick=skipLive; }
+    if(li.done){
+      btnEl.textContent=(ST.weekResult&&ST.weekResult.postseason?"See Result →":(ST.save.week<ST.save.schedule.length?"Continue →":"Finish Season →"));
+      btnEl.className="bigbtn btn-gold"; btnEl.onclick=finishLive;
+    } else if(atBreak){
+      btnEl.textContent=(li.quarter===2?"Start 2nd Half →":"Play Q"+(li.quarter+1)+" →");
+      btnEl.className="bigbtn btn-purple"; btnEl.style.background="var(--purple)"; btnEl.style.color="#fff";
+      btnEl.onclick=nextQuarter;
+    } else {
+      btnEl.textContent="Skip to Q"+li.quarter+" End ⏩"; btnEl.className="bigbtn btn-ghost";
+      btnEl.style.background=""; btnEl.style.color="";
+      btnEl.onclick=skipLive;
+    }
   }
+  // "Sim to Final" is always available, at any point in the game
+  var finEl=document.getElementById("live-sim-final");
+  if(finEl) finEl.style.display = li.done ? "none" : "";
+  var brkEl=document.getElementById("live-break");
+  if(brkEl) brkEl.innerHTML = atBreak ? quarterBreakPanel() : "";
+  var tacEl=document.getElementById("live-tactics");
+  if(tacEl && !li.done) tacEl.innerHTML=tacticsPanel();
+  else if(tacEl) tacEl.innerHTML="";
+  bindTactics();
+}
+// Advance to the next quarter with whatever tactics are currently set.
+function nextQuarter(){
+  if(!ST.G || ST.G.done) return;
+  ST.live.quarter++;
+  ST.live.paused=false;
+  runQuarter();
+  draw();
+}
+// Tactics can be toggled at ANY time — mid-quarter or at a break. They apply to
+// the next snap the engine runs, never retroactively.
+function tacticsPanel(){
+  var t=(ST.G&&ST.G.tactics)||{off:"balanced",tempo:"normal",def:"standard"};
+  function row(title, map, keys, cur, attr){
+    var h='<div class="tac-row"><div class="tac-lbl">'+title+'</div><div class="tac-pick">';
+    keys.forEach(function(k){
+      h+='<button class="tac-btn'+(cur===k?" on":"")+'" '+attr+'="'+k+'">'+
+         '<span class="tac-ico">'+map[k].icon+'</span>'+map[k].label+'</button>';
+    });
+    return h+'</div></div>';
+  }
+  var h='<div class="tactics">';
+  h+=row("Offense", OFF_TACTICS, ["run","balanced","pass"], t.off, "data-tacoff");
+  h+=row("Tempo",   TEMPO_TACTICS, ["burn","normal","hurry"], t.tempo, "data-tactempo");
+  h+=row("Defense", DEF_TACTICS, ["blitz","standard","prevent"], t.def, "data-tacdef");
+  h+='<div class="tac-desc">'+x(OFF_TACTICS[t.off].desc)+'<br>'+x(TEMPO_TACTICS[t.tempo].desc)+'<br>'+x(DEF_TACTICS[t.def].desc)+'</div>';
+  return h+'</div>';
+}
+function setTactic(kind, val){
+  if(!ST.G) return;
+  ST.G.tactics[kind]=val;
+  ST.save.tactics=ST.G.tactics;   // remember for the next game
+  persist();
+  var el=document.getElementById("live-tactics");
+  if(el){ el.innerHTML=tacticsPanel(); bindTactics(); }
+}
+function bindTactics(){
+  document.querySelectorAll("[data-tacoff]").forEach(function(b){b.onclick=function(){setTactic("off",b.getAttribute("data-tacoff"));};});
+  document.querySelectorAll("[data-tactempo]").forEach(function(b){b.onclick=function(){setTactic("tempo",b.getAttribute("data-tactempo"));};});
+  document.querySelectorAll("[data-tacdef]").forEach(function(b){b.onclick=function(){setTactic("def",b.getAttribute("data-tacdef"));};});
+  var sf=document.getElementById("live-sim-final"); if(sf)sf.onclick=simToFinal;
+}
+function quarterBreakPanel(){
+  var li=ST.live, G=ST.G;
+  var lbl = li.quarter===2 ? "HALFTIME" : "END OF Q"+li.quarter;
+  var m=G.S[0]-G.S[1];
+  var state = m>0 ? ("Leading by "+m) : (m<0 ? ("Trailing by "+(-m)) : "Tied");
+  return '<div class="qbreak"><div class="qbreak-lbl">'+lbl+'</div>'+
+         '<div class="qbreak-sc">'+state+'</div>'+
+         '<div class="qbreak-note">Set your tactics, then play on. They take effect on the next snap.</div></div>';
 }
 function advanceSeason(){
   var s=ST.save;
