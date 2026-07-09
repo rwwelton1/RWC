@@ -1168,6 +1168,13 @@ var COACH_TREE={
     {id:"pro4", name:"Dynasty",       cost:8, desc:"Job security erodes far more slowly."},
     {id:"pro5", name:"Living Legend", cost:10,desc:"The very best jobs come calling."}
   ]},
+  nil:{ name:"NIL", icon:"💵", color:"#b8860b", skills:[
+    {id:"nil1", name:"Booster Club",     cost:2, desc:"+20% to your season NIL budget."},
+    {id:"nil2", name:"Brand Builder",    cost:4, desc:"Your NIL offers sway recruits far more per dollar."},
+    {id:"nil3", name:"Loyalty Culture",  cost:6, desc:"Your players ask for less NIL and are far less likely to hit the portal."},
+    {id:"nil4", name:"Blank Check",      cost:8, desc:"+35% more NIL budget, and you can pour far more into a single recruit."},
+    {id:"nil5", name:"Collective Empire",cost:10,desc:"+50% more NIL budget, and half of any unused NIL rolls into next season."}
+  ]},
   legend:{ name:"Legend", icon:"👑", color:"#c9a227", legend:true, skills:[
     {id:"leg1", name:"Hall of Famer", cost:12, desc:"+3 to BOTH your offense and defense on game day."},
     {id:"leg2", name:"Master of the Craft", cost:16, desc:"+3 recruiting points, a huge interest head start, and prospects full-scout in a single visit."},
@@ -1583,9 +1590,10 @@ function makeProspect(pos, prestige){
     fuzzLo:lo, fuzzHi:hi
   };
 }
-// How many scout visits fully scout a prospect. Eye for Talent (or the Talent
-// Developer archetype) cuts it to 2 — the dev trait then shows at the 2nd visit.
-function maxScoutTier(){ return hasAbility("leg2") ? 1 : ((hasArch("developer")||hasAbility("dev2")) ? 2 : 3); }
+// How many scout visits fully scout a prospect. Eye for Talent cuts it to 2 — the
+// dev trait then shows at the 2nd visit. (The Talent Developer archetype speeds up
+// player DEVELOPMENT and roster gem reveals, but doesn't shortcut scouting itself.)
+function maxScoutTier(){ return hasAbility("leg2") ? 1 : (hasAbility("dev2") ? 2 : 3); }
 // Spend a point to scout a prospect — reveals more of their profile in tiers.
 function scoutProspect(id){
   var s=ST.save, b=(s.board||[]).filter(function(x){return x.id===id;})[0];
@@ -2072,7 +2080,17 @@ var POS_PAY={
 };
 function fmtMoney(m){ m=m||0; if(m>=1) return "$"+(Math.round(m*10)/10)+"M"; if(m>0.0001) return "$"+Math.round(m*1000)+"K"; return "$0"; }
 function money2(m){ return Math.round((m||0)*100)/100; } // avoid float drift
-function nilBudgetFor(){ var s=ST.save; var base=NIL_BASE[s.prestige]||8; var pool=base + facLvl("nil")*2 + facLvl("stadium")*1 + (s._lastWins||0)*0.4; return money2(pool * (s.role==="HC"?1:0.5)); } // OC/DC control only their unit's share of the collective
+// Season NIL budget multiplier from the NIL coaching branch (stacks).
+function nilPerkBudgetMult(){
+  var m=1;
+  if(hasAbility("nil1")) m+=0.20;   // Booster Club
+  if(hasAbility("nil4")) m+=0.35;   // Blank Check
+  if(hasAbility("nil5")) m+=0.50;   // Collective Empire
+  return m;
+}
+// Per-recruit NIL offer caps — Blank Check lets you go much bigger on one target.
+function nilRecruitCap(){ return hasAbility("nil4") ? {per:12, total:24} : {per:8, total:15}; }
+function nilBudgetFor(){ var s=ST.save; var base=NIL_BASE[s.prestige]||8; var pool=(base + facLvl("nil")*2 + facLvl("stadium")*1 + (s._lastWins||0)*0.4) * nilPerkBudgetMult(); return money2(pool * (s.role==="HC"?1:0.5)); } // OC/DC control only their unit's share of the collective
 // A rough "production" score from a player's season stats — productive players get noticed.
 function prodScore(p){
   var st=(p.stats&&p.stats.season)||{}, v=0;
@@ -2099,6 +2117,7 @@ function nilDemand(p){
   }
   if(p.dev==="elite") d*=1.15; else if(p.dev==="pro") d*=1.08;  // ascending stars cost more
   d+=Math.min(0.5, prodScore(p)*0.05);                          // production nudges toward the top of the band
+  if(hasAbility("nil3")) d*=0.85;                               // Loyalty Culture: players ask for less
   return money2(d);
 }
 function isStarterPlayer(p){
@@ -2114,6 +2133,7 @@ function retentionRisk(p, fundOverride){
   var base=(Math.max(0,dem-fund)/dem)*66;      // the funding gap is most of it
   if(!isStarterPlayer(p)){ base+=16; if(p.ovr>=78) base+=14; } // a buried blue-chip really wants to play
   if(p.yr==="SO"||p.yr==="JR") base+=6;        // underclassmen are more mobile
+  if(hasAbility("nil3")) base*=0.8;            // Loyalty Culture: a stickier roster
   return Math.max(0,Math.min(94,Math.round(base)));
 }
 // Cost to pull a departing player back out of the portal. Their unmet demand, plus a
@@ -2129,13 +2149,13 @@ function retainPrice(p){
 // Interest per $1M by star rating — blue-chips are expensive to buy, low-stars are cheap.
 // 5★ ≈ +1 per $250K; a 1★ moves far more per dollar.
 function nilRate(st){ return ({5:4,4:7,3:11,2:16,1:22}[Math.max(1,Math.min(5,st||3))]); }
-function nilInterestGain(b, amt){ return Math.round(amt * nilRate(b.st)); }
+function nilInterestGain(b, amt){ var g=amt * nilRate(b.st); if(hasAbility("nil2")) g*=1.4; return Math.round(g); }
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
 // Open the NIL slider sheet for a recruit ("recruit") or a roster player ("retain").
 function openNIL(kind, id){
   var s=ST.save;
   var maxA;
-  if(kind==="recruit"){ var b=(s.board||[]).filter(function(x){return x.id===id;})[0]; if(!b)return; maxA=Math.max(0,Math.min(s.nilLeft, 8, 15-(b.nil||0))); }
+  if(kind==="recruit"){ var b=(s.board||[]).filter(function(x){return x.id===id;})[0]; if(!b)return; var cap=nilRecruitCap(); maxA=Math.max(0,Math.min(s.nilLeft, cap.per, cap.total-(b.nil||0))); }
   else { var p=(s.roster||[]).filter(function(x){return x.id===id;})[0]; if(!p)return; var dem=nilDemand(p); maxA=Math.max(0,Math.min(s.nilLeft, Math.max(dem*1.5,1)-(p.nilFund||0))); }
   if(maxA<=0){ toast(kind==="recruit"?"NIL offer maxed for this recruit":"Fully funded"); return; }
   ST.nilPick={kind:kind, id:id};
@@ -2997,7 +3017,7 @@ function renderNilOverlay(){
   var np=ST.nilPick, s=ST.save;
   if(!np || !s){ el.innerHTML=""; el.className=""; return; }
   var kind=np.kind, item, name, sub, maxA;
-  if(kind==="recruit"){ item=(s.board||[]).filter(function(b){return b.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.ovr+" OVR est · "+(item.arch||""); maxA=Math.max(0,Math.min(s.nilLeft,8,15-(item.nil||0))); }
+  if(kind==="recruit"){ item=(s.board||[]).filter(function(b){return b.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.ovr+" OVR est · "+(item.arch||""); var rcap=nilRecruitCap(); maxA=Math.max(0,Math.min(s.nilLeft,rcap.per,rcap.total-(item.nil||0))); }
   else { item=(s.roster||[]).filter(function(p){return p.id===np.id;})[0]; if(!item){ST.nilPick=null;el.innerHTML="";return;} name=item.n; sub=item.pos+" · "+item.yr+" · "+item.ovr+" OVR · wants "+fmtMoney(nilDemand(item)); maxA=Math.max(0,Math.min(s.nilLeft,Math.max(nilDemand(item)*1.5,1)-(item.nilFund||0))); }
   var val=Math.min(ST.nilPickVal!=null?ST.nilPickVal:0, maxA);
   var step=(kind==="recruit" && item)?(1/nilRate(item.st)):0.01; // recruit: each notch = +1 interest
@@ -4375,7 +4395,8 @@ function beginSeasonRecruiting(){
   s.recruitPtsLeft=weeklyRecruitPoints()+16; s._usedFreeScout=false; // offseason gives a big head-start allotment to scout & build boards
   s._signedThisYear=null;
   resetSeasonStats(); // clear last year's per-season stats (career totals persist)
-  s.nilTotal=nilBudgetFor(); s.nilLeft=s.nilTotal; // refill the annual NIL budget
+  var nilRoll = hasAbility("nil5") ? money2(Math.max(0,(s.nilLeft||0))*0.5) : 0; // Collective Empire: carry half of unused NIL
+  s.nilTotal=money2(nilBudgetFor()+nilRoll); s.nilLeft=s.nilTotal; // refill the annual NIL budget
   s.roster.forEach(function(p){ p.nilFund=0; }); // retention funding resets each year
   ST.recruitPos="ALL"; // reset the board's position filter
 }
