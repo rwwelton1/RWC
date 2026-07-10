@@ -3378,7 +3378,7 @@ function setupScreen(){
     var archInfo=ARCHETYPES[archSel]||ARCHETYPES.offensive;
     h+='<div class="budget-bar"><div><div class="bnum">'+archInfo.icon+'</div><div class="blbl">'+archInfo.name+'</div></div>'+
        '<div class="needs">'+x(ST.setup.team.n)+' · '+ST.setup.team.c+'<br>'+stars(ST.setup.team.p)+' prestige · '+roleSel+'</div></div>';
-    h+='<button class="bigbtn btn-gold" id="start-btn">Start Dynasty →</button>';
+    h+='<button type="button" class="bigbtn btn-gold" id="start-btn" data-action="start-dynasty">Start Dynasty →</button>';
   } else {
     h+='<div class="lb-note" style="text-align:center;color:var(--muted);font-weight:700;font-size:11px;padding:14px">Pick a team to begin.</div>';
   }
@@ -4934,7 +4934,8 @@ function bind(){
   // ── setup ──
   // WIRE THE START BUTTON FIRST. It is the only control that can rescue a stuck
   // setup screen, so nothing above it may ever prevent it from being attached.
-  var sb=q("#start-btn"); if(sb)sb.onclick=startDynasty;
+  // NOTE: #start-btn is NOT wired here. It uses the delegated listener installed once at
+  // boot (see installActionDelegate), so it keeps working even if anything in bind() throws.
   each("[data-div]",function(b){b.onclick=function(){ST.setup.div=b.getAttribute("data-div");ST.setup.conf=null;ST.setup.team=null;draw();};});
   each("[data-conf]",function(b){b.onclick=function(){ST.setup.conf=b.getAttribute("data-conf");ST.setup.team=null;draw();};});
   each("[data-team]",function(b){b.onclick=function(){var n=b.getAttribute("data-team");ST.setup.team=ALL_TEAMS.filter(function(t){return t.n===n;})[0];draw();};});
@@ -6325,7 +6326,46 @@ function takeJob(offer){
   enterPreseason();
 }
 
+// ── Action delegation ────────────────────────────────────
+// draw() blows away #app.innerHTML on every render, so any handler attached directly to a
+// button dies with the node and must be re-attached by bind(). That makes critical controls
+// hostage to bind() completing without error. Instead, listen ONCE on a node draw() never
+// replaces and dispatch by the element's data-action. This survives redraws, survives an
+// exception anywhere in bind(), and needs no re-binding.
+var ACTIONS = {
+  "start-dynasty": function(){ startDynasty(); }
+};
+function closestAction(node){
+  // No Element.closest() on older WebKit — walk up manually.
+  while(node && node!==document){
+    if(node.getAttribute){
+      var a=node.getAttribute("data-action");
+      if(a) return a;
+    }
+    node=node.parentNode;
+  }
+  return null;
+}
+function installActionDelegate(){
+  try{
+    var root=document.getElementById("app") || document.body;
+    if(!root || root._actionDelegate || !root.addEventListener) return;
+    root._actionDelegate=true;
+    function handle(ev){
+      var a=closestAction(ev.target||ev.srcElement);
+      if(!a || !ACTIONS[a]) return;
+      if(ev.preventDefault) ev.preventDefault();
+      try{ ACTIONS[a](); }catch(err){ if(window.console&&console.error) console.error(a,err); }
+    }
+    // click alone is enough on modern iOS, and adding touchend risks double-firing.
+    root.addEventListener("click", handle, false);
+  }catch(e){ /* installing the delegate must never prevent the app from booting */ }
+}
+
 // ── Boot ─────────────────────────────────────────────────
+// Install the delegate BEFORE the first render. loadData() calls draw(), which calls
+// bind(); if bind() ever throws, execution would never reach a delegate installed after it.
+installActionDelegate();
 loadData();
 draw();
 </script>
