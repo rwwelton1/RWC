@@ -660,11 +660,31 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(-
 <div id="nil-overlay"></div>
 
 <script>
-// Older WebKit ships a NodeList without .forEach. This file calls it in ~30 places, and a
-// TypeError inside bind() would abort every remaining click handler, so patch it up front.
-if(typeof NodeList!=="undefined" && NodeList.prototype && !NodeList.prototype.forEach){
-  NodeList.prototype.forEach = Array.prototype.forEach;
-}
+// Surface runtime errors from OUR code instead of failing silently — a thrown exception
+// inside bind() used to leave every button inert with no visible explanation.
+//
+// Cross-origin scripts (the Firebase SDK on gstatic) report as a bare "Script error."
+// with no file or line. That noise is almost never actionable and isn't ours, so it is
+// ignored: reporting it would train us to dismiss the banner without reading it.
+// Set window.DEBUG_ALL_ERRORS = true in the console to see those too.
+window.addEventListener("error", function(e){
+  try{
+    var opaque = (!e.filename && (!e.message || e.message.indexOf("Script error")===0));
+    if(opaque && !window.DEBUG_ALL_ERRORS) return;
+    var el=document.getElementById("errbar");
+    if(!el){
+      el=document.createElement("div");
+      el.id="errbar";
+      el.style.cssText="position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#b00020;color:#fff;"+
+        "font:700 11px/1.4 monospace;padding:8px 10px;max-height:38vh;overflow:auto;white-space:pre-wrap";
+      el.onclick=function(){ el.parentNode&&el.parentNode.removeChild(el); };
+      document.body.appendChild(el);
+    }
+    el.textContent = "JS ERROR (tap to dismiss)\n" + (e.message||e) + "\n" +
+      ((e.filename||"?")+":"+(e.lineno||"?")+":"+(e.colno||"?")) +
+      (e.error && e.error.stack ? "\n"+e.error.stack.split("\n").slice(0,6).join("\n") : "");
+  }catch(_){}
+});
 
 // Comprehensive FBS team dataset (2025-26 alignment). p = prestige 1-5.
 // Prestige drives difficulty, starting budget, and how strong the CPU-run defense is.
@@ -802,12 +822,6 @@ var ALL_TEAMS = FBS_TEAMS.concat(FCS_TEAMS);
 // SCORECERY CFB DYNASTY — playable core (OC path)
 // Loop: pick school+role -> recruit offense -> weekly gameplan+sim -> offseason
 // =====================================================
-// Iterate a selector by index. querySelectorAll returns a NodeList, and relying on
-// NodeList.prototype.forEach means one missing method aborts every handler after it.
-function each(sel, fn){
-  var els=document.querySelectorAll(sel);
-  for(var i=0;i<els.length;i++) fn(els[i]);
-}
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 
@@ -4929,6 +4943,12 @@ function cutPlayer(id){
 // =====================================================
 // ACTIONS / BIND
 // =====================================================
+// querySelectorAll returns a NodeList, which lacks .forEach on older WebKit.
+// Iterate by index so a missing NodeList.prototype.forEach can never abort bind().
+function each(sel, fn){
+  var els=document.querySelectorAll(sel);
+  for(var i=0;i<els.length;i++) fn(els[i]);
+}
 function bind(){
   var q=function(s){return document.querySelector(s);};
   // ── setup ──
@@ -4941,17 +4961,17 @@ function bind(){
   each("[data-role]",function(b){b.onclick=function(){ST.setup.role=b.getAttribute("data-role");draw();};});
   each("[data-arch]",function(b){b.onclick=function(){ST.setup.archetype=b.getAttribute("data-arch");draw();};});
   // recruit
-  each("[data-sign]", function(b){b.onclick=function(){toggleSign(b.getAttribute("data-sign"));};});
+  document.querySelectorAll("[data-sign]").forEach(function(b){b.onclick=function(){toggleSign(b.getAttribute("data-sign"));};});
   var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
   // season
-  each("[data-plan]", function(b){b.onclick=function(){ST.planPick=b.getAttribute("data-plan");draw();};});
-  each("[data-tab]", function(b){b.onclick=function(){ST.seasonTab=b.getAttribute("data-tab");ST.editGame=null;ST.statPlayer=null;ST.swapPick=null;draw();};});
-  each("[data-statp]", function(b){b.onclick=function(){ST.statPlayer=b.getAttribute("data-statp");ST.statScope="season";draw();};});
-  each("[data-statscope]", function(b){b.onclick=function(){ST.statScope=b.getAttribute("data-statscope");draw();};});
+  document.querySelectorAll("[data-plan]").forEach(function(b){b.onclick=function(){ST.planPick=b.getAttribute("data-plan");draw();};});
+  document.querySelectorAll("[data-tab]").forEach(function(b){b.onclick=function(){ST.seasonTab=b.getAttribute("data-tab");ST.editGame=null;ST.statPlayer=null;ST.swapPick=null;draw();};});
+  document.querySelectorAll("[data-statp]").forEach(function(b){b.onclick=function(){ST.statPlayer=b.getAttribute("data-statp");ST.statScope="season";draw();};});
+  document.querySelectorAll("[data-statscope]").forEach(function(b){b.onclick=function(){ST.statScope=b.getAttribute("data-statscope");draw();};});
   var sbk=q("#stat-back"); if(sbk)sbk.onclick=function(){ST.statPlayer=null;ST.statScope="season";draw();};
-  each("[data-editgame]", function(b){b.onclick=function(){ST.editGame=parseInt(b.getAttribute("data-editgame"),10);draw();};});
-  each("[data-setha]", function(b){b.onclick=function(){ if(ST.editGame!=null){ ST.save.schedule[ST.editGame].home=(b.getAttribute("data-setha")==="home"); persist(); draw(); } };});
-  each("[data-pickopp]", function(b){b.onclick=function(){
+  document.querySelectorAll("[data-editgame]").forEach(function(b){b.onclick=function(){ST.editGame=parseInt(b.getAttribute("data-editgame"),10);draw();};});
+  document.querySelectorAll("[data-setha]").forEach(function(b){b.onclick=function(){ if(ST.editGame!=null){ ST.save.schedule[ST.editGame].home=(b.getAttribute("data-setha")==="home"); persist(); draw(); } };});
+  document.querySelectorAll("[data-pickopp]").forEach(function(b){b.onclick=function(){
     if(ST.editGame==null)return;
     var name=b.getAttribute("data-pickopp");
     var t=ALL_TEAMS.filter(function(x){return x.n===name;})[0];   // FBS or FCS
@@ -4962,21 +4982,21 @@ function bind(){
            persist(); draw(); }
   };});
   var ed=q("#edit-done"); if(ed)ed.onclick=function(){ ST.editGame=null; draw(); };
-  each("[data-scheme]", function(b){b.onclick=function(){ var parts=b.getAttribute("data-scheme").split(":"); setScheme(parts[0],parts[1]); };});
-  each("[data-nilopen]", function(b){b.onclick=function(e){
+  document.querySelectorAll("[data-scheme]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-scheme").split(":"); setScheme(parts[0],parts[1]); };});
+  document.querySelectorAll("[data-nilopen]").forEach(function(b){b.onclick=function(e){
     if(e && e.stopPropagation) e.stopPropagation();   // sits inside a tap-to-swap roster row
     var parts=b.getAttribute("data-nilopen").split(":"); openNIL(parts[0],parts[1]);
   };});
-  each("[data-nilmatch]", function(b){b.onclick=function(e){
+  document.querySelectorAll("[data-nilmatch]").forEach(function(b){b.onclick=function(e){
     if(e && e.stopPropagation) e.stopPropagation();   // ditto — don't arm a depth swap
     matchNIL(b.getAttribute("data-nilmatch"));
   };});
-  each("[data-signtransfer]", function(b){b.onclick=function(){ signTransfer(b.getAttribute("data-signtransfer")); };});
-  each("[data-retainplayer]", function(b){b.onclick=function(){ retainPlayer(b.getAttribute("data-retainplayer")); };});
-  each("[data-feedmode]", function(b){b.onclick=function(){
+  document.querySelectorAll("[data-signtransfer]").forEach(function(b){b.onclick=function(){ signTransfer(b.getAttribute("data-signtransfer")); };});
+  document.querySelectorAll("[data-retainplayer]").forEach(function(b){b.onclick=function(){ retainPlayer(b.getAttribute("data-retainplayer")); };});
+  document.querySelectorAll("[data-feedmode]").forEach(function(b){b.onclick=function(){
     ST.feedMode=b.getAttribute("data-feedmode");
-    each("[data-feedmode]", function(o){
-      if(o.getAttribute("data-feedmode")===ST.feedMode) o.classList.add("on"); else o.classList.remove("on"); });
+    document.querySelectorAll("[data-feedmode]").forEach(function(o){
+      o.classList.toggle("on", o.getAttribute("data-feedmode")===ST.feedMode); });
     var ft=document.getElementById("feed-title");
     if(ft) ft.textContent=(ST.feedMode==="stats")?"Box Score":"Play-by-Play";
     if(ST.live) ST.live.shownMode=null;   // force a rebuild into the new mode
@@ -4984,27 +5004,27 @@ function bind(){
     // slow mode paces against the VISIBLE plays, so filtering changes the cadence
     if(ST.live && !ST.live.done && simSpeed().holdMs) resumeLiveSim();  // cadence depends on visible plays
   };});
-  each("[data-simspeed]", function(b){b.onclick=function(){
+  document.querySelectorAll("[data-simspeed]").forEach(function(b){b.onclick=function(){
     ST.simSpeed=b.getAttribute("data-simspeed");
     try{ localStorage.setItem("dyn_simSpeed", ST.simSpeed); }catch(e){}
-    each("[data-simspeed]", function(o){
-      if(o.getAttribute("data-simspeed")===ST.simSpeed) o.classList.add("on"); else o.classList.remove("on"); });
+    document.querySelectorAll("[data-simspeed]").forEach(function(o){
+      o.classList.toggle("on", o.getAttribute("data-simspeed")===ST.simSpeed); });
     if(ST.live && !ST.live.done){ resumeLiveSim(); }   // retime, don't rewind
   };});
   var pdn=q("#portal-done"); if(pdn)pdn.onclick=finishPortal;
-  each("[data-pretab]", function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
+  document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
   var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.treeFrom||"offseason"; draw(); };
   var hb=q("#hist-back"); if(hb)hb.onclick=function(){ ST.screen=ST.historyFrom||"offseason"; draw(); };
-  each("[data-skill]", function(b){b.onclick=function(){ var parts=b.getAttribute("data-skill").split(":"); buyCoachSkill(parts[0],parts[1]); };});
-  each("[data-facility]", function(b){b.onclick=function(){ buyFacility(b.getAttribute("data-facility")); };});
+  document.querySelectorAll("[data-skill]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-skill").split(":"); buyCoachSkill(parts[0],parts[1]); };});
+  document.querySelectorAll("[data-facility]").forEach(function(b){b.onclick=function(){ buyFacility(b.getAttribute("data-facility")); };});
   var ko=q("#kickoff-season"); if(ko)ko.onclick=kickoffSeason;
-  each("[data-recruit]", function(b){b.onclick=function(){ recruitProspect(b.getAttribute("data-recruit")); };});
-  each("[data-scout]", function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
-  each("[data-watch]", function(b){b.onclick=function(e){ if(e)e.stopPropagation(); toggleWatch(b.getAttribute("data-watch")); };});
-  each("[data-recexpand]", function(b){b.onclick=function(){ var id=b.getAttribute("data-recexpand"); ST.recExpand=(ST.recExpand===id)?null:id; draw(); };});
-  each("[data-recpos]", function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; draw(); };});
-  each("[data-depthtap]", function(b){b.onclick=function(){ tapDepth(b.getAttribute("data-depthtap")); };});
+  document.querySelectorAll("[data-recruit]").forEach(function(b){b.onclick=function(){ recruitProspect(b.getAttribute("data-recruit")); };});
+  document.querySelectorAll("[data-scout]").forEach(function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
+  document.querySelectorAll("[data-watch]").forEach(function(b){b.onclick=function(e){ if(e)e.stopPropagation(); toggleWatch(b.getAttribute("data-watch")); };});
+  document.querySelectorAll("[data-recexpand]").forEach(function(b){b.onclick=function(){ var id=b.getAttribute("data-recexpand"); ST.recExpand=(ST.recExpand===id)?null:id; draw(); };});
+  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; draw(); };});
+  document.querySelectorAll("[data-depthtap]").forEach(function(b){b.onclick=function(){ tapDepth(b.getAttribute("data-depthtap")); };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
   var pw=q("#play-week"); if(pw)pw.onclick=playWeek;
   var toff=q("#to-postseason"); if(toff)toff.onclick=function(){ enterPostseason(); };
@@ -5017,8 +5037,8 @@ function bind(){
   var pto=q("#post-to-offseason"); if(pto)pto.onclick=function(){ ST.post=null; ST.save._postDone=true; ST.screen="offseason"; persist(); draw(); };
   // offseason
   var adv=q("#advance-season"); if(adv)adv.onclick=advanceSeason;
-  each("[data-cut]", function(b){b.onclick=function(){ cutPlayer(b.getAttribute("data-cut")); };});
-  each("[data-takejob]", function(b){ b.onclick=function(){ var i=parseInt(b.getAttribute("data-takejob"),10); var t=(ST.carousel||[])[i]; if(t) takeJob(t); }; });
+  document.querySelectorAll("[data-cut]").forEach(function(b){b.onclick=function(){ cutPlayer(b.getAttribute("data-cut")); };});
+  document.querySelectorAll("[data-takejob]").forEach(function(b){ b.onclick=function(){ var i=parseInt(b.getAttribute("data-takejob"),10); var t=(ST.carousel||[])[i]; if(t) takeJob(t); }; });
   var sj=q("#stay-job"); if(sj)sj.onclick=function(){ ST.carousel=null; startNextSeason(); };
   var rd=q("#reset-dynasty"); if(rd)rd.onclick=function(){ if(confirm("Reset everything? This erases your dynasty permanently.")){ if(DB)DB.ref(BASE()).remove(); ST.save=null; ST.fired=null; ST.carousel=null; ST.screen="setup"; ST.setup={div:"FBS",conf:"SEC",team:null,role:"OC",archetype:"offensive"}; draw(); } };
 }
@@ -6049,9 +6069,9 @@ function bindTactics(){
     var el=document.getElementById("live-tactics");
     if(el){ el.innerHTML=tacticsPanel(); bindTactics(); }
   };
-  each("[data-tacoff]", function(b){b.onclick=function(){setTactic("off",b.getAttribute("data-tacoff"));};});
-  each("[data-tactempo]", function(b){b.onclick=function(){setTactic("tempo",b.getAttribute("data-tactempo"));};});
-  each("[data-tacdef]", function(b){b.onclick=function(){setTactic("def",b.getAttribute("data-tacdef"));};});
+  document.querySelectorAll("[data-tacoff]").forEach(function(b){b.onclick=function(){setTactic("off",b.getAttribute("data-tacoff"));};});
+  document.querySelectorAll("[data-tactempo]").forEach(function(b){b.onclick=function(){setTactic("tempo",b.getAttribute("data-tactempo"));};});
+  document.querySelectorAll("[data-tacdef]").forEach(function(b){b.onclick=function(){setTactic("def",b.getAttribute("data-tacdef"));};});
 }
 // "Sim to Final" is in liveScreen's static markup — bound once, never rebuilt.
 function bindLiveControls(){
