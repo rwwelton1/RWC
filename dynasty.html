@@ -67,15 +67,21 @@ a{color:inherit;text-decoration:none}
 .sec-title .pill{margin-left:auto;font-size:9px;background:#fff;border:2px solid var(--border);border-radius:20px;padding:2px 9px;box-shadow:1px 1px 0 var(--border);color:var(--text)}
 
 /* setup: conference + team pick */
-/* The tab strip scrolls horizontally. 2px of right padding keeps the last tab's
-   drop-shadow from being clipped, and the wrapper fades it out so it reads as scrollable. */
+/* The tab strip scrolls horizontally. The right edge fades out so it reads as scrollable.
+   This is done with a MASK, not a gradient overlay: an overlay has to paint a background
+   colour to fade toward, which goes wrong the moment the page background isn't what the
+   overlay assumed (e.g. a browser forcing dark mode). A mask fades the tabs to transparent
+   and therefore looks right on any background. The mask only appears once the strip has
+   enough tabs to actually overflow. */
 .conf-tabs-wrap{position:relative;margin-bottom:6px}
-.conf-tabs-wrap:after{content:"";position:absolute;top:0;right:0;bottom:8px;width:22px;pointer-events:none;
-  background:linear-gradient(90deg,rgba(245,240,232,0),var(--bg) 70%)}
 .conf-tabs{display:flex;gap:5px;overflow-x:auto;padding:0 2px 8px 0;margin-bottom:0;-webkit-overflow-scrolling:touch;scrollbar-width:none}
 .conf-tabs::-webkit-scrollbar{display:none}
+.conf-tabs.fade{
+  -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent 100%);
+          mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent 100%);
+}
 .conf-tab{flex-shrink:0;padding:6px 12px;font-size:10px;font-weight:800;border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:8px;box-shadow:2px 2px 0 var(--border);white-space:nowrap}
-.conf-tab:last-child{margin-right:20px}   /* room for the fade so the last tab stays tappable */
+.conf-tabs.fade .conf-tab:last-child{margin-right:16px} /* keeps the last tab tappable past the fade */
 .conf-tab.active{background:var(--gold);color:var(--text)}
 .team-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
 /* min-width:0 on BOTH the grid cell and the flex child — without it a long name like
@@ -1183,7 +1189,7 @@ var ST={
   screen:"loading",
   user:URL_USER||"guest",
   save:null,        // the dynasty save object
-  setup:{conf:"SEC",team:null,role:"OC",archetype:"offensive"},
+  setup:{div:"FBS",conf:"SEC",team:null,role:"OC",archetype:"offensive"},
   recruitClass:[],
   signed:{},        // recruitId -> true
   weekResult:null,  // last game result to show
@@ -3216,7 +3222,7 @@ function restartDynasty(){
   if(!confirm("Restart your dynasty? This permanently erases your current save — career record, team, and league.")) return;
   if(DB)DB.ref(BASE()).remove();
   ST.save=null; ST.fired=null; ST.carousel=null; ST.post=null; ST.confchamp=null;
-  ST.screen="setup"; ST.setup={conf:"SEC",team:null,role:"OC",archetype:"offensive"}; ST.seasonTab="week"; ST.planPick=null;
+  ST.screen="setup"; ST.setup={div:"FBS",conf:"SEC",team:null,role:"OC",archetype:"offensive"}; ST.seasonTab="week"; ST.planPick=null;
   draw();
 }
 
@@ -3314,9 +3320,9 @@ function setupScreen(){
   h+='<div class="hero"><h1>🏈 Build Your Dynasty</h1><p>Take over as a <b>coordinator</b> at any FBS or FCS school. Recruit your side of the ball, call the shots, and climb the ladder toward Head Coach.</p></div>';
 
   h+='<div class="sec-title">1 · Pick Your Subdivision</div>';
-  h+='<div class="conf-tabs" style="margin-bottom:10px;overflow:visible">'+
-     '<button class="conf-tab'+(ST.setup.div==="FBS"?" active":"")+'" data-div="FBS" style="margin-right:0">FBS</button>'+
-     '<button class="conf-tab'+(ST.setup.div==="FCS"?" active":"")+'" data-div="FCS" style="margin-right:0">FCS</button>'+
+  h+='<div class="conf-tabs no-fade" style="margin-bottom:10px;overflow:visible">'+
+     '<button class="conf-tab'+(ST.setup.div==="FBS"?" active":"")+'" data-div="FBS">FBS</button>'+
+     '<button class="conf-tab'+(ST.setup.div==="FCS"?" active":"")+'" data-div="FCS">FCS</button>'+
      '</div>';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:-4px 2px 10px">'+
      (ST.setup.div==="FCS"
@@ -4909,6 +4915,28 @@ function cutPlayer(id){
 // =====================================================
 // ACTIONS / BIND
 // =====================================================
+// Only mask the tab strip when it actually overflows — otherwise a short conference
+// list (or a wide screen) would get its last tab needlessly faded.
+// This is pure cosmetics, so it must never be able to break bind(): it runs inside a
+// try/catch, and it avoids classList.toggle()'s two-argument form, which throws on
+// older WebKit. A thrown error here would kill every click handler on the page.
+function syncTabFade(){
+  try{
+    var els=document.querySelectorAll(".conf-tabs:not(.no-fade)");
+    for(var i=0;i<els.length;i++){
+      (function(el){
+        var overflows = el.scrollWidth > el.clientWidth + 1;
+        var atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
+        if(overflows && !atEnd) el.classList.add("fade");
+        else el.classList.remove("fade");
+        if(overflows && !el._fadeBound){
+          el._fadeBound = true;
+          el.addEventListener("scroll", function(){ syncTabFade(); });
+        }
+      })(els[i]);
+    }
+  }catch(e){ /* cosmetic only — never block bind() */ }
+}
 function bind(){
   var q=function(s){return document.querySelector(s);};
   // setup
@@ -4998,7 +5026,9 @@ function bind(){
   document.querySelectorAll("[data-cut]").forEach(function(b){b.onclick=function(){ cutPlayer(b.getAttribute("data-cut")); };});
   document.querySelectorAll("[data-takejob]").forEach(function(b){ b.onclick=function(){ var i=parseInt(b.getAttribute("data-takejob"),10); var t=(ST.carousel||[])[i]; if(t) takeJob(t); }; });
   var sj=q("#stay-job"); if(sj)sj.onclick=function(){ ST.carousel=null; startNextSeason(); };
-  var rd=q("#reset-dynasty"); if(rd)rd.onclick=function(){ if(confirm("Reset everything? This erases your dynasty permanently.")){ if(DB)DB.ref(BASE()).remove(); ST.save=null; ST.fired=null; ST.carousel=null; ST.screen="setup"; ST.setup={conf:"SEC",team:null,role:"OC",archetype:"offensive"}; draw(); } };
+  var rd=q("#reset-dynasty"); if(rd)rd.onclick=function(){ if(confirm("Reset everything? This erases your dynasty permanently.")){ if(DB)DB.ref(BASE()).remove(); ST.save=null; ST.fired=null; ST.carousel=null; ST.screen="setup"; ST.setup={div:"FBS",conf:"SEC",team:null,role:"OC",archetype:"offensive"}; draw(); } };
+  // Cosmetic tab-strip fade LAST: if it ever throws, every handler above is already wired.
+  syncTabFade();
 }
 
 function startDynasty(){
