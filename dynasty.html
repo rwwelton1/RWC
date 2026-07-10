@@ -112,6 +112,10 @@ a{color:inherit;text-decoration:none}
 .recruit.signed{background:var(--green-bg);border-color:var(--green)}
 .recruit.tooexp{opacity:.5}
 .rec-pos{width:34px;height:34px;border-radius:8px;background:var(--cream);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;flex-shrink:0}
+.rec-star-row{display:flex;align-items:center;gap:7px;margin:0 2px 10px}
+.rec-star-lbl{font-size:10px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.rec-star-select{font-size:12px;font-weight:800;color:var(--ink,#111);background:var(--cream);border:2px solid var(--border);border-radius:8px;padding:5px 8px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.rec-star-select:focus{outline:none;border-color:var(--gold-dark)}
 .rec-body{flex:1;min-width:0}
 .rec-name{font-size:14px;font-weight:900}
 .rec-meta{font-size:9px;font-weight:700;color:var(--muted);margin-top:2px}
@@ -462,6 +466,8 @@ a{color:inherit;text-decoration:none}
 .ct-pill.need{background:var(--red-bg);border-color:var(--red2);color:var(--red2)}
 .ct-pill.filled{background:var(--green-bg);border-color:var(--green);color:var(--green)}
 .t25-conf{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.cfp-cutline{font-size:9px;font-weight:900;color:var(--gold-dark,#b8860b);text-align:center;text-transform:uppercase;letter-spacing:.08em;padding:6px 0 4px;border-top:2px dashed var(--gold-dark,#b8860b);margin:2px 6px}
+.cfp-champ{color:var(--gold-dark,#b8860b);font-size:10px}
 /* roster view */
 .ros-row{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1.5px solid var(--border2)}
 .ros-row:last-child{border-bottom:none}
@@ -1198,6 +1204,8 @@ var ST={
   showScheme:false, // gameplan scheme panel expanded on week tab
   preTab:"overview", // active tab on the preseason screen
   recruitPos:"ALL", // position filter on the recruiting board
+  recruitStars:"ALL", // star-rating filter on the recruiting board
+  recRank:null, // settled board order (id->rank); re-settles on tab/filter change, frozen mid-scout
   planPick:null,
   feedMode:"all",  // live game tab: "all" (full log) | "scoring" | "stats"
   simSpeed:"normal", // sim speed: fast | normal | slow
@@ -1597,6 +1605,28 @@ function genPlayerAt(pos, ovr, yr){
   var dev=rollDevGeneric(ovr);
   return {id:"p"+Math.random().toString(36).slice(2,8), n:genName(), pos:pos, ovr:ovr, yr:yr||pick(["FR","SO","JR","SR"]), dev:dev, arch:rollArch(pos), pot:rollPotential(ovr,dev), startOvr:ovr, ssOvr:ovr, revealed:false};
 }
+// Class year for a generated player. Starters skew experienced, depth skews young.
+// `srMult` is a TEAM-level seniority roll (drawn once per roster): >1 makes the whole
+// team older (more seniors → bigger graduating class), <1 makes it younger. That's what
+// gives one takeover a veteran roster and the next a young one, on top of per-position
+// noise — so gaps differ both across positions AND across teams/years.
+function pickYear(isStarter, srMult){
+  srMult=srMult||1;
+  var r=Math.random();
+  if(isStarter){
+    var pSR=Math.max(0.10, Math.min(0.70, 0.40*srMult));   // seniors among starters
+    var rest=1-pSR;
+    if(r<pSR) return "SR";
+    if(r<pSR+rest*0.66) return "JR";
+    return "SO";                                            // the occasional young starter
+  }
+  var pSRd=Math.max(0.02, Math.min(0.28, 0.08*srMult));    // a few senior backups
+  var rd=1-pSRd;                                            // split the rest JR:SO:FR ~ 18:34:40
+  if(r<pSRd) return "SR";
+  if(r<pSRd+rd*(18/92)) return "JR";
+  if(r<pSRd+rd*(52/92)) return "SO";
+  return "FR";
+}
 function genStarterRoster(prestige, roleArg, targets){
   var r=[];
   var offPos=["QB","RB","WR","TE","OL"];
@@ -1604,17 +1634,13 @@ function genStarterRoster(prestige, roleArg, targets){
   var uniquePos = (roleArg==="DC") ? defPos
                 : (roleArg==="HC") ? offPos.concat(defPos)
                 : offPos;
+  var srMult = 0.6 + Math.random()*0.9;   // this team's seniority (~0.6 young … ~1.5 veteran)
   uniquePos.forEach(function(pos){
     var isDef=defPos.indexOf(pos)>=0;
     var total=rosterSizeAt(pos);
     var starters=startersAt(pos);
-    // spread the roster across class years: starters skew upperclassman, depth skews younger,
-    // cycling SR→JR→SO→FR so every position keeps a freshman-to-senior pipeline.
-    var years=["SR","JR","SO","FR"];
     for(var i=0;i<total;i++){
-      var yr;
-      if(i<starters){ yr=years[i % 2 === 0 ? 0 : 1]; } // starters: SR/JR
-      else { yr=years[2 + ((i-starters) % 2)]; }        // depth: SO/FR
+      var yr=pickYear(i<starters, srMult);
       if(targets){
         // anchor overalls to the team's real unit rating: starters near it, depth clearly below
         var t=isDef?targets.def:targets.off;
@@ -1660,7 +1686,8 @@ function recruitOvr(st){
 // Generate a board of prospects you pursue across the whole season. Each has an interest level
 // in you, a set of rival schools also recruiting them, and commits over time.
 function genRecruitBoard(prestige){
-  // 3 prospects per STARTING SLOT — deep positions get more options (OL 5 starters → 15 prospects)
+  // 25 prospects at every position you recruit — a deep board to sift through with the
+  // position + star filters (HC covers all 9 positions → 225; OC 5 → 125; DC 4 → 100).
   var offPos=["QB","RB","WR","TE","OL"];
   var defPos=["DL","LB","CB","S"];
   var positions = (ST.save&&ST.save.role==="DC") ? defPos
@@ -1668,7 +1695,7 @@ function genRecruitBoard(prestige){
                 : offPos;
   var board=[];
   positions.forEach(function(pos){
-    var count=10; // 10 prospects at every position to choose from
+    var count=25; // prospects per position
     for(var i=0;i<count;i++){
       board.push(makeProspect(pos, prestige));
     }
@@ -1705,6 +1732,7 @@ function makeProspect(pos, prestige){
   var lo=Math.max(1,st-1), hi=Math.min(5,st+1);
   return {
     id:"r"+Math.random().toString(36).slice(2,8),
+    _seed:Math.random(),   // fixed board-order seed: keeps order stable & OVR-blind
     n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev, arch:rollArch(pos),
     interest:startInterest,
     rivals:rivals,
@@ -2445,6 +2473,31 @@ function retentionPanel(){
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:6px 2px 10px;line-height:1.5">'+note+'</div>';
   return h;
 }
+// ── Recruiting board order ───────────────────────────────
+// The board order SETTLES only when you change tabs/filters (refreshRecOrder), never
+// mid-scout — so scouting a prospect never makes cards jump. When it settles, fully-
+// scouted prospects sort by their revealed OVR (best first) within their star tier —
+// OVR is revealed at scout tier 2 — while everyone still unknown keeps a stable,
+// OVR-blind seed order.
+function recSeed(b){
+  if(b._seed!=null) return b._seed;
+  var s=String(b.id||""), h=0; for(var i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; }
+  return ((h>>>0)%100000)/100000;   // stable fallback for boards made before _seed existed
+}
+function recRankCompare(a,b){
+  var order={open:0,committed:1,lost:2};
+  if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
+  if(b.st!==a.st) return b.st-a.st;                       // star tier still leads
+  var ot=Math.min(2, maxScoutTier()), af=a.scout>=ot, bf=b.scout>=ot; // OVR is revealed at scout tier 2 (or full scout, if that comes sooner)
+  if(af&&bf) return b.ovr-a.ovr;                          // both OVR-known → best OVR first
+  if(af!==bf) return af?-1:1;                             // OVR-known rise above the unknown
+  return recSeed(a)-recSeed(b);                           // both unknown → blind stable order
+}
+function refreshRecOrder(){
+  var s=ST.save; if(!s||!s.board){ ST.recRank=null; return; }
+  var m={}; s.board.slice().sort(recRankCompare).forEach(function(b,i){ m[b.id]=i; });
+  ST.recRank=m;
+}
 function recruitTab(){
   var s=ST.save;
   if(!s.board){ return '<div style="padding:20px;text-align:center;font-weight:700;color:var(--muted)">Recruiting starts once the season begins.</div>'; }
@@ -2477,21 +2530,39 @@ function recruitTab(){
     h+='<button class="pos-chip'+(activePos===pos?" active":"")+'" data-recpos="'+pos+'">'+pos+' <span class="pos-chip-n">'+openCount(pos)+'</span></button>';
   });
   h+='</div>';
+  // star-rating dropdown — respects the scouting fuzz: a scouted prospect matches its
+  // exact star; an unscouted one matches any star inside its fuzzy range (could-be).
+  var activeStars=ST.recruitStars||"ALL";
+  h+='<div class="rec-star-row"><span class="rec-star-lbl">Stars</span>'+
+     '<select id="rec-star-filter" class="rec-star-select">';
+  [["ALL","All ★"],["5","5 ★"],["4","4 ★"],["3","3 ★"],["2","2 ★"],["1","1 ★"]].forEach(function(o){
+    h+='<option value="'+o[0]+'"'+(activeStars===o[0]?" selected":"")+'>'+o[1]+'</option>';
+  });
+  h+='</select></div>';
+  var starMatch=function(b){
+    if(activeStars==="ALL") return true;
+    var want=+activeStars;
+    if(b.scout>=1) return b.st===want;                                   // star is known
+    return want>=(b.fuzzLo||b.st) && want<=(b.fuzzHi||b.st);             // unscouted: could be this star
+  };
   // filter by the active chip: position, watchlist, or scouted
   var matchesFilter=function(b){
+    if(!starMatch(b)) return false;
     if(activePos==="ALL") return true;
     if(activePos==="COMMITTED") return b.status==="committed";
     if(activePos==="WATCH") return b.status==="open" && !!b.watch;
     if(activePos==="SCOUTED") return b.scout>0;
     return b.pos===activePos;
   };
-  // sort: open first (by rating — estimated until scouted), then committed, then lost
-  var order={open:0,committed:1,lost:2};
+  // Sort by the SETTLED order (frozen until you change tabs/filters). Building it here
+  // on first paint means a freshly opened board is already in a sensible order.
+  if(!ST.recRank) refreshRecOrder();
+  var rank=ST.recRank||{};
   var board=s.board.slice()
     .filter(matchesFilter)
     .sort(function(a,b){
-      if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
-      return estOvr(b)-estOvr(a) || b.interest-a.interest;
+      var ra=(rank[a.id]==null?1e9:rank[a.id]), rb=(rank[b.id]==null?1e9:rank[b.id]);
+      return ra-rb;
     });
   // When viewing your commits, show a position tracker: committed vs. graduating need.
   if(activePos==="COMMITTED"){
@@ -2512,10 +2583,11 @@ function recruitTab(){
   }
   h+='<div class="scroll-list rec-scroll">';
   if(!board.length){
+    var starNote = (activeStars!=="ALL") ? " at "+activeStars+"★" : "";
     var emptyMsg = activePos==="COMMITTED" ? "No commits yet. Build a clear interest lead on open prospects to land commitments."
                  : activePos==="WATCH" ? "No prospects on your watchlist yet. Tap the ⭐ on a prospect to add them."
                  : activePos==="SCOUTED" ? "You haven\u2019t scouted anyone yet. Tap Scout on a prospect."
-                 : "No "+(activePos==="ALL"?"":activePos+" ")+"prospects on the board.";
+                 : "No "+(activePos==="ALL"?"":activePos+" ")+"prospects"+starNote+" on the board.";
     h+='<div style="padding:24px;text-align:center;font-weight:700;color:var(--muted);line-height:1.5">'+emptyMsg+'</div>';
   }
   board.forEach(function(b){
@@ -3594,7 +3666,7 @@ function seasonScreen(){
      tabBtn("stats","Stats")+
      tabBtn("schedule","Sched")+
      tabBtn("standings","Stand")+
-     tabBtn("top25","AP25")+
+     tabBtn("top25","CFP")+
      '</div>';
 
   h+='<div class="tab-body">';
@@ -3781,7 +3853,7 @@ function rankedTeams(){
       var w=isYou?s.wins:t.w, l=isYou?s.losses:t.l;
       var sc = (myDiv==="FCS")
         ? fcsResumeScore(w, t.p, isYou&&s._wonConfThisYear, t.ovr, isYou&&s._beatFBSThisYear)
-        : resumeScore(w, t.p, t.c, isYou&&s._wonConfThisYear, isYou?myUnitRating():t.off) + t.ovr*0.5;
+        : cfpScore({w:w, l:l, p:t.p, conf:t.c, wonConf:isConfChamp(n), ovr:t.ovr, you:isYou});
       rows.push({name:n, conf:t.c, p:t.p, you:isYou, w:w, l:l, ovr:t.ovr, g5:!isPowerConf(t.c), score:sc});
     });
   }
@@ -3796,9 +3868,10 @@ function userConfRecord(){
   return {cw:cw, cl:cl};
 }
 // The champion of a conference by best conference record (tiebreak overall). Used for
-// CPU conferences in the league history; your own conference uses the real title-game result.
+// CPU conferences in the league history; your own conference uses the real title-game
+// result. Independents have no conference, so they can never be a champion (at-large only).
 function bestConfChampion(conf){
-  var s=ST.save, L=s.league; if(!L) return null;
+  var s=ST.save, L=s.league; if(!L || isIndependentConf(conf)) return null;   // no champion for independents
   var best=null, bestKey=-1;
   Object.keys(L.teams).forEach(function(n){
     var t=L.teams[n]; if(t.c!==conf) return;
@@ -3830,7 +3903,7 @@ function recordChampions(){
   Object.keys(s.league.teams).forEach(function(n){
     var t=s.league.teams[n];
     if((t.div||"FBS")!==myDiv) return;                    // only your subdivision's leagues
-    var c=t.c; if(c && c!=="Independent" && c!=="FCS Independent") confSet[c]=1;
+    var c=t.c; if(c && !isIndependentConf(c)) confSet[c]=1;
   });
   var confs={};
   Object.keys(confSet).sort().forEach(function(c){
@@ -3844,13 +3917,16 @@ function recordChampions(){
 function top25Table(){
   var rows=computeTop25();
   var myRank=0; rows.forEach(function(r,i){ if(r.you)myRank=i+1; });
-  var h='<div class="sec-title" style="margin:2px 2px 8px">AP Top 25'+(myRank?' <span class="pill">You: #'+myRank+'</span>':' <span class="pill">You: NR</span>')+'</div>';
+  var h='<div class="sec-title" style="margin:2px 2px 8px">CFP Rankings'+(myRank?' <span class="pill">You: #'+myRank+'</span>':' <span class="pill">You: NR</span>')+'</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 9px;line-height:1.5">Committee-style résumé rankings — wins over quality opponents and conference titles lift you, bad losses sink you. The top <b>12</b> make the Playoff; the top <b>4</b> seeds earn a first-round bye.</div>';
   h+='<div class="conf-table scroll-list">';
   rows.forEach(function(r,i){
-    h+='<div class="conf-row'+(r.you?" me":"")+(i<4?" top2":"")+'">'+
-       '<span class="conf-rank">'+(i+1)+'</span>'+
-       '<span class="conf-name">'+x(r.name)+' <span class="t25-conf">'+x(r.conf)+' · '+r.ovr+' OVR</span></span>'+
+    var seed=i+1, champ=isConfChamp(r.name);
+    h+='<div class="conf-row'+(r.you?" me":"")+(seed<=4?" top2":"")+'">'+
+       '<span class="conf-rank">'+seed+'</span>'+
+       '<span class="conf-name">'+x(r.name)+(champ?' <span class="cfp-champ" title="Conference champion">◆</span>':'')+' <span class="t25-conf">'+x(r.conf)+' · '+r.ovr+' OVR'+(seed<=4?' · BYE':'')+'</span></span>'+
        '<span class="conf-rec">'+r.w+'-'+r.l+'</span></div>';
+    if(seed===12){ h+='<div class="cfp-cutline">— Playoff cutline · top 12 —</div>'; }
   });
   h+='</div>';
   return h;
@@ -3885,7 +3961,7 @@ function enterConfChampionship(){
   var s=ST.save;
   finalizeLeagueSeason(s.school); // ensure every team completed its conference slate
   // Independents have no conference, so no conference championship — go straight to the postseason.
-  if(s.conf==="Independent" || s.conf==="FCS Independent"){
+  if(isIndependentConf(s.conf)){
     ST.confchamp=null; s._confchamp=null;
     enterPostseason(); return;
   }
@@ -3993,12 +4069,43 @@ function confStandingsTable(){
 // Power-conference wins are worth more than Group-of-Five wins (strength of schedule).
 var POWER_CONF={"SEC":1,"Big Ten":1,"Big 12":1,"ACC":1};
 function isPowerConf(conf){ return !!POWER_CONF[conf]; }
-function resumeScore(wins, prestige, conf, wonConf, off){
-  var confWeight = isPowerConf(conf) ? 1.0 : 0.62;   // G5 wins are discounted (weaker schedule)
-  var base = wins*8*confWeight + prestige*7;
-  if(wonConf) base += 10;
-  if(off) base += off/12;
-  return base;
+// Committee-style résumé score (FBS) — emulates how the CFP selection committee weighs a
+// team: results first (wins, scaled by strength of schedule), losses hurt (a touch less in
+// a power league where every week's a grind), a conference title is a real plus, and the
+// "eye test"/talent matters at the margins. For YOU we also read your actual schedule, so
+// signature wins lift you and bad losses sink you — just like the real committee.
+function cfpScore(t){
+  var power=isPowerConf(t.conf);
+  var wins=t.w||0, losses=t.l||0, games=wins+losses;
+  var sos=(power?1.0:0.60)+(t.p||1)*0.05;         // strength-of-schedule proxy
+  var winVal=wins*(6+sos*5);                      // wins worth more against a tougher slate
+  var lossPen=losses*(power?7:9);                 // losses cost; power losses forgiven slightly
+  var confTitle=t.wonConf?12:0;                   // conference championship
+  var unbeaten=(losses===0&&games>=8)?7:0;        // undefeated résumé bonus
+  var eye=(t.ovr||60)*0.35+(t.p||1)*3;            // committee eye-test / talent
+  var s=winVal-lossPen+confTitle+unbeaten+eye;
+  if(t.you) s+=userResumeAdj();                   // your real quality wins / bad losses
+  return s;
+}
+// Your actual résumé from played games: signature wins lift you, bad losses sink you.
+// (CPU teams have no per-game log, so their SOS is approximated inside cfpScore.)
+function userResumeAdj(){
+  var s=ST.save, adj=0;
+  (s.schedule||[]).forEach(function(g){
+    if(!g.result) return;
+    var op=g.op||1, won=g.result.us>g.result.them;   // g.op = opponent prestige tier
+    if(won){ adj += (op>=5?7:op>=4?4:op>=3?1.5:0); }         // quality wins
+    else   { adj += (op<=1?-9:op<=2?-5:op<=3?-2:0); }        // bad losses (losing to a p4/p5 is ~ok)
+  });
+  return adj;
+}
+// Is this team its conference's champion? Uses the decided title once known, else the
+// current conference leader as a projection (that's how in-season CFP rankings work).
+function isConfChamp(name){
+  var s=ST.save, L=s.league, t=L&&L.teams[name]; if(!t) return false;
+  var conf=t.c; if(!conf || isIndependentConf(conf)) return false;   // independents are at-large only, never a conf champ
+  if(conf===s.conf && s._userConfChampName) return name===s._userConfChampName;
+  return bestConfChampion(conf)===name;
 }
 function enterPostseason(){
   var s=ST.save;
@@ -4291,7 +4398,7 @@ function fcsSimRest(fromRound){
 // Build the 12-team bracket seeded by strength-weighted resume score.
 function setupPlayoff(){
   var s=ST.save, L=s.league;
-  var myScore = resumeScore(s.wins, s.prestige, s.conf, s._wonConfThisYear, myUnitRating()) + (L?L.teams[s.school].ovr*0.5:0);
+  var myScore = cfpScore({w:s.wins, l:s.losses, p:s.prestige, conf:s.conf, wonConf:isConfChamp(s.school), ovr:(L?L.teams[s.school].ovr:70), you:true});
   var iAmG5 = !isPowerConf(s.conf);
   var field=[{name:s.school, p:s.prestige, you:true, score:myScore, g5:iAmG5}];
   // pull the actual best 11 teams from the living league by resume score
@@ -4301,7 +4408,7 @@ function setupPlayoff(){
       if(n===s.school)return;
       var t=L.teams[n];
       others.push({name:n, p:t.p, you:false, g5:!isPowerConf(t.c),
-                   score: resumeScore(t.w, t.p, t.c, false, t.off) + t.ovr*0.5});
+                   score: cfpScore({w:t.w, l:t.l, p:t.p, conf:t.c, wonConf:isConfChamp(n), ovr:t.ovr})});
     });
   }
   others.sort(function(a,b){return b.score-a.score;});
@@ -5002,7 +5109,7 @@ function bind(){
   var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
   // season
   document.querySelectorAll("[data-plan]").forEach(function(b){b.onclick=function(){ST.planPick=b.getAttribute("data-plan");draw();};});
-  document.querySelectorAll("[data-tab]").forEach(function(b){b.onclick=function(){ST.seasonTab=b.getAttribute("data-tab");ST.editGame=null;ST.statPlayer=null;ST.swapPick=null;draw();};});
+  document.querySelectorAll("[data-tab]").forEach(function(b){b.onclick=function(){ST.seasonTab=b.getAttribute("data-tab");ST.editGame=null;ST.statPlayer=null;ST.swapPick=null; if(b.getAttribute("data-tab")==="recruit") refreshRecOrder(); draw();};});
   document.querySelectorAll("[data-statp]").forEach(function(b){b.onclick=function(){ST.statPlayer=b.getAttribute("data-statp");ST.statScope="season";draw();};});
   document.querySelectorAll("[data-statscope]").forEach(function(b){b.onclick=function(){ST.statScope=b.getAttribute("data-statscope");draw();};});
   var sbk=q("#stat-back"); if(sbk)sbk.onclick=function(){ST.statPlayer=null;ST.statScope="season";draw();};
@@ -5060,7 +5167,8 @@ function bind(){
   document.querySelectorAll("[data-scout]").forEach(function(b){b.onclick=function(){ scoutProspect(b.getAttribute("data-scout")); };});
   document.querySelectorAll("[data-watch]").forEach(function(b){b.onclick=function(e){ if(e)e.stopPropagation(); toggleWatch(b.getAttribute("data-watch")); };});
   document.querySelectorAll("[data-recexpand]").forEach(function(b){b.onclick=function(){ var id=b.getAttribute("data-recexpand"); ST.recExpand=(ST.recExpand===id)?null:id; draw(); };});
-  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; draw(); };});
+  document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; refreshRecOrder(); draw(); };});
+  var rsf=q("#rec-star-filter"); if(rsf)rsf.onchange=function(){ ST.recruitStars=rsf.value; ST.recExpand=null; refreshRecOrder(); draw(); };
   document.querySelectorAll("[data-depthtap]").forEach(function(b){b.onclick=function(){ tapDepth(b.getAttribute("data-depthtap")); };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
   var pw=q("#play-week"); if(pw)pw.onclick=playWeek;
@@ -5106,6 +5214,8 @@ function beginSeasonRecruiting(){
   s.nilTotal=money2(nilBudgetFor()+nilRoll); s.nilLeft=s.nilTotal; // refill the annual NIL budget
   s.roster.forEach(function(p){ p.nilFund=0; }); // retention funding resets each year
   ST.recruitPos="ALL"; // reset the board's position filter
+  ST.recruitStars="ALL"; // reset the board's star filter
+  ST.recRank=null;       // re-settle order for the new class on first paint
 }
 // Enter the preseason setup hub before Week 1
 function enterPreseason(){
