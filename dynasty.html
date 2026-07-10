@@ -199,7 +199,9 @@ a{color:inherit;text-decoration:none}
 .rec-badge.red{background:var(--red-bg);color:var(--red2)}
 .rec-bars{margin-top:9px;display:flex;flex-direction:column;gap:4px}
 .rec-bar-row{display:flex;align-items:center;gap:6px}
-.rec-bar-lbl{font-size:9px;font-weight:800;color:var(--muted);width:64px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Two rival names now share this column, so give it a little more room. Long school names
+   (Mississippi Valley State) still ellipsize; the full name is in the title attribute. */
+.rec-bar-lbl{font-size:9px;font-weight:800;color:var(--muted);width:78px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rec-bar{flex:1;height:8px;background:var(--cream);border:1.5px solid var(--border);border-radius:5px;overflow:hidden;position:relative}
 .rec-thresh{position:absolute;left:70%;top:-1px;bottom:-1px;width:2px;background:var(--green);opacity:.55;z-index:1}
 .rec-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
@@ -211,6 +213,9 @@ a{color:inherit;text-decoration:none}
 .rec-bar-fill{height:100%;border-radius:3px}
 .rec-bar-fill.you{background:var(--purple)}
 .rec-bar-fill.rival{background:#c9a24a}
+/* Runner-up rivals: same hue, dialled back so the actual threat stays visually dominant. */
+.rec-bar-fill.rival2{background:#c9a24a;opacity:.52}
+.rec-bar-row.dim .rec-bar-lbl,.rec-bar-row.dim .rec-bar-val{opacity:.68}
 .rec-bar-val{font-size:9px;font-weight:900;width:20px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
 .rec-rivals{font-size:9px;font-weight:700;color:var(--muted);margin-top:5px}
 /* recruiting position filter wheel */
@@ -1668,9 +1673,18 @@ function genRecruitClass(prestige, count){
   dedupeNames(cls, rosterNameSet());   // recruits don't collide with each other or current players
   return cls;
 }
-function weightedStars(prestige){
-  // higher prestige => more high-star recruits available
-  var roll=Math.random()*10 + prestige*1.4;
+// Which recruits even APPEAR on your board. Prestige is scaled within a subdivision, so a
+// raw p5 roll would hand Montana the same blue-chip board as Alabama. FCS programs recruit
+// from a market roughly two prestige tiers lower, and a true 5-star essentially never lands
+// there — the handful that appear are the "reach" recruits a rival will almost always win.
+function recruitTierFor(prestige, conf){
+  var p=prestige;
+  if(isFCSConf(conf)) p = Math.max(0, p - 2.6);   // FCS recruits ~2.6 tiers below FBS parity
+  return p;
+}
+function weightedStars(prestige, conf){
+  var p = recruitTierFor(prestige, (conf!=null?conf:(ST.save&&ST.save.conf)));
+  var roll=Math.random()*10 + p*1.4;
   if(roll>13) return 5; if(roll>10) return 4; if(roll>6.5) return 3; if(roll>3) return 2; return 1;
 }
 function starCost(st){ return [0,4,8,15,26,40][st]; }
@@ -1710,31 +1724,187 @@ var CONF_TIER={"SEC":3,"Big Ten":3,"Big 12":2,"ACC":2,"Pac-12":1,"American":1,"I
   // with the perennial national powers a shade more attractive.
   "MVFC":0,"Big Sky":0,"CAA":-1,"SoCon":-1,"Southland":-1,"OVC":-1,"Patriot League":-1,
   "Ivy League":-1,"MEAC":-1,"SWAC":-1,"NEC":-1,"Pioneer":-1,"UAC":-1,"FCS Independent":-1};
-// Build a single prospect at a given position.
-function makeProspect(pos, prestige){
-  var st=weightedStars(prestige);
-  var dev=rollDevByStars(st);
+// ── Program appeal ───────────────────────────────────────
+// What a recruit thinks of your program, independent of who he is. Four inputs:
+//   prestige  — the program's standing (scaled within its subdivision)
+//   momentum  — recent success: how you've done against expectations lately
+//   talent    — how good the roster actually is right now (team/unit overall)
+//   league    — conference appeal
+// Returns roughly 0-100. Used as the base of starting interest and of weekly progression.
+
+// Recent success for the PLAYER: wins over expectation across the last 3 seasons, plus
+// titles. A program on a run sells itself; one coming off 3-9 does not.
+function playerMomentum(){
+  var s=ST.save, h=(s.history||[]).slice(-3);
+  if(!h.length) return 0;
+  var m=0;
+  h.forEach(function(y,i){
+    var w=(i+1)/h.length;                       // most recent season weighted heaviest
+    m += ((y.wins||0) - (y.expect||7)) * 1.6 * w;
+  });
+  m += (s.natlTitles||0)*3 + (s.titles||0)*1.2; // rings are the loudest recruiting pitch
+  return Math.max(-14, Math.min(16, m));
+}
+// Recent success for a CPU program: how far its rating has drifted above/below the static
+// baseline it started from. simLeagueSeason/simLeaguePortal move t.ovr each offseason, so a
+// program trending up reads as hot even though we never stored its win history.
+function cpuMomentum(name, t){
+  if(!t) return 0;
+  var base=(TEAM_RATINGS[name]||FCS_TEAM_RATINGS[name]||{}).v;
+  if(base==null) base = 44 + (t.p||3)*6;        // same fallback initLeague uses
+  return Math.max(-14, Math.min(16, (t.ovr - base) * 1.5));
+}
+// How good the program is RIGHT NOW. For you, your unit's rating (an OC sells the offense).
+// Anchored so ~70 ovr is neutral; elite rosters pull hard, bad ones repel.
+function talentPull(ovr){ return Math.max(-12, Math.min(14, (ovr - 70) * 0.85)); }
+
+// The full appeal score for YOUR program.
+//
+// Talent is read from the SAME source the CPU uses — the league's team rating — otherwise
+// the two sides are measured on different scales. myUnitRating() is your side of the ball
+// (typically several points off the team number), so using it here while rivals used t.ovr
+// handed every CPU blue blood a systematic pull advantage over you. We blend the two: the
+// program's overall standing dominates, but a coordinator's own unit still counts for
+// something on the trail.
+function myTalentOvr(){
+  var s=ST.save, L=s.league;
+  var team = (L&&L.teams&&L.teams[s.school]) ? L.teams[s.school].ovr : 70;
+  var unit = myUnitRating();
+  return (s.role==="HC") ? team : Math.round(team*0.6 + unit*0.4);
+}
+// A floor of goodwill every program enjoys with a recruit who fits it: even a 1-star program
+// is somebody's dream school, and without this a p1/tier-0 team's pull collapses to ~4 and it
+// loses its OWN tier three times out of four.
+var PULL_BASE = 12;
+function programPull(){
+  var s=ST.save;
+  var prestigePull = s.prestige * 5;                       // 5 → 25
+  var conf = (CONF_TIER[s.conf]||0) * 3.5;                 // -3.5 → +10.5
+  return PULL_BASE + prestigePull + conf + playerMomentum() + talentPull(myTalentOvr());
+}
+// Appeal for a CPU rival, on the same scale, so head-to-head battles are apples-to-apples.
+function rivalPull(name, t, prestige){
+  var conf=(CONF_TIER[(t&&t.c)||""]||0)*3.5;
+  var ovr=(t&&t.ovr)||(44+(prestige||3)*6);
+  return PULL_BASE + (prestige||3)*5 + conf + cpuMomentum(name,t) + talentPull(ovr);
+}
+
+// How badly a recruit outclasses (or is outclassed by) a program. A 5-star looking at a
+// program that lands 2-stars is being asked to step down two full tiers; he is not
+// interested, and no amount of prestige-adjacent noise should make him so. Conversely a
+// 1-star at a blue blood knows he will never see the field.
+//
+// Returns a MULTIPLIER on the program's pull. Reaching up is punished far harder than
+// reaching down, because talent flows downhill only under duress.
+// The star a program TYPICALLY lands. Derived from the same distribution weightedStars()
+// samples, so fit is self-consistent with the board by construction rather than a guess:
+//   roll = U(0,10) + p*1.4, thresholds at 3 / 6.5 / 10 / 13
+function expectedStarFor(prestige, conf){
+  var p=recruitTierFor(prestige, conf), e=0;
+  // P(roll > t) for each threshold, clamped to [0,1]; mean star = 1 + sum of tail probs
+  [3,6.5,10,13].forEach(function(t){
+    e += Math.max(0, Math.min(1, (p*1.4 + 10 - t) / 10));
+  });
+  return 1 + e;
+}
+// A recruit is "in range" anywhere from the program's typical star up to about one tier
+// above it — Alabama's mean recruit is a 4.1, but a 5-star is squarely a target, not a
+// reach. Only the gap BEYOND that comfort band is punished, and punished steeply: two full
+// tiers above the band and the recruit simply isn't listening.
+function starFitMult(st, prestige, conf){
+  var exp=expectedStarFor(prestige, conf);
+  var reach = st - (exp + 0.9);            // 0.9-star grace band above the mean
+  if(reach > 0) return Math.max(0.05, 1 - reach*0.80);
+  var below = st - exp;                    // stepping down is only mildly discouraged
+  if(below < 0) return Math.max(0.62, 1 + below*0.14);
+  return 1;
+}
+
+// Choose the schools competing for a recruit, weighted by how plausibly each would land him.
+//
+// starFitMult() already answers "does this recruit fit this program?" — it is 1.00 for a
+// 5-star at Alabama and 0.05 at McNeese. Squaring it sharpens the contrast (400:1) so the
+// blue-bloods dominate a blue-chip's list while still leaving room for the occasional
+// surprise, and a hard floor drops programs with no business in the conversation at all.
+//
+// Candidates span BOTH subdivisions on purpose. A 5-star on Montana's board should be
+// choosing between Georgia and Texas; the FCS school is the long shot, not the field.
+var RIVAL_MIN_FIT = 0.22;   // below this a program simply isn't recruiting him
+// starFitMult is deliberately forgiving about stepping DOWN — a recruit will still take a
+// call from a program beneath him. For picking who actually COMPETES, that's wrong: Alabama
+// does not offer 1-stars, because it has better options. So for rival selection we also
+// penalize the program for slumming, symmetrically with how the recruit penalizes reaching.
+function rivalOfferWeight(st, t){
+  var fit = starFitMult(st, t.p, t.c);              // recruit's view of the program
+  if(fit < RIVAL_MIN_FIT) return 0;                 // he isn't listening
+  var exp = expectedStarFor(t.p, t.c);
+  var below = exp - st;                             // how far the recruit is beneath them
+  var offer = (below > 0.5) ? Math.max(0, 1 - (below-0.5)*1.15) : 1;  // program's view of him
+  return fit*fit * offer;
+}
+function rivalCandidates(st, exclude){
+  var out=[];
+  ALL_TEAMS.forEach(function(t){
+    if(t.n===exclude) return;
+    var w=rivalOfferWeight(st, t);
+    if(w<=0.01) return;
+    out.push({t:t, w:w});
+  });
+  return out;
+}
+function pickRivalsFor(st, exclude){
+  var L=ST.save.league;
+  var cand=rivalCandidates(st, exclude);
+  // A blue-chip's list is short and elite; a low-star has a long, scattered field.
   var nRivals=1+Math.floor(Math.random()*3);
   var rivals=[];
-  var pool=divTeams(myDivision()).filter(function(t){return t.n!==ST.save.school;});
-  for(var r=0;r<nRivals;r++){
-    var rv=pool.splice(Math.floor(Math.random()*pool.length),1)[0];
-    if(rv) rivals.push({name:rv.n, p:rv.p, interest: 20+Math.floor(Math.random()*25)});
+  for(var r=0; r<nRivals && cand.length; r++){
+    var total=0, i;
+    for(i=0;i<cand.length;i++) total+=cand[i].w;
+    var roll=Math.random()*total, acc=0, hit=cand.length-1;
+    for(i=0;i<cand.length;i++){ acc+=cand[i].w; if(roll<=acc){ hit=i; break; } }
+    var rv=cand.splice(hit,1)[0].t;          // no duplicates
+    var rt=L&&L.teams?L.teams[rv.n]:null;
+    var rPull = rivalPull(rv.n, rt, rv.p) * starFitMult(st, rv.p, rv.c);
+    rivals.push({name:rv.n, p:rv.p, interest: Math.max(3, Math.min(70, Math.round(rPull*0.62 + rnd(-6,6)))) });
   }
-  // Fit window: a recruit is warmest on programs at HIS level (he'll play), cooler when the
-  // program is a reach (won't play) or beneath him (why step down). Prestige & conference still pull.
-  var expected = 1.2 + prestige*0.66;                        // star level this program typically lands
-  var fit = Math.max(0, 1 - Math.abs(st - expected)/2.5);    // 1 at a perfect fit
-  var confBonus = (CONF_TIER[ST.save.conf]||0)*2;            // power/top-league appeal
-  var startInterest = Math.max(5, Math.min(66, 14 + prestige*3 + Math.round(fit*16) + confBonus + rnd(-5,5)
-    + (hasArch("recruiter")?8:0) + (hasAbility("rec2")?8:0) + (hasAbility("rec5")?10:0) + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0)
-    + facLvl("academics")*3 + facLvl("stadium")*2));
+  return rivals;
+}
+
+// Build a single prospect at a given position.
+function makeProspect(pos, prestige){
+  var s=ST.save;
+  var st=weightedStars(prestige, s.conf);
+  var dev=rollDevByStars(st);
+  var L=s.league;
+
+  // Rivals are the programs that would REALISTICALLY chase this recruit — a 5-star is
+  // fielding calls from Alabama, not McNeese. Candidates are drawn from BOTH subdivisions
+  // (an FCS program chasing a blue-chip is losing him to an FBS school, not to a peer) and
+  // sampled with probability proportional to how plausible they are for his star level.
+  var rivals=pickRivalsFor(st, s.school);
+
+  // ── Starting interest ──
+  // Base is the program's appeal (prestige + conference + recent success + current talent),
+  // scaled by how well the recruit fits the program's level. Coaching perks and facilities
+  // add on top, but they are ADDITIVE — they cannot rescue a program a blue-chip has already
+  // written off, which is the whole point of the multiplier.
+  var pull = programPull();
+  var fitM = starFitMult(st, prestige, s.conf);
+  var coachBonus = (hasArch("recruiter")?8:0) + (hasAbility("rec2")?8:0) + (hasAbility("rec5")?10:0)
+    + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0)
+    + facLvl("academics")*3 + facLvl("stadium")*2;
+  // A reach recruit discounts the coaching pitch too — a great recruiter at a 1-star program
+  // still isn't landing a 5-star cold, he just gets a slightly better hearing.
+  var startInterest = Math.max(3, Math.min(70,
+    Math.round(pull*0.62*fitM + coachBonus*(0.35+0.65*fitM) + rnd(-5,5))));
   var lo=Math.max(1,st-1), hi=Math.min(5,st+1);
   return {
     id:"r"+Math.random().toString(36).slice(2,8),
     _seed:Math.random(),   // fixed board-order seed: keeps order stable & OVR-blind
     n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev, arch:rollArch(pos),
     interest:startInterest,
+    fitM:money2(fitM),      // how much this recruit is reaching; drives weekly progression too
     rivals:rivals,
     status:"open",
     committedTo:null,
@@ -1816,9 +1986,15 @@ function recruitProspect(id){
   if((s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
   s.recruitPtsLeft--;
   b.wkRec=(b.wkRec||0)+1;
-  // each point adds interest, with diminishing returns as it gets high; a 5★ is harder to sway.
-  // Tuned so closing a recruit takes ~7-9 clicks — you can seriously pursue ~10 targets a year.
-  var gain = Math.max(3, 8 - Math.floor(b.st*0.7) - Math.floor(b.interest/22));
+  // Each point adds interest, with diminishing returns as it gets high; a 5★ is harder to sway.
+  // Tuned so closing a recruit takes ~7-9 clicks at a program he actually fits.
+  //
+  // fitM scales the whole gain: chasing a recruit two tiers above your program is a grind
+  // (0.06x), not merely slower. This is what stops an FCS coach from simply clicking a
+  // blue-chip to 100 — he can lead early and still lose the battle to a rival who fits.
+  var fitM = (b.fitM!=null) ? b.fitM : starFitMult(b.st, s.prestige, s.conf);
+  var base = 8 - Math.floor(b.st*0.7) - Math.floor(b.interest/22);
+  var gain = Math.max(1, Math.round(Math.max(3, base) * (0.30 + 0.70*fitM)));
   b.interest = Math.min(100, b.interest + gain);
   if(b.interest>=100){ b.status="committed"; b.committedTo=s.school; toast("🎉 "+x(b.n)+" committed to you!"); }
   persist(); draw();
@@ -2618,11 +2794,21 @@ function recruitTab(){
       h+='<div class="rec-detail">';
       h+='<div class="rec-bars">';
       h+='<div class="rec-bar-row"><span class="rec-bar-lbl">You</span><div class="rec-bar"><div class="rec-thresh" title="commit threshold"></div><div class="rec-bar-fill you" style="width:'+b.interest+'%"></div></div><span class="rec-bar-val">'+b.interest+'</span></div>';
-      if(topRival){
-        h+='<div class="rec-bar-row"><span class="rec-bar-lbl">'+x(topRival.name).slice(0,12)+'</span><div class="rec-bar"><div class="rec-bar-fill rival" style="width:'+rivalLead+'%"></div></div><span class="rec-bar-val">'+rivalLead+'</span></div>';
-      }
+      // Show the top few rivals, strongest first, so you can see the whole battle rather than
+      // a single opponent plus an opaque "+2 others". The leader is drawn at full strength;
+      // the rest are dimmed so the real threat still reads at a glance.
+      var SHOWN_RIVALS=2;
+      var ranked=b.rivals.slice().sort(function(a,c){ return c.interest-a.interest; });
+      ranked.slice(0,SHOWN_RIVALS).forEach(function(rv,i){
+        var lead=(i===0);
+        h+='<div class="rec-bar-row'+(lead?"":" dim")+'">'+
+           '<span class="rec-bar-lbl" title="'+x(rv.name)+'">'+x(rv.name)+'</span>'+
+           '<div class="rec-bar"><div class="rec-bar-fill '+(lead?"rival":"rival2")+'" style="width:'+rv.interest+'%"></div></div>'+
+           '<span class="rec-bar-val">'+rv.interest+'</span></div>';
+      });
       h+='</div>';
-      if(b.rivals.length>1) h+='<div class="rec-rivals">+'+(b.rivals.length-1)+' other school'+(b.rivals.length-1>1?"s":"")+' pursuing</div>';
+      var hidden=Math.max(0, ranked.length-SHOWN_RIVALS);
+      if(hidden>0) h+='<div class="rec-rivals">+'+hidden+' other school'+(hidden>1?"s":"")+' pursuing</div>';
       h+='<div class="rec-actions">';
       if(b.scout<maxScoutTier()){
         var isLast=(b.scout===maxScoutTier()-1);
@@ -4407,6 +4593,7 @@ function setupPlayoff(){
     Object.keys(L.teams).forEach(function(n){
       if(n===s.school)return;
       var t=L.teams[n];
+      if((t.div||"FBS")!=="FBS") return;   // the CFP is an FBS event — no FCS teams
       others.push({name:n, p:t.p, you:false, g5:!isPowerConf(t.c),
                    score: cfpScore({w:t.w, l:t.l, p:t.p, conf:t.c, wonConf:isConfChamp(n), ovr:t.ovr})});
     });
