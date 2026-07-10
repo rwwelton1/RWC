@@ -4535,14 +4535,14 @@ function enterPostseason(){
   var s=ST.save;
   if(myDivision()==="FCS"){ enterFCSPostseason(); return; }
   var w=s.wins;
-  var power=isPowerConf(s.conf);
-  // Power programs make it on record. Group-of-Five teams essentially need to win their
-  // conference (auto-bid) AND have a strong record — mirroring the real G5-gets-one-bid rule.
-  var makePlayoff = power
-    ? ( w>=10 || (w>=9 && s.prestige>=3) || (w>=8 && s.prestige>=5) )
-    : ( w>=11 && s._wonConfThisYear );   // G5: only the conf champ with a great record sneaks in
-  if(makePlayoff){
-    setupPlayoff();
+  // You make the Playoff iff you are in the top 12 of the SAME résumé rankings shown on the
+  // CFP tab. Previously this used a record heuristic (9 wins + prestige) that was blind to the
+  // rankings, so a 9-3 team ranked ~30th would still be handed the #12 seed while showing
+  // "NR" on the ranking page. One source of truth now: rankedTeams().
+  var ranks=rankedTeams();
+  var myRank=0; ranks.forEach(function(r,i){ if(r.you)myRank=i+1; });
+  if(myRank>=1 && myRank<=12){
+    setupPlayoff(ranks);
     ST.screen="season"; ST.seasonTab="week"; persist(); draw(); return;
   }
   if(w>=6){
@@ -4821,29 +4821,19 @@ function fcsSimRest(fromRound){
 }
 
 // Build the 12-team bracket seeded by strength-weighted resume score.
-function setupPlayoff(){
+function setupPlayoff(ranks){
   var s=ST.save, L=s.league;
-  var myScore = cfpScore({w:s.wins, l:s.losses, p:s.prestige, conf:s.conf, wonConf:isConfChamp(s.school), ovr:(L?L.teams[s.school].ovr:70), you:true});
-  var iAmG5 = !isPowerConf(s.conf);
-  var field=[{name:s.school, p:s.prestige, you:true, score:myScore, g5:iAmG5}];
-  // pull the actual best 11 teams from the living league by resume score
-  var others=[];
-  if(L){
-    Object.keys(L.teams).forEach(function(n){
-      if(n===s.school)return;
-      var t=L.teams[n];
-      if((t.div||"FBS")!=="FBS") return;   // the CFP is an FBS event — no FCS teams
-      others.push({name:n, p:t.p, you:false, g5:!isPowerConf(t.c),
-                   score: cfpScore({w:t.w, l:t.l, p:t.p, conf:t.c, wonConf:isConfChamp(n), ovr:t.ovr})});
-    });
-  }
-  others.sort(function(a,b){return b.score-a.score;});
-  for(var i=0;i<11 && i<others.length;i++){ field.push(others[i]); }
-  // seed by resume score
-  field.sort(function(a,b){return b.score-a.score;});
-  // Enforce realism: a Group-of-Five team can never be seeded higher than 9th.
-  var you=null; field.forEach(function(f){ if(f.you)you=f; });
+  // The field IS the top 12 of the résumé rankings — the exact list the CFP tab shows, so the
+  // bracket and the rankings can never disagree. You are in it only if you ranked top 12.
+  ranks = ranks || rankedTeams();
+  var top12 = ranks.slice(0, 12);
+  var field = top12.map(function(r){
+    return {name:r.name, p:r.p, you:!!r.you, score:r.score, g5:r.g5};
+  });
+  // Seed by résumé score (already the sort order of rankedTeams).
   field.forEach(function(f,idx){ f.seed=idx+1; });
+  // Enforce realism: a Group-of-Five team can never be seeded higher than 9th (auto-bid caps).
+  var you=null; field.forEach(function(f){ if(f.you)you=f; });
   if(you && you.g5 && you.seed<9){
     field = field.filter(function(f){return !f.you;});
     field.splice(8,0,you);           // insert at index 8 => seed 9
