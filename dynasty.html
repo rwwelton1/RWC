@@ -407,15 +407,38 @@ a{color:inherit;text-decoration:none}
 .result-tag.win{background:var(--green-bg);color:var(--green)}
 .result-tag.loss{background:var(--red-bg);color:var(--red2)}
 /* season expectations bar */
-.expect-bar{display:flex;gap:10px;background:var(--cream);border:2px solid var(--border);border-radius:12px;padding:10px 12px;box-shadow:3px 3px 0 var(--border);margin-bottom:12px}
-.exp-left{flex:1;min-width:0}
-.exp-lbl{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
-.exp-goal{font-size:14px;font-weight:900;line-height:1.15;margin-top:1px}
-.exp-sub{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:2px}
-.exp-right{flex-shrink:0;text-align:right;min-width:82px}
-.exp-sec{font-size:12px;font-weight:900}
-.exp-secbar{height:6px;background:#e4ddd0;border:1.5px solid var(--border);border-radius:6px;overflow:hidden;margin:3px 0 0}
-.exp-secfill{height:100%;border-radius:4px;transition:width .3s}
+/* The expectation card wraps the header AND the goal rows, so the whole thing reads as one
+   object. The border/shadow live on the card; the header button inside is flat and fills it. */
+.expect-card{background:var(--cream);border:2px solid var(--border);border-radius:12px;
+  box-shadow:3px 3px 0 var(--border);margin-bottom:12px;overflow:hidden}
+.expect-bar{display:flex;gap:10px;align-items:center;width:100%;background:transparent;border:none;
+  border-radius:0;padding:10px 12px;box-shadow:none;margin:0;text-align:left;cursor:pointer}
+.expect-bar:active{background:rgba(0,0,0,.04)}
+/* Count + chevron on the far edge: the state stays legible while collapsed. */
+.exp-toggle{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding-left:9px;margin-left:2px;border-left:2px solid var(--border2)}
+.exp-cnt{font-size:11px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
+.exp-chev{font-size:10px;font-weight:900;color:var(--muted);line-height:1}
+.exp-left{flex:1;min-width:0;display:block}
+.exp-lbl{display:block;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.exp-goal{display:block;font-size:14px;font-weight:900;line-height:1.15;margin-top:1px}
+.exp-sub{display:block;font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:2px}
+.exp-right{flex-shrink:0;text-align:right;min-width:82px;display:block}
+.exp-sec{display:block;font-size:12px;font-weight:900}
+.exp-secbar{display:block;height:6px;background:#e4ddd0;border:1.5px solid var(--border);border-radius:6px;overflow:hidden;margin:3px 0 0}
+.goal-list{display:flex;flex-direction:column;gap:4px}
+/* Inside the expectation card: separated by a rule, flush with the header's padding. */
+.expect-card .goal-list{margin:0;padding:0 12px 11px;border-top:2px solid var(--border2);padding-top:9px}
+.expect-card .goal-row{box-shadow:none;border-width:1.5px}
+/* Standalone (the season recap): keep the original spacing. */
+.result-card .goal-list{margin:8px 0 2px}
+.goal-row{display:flex;align-items:center;gap:7px;padding:6px 9px;border:2px solid var(--border);border-radius:9px;background:#fff;box-shadow:2px 2px 0 var(--border)}
+.goal-row.met{background:var(--gold-bg);border-color:var(--gold-dark)}
+.goal-box{width:15px;height:15px;flex-shrink:0;border:2px solid var(--border);border-radius:4px;background:#fff;font-size:10px;font-weight:900;line-height:12px;text-align:center;color:var(--green)}
+.goal-row.met .goal-box{background:var(--green);color:#fff;border-color:var(--border)}
+.goal-txt{flex:1;min-width:0;font-size:10.5px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.goal-detail{font-size:9px;font-weight:900;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+.exp-secfill{display:block;height:100%;border-radius:4px;transition:width .3s}
 /* job offers */
 .job-offer{display:flex;align-items:center;gap:10px;background:#fff;border:2px solid var(--border);border-radius:11px;padding:10px 12px;box-shadow:3px 3px 0 var(--border);margin-bottom:8px}
 .job-body{flex:1;min-width:0}
@@ -1384,15 +1407,143 @@ function newSave(team, role){
   // start with your archetype's matching tier-1 skill already unlocked
   var startSkill=archStartSkill(s.archetype);
   if(startSkill) s.abilities.push(startSkill);
-  s.expectWins=expectWinsFor(team.p);
+  s.expectWins=expectWinsFor(team.p, team.c);
   s.league=initLeague();
   s.gameplan={offBalance:53, defBalance:50};
   s.offScheme="prostyle"; s.defScheme="base43";
   s._lastWins=0; s.nilTotal=NIL_BASE[team.p]||8; s.nilLeft=s.nilTotal;
+  s._goalsCollapsed=false;   // the goal list opens on a new dynasty; the user can fold it away
   return s;
 }
 // Season win expectation by program prestige (of a 12-game schedule)
-function expectWinsFor(prestige){ return [0,3,4,6,8,9][prestige]; }
+// ── Season expectations ──────────────────────────────────
+// Three goals every year, judged independently. The AD wants a win total, a postseason
+// result, and evidence you're building something. Prestige raises every bar; the postseason
+// goal is expressed in the language of your OWN subdivision (an FCS coach is asked to reach
+// the quarterfinals of a 24-team bracket, not "a bowl game").
+function expectWinsFor(prestige, conf){
+  // FCS plays 11 games, FBS 12, so the FCS bars sit one win lower at the top.
+  if(conf!=null && isFCSConf(conf)) return [0,3,4,6,7,8][prestige];
+  return [0,3,4,6,8,9][prestige];
+}
+
+// The postseason bar, by prestige. Keys are checked against furthestRoundReached().
+// FBS: bowl → CFP → quarterfinal → title.  FCS: playoff → quarterfinal → semifinal → title.
+// SWAC/MEAC have no bracket, so their bar is the Celebration Bowl; the Ivy has no postseason
+// at all and is judged on the conference race instead.
+var POST_GOAL_ORDER=["none","postseason","r2","qf","sf","champ"];
+function postGoalFor(prestige, conf){
+  // SWAC/MEAC never enter the bracket; their season peaks at the Celebration Bowl.
+  if(isCelebrationConf(conf)){
+    if(prestige>=4) return {key:"celebration", label:"Win the Celebration Bowl"};
+    if(prestige>=2) return {key:"conf",        label:"Win the "+conf};
+    return {key:"tophalf", label:"Finish in the top half of the "+conf};
+  }
+  // A league that declines all bids can only be judged on its own race.
+  if(isNoPostseasonConf(conf)){
+    return prestige>=3 ? {key:"conf", label:"Win the "+conf}
+                       : {key:"tophalf", label:"Finish in the top half of the "+conf};
+  }
+  if(isFCSConf(conf)){
+    if(prestige>=5) return {key:"sf",         label:"Reach the FCS semifinals"};
+    if(prestige>=4) return {key:"qf",         label:"Reach the FCS quarterfinals"};
+    if(prestige>=3) return {key:"postseason", label:"Make the 24-team FCS playoff"};
+    if(prestige>=2) return {key:"tophalf",    label:"Finish in the top half of the "+conf};
+    return {key:"none", label:"No postseason expectation"};
+  }
+  if(prestige>=5) return {key:"qf",         label:"Reach the CFP quarterfinals"};
+  if(prestige>=4) return {key:"postseason", label:"Make the College Football Playoff"};
+  if(prestige>=3) return {key:"postseason", label:"Reach a bowl game"};
+  if(prestige>=2) return {key:"tophalf",    label:"Finish in the top half of the "+conf};
+  return {key:"none", label:"No postseason expectation"};
+}
+
+// A program-building goal: proof the future is brighter than the present. The bar is anchored
+// to the star this program ACTUALLY lands (expectedStarFor) rather than raw prestige, so it is
+// always a stretch and never a fantasy — "sign 2 four-stars" is impossible at an FCS school
+// that leads 9% of its 4-star battles.
+function buildGoalFor(prestige, conf){
+  var exp=expectedStarFor(prestige, conf);
+  // How hard is a recruit one tier up? starFitMult answers directly. Anything under ~0.5 is a
+  // battle you lose most of the time, so ask for ONE of those; a comfortable tier can be asked
+  // for twice. This is what keeps "sign 2 4-stars" off Montana's list (its 4-star fit is 0.77
+  // but its lead rate is 11%) while leaving it on Alabama's.
+  // Ask for a HAUL at the tier you actually win, not a lottery ticket one tier up. Chasing a
+  // star you lead 3% of the time isn't a goal, it's a coin flip; signing several of the star
+  // you lead ~50% of the time is a real recruiting season and a real test of point management.
+  var star=Math.min(5, Math.max(2, Math.round(exp)));
+  var n=3;
+  // The very top programs get asked for the tier above, because they genuinely land it.
+  if(starFitMult(star+1, prestige, conf) >= 0.95 && star<5){ star+=1; n=2; }
+  return {key:"recruit", star:star, n:n,
+          label:(n>1?("Sign "+n+" "+star+"★ recruits"):("Sign a "+star+"★ recruit"))};
+}
+
+// How far you actually got. "" if you never made a postseason field.
+function furthestRoundReached(){
+  var P=ST.post, s=ST.save;
+  if(!P) return "none";
+  if(P.mode==="celebration") return P.done && P.result && P.result.us>P.result.them ? "celebration" : "postseason";
+  if(P.mode==="bowl") return "postseason";
+  if(P.mode!=="playoff" && P.mode!=="fcsPlayoff") return "none";
+  if(P.champion!=null && P.champion===P.mySeed) return "champ";
+  // The round you were eliminated in IS the round you reached.
+  return P.round || "postseason";
+}
+function postGoalMet(goal){
+  var s=ST.save, P=ST.post;
+  if(goal.key==="none") return true;
+  if(goal.key==="conf") return !!s._wonConfThisYear;
+  if(goal.key==="celebration") return furthestRoundReached()==="celebration";
+  var reached=furthestRoundReached();
+  if(reached==="none") return false;
+  if(reached==="champ") return true;
+  if(goal.key==="postseason") return true;   // you made a field at all
+  var want=POST_GOAL_ORDER.indexOf(goal.key);
+  var got =POST_GOAL_ORDER.indexOf(reached);
+  return got>=0 && want>=0 && got>=want;
+}
+function buildGoalMet(goal){
+  var s=ST.save;
+  if(goal.key==="recruit"){
+    var cls=(typeof committedRecruits==="function") ? committedRecruits() : [];
+    var n=cls.filter(function(b){ return b.st>=goal.star; }).length;
+    return n>=goal.n;
+  }
+  if(goal.key==="tophalf"){
+    var t=computeConfStandings();
+    if(!t.length) return false;
+    var idx=-1;
+    t.forEach(function(r,i){ if(r.you) idx=i; });
+    return idx>=0 && idx < Math.ceil(t.length/2);
+  }
+  return false;
+}
+// The full set, evaluated. Used by the banner and the season recap alike.
+function seasonGoals(){
+  var s=ST.save;
+  var wins={key:"wins", label:s.expectWins+"+ wins", met:(s.wins>=s.expectWins),
+            detail:s.wins+"–"+s.losses};
+  var pg=postGoalFor(s.prestige, s.conf);
+  var post={key:"post", label:pg.label, met:postGoalMet(pg), goal:pg};
+  var bg=buildGoalFor(s.prestige, s.conf);
+  var build={key:"build", label:bg.label, met:buildGoalMet(bg), goal:bg};
+  return [wins, post, build];
+}
+function goalsMetCount(){ var n=0; resolvedGoals().forEach(function(g){ if(g.met)n++; }); return n; }
+// ST.post is cleared on the way to the offseason, but the recap, XP and job-security math all
+// need to know how far you got. Freeze the evaluated goals onto the save at that moment.
+function snapshotSeasonGoals(){
+  var s=ST.save; if(!s) return;
+  s._goals = seasonGoals().map(function(g){ return {key:g.key, label:g.label, met:!!g.met, detail:g.detail||""}; });
+  s._goalsMet = s._goals.filter(function(g){ return g.met; }).length;
+}
+// Prefer the frozen snapshot once the postseason is over; otherwise evaluate live.
+function resolvedGoals(){
+  var s=ST.save;
+  if(s && s._goals && s._goals.length) return s._goals;
+  return seasonGoals();
+}
 function expectLabel(prestige){
   return ["","Compete & develop","Show clear progress","Reach a bowl game","New Year's Six push","Championship contender"][prestige];
 }
@@ -1991,6 +2142,9 @@ function weeklyRecruitPoints(){
 }
 // Spend a point of recruiting effort on a prospect this week (raises your interest).
 var MAX_WEEKLY_RECRUIT=3; // most "+ Recruit" pushes you can make on one prospect in a single week
+// Points granted during the preseason, for scouting and opening relationships. Spent or not,
+// they end at kickoff: week 1 gets its own weekly allowance.
+var PRESEASON_RECRUIT_POINTS=34;
 function recruitProspect(id){
   var s=ST.save, b=(s.board||[]).filter(function(x){return x.id===id;})[0];
   if(!b || b.status!=="open"){ return; }
@@ -3721,13 +3875,48 @@ function rosterNeeds(){
   return need;
 }
 function spent(){ var s=0; ST.recruitClass.forEach(function(r){ if(ST.signed[r.id]) s+=r.cost; }); return s; }
+// One card: the season expectation, job security, and — folded inside it — the AD's three
+// goals. The whole header is the toggle, so there's no separate "Season Goals" strip eating a
+// row of its own. Opens at the start of each season, then remembers your choice.
 function expectBanner(){
   var s=ST.save;
   var sec=securityLabel(s.jobSecurity);
-  var h='<div class="expect-bar">';
-  h+='<div class="exp-left"><div class="exp-lbl">Season Expectation</div><div class="exp-goal">'+x(expectLabel(s.prestige))+'</div><div class="exp-sub">Athletic director wants '+s.expectWins+'+ wins</div></div>';
-  h+='<div class="exp-right" style="color:'+sec.c+'"><div class="exp-sec">'+sec.t+'</div><div class="exp-secbar"><div class="exp-secfill" style="width:'+Math.max(4,Math.min(100,s.jobSecurity))+'%;background:'+sec.c+'"></div></div><div class="exp-sub">Job Security</div></div>';
-  return h+'</div>';
+  var gs=resolvedGoals();
+  var nMet=0; gs.forEach(function(g){ if(g.met)nMet++; });
+  var open = !s._goalsCollapsed;
+
+  var h='<div class="expect-card'+(open?" open":"")+'">';
+  // NB: <button> only accepts phrasing content — a <div> inside one is invalid and Safari can
+  // collapse the flex layout. Spans with display:block give identical rendering, legally.
+  h+='<button class="expect-bar" id="goal-toggle" aria-expanded="'+(open?"true":"false")+'">';
+  h+='<span class="exp-left"><span class="exp-lbl">Season Expectation</span>'+
+     '<span class="exp-goal">'+x(expectLabel(s.prestige))+'</span>'+
+     '<span class="exp-sub">'+x(s.school)+' &middot; '+x(s.conf)+'</span></span>';
+  h+='<span class="exp-right" style="color:'+sec.c+'"><span class="exp-sec">'+sec.t+'</span>'+
+     '<span class="exp-secbar"><span class="exp-secfill" style="width:'+Math.max(4,Math.min(100,s.jobSecurity))+'%;background:'+sec.c+'"></span></span>'+
+     '<span class="exp-sub">Job Security</span></span>';
+  // Goal count + chevron ride on the far edge so the state is legible while collapsed.
+  h+='<span class="exp-toggle"><span class="exp-cnt">'+nMet+'/'+gs.length+'</span>'+
+     '<span class="exp-chev">'+(open?"▾":"▸")+'</span></span>';
+  h+='</button>';
+  if(open) h+=goalChecklist(false);
+  h+='</div>';
+  return h;
+}
+// Just the three goal rows, with a live tick as you meet them. The expectation card owns the
+// collapsing; the season recap renders this bare, since the verdict should always be read.
+function goalChecklist(){
+  var gs=resolvedGoals();
+  var h='<div class="goal-list">';
+  gs.forEach(function(g){
+    h+='<div class="goal-row'+(g.met?" met":"")+'">'+
+       '<span class="goal-box">'+(g.met?"✓":"")+'</span>'+
+       '<span class="goal-txt">'+x(g.label)+'</span>'+
+       (g.detail?'<span class="goal-detail">'+x(g.detail)+'</span>':'')+
+       '</div>';
+  });
+  h+='</div>';
+  return h;
 }
 function recruitScreen(){
   var budget=ST.save.budget, used=spent(), left=budget-used;
@@ -4396,6 +4585,7 @@ function enterFCSPostseason(){
 
   // FCS has no bowl system below the playoff — a losing-out season simply ends.
   ST.post={mode:"none", reason:"missed"};
+  snapshotSeasonGoals();
   ST.screen="season"; ST.seasonTab="week"; persist(); draw();
 }
 
@@ -5188,15 +5378,16 @@ function offseasonScreen(){
      '<p><b style="font-size:16px;color:'+(win>loss?"var(--green)":"var(--red2)")+'">'+win+'–'+loss+'</b><br>'+
      (win>=10?"Elite season! 🏆":win>=7?"Bowl-worthy year. 🎉":win>=5?"Respectable campaign.":"Rebuilding year.")+'</p></div>';
 
-  // expectation result
-  var met = win>=s.expectWins;
-  var diff = win - s.expectWins;
-  var resTxt = diff>=2?"Exceeded expectations — the boosters are thrilled.":
-               diff>=0?"Met the season's expectation.":
-               diff>=-2?"Fell short of expectations. Seat's getting warm.":
-               "Badly missed expectations. The AD is not happy.";
-  h+='<div class="result-card '+(met?"win":"loss")+'" style="padding:14px">'+
-     '<div style="font-size:13px;font-weight:900">'+(met?"✓ ":"✕ ")+win+' wins vs '+s.expectWins+' expected</div>'+
+  // ── The AD's three goals, judged ──
+  var gs=resolvedGoals();
+  var nMet=gs.filter(function(g){return g.met;}).length;
+  var resTxt = nMet===3 ? "A clean sweep. The boosters are thrilled and your seat is ice cold." :
+               nMet===2 ? "Two of three. The AD is satisfied, if not delighted." :
+               nMet===1 ? "One box ticked. Questions are being asked." :
+                          "Nothing to show for the year. The AD is not happy.";
+  h+='<div class="result-card '+(nMet>=2?"win":"loss")+'" style="padding:14px">'+
+     '<div style="font-size:13px;font-weight:900">'+nMet+' of 3 expectations met</div>'+
+     goalChecklist()+
      '<p style="font-size:11px;font-weight:700;color:var(--muted);margin-top:5px">'+resTxt+'</p></div>';
 
   // ── Where the roster stands, and where it's going ──
@@ -5303,6 +5494,10 @@ function bind(){
   document.querySelectorAll("[data-role]").forEach(function(b){b.onclick=function(){ST.setup.role=b.getAttribute("data-role");draw();};});
   document.querySelectorAll("[data-arch]").forEach(function(b){b.onclick=function(){ST.setup.archetype=b.getAttribute("data-arch");draw();};});
   var sb=q("#start-btn"); if(sb)sb.onclick=startDynasty;
+  var gt=q("#goal-toggle"); if(gt)gt.onclick=function(){
+    ST.save._goalsCollapsed = !ST.save._goalsCollapsed;
+    persist(); draw();
+  };
   // recruit
   document.querySelectorAll("[data-sign]").forEach(function(b){b.onclick=function(){toggleSign(b.getAttribute("data-sign"));};});
   var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
@@ -5378,7 +5573,11 @@ function bind(){
   var pcc=q("#play-confchamp"); if(pcc)pcc.onclick=function(){ playConfChampGame(); };
   var ccc=q("#confchamp-continue"); if(ccc)ccc.onclick=function(){ ST.confchamp=null; ST.save._confchamp=null; enterPostseason(); };
   var pb=q("#play-bowl"); if(pb)pb.onclick=function(){ playPostGame(); };
-  var pto=q("#post-to-offseason"); if(pto)pto.onclick=function(){ ST.post=null; ST.save._postDone=true; ST.screen="offseason"; persist(); draw(); };
+  var pto=q("#post-to-offseason"); if(pto)pto.onclick=function(){
+    // Freeze the season's goals BEFORE ST.post is discarded — postGoalMet() reads it.
+    snapshotSeasonGoals();
+    ST.post=null; ST.save._postDone=true; ST.screen="offseason"; persist(); draw();
+  };
   // offseason
   var adv=q("#advance-season"); if(adv)adv.onclick=advanceSeason;
   document.querySelectorAll("[data-cut]").forEach(function(b){b.onclick=function(){ cutPlayer(b.getAttribute("data-cut")); };});
@@ -5406,7 +5605,9 @@ function startDynasty(){
 function beginSeasonRecruiting(){
   var s=ST.save;
   s.board=genRecruitBoard(s.prestige);
-  s.recruitPtsLeft=weeklyRecruitPoints()+16; s._usedFreeScout=false; // offseason gives a big head-start allotment to scout & build boards
+  // A standalone preseason allotment for scouting and building the board. It does NOT roll
+  // into week 1 — finishRecruiting() hands you a fresh weekly allowance at kickoff.
+  s.recruitPtsLeft=PRESEASON_RECRUIT_POINTS; s._usedFreeScout=false;
   s._signedThisYear=null;
   resetSeasonStats(); // clear last year's per-season stats (career totals persist)
   var nilRoll = hasAbility("nil5") ? money2(Math.max(0,(s.nilLeft||0))*0.5) : 0; // Collective Empire: carry half of unused NIL
@@ -5610,9 +5811,21 @@ function toggleSign(id){
   draw();
 }
 function finishRecruiting(){
+  var s=ST.save;
   // add signed recruits to roster as FR
-  ST.recruitClass.forEach(function(r){ if(ST.signed[r.id]){ ST.save.roster.push({id:r.id,n:r.n,pos:r.pos,ovr:r.ovr,yr:"FR",dev:r.dev,arch:r.arch||rollArch(r.pos),pot:rollPotential(r.ovr,r.dev),st:r.st,startOvr:r.ovr,ssOvr:r.ovr,revealed:false}); } });
-  ST.save._recruited=true; ST.save.week=0;
+  ST.recruitClass.forEach(function(r){ if(ST.signed[r.id]){ s.roster.push({id:r.id,n:r.n,pos:r.pos,ovr:r.ovr,yr:"FR",dev:r.dev,arch:r.arch||rollArch(r.pos),pot:rollPotential(r.ovr,r.dev),st:r.st,startOvr:r.ovr,ssOvr:r.ovr,revealed:false}); } });
+  s._recruited=true; s.week=0;
+
+  // ── Week 1 starts with a FULL allotment ──
+  // The preseason grant is its own budget for building the board. Previously whatever you
+  // didn't spend simply carried over, so a coach who used it all opened the season with zero
+  // points and had to wait until week 2 — advanceRecruitingWeek() only fires after a game.
+  // Refill here, at the preseason → week 1 boundary, so week 1 is a week like any other.
+  s.recruitPtsLeft = weeklyRecruitPoints();
+  s._usedFreeScout = false;                  // Bird Dog's free scout resets too
+  // Per-prospect push caps are weekly. Preseason pushes must not eat into week 1's allowance.
+  (s.board||[]).forEach(function(b){ b.wkRec=0; });
+
   stampSeasonStart();  // baseline for "this year" progression
   persist();
   ST.screen="season"; ST.planPick=null; draw();
@@ -6445,6 +6658,7 @@ function advanceSeason(){
   }
   s.seasonsPlayed=(s.seasonsPlayed||0)+1;
   s._evaluated=true;
+  if(!s._goals || !s._goals.length) snapshotSeasonGoals();  // defensive: some paths skip the postseason screen
   // defensive: ensure fields exist on older saves so nothing below crashes
   if(!s.history) s.history=[];
   if(!s.abilities) s.abilities=[];
@@ -6461,7 +6675,10 @@ function advanceSeason(){
   // ── Coach XP: earn from wins, meeting expectations, and postseason success ──
   s._xpGainedThisYear=0;
   awardCoachXP(Math.floor(s.wins/2), "wins");            // ~1 XP per 2 wins
-  if(s.wins>=s.expectWins) awardCoachXP(2, "met expectations");
+  // Each of the AD's three goals is worth XP on its own, and hitting all three is a bonus.
+  var _g=resolvedGoals();
+  _g.forEach(function(g){ if(g.met) awardCoachXP(2, g.key==="wins"?"met win total":(g.key==="post"?"postseason goal":"program goal")); });
+  if(_g.length && _g.every(function(g){return g.met;})) awardCoachXP(3, "met every expectation");
   if(s.wins>=11) awardCoachXP(2, "11-win season");       // a great year, title or not
   if(s._wonConfThisYear) awardCoachXP(3, "conference title");
   if(s._wonNatlThisYear) awardCoachXP(5, "national title");
@@ -6474,6 +6691,13 @@ function advanceSeason(){
   else if(diff>=-1){ s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(8*cult)); s.missedYears=0; }
   else if(diff>=-3){ s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(16*cult)); s.missedYears++; }
   else { s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(26*cult)); s.missedYears++; }
+  // The win total is the headline, but the AD set three goals. Clearing the postseason and
+  // program bars buys goodwill a light win total alone wouldn't, and whiffing on all three is
+  // worse than the record suggests. Sweeping all three also wipes a "missed year".
+  var gm=(s._goalsMet!=null) ? s._goalsMet : goalsMetCount();
+  if(gm>=3){ s.jobSecurity=Math.min(100,s.jobSecurity+8); s.missedYears=0; }
+  else if(gm===2){ s.jobSecurity=Math.min(100,s.jobSecurity+3); }
+  else if(gm===0){ s.jobSecurity=Math.max(0,s.jobSecurity-Math.round(8*cult)); }
   if(hasAbility("leg3")){ s.jobSecurity=Math.max(s.jobSecurity,45); s.missedYears=0; } // Immortal: never truly on the hot seat
 
   // prestige drift
@@ -6546,7 +6770,9 @@ function startNextSeason(){
   signCommittedRecruits(); // last season's commits become freshmen on the roster
   s.season++; s.wins=0; s.losses=0; s.week=0; s._recruited=false;
   s._evaluated=false; s._pendingFired=false;
-  s.expectWins=expectWinsFor(s.prestige);
+  s.expectWins=expectWinsFor(s.prestige, s.conf);
+  s._goals=null; s._goalsMet=0;   // last year's verdict doesn't carry over
+  s._goalsCollapsed=false;        // new season, new goals — show them again
   s.schedule=genSchedule({n:s.school,c:s.conf,p:s.prestige});
   s.budget=budgetFor(s.prestige,s.role);
   if(s.league && s.league.teams){
