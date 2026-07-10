@@ -2214,7 +2214,20 @@ function schemeReadout(){
 // ── NIL (real football $, anchored to public NIL trackers) ─────────────────
 // Football-only NIL budget in $millions, by program prestige, +facilities +last wins.
 // Anchors: elite ≈ $40M (Texas), solid P4 ≈ $11M (Wake), top G5 ≈ $11M (USF), G5 ≈ $4M (Tulsa).
-var NIL_BASE={1:4, 2:8, 3:12, 4:22, 5:36};
+// Annual NIL collective pool, in $M, by prestige. FBS and FCS are entirely different
+// markets: an elite FCS collective (Montana, South Dakota State) runs ~$2M, while the
+// smallest ones scrape together ~$250K. A blue-blood FBS program clears $30M+. Prestige
+// is scaled WITHIN a subdivision, so an FCS 5-star must never draw an FBS 5-star's pool.
+var NIL_BASE={1:4, 2:8, 3:12, 4:22, 5:36};                      // FBS: $4M → $36M
+var NIL_BASE_FCS={1:0.25, 2:0.5, 3:0.75, 4:1.4, 5:2.2};         // FCS: $250K → $2.2M
+function nilBaseFor(prestige, conf){
+  var tbl = isFCSConf(conf) ? NIL_BASE_FCS : NIL_BASE;
+  return tbl[prestige] || (isFCSConf(conf) ? 0.5 : 8);
+}
+// Everything downstream (facility bonuses, win bonuses, per-recruit caps, player demands)
+// is expressed as a FRACTION of the elite pool for that subdivision, so the whole economy
+// rescales together instead of a maxed facility dwarfing an FCS budget.
+function nilElitePool(){ return isFCSConf(ST.save.conf) ? NIL_BASE_FCS[5] : NIL_BASE[5]; }
 // Position value weights — the NIL market pays QBs the most, then premium skill/pass-rush/corner.
 var NIL_POS_W={QB:1.9, WR:1.2, CB:1.15, DL:1.15, RB:1.05, S:0.95, LB:0.95, OL:0.9, TE:0.85};
 // Per-position annual pay bands ($M) at a P4-elite scale: [starterLo, starterHi, depthLo, depthHi].
@@ -2235,8 +2248,31 @@ function nilPerkBudgetMult(){
   return m;
 }
 // Per-recruit NIL offer caps — Blank Check lets you go much bigger on one target.
-function nilRecruitCap(){ return hasAbility("nil4") ? {per:12, total:24} : {per:8, total:15}; }
-function nilBudgetFor(){ var s=ST.save; var base=NIL_BASE[s.prestige]||8; var pool=(base + facLvl("nil")*2 + facLvl("stadium")*1 + (s._lastWins||0)*0.4) * nilPerkBudgetMult(); return money2(pool * (s.role==="HC"?1:0.5)); } // OC/DC control only their unit's share of the collective
+// Caps on what you may commit to ONE recruit, and to the recruiting class overall.
+// These were flat ($8M / $15M), which is larger than an entire FCS collective — the cap
+// would never bind and an FCS coach could offer a recruit 4x his whole budget. Expressing
+// them as a share of your own pool keeps the constraint meaningful at every level.
+//
+// The percentages are reverse-engineered from the old flat caps at the case they were tuned
+// for (a head coach at an elite FBS program: $8M/$36M = 22%, $15M/$36M = 42%), so that
+// scenario is unchanged. Everywhere else the flat cap was simply non-binding.
+function nilRecruitCap(){
+  var pool=Math.max(0.01, nilBudgetFor());
+  var big=hasAbility("nil4");                       // Blank Check
+  return { per:   money2(pool * (big?0.34:0.23)),   // one recruit: ~23% of the pool (34% w/ perk)
+           total: money2(pool * (big?0.67:0.42)) }; // whole class: ~42% (67% w/ perk)
+}
+function nilBudgetFor(){
+  var s=ST.save;
+  var base=nilBaseFor(s.prestige, s.conf);
+  // Facility and win bonuses used to be flat $M, which is meaningless at FCS scale — a maxed
+  // NIL facility (+$6M) was 3x Montana's entire collective. Express them as a share of the
+  // elite pool instead: the same upgrade is worth the same PROPORTION in either subdivision.
+  var elite=nilElitePool();
+  var bonus=(facLvl("nil")*0.0555 + facLvl("stadium")*0.0278 + (s._lastWins||0)*0.0111) * elite;
+  var pool=(base + bonus) * nilPerkBudgetMult();
+  return money2(pool * (s.role==="HC"?1:0.5)); // OC/DC control only their unit's share of the collective
+}
 // A rough "production" score from a player's season stats — productive players get noticed.
 function prodScore(p){
   var st=(p.stats&&p.stats.season)||{}, v=0;
@@ -2252,7 +2288,17 @@ function prodScore(p){
 function nilDemand(p){
   if(!p || p.ovr<66) return 0;
   var pay=POS_PAY[p.pos]||POS_PAY.LB;
-  var poolF=Math.max(0.1, Math.min(1.15, nilBudgetFor()/36));   // P4-elite pool ($36M) = 1.0
+  // TWO separate scalings, which were previously conflated:
+  //   poolF       — how rich YOU are relative to the best program in YOUR subdivision.
+  //                 A 1-star FCS program pays less than Montana, just as UMass pays less
+  //                 than Alabama. Ranges ~0.1 → 1.15.
+  //   marketScale — how big your subdivision's market is at all. POS_PAY is denominated in
+  //                 FBS dollars (a starting QB commands $1.5M–$3.5M); the FCS market is
+  //                 ~16x smaller, so the same player asks for ~$150K, not $2.5M.
+  var elite=nilElitePool();
+  var roleShare=(ST.save.role==="HC"?1:0.5);
+  var poolF=Math.max(0.1, Math.min(1.15, nilBudgetFor()/(elite*roleShare)));
+  var marketScale=elite/NIL_BASE[5];                            // FBS = 1.0, FCS ≈ 0.061
   var d;
   if(isStarterPlayer(p)){
     var tT=Math.max(0,Math.min(1,(p.ovr-70)/23));               // 70→band floor, 93→band ceiling
@@ -2263,6 +2309,7 @@ function nilDemand(p){
   }
   if(p.dev==="elite") d*=1.15; else if(p.dev==="pro") d*=1.08;  // ascending stars cost more
   d+=Math.min(0.5, prodScore(p)*0.05);                          // production nudges toward the top of the band
+  d*=marketScale;                                               // convert FBS dollars to this subdivision's market
   if(hasAbility("nil3")) d*=0.85;                               // Loyalty Culture: players ask for less
   return money2(d);
 }
@@ -2294,7 +2341,17 @@ function retainPrice(p){
 // Interest a recruit gains from an NIL offer of $amt (M) — strong, but diminishing as they warm.
 // Interest per $1M by star rating — blue-chips are expensive to buy, low-stars are cheap.
 // 5★ ≈ +1 per $250K; a 1★ moves far more per dollar.
-function nilRate(st){ return ({5:4,4:7,3:11,2:16,1:22}[Math.max(1,Math.min(5,st||3))]); }
+// Interest points gained per $1M offered to a recruit. A blue-chip is unmoved by small
+// money; a 1-star is swayed easily. These numbers are denominated in FBS dollars, so they
+// must be divided by the subdivision's market scale — otherwise Montana maxing out its
+// entire per-recruit cap ($510K) would move a 3-star by 6 points out of 100, and NIL would
+// be a dead button at FCS. Scaled, $510K of FCS money buys the same persuasion as the
+// equivalent share of an FBS budget.
+function nilRate(st){
+  var base={5:4,4:7,3:11,2:16,1:22}[Math.max(1,Math.min(5,st||3))];
+  var marketScale = (ST.save && isFCSConf(ST.save.conf)) ? (NIL_BASE_FCS[5]/NIL_BASE[5]) : 1;
+  return base / marketScale;
+}
 function nilInterestGain(b, amt){ var g=amt * nilRate(b.st); if(hasAbility("nil2")||hasArch("nil")) g*=1.4; return Math.round(g); }
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
 // Open the NIL slider sheet for a recruit ("recruit") or a roster player ("retain").
