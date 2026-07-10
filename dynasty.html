@@ -116,6 +116,9 @@ a{color:inherit;text-decoration:none}
 .rec-star-lbl{font-size:10px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
 .rec-star-select{font-size:12px;font-weight:800;color:var(--ink,#111);background:var(--cream);border:2px solid var(--border);border-radius:8px;padding:5px 8px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
 .rec-star-select:focus{outline:none;border-color:var(--gold-dark)}
+.rec-sort-wrap{display:flex;align-items:center;gap:5px;margin-left:auto}
+.rec-sort-btn{font-size:11px;font-weight:800;color:var(--muted);background:var(--cream);border:2px solid var(--border);border-radius:8px;padding:4px 9px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.rec-sort-btn.on{background:var(--purple);color:#fff;border-color:var(--purple);box-shadow:2px 2px 0 var(--border)}
 .rec-body{flex:1;min-width:0}
 .rec-name{font-size:14px;font-weight:900}
 .rec-meta{font-size:9px;font-weight:700;color:var(--muted);margin-top:2px}
@@ -989,6 +992,18 @@ function oppRatings(name, prestige){
   var base=58+(prestige||3)*6;
   return {off:base, def:base, ovr:base};
 }
+// Roster-anchor targets for a team's units, using the SAME rating logic as the league:
+// an explicit rating if we have one, else a subdivision-aware prestige fallback (FBS sits
+// a full tier above FCS). This guarantees every generated roster matches the team's real
+// overall — no FBS-scale inflation on an FCS squad, and no mismatched fallback on an FBS
+// team that lacks an explicit rating.
+function teamTargets(team){
+  var fcs = (teamDivision(team.c)==="FCS");
+  var r = fcs ? FCS_TEAM_RATINGS[team.n] : TEAM_RATINGS[team.n];
+  if(r) return {off:r.o, def:r.d};
+  var base = fcs ? (44+team.p*6) : (58+team.p*6);
+  return {off:base, def:base};
+}
 // Simulate one game between two league teams by name → returns {w:winnerName, l:loserName}
 function simLeagueGame(aName,bName,neutralHome){
   var A=ST.save.league.teams[aName], B=ST.save.league.teams[bName];
@@ -1234,6 +1249,7 @@ var ST={
   recruitPos:"ALL", // position filter on the recruiting board
   recruitStars:"ALL", // star-rating filter on the recruiting board
   recRank:null, // settled board order (id->rank); re-settles on tab/filter change, frozen mid-scout
+  recSort:"overall", // recruiting board sort mode: "overall" (best prospects) | "interest" (your standing)
   planPick:null,
   feedMode:"all",  // live game tab: "all" (full log) | "scoring" | "stats"
   simSpeed:"normal", // sim speed: fast | normal | slow
@@ -1392,8 +1408,9 @@ function buyFacility(id){
 
 // ── Save / load ──────────────────────────────────────────
 function newSave(team, role){
-  var _tr=TEAM_RATINGS[team.n];
-  var roster=genStarterRoster(team.p, role, _tr?{off:_tr.o, def:_tr.d}:null);
+  // Anchor the starting roster to the team's REAL unit ratings (subdivision-aware), so an
+  // FCS roster sits at its true, lower overall and every FBS roster matches its rating too.
+  var roster=genStarterRoster(team.p, role, teamTargets(team));
   var s={
     school:team.n, conf:team.c, prestige:team.p, role:role,
     archetype:(ST.setup&&ST.setup.archetype)||"offensive",
@@ -2829,6 +2846,11 @@ function recSeed(b){
 function recRankCompare(a,b){
   var order={open:0,committed:1,lost:2};
   if(order[a.status]!==order[b.status]) return order[a.status]-order[b.status];
+  if((ST.recSort||"overall")==="interest"){
+    if((b.interest||0)!==(a.interest||0)) return (b.interest||0)-(a.interest||0); // your standing: warmest first
+    if(b.st!==a.st) return b.st-a.st;
+    return recSeed(a)-recSeed(b);
+  }
   if(b.st!==a.st) return b.st-a.st;                       // star tier still leads
   var ot=Math.min(2, maxScoutTier()), af=a.scout>=ot, bf=b.scout>=ot; // OVR is revealed at scout tier 2 (or full scout, if that comes sooner)
   if(af&&bf) return b.ovr-a.ovr;                          // both OVR-known → best OVR first
@@ -2875,12 +2897,17 @@ function recruitTab(){
   // star-rating dropdown — respects the scouting fuzz: a scouted prospect matches its
   // exact star; an unscouted one matches any star inside its fuzzy range (could-be).
   var activeStars=ST.recruitStars||"ALL";
+  var activeSort=ST.recSort||"overall";
   h+='<div class="rec-star-row"><span class="rec-star-lbl">Stars</span>'+
      '<select id="rec-star-filter" class="rec-star-select">';
   [["ALL","All ★"],["5","5 ★"],["4","4 ★"],["3","3 ★"],["2","2 ★"],["1","1 ★"]].forEach(function(o){
     h+='<option value="'+o[0]+'"'+(activeStars===o[0]?" selected":"")+'>'+o[1]+'</option>';
   });
-  h+='</select></div>';
+  h+='</select>'+
+     '<span class="rec-sort-wrap"><span class="rec-star-lbl">Sort</span>'+
+       '<button class="rec-sort-btn'+(activeSort==="interest"?" on":"")+'" data-recsort="interest">Interest</button>'+
+       '<button class="rec-sort-btn'+(activeSort==="overall"?" on":"")+'" data-recsort="overall">OVR</button>'+
+     '</span></div>';
   var starMatch=function(b){
     if(activeStars==="ALL") return true;
     var want=+activeStars;
@@ -4065,6 +4092,16 @@ function seasonScreen(){
         : PC.kind==="fcsPlayoff"  ? fcsBracketBody()
         : PC.kind==="noPost"      ? noPostseasonBody()
         : bracketBody();
+    } else if(g && g.result){
+      // this week's game is already played — show the result and let you advance when ready
+      var rw=(g.result.us>g.result.them);
+      h+='<div class="result-card" style="padding:14px;margin-bottom:10px">'+
+         '<div class="vs" style="margin:0 0 4px">Week '+(s.week+1)+' · '+(g.home?'HOME':'AWAY')+'</div>'+
+         '<div class="score" style="font-size:26px;color:'+(rw?'var(--green)':'#c0392b')+'">'+(rw?'W':'L')+' '+g.result.us+'–'+g.result.them+'</div>'+
+         '<div class="vs">vs '+x(g.opp)+' · '+x(g.oc)+'</div></div>';
+      h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Game in the books. Recruit, work the roster, or check the standings — then advance the week whenever you\u2019re ready.</div>';
+      var nextLbl = ((s.week+1)>=s.schedule.length) ? 'Postseason' : 'Week '+(s.week+2);
+      h+='<button class="bigbtn btn-green" id="advance-week" style="margin-top:2px">Advance to '+nextLbl+' →</button>';
     } else if(g){
       h+='<div class="result-card" style="padding:13px;margin-bottom:10px"><div class="vs" style="margin:0 0 4px">Week '+(s.week+1)+(g.home?' · HOME':' · AWAY')+'</div>';
       h+='<div class="score" style="font-size:20px">vs '+x(g.opp)+'</div>';
@@ -5563,9 +5600,11 @@ function bind(){
   document.querySelectorAll("[data-recexpand]").forEach(function(b){b.onclick=function(){ var id=b.getAttribute("data-recexpand"); ST.recExpand=(ST.recExpand===id)?null:id; draw(); };});
   document.querySelectorAll("[data-recpos]").forEach(function(b){b.onclick=function(){ ST.recruitPos=b.getAttribute("data-recpos"); ST.recExpand=null; refreshRecOrder(); draw(); };});
   var rsf=q("#rec-star-filter"); if(rsf)rsf.onchange=function(){ ST.recruitStars=rsf.value; ST.recExpand=null; refreshRecOrder(); draw(); };
+  document.querySelectorAll("[data-recsort]").forEach(function(b){ b.onclick=function(){ ST.recSort=b.getAttribute("data-recsort"); ST.recExpand=null; refreshRecOrder(); draw(); }; });
   document.querySelectorAll("[data-depthtap]").forEach(function(b){b.onclick=function(){ tapDepth(b.getAttribute("data-depthtap")); };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
   var pw=q("#play-week"); if(pw)pw.onclick=playWeek;
+  var aw=q("#advance-week"); if(aw)aw.onclick=advanceWeek;
   var toff=q("#to-postseason"); if(toff)toff.onclick=function(){ enterPostseason(); };
   var pp=q("#play-playoff"); if(pp)pp.onclick=function(){ playPostGame(); };
   var pf=q("#play-fcs"); if(pf)pf.onclick=function(){ playPostGame(); };
@@ -6221,6 +6260,20 @@ function playerStatDetail(id){
 // Build the live game but DON'T sim it. The score isn't known until the fourth
 // quarter ends, because your tactics decide it. Nothing is recorded up front:
 // wins, stats, and the league week all wait for finishGame().
+// End the current week on demand: resolve the rest of the league's games, develop your
+// players, let rivals push the recruiting trail, refill next week's points, and tick the
+// week over. Called by the "Advance to Next Week" button once your game is played.
+function advanceWeek(){
+  var s=ST.save, g=s.schedule[s.week];
+  if(!g || !g.result) return;           // only advance after this week's game is actually played
+  simLeagueWeek(s.school);
+  developInSeason();
+  advanceRecruitingWeek();              // rivals push, prospects may commit, points refill for next week
+  s.week++;
+  persist();
+  if(s.week>=s.schedule.length){ enterConfChampionship(); return; } // regular season over → title game → postseason
+  ST.seasonTab="week"; ST.editGame=null; ST.screen="season"; draw();
+}
 function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
   var setup=gameSetup(g);
@@ -6289,10 +6342,10 @@ function finishGameSim(){
     }
     recordUserLeagueResult(won, g.oc===s.conf);
     recordGameStats(res, g.opp, r.pbp);
-    simLeagueWeek(s.school);
-    developInSeason();
-    advanceRecruitingWeek();
-    s.week++;
+    // The rest of the week — the other league games, player development, rivals pushing on
+    // the recruiting trail, and the week counter itself — now resolves when you click
+    // "Advance to Next Week" (see advanceWeek). That lets you play your game and THEN keep
+    // recruiting or managing before moving on.
   } else {
     // conf title / bowl / playoff: the win still counts, the bracket resolves later
     var won=res.us>res.them;
@@ -6442,7 +6495,8 @@ function finishLive(){
   if(ST.weekResult && ST.weekResult.confchamp){ finishConfChampGame(); return; }
   if(ST.weekResult && ST.weekResult.postseason){ finishPostGame(); return; }
   ST.weekResult=null; ST.live=null; ST.planPick=null;
-  if(ST.save.week>=ST.save.schedule.length){ enterConfChampionship(); return; } // regular season over → conf title game → postseason
+  // Back to the week hub — the game is recorded but the week hasn't advanced yet, so the
+  // hub now offers "Advance to Next Week" (and you can recruit/manage first).
   ST.seasonTab="week"; ST.editGame=null; ST.screen="season"; draw();
 }
 // Format absolute elapsed seconds into "Qn · MM:SS" (clock counts down within each quarter)
