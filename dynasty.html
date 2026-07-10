@@ -1776,17 +1776,24 @@ function myTalentOvr(){
 // is somebody's dream school, and without this a p1/tier-0 team's pull collapses to ~4 and it
 // loses its OWN tier three times out of four.
 var PULL_BASE = 12;
+// Prestige is scaled WITHIN a subdivision — an FCS 5 and an FBS 5 are both "the best in their
+// world", but they are not equally attractive to a recruit. Feeding raw prestige into the pull
+// formula gave North Dakota (FCS p5) more base pull than Iowa State (FBS p3), which is exactly
+// how an FCS school ends up leading a 4-star. recruitTierFor() already maps both onto one
+// common ladder; use it here so cross-subdivision battles are scored on the same axis.
+function pullPrestige(prestige, conf){ return recruitTierFor(prestige, conf); }
 function programPull(){
   var s=ST.save;
-  var prestigePull = s.prestige * 5;                       // 5 → 25
-  var conf = (CONF_TIER[s.conf]||0) * 3.5;                 // -3.5 → +10.5
+  var prestigePull = pullPrestige(s.prestige, s.conf) * 5;   // FBS 5→25, FCS 5→12
+  var conf = (CONF_TIER[s.conf]||0) * 3.5;                   // -3.5 → +10.5
   return PULL_BASE + prestigePull + conf + playerMomentum() + talentPull(myTalentOvr());
 }
 // Appeal for a CPU rival, on the same scale, so head-to-head battles are apples-to-apples.
 function rivalPull(name, t, prestige){
-  var conf=(CONF_TIER[(t&&t.c)||""]||0)*3.5;
+  var c=(t&&t.c)||"";
+  var conf=(CONF_TIER[c]||0)*3.5;
   var ovr=(t&&t.ovr)||(44+(prestige||3)*6);
-  return PULL_BASE + (prestige||3)*5 + conf + cpuMomentum(name,t) + talentPull(ovr);
+  return PULL_BASE + pullPrestige(prestige||3, c)*5 + conf + cpuMomentum(name,t) + talentPull(ovr);
 }
 
 // How badly a recruit outclasses (or is outclassed by) a program. A 5-star looking at a
@@ -1811,10 +1818,15 @@ function expectedStarFor(prestige, conf){
 // above it — Alabama's mean recruit is a 4.1, but a 5-star is squarely a target, not a
 // reach. Only the gap BEYOND that comfort band is punished, and punished steeply: two full
 // tiers above the band and the recruit simply isn't listening.
+// The grace band above a program's mean recruit scales with the program. Alabama's board is
+// 39% five-stars, so a 5-star is squarely a target and it earns a full band. A program whose
+// mean recruit is a 3.06 (an elite FCS school) lands 4-stars rarely, so its band is small and
+// a 4-star is already a genuine reach. A flat band handed North Dakota a 0.97 fit on 4-stars.
 function starFitMult(st, prestige, conf){
   var exp=expectedStarFor(prestige, conf);
-  var reach = st - (exp + 0.9);            // 0.9-star grace band above the mean
-  if(reach > 0) return Math.max(0.05, 1 - reach*0.80);
+  var band = 0.02 + 0.22 * exp;            // exp 4.10 → 0.92; exp 3.06 → 0.69; exp 2.05 → 0.47
+  var reach = st - (exp + band);
+  if(reach > 0) return Math.max(0.03, 1 - reach*0.92);
   var below = st - exp;                    // stepping down is only mildly discouraged
   if(below < 0) return Math.max(0.62, 1 + below*0.14);
   return 1;
