@@ -67,21 +67,23 @@ a{color:inherit;text-decoration:none}
 .sec-title .pill{margin-left:auto;font-size:9px;background:#fff;border:2px solid var(--border);border-radius:20px;padding:2px 9px;box-shadow:1px 1px 0 var(--border);color:var(--text)}
 
 /* setup: conference + team pick */
-/* The tab strip scrolls horizontally. The right edge fades out so it reads as scrollable.
-   This is done with a MASK, not a gradient overlay: an overlay has to paint a background
-   colour to fade toward, which goes wrong the moment the page background isn't what the
-   overlay assumed (e.g. a browser forcing dark mode). A mask fades the tabs to transparent
-   and therefore looks right on any background. The mask only appears once the strip has
-   enough tabs to actually overflow. */
+/* Tab strip scrolls horizontally. The right-edge fade is done with a mask so it stays
+   correct on any page background (an opaque gradient overlay assumes a background colour
+   and smears when the browser forces dark mode).
+
+   It is PURE CSS on purpose: an earlier JS version measured overflow on every draw() and
+   any exception it threw ran before the click handlers were attached, leaving buttons
+   dead. Cosmetics must never be able to break input. The mask is harmless when the strip
+   doesn't overflow, because there is nothing past the last tab to fade. */
 .conf-tabs-wrap{position:relative;margin-bottom:6px}
-.conf-tabs{display:flex;gap:5px;overflow-x:auto;padding:0 2px 8px 0;margin-bottom:0;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.conf-tabs{display:flex;gap:5px;overflow-x:auto;padding:0 2px 8px 0;margin-bottom:0;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+  -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent);
+          mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent)}
 .conf-tabs::-webkit-scrollbar{display:none}
-.conf-tabs.fade{
-  -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent 100%);
-          mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent 100%);
-}
+/* The subdivision toggle never scrolls, so it opts out of the mask. */
+.conf-tabs.no-fade{-webkit-mask-image:none;mask-image:none}
 .conf-tab{flex-shrink:0;padding:6px 12px;font-size:10px;font-weight:800;border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:8px;box-shadow:2px 2px 0 var(--border);white-space:nowrap}
-.conf-tabs.fade .conf-tab:last-child{margin-right:16px} /* keeps the last tab tappable past the fade */
+.conf-tabs:not(.no-fade) .conf-tab:last-child{margin-right:14px} /* stay tappable past the fade */
 .conf-tab.active{background:var(--gold);color:var(--text)}
 .team-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
 /* min-width:0 on BOTH the grid cell and the flex child — without it a long name like
@@ -658,6 +660,25 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(-
 <div id="nil-overlay"></div>
 
 <script>
+// Surface runtime errors instead of failing silently. Without this, one thrown
+// exception inside bind() leaves every button inert with no visible explanation.
+window.addEventListener("error", function(e){
+  try{
+    var el=document.getElementById("errbar");
+    if(!el){
+      el=document.createElement("div");
+      el.id="errbar";
+      el.style.cssText="position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#b00020;color:#fff;"+
+        "font:700 11px/1.4 monospace;padding:8px 10px;max-height:38vh;overflow:auto;white-space:pre-wrap";
+      el.onclick=function(){ el.remove(); };
+      document.body.appendChild(el);
+    }
+    el.textContent = "JS ERROR (tap to dismiss)\n" + (e.message||e) + "\n" +
+      ((e.filename||"")+":"+(e.lineno||"?")+":"+(e.colno||"?")) +
+      (e.error && e.error.stack ? "\n"+e.error.stack.split("\n").slice(0,6).join("\n") : "");
+  }catch(_){}
+});
+
 // Comprehensive FBS team dataset (2025-26 alignment). p = prestige 1-5.
 // Prestige drives difficulty, starting budget, and how strong the CPU-run defense is.
 var FBS_TEAMS = [
@@ -4915,37 +4936,23 @@ function cutPlayer(id){
 // =====================================================
 // ACTIONS / BIND
 // =====================================================
-// Only mask the tab strip when it actually overflows — otherwise a short conference
-// list (or a wide screen) would get its last tab needlessly faded.
-// This is pure cosmetics, so it must never be able to break bind(): it runs inside a
-// try/catch, and it avoids classList.toggle()'s two-argument form, which throws on
-// older WebKit. A thrown error here would kill every click handler on the page.
-function syncTabFade(){
-  try{
-    var els=document.querySelectorAll(".conf-tabs:not(.no-fade)");
-    for(var i=0;i<els.length;i++){
-      (function(el){
-        var overflows = el.scrollWidth > el.clientWidth + 1;
-        var atEnd = el.scrollLeft + el.clientWidth >= el.scrollWidth - 1;
-        if(overflows && !atEnd) el.classList.add("fade");
-        else el.classList.remove("fade");
-        if(overflows && !el._fadeBound){
-          el._fadeBound = true;
-          el.addEventListener("scroll", function(){ syncTabFade(); });
-        }
-      })(els[i]);
-    }
-  }catch(e){ /* cosmetic only — never block bind() */ }
+// querySelectorAll returns a NodeList, which lacks .forEach on older WebKit.
+// Iterate by index so a missing NodeList.prototype.forEach can never abort bind().
+function each(sel, fn){
+  var els=document.querySelectorAll(sel);
+  for(var i=0;i<els.length;i++) fn(els[i]);
 }
 function bind(){
   var q=function(s){return document.querySelector(s);};
-  // setup
-  document.querySelectorAll("[data-div]").forEach(function(b){b.onclick=function(){ST.setup.div=b.getAttribute("data-div");ST.setup.conf=null;ST.setup.team=null;draw();};});
-  document.querySelectorAll("[data-conf]").forEach(function(b){b.onclick=function(){ST.setup.conf=b.getAttribute("data-conf");ST.setup.team=null;draw();};});
-  document.querySelectorAll("[data-team]").forEach(function(b){b.onclick=function(){var n=b.getAttribute("data-team");ST.setup.team=ALL_TEAMS.filter(function(t){return t.n===n;})[0];draw();};});
-  document.querySelectorAll("[data-role]").forEach(function(b){b.onclick=function(){ST.setup.role=b.getAttribute("data-role");draw();};});
-  document.querySelectorAll("[data-arch]").forEach(function(b){b.onclick=function(){ST.setup.archetype=b.getAttribute("data-arch");draw();};});
+  // ── setup ──
+  // WIRE THE START BUTTON FIRST. It is the only control that can rescue a stuck
+  // setup screen, so nothing above it may ever prevent it from being attached.
   var sb=q("#start-btn"); if(sb)sb.onclick=startDynasty;
+  each("[data-div]",function(b){b.onclick=function(){ST.setup.div=b.getAttribute("data-div");ST.setup.conf=null;ST.setup.team=null;draw();};});
+  each("[data-conf]",function(b){b.onclick=function(){ST.setup.conf=b.getAttribute("data-conf");ST.setup.team=null;draw();};});
+  each("[data-team]",function(b){b.onclick=function(){var n=b.getAttribute("data-team");ST.setup.team=ALL_TEAMS.filter(function(t){return t.n===n;})[0];draw();};});
+  each("[data-role]",function(b){b.onclick=function(){ST.setup.role=b.getAttribute("data-role");draw();};});
+  each("[data-arch]",function(b){b.onclick=function(){ST.setup.archetype=b.getAttribute("data-arch");draw();};});
   // recruit
   document.querySelectorAll("[data-sign]").forEach(function(b){b.onclick=function(){toggleSign(b.getAttribute("data-sign"));};});
   var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
@@ -5027,8 +5034,6 @@ function bind(){
   document.querySelectorAll("[data-takejob]").forEach(function(b){ b.onclick=function(){ var i=parseInt(b.getAttribute("data-takejob"),10); var t=(ST.carousel||[])[i]; if(t) takeJob(t); }; });
   var sj=q("#stay-job"); if(sj)sj.onclick=function(){ ST.carousel=null; startNextSeason(); };
   var rd=q("#reset-dynasty"); if(rd)rd.onclick=function(){ if(confirm("Reset everything? This erases your dynasty permanently.")){ if(DB)DB.ref(BASE()).remove(); ST.save=null; ST.fired=null; ST.carousel=null; ST.screen="setup"; ST.setup={div:"FBS",conf:"SEC",team:null,role:"OC",archetype:"offensive"}; draw(); } };
-  // Cosmetic tab-strip fade LAST: if it ever throws, every handler above is already wired.
-  syncTabFade();
 }
 
 function startDynasty(){
