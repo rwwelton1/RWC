@@ -369,11 +369,27 @@ function loadData(){
       else if(!ST.curDay&&ST.dayIds.length){ ST.curDay=defaultDay(); }
       draw();
     });
-    DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};draw();});
-    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();});
-    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();});
+    DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};draw();syncScores();});
+    DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};draw();syncScores();});
+    DB.ref(BASE+"/picks").on("value",function(sn){ST.picks=sn.val()||{};draw();syncScores();});
   }
   s1();
+}
+// Write each player's total points to Firebase so the Scorecery hub can display standings.
+// The hub reads groups/{id}/data/nbasummer/playerscores as a {ukey: points} map.
+// IMPORTANT: the hub's ukey is simpler than this pool's (no accent/dot stripping), so we key
+// the synced map with the hub's normalization to guarantee the hub can match player names.
+function hubUkey(n){ return String(n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,""); }
+var _lastScoreSync="";
+function syncScores(){
+  if(!DB || !GROUP_ID) return;               // only meaningful in a group context
+  if(!ST.dayIds || !ST.dayIds.length) return;
+  var map={};
+  PARTS.forEach(function(p){ map[hubUkey(p)] = totalScore(p).pts; });
+  var fp=JSON.stringify(map);
+  if(fp===_lastScoreSync) return;            // nothing changed — skip the write
+  _lastScoreSync=fp;
+  DB.ref(BASE+"/playerscores").set(map);
 }
 function defaultDay(){
   for(var i=0;i<ST.dayIds.length;i++){ if(!ST.locked[ST.dayIds[i]]) return ST.dayIds[i]; }
