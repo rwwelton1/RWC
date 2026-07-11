@@ -1561,7 +1561,11 @@ function resolvedGoals(){
   if(s && s._goals && s._goals.length) return s._goals;
   return seasonGoals();
 }
-function expectLabel(prestige){
+function expectLabel(prestige, conf){
+  // FCS has no bowls or New Year's Six — the season ceiling is a deep playoff run, so the
+  // expectation is phrased in that subdivision's own terms (mirrors postGoalFor/buildGoalFor).
+  if(conf!=null && isFCSConf(conf))
+    return ["","Compete & develop","Show clear progress","Make the FCS playoff","Deep playoff run","Championship contender"][prestige];
   return ["","Compete & develop","Show clear progress","Reach a bowl game","New Year's Six push","Championship contender"][prestige];
 }
 function securityLabel(js){
@@ -2071,7 +2075,7 @@ function makeProspect(pos, prestige){
   // written off, which is the whole point of the multiplier.
   var pull = programPull();
   var fitM = starFitMult(st, prestige, s.conf);
-  var coachBonus = (hasArch("recruiter")?8:0) + (hasAbility("rec2")?8:0) + (hasAbility("rec5")?10:0)
+  var coachBonus = ((hasArch("recruiter")||hasAbility("rec2"))?8:0) + (hasAbility("rec5")?10:0)
     + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0)
     + facLvl("academics")*3 + facLvl("stadium")*2;
   // A reach recruit discounts the coaching pitch too — a great recruiter at a 1-star program
@@ -3917,7 +3921,7 @@ function expectBanner(){
   // collapse the flex layout. Spans with display:block give identical rendering, legally.
   h+='<button class="expect-bar" id="goal-toggle" aria-expanded="'+(open?"true":"false")+'">';
   h+='<span class="exp-left"><span class="exp-lbl">Season Expectation</span>'+
-     '<span class="exp-goal">'+x(expectLabel(s.prestige))+'</span>'+
+     '<span class="exp-goal">'+x(expectLabel(s.prestige, s.conf))+'</span>'+
      '<span class="exp-sub">'+x(s.school)+' &middot; '+x(s.conf)+'</span></span>';
   h+='<span class="exp-right" style="color:'+sec.c+'"><span class="exp-sec">'+sec.t+'</span>'+
      '<span class="exp-secbar"><span class="exp-secfill" style="width:'+Math.max(4,Math.min(100,s.jobSecurity))+'%;background:'+sec.c+'"></span></span>'+
@@ -4276,7 +4280,7 @@ function rankedTeams(){
       var isYou=(n===s.school);
       var w=isYou?s.wins:t.w, l=isYou?s.losses:t.l;
       var sc = (myDiv==="FCS")
-        ? fcsResumeScore(w, t.p, isYou&&s._wonConfThisYear, t.ovr, isYou&&s._beatFBSThisYear)
+        ? fcsResumeScore(w, t.p, isYou ? s._wonConfThisYear : isConfChamp(n), t.ovr, isYou&&s._beatFBSThisYear)
         : cfpScore({w:w, l:l, p:t.p, conf:t.c, wonConf:isConfChamp(n), ovr:t.ovr, you:isYou});
       rows.push({name:n, conf:t.c, p:t.p, you:isYou, w:w, l:l, ovr:t.ovr, g5:!isPowerConf(t.c), score:sc});
     });
@@ -4339,18 +4343,25 @@ function recordChampions(){
   s._natlChampName=null; s._userConfChampName=null; // clear the season's stashed results
 }
 function top25Table(){
-  var rows=computeTop25();
+  var fcs = (myDivision()==="FCS");
+  var fieldSize = fcs ? 24 : 12;   // playoff field size
+  var byes      = fcs ? 8  : 4;    // seeds earning a first-round bye
+  var showN     = fcs ? 30 : 25;   // how many ranked teams to list (a few past the cutline)
+  var rows=rankedTeams().slice(0,showN);
   var myRank=0; rows.forEach(function(r,i){ if(r.you)myRank=i+1; });
   var h='<div class="sec-title" style="margin:2px 2px 8px">CFP Rankings'+(myRank?' <span class="pill">You: #'+myRank+'</span>':' <span class="pill">You: NR</span>')+'</div>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 9px;line-height:1.5">Committee-style résumé rankings — wins over quality opponents and conference titles lift you, bad losses sink you. The top <b>12</b> make the Playoff; the top <b>4</b> seeds earn a first-round bye.</div>';
+  var desc = fcs
+    ? 'Committee-style résumé rankings. The FCS playoff takes <b>24</b> teams — conference champions (◆) earn automatic bids and the strongest at-large résumés fill out the field. The top <b>8</b> seeds earn a first-round bye.'
+    : 'Committee-style résumé rankings — wins over quality opponents and conference titles lift you, bad losses sink you. The top <b>12</b> make the Playoff; the top <b>4</b> seeds earn a first-round bye.';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 9px;line-height:1.5">'+desc+'</div>';
   h+='<div class="conf-table scroll-list">';
   rows.forEach(function(r,i){
     var seed=i+1, champ=isConfChamp(r.name);
-    h+='<div class="conf-row'+(r.you?" me":"")+(seed<=4?" top2":"")+'">'+
+    h+='<div class="conf-row'+(r.you?" me":"")+(seed<=byes?" top2":"")+'">'+
        '<span class="conf-rank">'+seed+'</span>'+
-       '<span class="conf-name">'+x(r.name)+(champ?' <span class="cfp-champ" title="Conference champion">◆</span>':'')+' <span class="t25-conf">'+x(r.conf)+' · '+r.ovr+' OVR'+(seed<=4?' · BYE':'')+'</span></span>'+
+       '<span class="conf-name">'+x(r.name)+(champ?' <span class="cfp-champ" title="Conference champion · auto-bid">◆</span>':'')+' <span class="t25-conf">'+x(r.conf)+' · '+r.ovr+' OVR'+(seed<=byes?' · BYE':'')+'</span></span>'+
        '<span class="conf-rec">'+r.w+'-'+r.l+'</span></div>';
-    if(seed===12){ h+='<div class="cfp-cutline">— Playoff cutline · top 12 —</div>'; }
+    if(seed===fieldSize){ h+='<div class="cfp-cutline">— Playoff cutline · top '+fieldSize+' —</div>'; }
   });
   h+='</div>';
   return h;
@@ -4660,7 +4671,7 @@ function setupFCSPlayoff(){
       if(t.div!=="FCS") return;                       // FBS teams are not eligible
       if(isNoPostseasonConf(t.c)) return;             // Ivy declines
       if(isCelebrationConf(t.c)) return;              // SWAC/MEAC are on the bowl track
-      others.push({name:n, p:t.p, you:false, score: fcsResumeScore(t.w, t.p, false, t.ovr, false)});
+      others.push({name:n, p:t.p, you:false, score: fcsResumeScore(t.w, t.p, isConfChamp(n), t.ovr, false)});
     });
   }
   others.sort(function(a,b){return b.score-a.score;});
@@ -6718,12 +6729,12 @@ function advanceSeason(){
 
   // ── Coach XP: earn from wins, meeting expectations, and postseason success ──
   s._xpGainedThisYear=0;
-  awardCoachXP(Math.floor(s.wins/2), "wins");            // ~1 XP per 2 wins
+  awardCoachXP(Math.floor(s.wins/3), "wins");            // ~1 XP per 3 wins (farmable source — kept slow)
   // Each of the AD's three goals is worth XP on its own, and hitting all three is a bonus.
   var _g=resolvedGoals();
   _g.forEach(function(g){ if(g.met) awardCoachXP(2, g.key==="wins"?"met win total":(g.key==="post"?"postseason goal":"program goal")); });
-  if(_g.length && _g.every(function(g){return g.met;})) awardCoachXP(3, "met every expectation");
-  if(s.wins>=11) awardCoachXP(2, "11-win season");       // a great year, title or not
+  if(_g.length && _g.every(function(g){return g.met;})) awardCoachXP(2, "met every expectation");
+  if(s.wins>=11) awardCoachXP(1, "11-win season");       // a great year, title or not (overlaps win XP — kept small)
   if(s._wonConfThisYear) awardCoachXP(3, "conference title");
   if(s._wonNatlThisYear) awardCoachXP(5, "national title");
 
@@ -6874,12 +6885,14 @@ function signCommittedRecruits(){
 }
 
 // Generate coaching-carousel job openings.
-// fired=true → only lateral/lower jobs; performing well → step-up jobs appear.
+// fired=true → only lateral/lower jobs. Otherwise: step-up/lateral offers PLUS a standing
+// rebuild ladder (one HC job per tier below you) PLUS coordinator openings at every
+// lower tier, so you can always drop down — rebuild as HC, or step back to run a unit.
 function genCarousel(fired){
   var s=ST.save;
   var cur=s.prestige;
   var offers=[];
-  var over = (s.wins - s.expectWins) + (hasAbility("pro2")?2:0) + (hasAbility("pro5")?4:0); // Reputation / Living Legend: better offers appear
+  var over = (s.wins - s.expectWins) + ((hasAbility("pro2")||hasArch("program"))?2:0) + (hasAbility("pro5")?4:0); // Program Builder / Reputation (non-stacking) + Living Legend: better offers appear
   var myDiv=myDivision();
   // Your own subdivision is always in play. A strong FCS season (or a title) opens the
   // door to LOW-END FBS jobs — the classic FCS-to-FBS jump. FBS coaches never drop to FCS
@@ -6934,13 +6947,27 @@ function genCarousel(fired){
     else if(over>=0){ addOffer(take(cand(cur,clamp(cur+1))),"HC"); }        // lateral or slight step up
     else { addOffer(take(cand(clamp(cur-1),cur)),"HC"); }                   // down year → lateral/step down
     addOffer(take(cand(clamp(cur-1),clamp(cur+1))),"HC");                   // a comparable second option
+    // ── Rebuild projects: you can ALWAYS choose to step DOWN and take on a
+    // reclamation job, even coming off a title — leave the blue blood to wake a
+    // sleeping giant. One standing HC offer at every tier beneath you.
+    for(var rp=cur-1; rp>=1; rp--){ addOffer(take(cand(rp,rp)),"HC"); }
   }
-  // de-dupe by school name, keep up to 4
+  // ── Coordinator openings at smaller programs: whatever your role, lower-tier
+  // programs are always hiring coordinators. Drop down a level to run a unit on a
+  // fresh project — one OC/DC opening per tier beneath you (an HC can step back to
+  // either side of the ball).
+  if(!fired){
+    for(var lp=cur-1; lp>=1; lp--){
+      if(s.role==="HC"){ addOffer(take(cand(lp,lp)),"OC"); addOffer(take(cand(lp,lp)),"DC"); }
+      else { addOffer(take(cand(lp,lp)), s.role); }   // OC stays OC, DC stays DC
+    }
+  }
+  // de-dupe by school name, keep up to 10
   var seen={}, uniq=[];
   offers.forEach(function(o){ if(o&&!seen[o.n]){seen[o.n]=1;uniq.push(o);} });
   // absolute safety net: never return an empty slate
   if(!uniq.length){ var anyT=take(cand(1,5)); if(anyT){ uniq.push({n:anyT.n,c:anyT.c,p:anyT.p,role:s.role==="HC"?"HC":"OC"}); } }
-  return uniq.slice(0,4);
+  return uniq.slice(0,10);
 }
 // Take a job from the carousel (or after being fired). Offer carries its own role.
 function takeJob(offer){
