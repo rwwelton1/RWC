@@ -1230,7 +1230,57 @@ function simLeagueGame(aName,bName,neutralHome){
   var aStr=A.ovr + rnd(-10,10) + (neutralHome?0:3);   // slight home edge to A
   var bStr=B.ovr + rnd(-10,10);
   var aWon=aStr>=bStr;
+  // Their stars played a game too — bank it. Stats now ACCUMULATE across a season and a
+  // career, exactly like your own players', instead of being conjured at year's end.
+  accrueStarGame(A); accrueStarGame(B);
   return {w:aWon?aName:bName, l:aWon?bName:aName};
+}
+// Add one game to every star on a team. Season totals build week by week; career totals
+// carry across years, so a CPU star can leave with a real body of work behind him.
+function accrueStarGame(t){
+  if(!t || !t.stars) return;
+  t.stars.forEach(function(st){
+    var g=genStarStats(st, 1, true);      // a single game's line, kept fractional
+    st.s=st.s||{}; st.c=st.c||{};
+    for(var k in g){
+      if(k==="g") continue;
+      st.s[k]=(st.s[k]||0)+g[k];
+      st.c[k]=(st.c[k]||0)+g[k];
+    }
+    st.s.g=(st.s.g||0)+1; st.c.g=(st.c.g||0)+1;
+  });
+}
+// The league sim only plays CONFERENCE games, so CPU stars finish the year several games
+// short of your full slate — which would quietly hand you every statistical title. Top them
+// up to a full season's worth of games (their non-conference schedule, in effect).
+function topUpStarSeasons(fullGames){
+  var L=ST.save.league; if(!L||!L.teams) return;
+  Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if(t.div!==myDivision() || !t.stars) return;
+    t.stars.forEach(function(st){
+      st.s=st.s||{};
+      var played=st.s.g||0;
+      for(var i=played; i<fullGames; i++){
+        var g=genStarStats(st, 1, true);
+        st.c=st.c||{};
+        for(var k in g){
+          if(k==="g") continue;
+          st.s[k]=(st.s[k]||0)+g[k];
+          st.c[k]=(st.c[k]||0)+g[k];
+        }
+        st.s.g=(st.s.g||0)+1; st.c.g=(st.c.g||0)+1;
+      }
+    });
+  });
+}
+// Wipe star season stats when a new year kicks off (careers persist).
+function resetStarSeasons(){
+  var L=ST.save.league; if(!L||!L.teams) return;
+  Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n]; if(!t.stars) return;
+    t.stars.forEach(function(st){ st.s={}; st.form = 0.84 + Math.random()*0.32; });
+  });
 }
 // Advance the league by one week: pair up all non-user teams and play them.
 // The user's team result is recorded separately (from their real game).
@@ -3932,18 +3982,40 @@ function pickDepth(pos){
 // name since we don't model their rosters.
 // A game's named cast. The starting QB takes nearly every snap, so he is fixed
 // for the game rather than re-rolled per play; the opponent gets one QB name too.
-function newCast(){
+function newCast(oppName){
   var qb=depthOrder(ST.save.roster,"QB")[0];
-  return {usQB: qb?qb.n:genName(), usQBp: qb||null, oppQB: genName()};
+  // The opponent has a REAL cast now: their actual star QB and skill players, pulled from the
+  // league. (This used to invent a fresh random name on literally every snap.)
+  var stars=starsOf(oppName);
+  var at=function(pos){ return stars.filter(function(s){return s.pos===pos;})[0] || null; };
+  var oQB=at("QB");
+  return {
+    usQB: qb?qb.n:genName(), usQBp: qb||null,
+    oppQB: oQB?oQB.n:genName(),
+    oppRB: at("RB"), oppWR: at("WR"), oppTE: at("TE")
+  };
+}
+// A team's star players, if we have them (your own team uses your real roster instead).
+function starsOf(name){
+  var L=ST.save.league;
+  var t=(L&&L.teams)?L.teams[name]:null;
+  return (t&&t.stars)?t.stars:[];
 }
 // Returns display names AND the actual roster objects (ours only), so the
 // play-by-play and the box score describe the SAME events.
 function attribute(p, cast){
   if(p.t!==0){
-    // we don't model opposing rosters — one QB, generated skill players
-    var b=genName(), guard=0;
-    while(b===cast.oppQB && guard++<6) b=genName();   // never throw to yourself
-    return {ball:b, qb:cast.oppQB, ballP:null, qbP:null};
+    // The opponent's real stars carry the ball — their names show up in the feed, so you're
+    // beating (or losing to) an actual player from an actual program.
+    var b=null;
+    if(p.kind==="run"){ b=cast.oppRB; }
+    else if(p.kind==="pass"){
+      var r=Math.random();
+      b = r<0.60 ? cast.oppWR : (r<0.82 ? cast.oppTE : cast.oppRB);
+    }
+    var bn = b?b.n:genName(), guard=0;
+    while(bn===cast.oppQB && guard++<6) bn=genName();  // never throw to yourself
+    return {ball:bn, qb:cast.oppQB, ballP:null, qbP:null};
   }
   var qbP=cast.usQBp, qn=cast.usQB;
   if(p.kind==="run"){
@@ -3971,7 +4043,7 @@ function ordDown(d){ return ["","1st","2nd","3rd","4th"][d]||String(d); }
 // Every row carries `scoring:true|false` so the UI can filter to scoring plays.
 function buildPlayByPlay(drivePlays, usName, themName){
   var usAb=abbr(usName), themAb=abbr(themName);
-  var cast=newCast();
+  var cast=newCast(themName);
   var out=[], ut=0, tt=0;
   drivePlays.forEach(function(p){
     var team=(p.t===0)?"us":"them";
@@ -4199,7 +4271,8 @@ function starOvrFor(t, pos){
 }
 function genStars(t){
   return ALL_POS.map(function(pos){
-    return {n:genName(), pos:pos, yr:pick(["FR","SO","JR","SR"]), ovr:starOvrFor(t,pos)};
+    return {n:genName(), pos:pos, yr:pick(["FR","SO","JR","SR"]), ovr:starOvrFor(t,pos),
+            s:{}, c:{}, form:0.84+Math.random()*0.32};
   });
 }
 // Give every team in YOUR subdivision a cast of stars (your own team has a real roster).
@@ -4213,20 +4286,30 @@ function ensureStars(){
   });
 }
 // A star's season, in the same units the engine produces for your own players.
-function genStarStats(st, games){
+function genStarStats(st, games, raw){
   var q=(st.ovr-70), g=games||12;
-  var nz=function(){ return 0.87 + Math.random()*0.26; };   // ±13% — scheme, tempo, game script
-  var sc=function(v){ return Math.max(0, Math.round(v*nz()*g/12)); };
+  // SEASON FORM. Accruing a season game-by-game averages the per-game noise away (central
+  // limit), so every CPU star finished within a few percent of the mean while your own engine
+  // stats stayed volatile — and you won the Payton 5 years in 6. A form factor rolled ONCE per
+  // season restores real season-to-season spread: some years a player is just on one.
+  var form = st.form || 1;
+  var nz=function(){ return (0.87 + Math.random()*0.26) * form; };   // ±13% game noise × season form
+  // `raw` keeps fractions. Rounding EVERY GAME is a trap: a 0.63-sack-per-game lineman rounds
+  // to 1 every single week and finishes with 11 sacks, and every DL in the country lands on the
+  // same inflated number. Accrue fractions, round only when the number is shown.
+  var sc=function(v){ var x=Math.max(0, v*nz()*g/12); return raw?x:Math.round(x); };
+  // Touchdowns need the same treatment: a back scoring 0.97 TD/game rounds up to 1 every week.
+  var td=function(v){ var x=Math.max(0, v*nz()); return raw?x:Math.round(x); };
   // TUNED against the engine's measured output. The key finding: the sim's box scores are
   // only WEAKLY tied to rating — a 72 OVR lineman still gets ~10 sacks, and a mid QB can
   // out-throw an elite one. An earlier version scaled these linearly with OVR, which starved
   // the (lower-rated) FCS field and handed you the Heisman 9 years in 10. Flat bases, gentle
   // slopes.
   var o={g:g};
-  if(st.pos==="QB"){ o.py=sc(2600+q*25); o.ptd=Math.max(0,Math.round(o.py/150*nz())); }
-  else if(st.pos==="RB"){ o.ry=sc(1050+q*20); o.rtd=Math.max(0,Math.round(o.ry/110*nz())); }
-  else if(st.pos==="WR"){ o.recy=sc(850+q*18); o.rectd=Math.max(0,Math.round(o.recy/170*nz())); }
-  else if(st.pos==="TE"){ o.recy=sc(430+q*12); o.rectd=Math.max(0,Math.round(o.recy/150*nz())); }
+  if(st.pos==="QB"){ o.py=sc(2600+q*25); o.ptd=td(o.py/150); }
+  else if(st.pos==="RB"){ o.ry=sc(1050+q*20); o.rtd=td(o.ry/110); }
+  else if(st.pos==="WR"){ o.recy=sc(850+q*18); o.rectd=td(o.recy/170); }
+  else if(st.pos==="TE"){ o.recy=sc(430+q*12); o.rectd=td(o.recy/150); }
   else if(st.pos==="OL"){ /* no box score — a lineman is judged on how he plays */ }
   else if(st.pos==="DL"){ o.sack=sc(8+q*0.18); o.tkl=sc(45+q*1.0); }
   // Interceptions are matched to the ENGINE's own (generous) output — it hands a good LB
@@ -4251,6 +4334,47 @@ function awardScore(pos, st, ovr, teamWins){
   return v;
 }
 var OFF_AWARD_POS={QB:1,RB:1,WR:1,TE:1,OL:1};
+// ── The real award slates ────────────────────────────────
+// FBS and FCS hand out different hardware, and the FCS awards are NOT just renamed Heismans:
+// the Walter Payton is the FCS OFFENSIVE player of the year, not an overall POY. (An earlier
+// pass treated it as a Heisman equivalent and handed the same player both it and "Offensive
+// POY" — the FCS simply has no overall-player award, so there's no top prize here at all.)
+var AWARD_SLATE={
+  FBS:{
+    top:  "Heisman Trophy",                       // best player in the country
+    off:  "Maxwell Award",                        // best offensive player (often the same man — as in life)
+    def:  "Bednarik Award",                       // defensive player of the year
+    frosh:"Shaun Alexander Freshman of the Year",
+    coach:"AP Coach of the Year",
+    pos:  {QB:"Davey O'Brien Award", RB:"Doak Walker Award", WR:"Biletnikoff Award",
+           TE:"John Mackey Award",   OL:"Outland Trophy",    DL:"Ted Hendricks Award",
+           LB:"Butkus Award",        DB:"Jim Thorpe Award"}
+  },
+  FCS:{
+    top:  null,                                   // the FCS has no overall player of the year
+    off:  "Walter Payton Award",                  // FCS offensive player of the year
+    def:  "Buck Buchanan Award",                  // FCS defensive player of the year
+    frosh:"Jerry Rice Award",                     // FCS freshman of the year
+    coach:"Eddie Robinson Award",                 // FCS coach of the year
+    pos:  null                                    // no positional national awards in the FCS
+  }
+};
+function awardSlate(){ return AWARD_SLATE[myDivision()] || AWARD_SLATE.FBS; }
+// Jim Thorpe covers the whole secondary, so corners and safeties compete for one trophy.
+function awardPosGroup(pos){ return (pos==="CB"||pos==="S") ? "DB" : pos; }
+// Coach of the Year goes to whoever most outran his expectations — you're eligible.
+function runCoachAward(){
+  var s=ST.save, L=s.league, best=null;
+  var mine=(s.wins||0) - (s.expectWins||0);
+  best={coach:"You", school:s.school, over:mine, wins:s.wins||0, you:true};
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if(t.div!==myDivision() || n===s.school) return;
+    var over=(t.w||0) - expectWinsFor(t.p, t.c);
+    if(over>best.over){ best={coach:n+" HC", school:n, over:over, wins:t.w||0, you:false}; }
+  });
+  return best;
+}
 // Build the whole national field: your real players + every CPU team's stars.
 function awardField(){
   var s=ST.save, L=s.league, field=[];
@@ -4267,9 +4391,9 @@ function awardField(){
     var t=L.teams[n];
     if(t.div!==myDiv || n===s.school || !t.stars) return;
     t.stars.forEach(function(stp){
-      var st=genStarStats(stp, games);   // rolled fresh each season; never persisted
+      var st=stp.s||{};                  // REAL stats, accrued game by game all season
       field.push({n:stp.n, pos:stp.pos, yr:stp.yr, ovr:stp.ovr, school:n, conf:t.c,
-                  you:false, st:st,
+                  you:false, st:st, star:stp,
                   score:awardScore(stp.pos, st, stp.ovr, t.w||0)});
     });
   });
@@ -4281,47 +4405,69 @@ function runAwards(){
   ensureStars();
   var field=awardField();
   if(!field.length) return;
+  var SL=awardSlate();
   var best=function(list){ return list.slice().sort(function(a,b){return b.score-a.score;})[0]; };
   var off=field.filter(function(p){return OFF_AWARD_POS[p.pos];});
   var def=field.filter(function(p){return !OFF_AWARD_POS[p.pos];});
-  var res={year:year, div:myDivision()};
-  // The Heisman almost always goes to an offensive player; a defender needs a monster year.
-  var ballot=field.map(function(p){
-    var q={}; for(var k in p) q[k]=p[k];
-    if(!OFF_AWARD_POS[p.pos]) q.score=p.score*0.88;
-    return q;
-  });
-  res.heisman = best(ballot);
-  res.offPOY  = best(off);
-  res.defPOY  = best(def);
-  var frosh   = field.filter(function(p){ return /FR$/.test(p.yr); });
-  res.frosh   = frosh.length?best(frosh):null;
-  var myConf  = field.filter(function(p){ return p.conf===s.conf; });
+  var res={year:year, div:myDivision(), slate:SL, named:[]};
+
+  // Overall player of the year (FBS only). The Heisman is an offensive award in practice,
+  // so a defender needs a monster year to take it.
+  if(SL.top){
+    var ballot=field.map(function(p){
+      var q={}; for(var k in p) q[k]=p[k];
+      if(!OFF_AWARD_POS[p.pos]) q.score=p.score*0.88;
+      return q;
+    });
+    res.top = best(ballot);
+  }
+  res.off = off.length?best(off):null;
+  res.def = def.length?best(def):null;
+  var frosh = field.filter(function(p){ return /FR$/.test(p.yr); });
+  res.frosh = frosh.length?best(frosh):null;
+  var myConf = field.filter(function(p){ return p.conf===s.conf; });
   res.confPOY = myConf.length?best(myConf):null;
+  res.coach = runCoachAward();
+  // Positional trophies (FBS only — the FCS has none).
+  res.posAwards=[];
+  if(SL.pos){
+    Object.keys(SL.pos).forEach(function(grp){
+      var pool=field.filter(function(p){ return awardPosGroup(p.pos)===grp; });
+      if(!pool.length) return;
+      var w=best(pool);
+      res.posAwards.push({award:SL.pos[grp], w:w});
+    });
+  }
   res.allAmerica = ALL_POS.map(function(pos){
     return best(field.filter(function(p){return p.pos===pos;}));
   }).filter(Boolean);
+
   s._lastAwards=res;
   // Bank anything YOUR players won — that's the permanent trophy case.
   s.awards=s.awards||[];
   var mine=[];
   var add=function(w, label){
-    if(!w || !w.you) return;
+    if(!w || !w.you || !label) return;
     s.awards.push({year:year, award:label, n:w.n, pos:w.pos, school:s.school, div:res.div});
-    mine.push(w.n+" — "+label);
+    mine.push(w.n);
     var pl=(s.roster||[]).filter(function(r){return r.id===w.id;})[0];
     if(pl){ pl.awards=pl.awards||[]; pl.awards.push(label+" ("+year+")"); }
   };
-  add(res.heisman, HEISMAN_NAME());
-  add(res.offPOY,  "Offensive Player of the Year");
-  add(res.defPOY,  "Defensive Player of the Year");
-  add(res.frosh,   "Freshman of the Year");
+  add(res.top,   SL.top);
+  add(res.off,   SL.off);
+  add(res.def,   SL.def);
+  add(res.frosh, SL.frosh);
   add(res.confPOY, s.conf+" Player of the Year");
+  res.posAwards.forEach(function(pa){ add(pa.w, pa.award); });
   res.allAmerica.forEach(function(w){ add(w, "All-America ("+w.pos+")"); });
-  if(mine.length) toast("🏅 "+mine.length+" of your players took home hardware!");
+  // The coach award is yours, not a player's.
+  if(res.coach && res.coach.you){
+    s.awards.push({year:year, award:SL.coach, n:"You", pos:"HC", school:s.school, div:res.div});
+    s.coachAwards=(s.coachAwards||0)+1;
+    toast("🏆 You won the "+SL.coach+"!");
+  }
+  if(mine.length) toast("🏅 "+mine.length+" award"+(mine.length===1?"":"s")+" for your players!");
 }
-// The FCS national player of the year is the Walter Payton Award; FBS is the Heisman.
-function HEISMAN_NAME(){ return myDivision()==="FCS" ? "Walter Payton Award" : "Heisman Trophy"; }
 // Stars age with the calendar: seniors move on and a new face takes their place.
 function ageStars(){
   var s=ST.save, L=s.league; if(!L||!L.teams) return;
@@ -4330,10 +4476,23 @@ function ageStars(){
     var t=L.teams[n];
     if(!t.stars) return;
     t.stars=t.stars.map(function(st){
-      if(st.yr==="SR") return {n:genName(), pos:st.pos, yr:pick(["FR","SO"]), ovr:starOvrFor(t,st.pos)};
+      // Seniors graduate, and juniors who declared for the draft are gone too — a fresh face
+      // takes the job, with no stats to his name yet.
+      if(st.yr==="SR" || st._declared)
+        return {n:genName(), pos:st.pos, yr:pick(["FR","SO"]), ovr:starOvrFor(t,st.pos),
+                s:{}, c:{}, form:0.84+Math.random()*0.32};
       st.yr=YR_NEXT[st.yr]||st.yr;
-      st.ovr=clampN(st.ovr+rnd(-1,4), 48, 99);   // they develop too
-      delete st._st;
+      // They develop — but against a CEILING tied to their program. Unbounded growth (+1.5 a
+      // year) quietly inflated the whole country: the national draft class went 41 → 57 → 122
+      // over three seasons as everyone drifted toward 99. A star can outgrow his program, but
+      // only so far.
+      // Ceiling sits just above the program's baseline. At +8 every star eventually maxed out,
+      // and the FCS draft class inflated from 18 to 65 over a dynasty as the whole country
+      // drifted into draftable range. A star can outgrow his program — but only a little.
+      var ceil=Math.round(0.575*(t.ovr||70) + 34.25) + 4;
+      st.ovr=clampN(st.ovr+rnd(-1,3), 48, Math.min(99, ceil));
+      st.s={};                                    // new season, fresh stat line (career carries)
+      st.form=0.84+Math.random()*0.32;            // and a fresh roll of form
       return st;
     });
   });
@@ -4386,49 +4545,108 @@ function draftStock(p){
   st += Math.min(4, prodScore(p)*0.4);                 // production gets you on the board
   st += (DRAFT_POS_VAL[p.pos]||0);                     // premium positions get pushed up
   st += Math.min(1.5, Math.max(0,(p.pot-p.ovr))*0.25); // remaining upside
-  if(myDivision()==="FCS") st -= 6;                    // far fewer scouts at the FCS level
   return st;
+}
+// Where a prospect lands, accounting for his level. FCS players are scored on the same scale
+// and then slide two rounds — good enough and you're still drafted; borderline and you're not.
+function draftRoundFor(stock, div){
+  var rd=draftRound(stock);
+  if(div!=="FCS") return rd;
+  if(!rd) return null;
+  rd+=3;
+  return rd>7 ? null : rd;
 }
 // Where that stock lands you. null = undrafted. Calibrated so a ~90 OVR star goes in the
 // first round, 85–89 is a day-two pick, low 80s is a late flier, and below that you go UDFA.
 function draftRound(stock){
-  if(stock>=93) return 1;
-  if(stock>=90) return 2;
-  if(stock>=88) return 3;
-  if(stock>=86) return 4;
-  if(stock>=84) return 5;
-  if(stock>=82) return 6;
-  if(stock>=80) return 7;
+  if(stock>=91) return 1;
+  if(stock>=89) return 2;
+  if(stock>=87) return 3;
+  if(stock>=85) return 4;
+  if(stock>=83) return 5;
+  if(stock>=81) return 6;
+  if(stock>=79) return 7;
   return null;
 }
 // A junior only leaves early if he projects as a TOP-3-ROUND pick — that's the real
 // trade-off: your best players are exactly the ones you can lose a year early.
 function willDeclareEarly(p){
-  return p.yr==="JR" && draftStock(p)>=88;
+  return p.yr==="JR" && !!draftRoundFor(draftStock(p), myDivision()) && draftStock(p)>=88;
 }
 // Run the draft. Seniors are all draft-eligible; juniors must declare. Marks early entrants
 // so the graduation pass removes them from the roster.
 function runDraft(){
   var s=ST.save, year=2026+((s.seasonsPlayed||1)-1);
-  var picks=[], undrafted=[];
+  var picks=[], undrafted=[], national=[];
+  // ── Your players ──
   (s.roster||[]).forEach(function(p){
     if(p.cut) return;
     var senior=(p.yr==="SR"), early=willDeclareEarly(p);
     if(!senior && !early) return;
     if(early) p._declared=true;                 // he's gone — the graduation pass drops him
-    var stock=draftStock(p), rd=draftRound(stock);
-    var entry={n:p.n, pos:p.pos, ovr:p.ovr, yr:p.yr, early:!!early,
-               school:s.school, div:myDivision(), year:year};
-    if(rd){ entry.round=rd; entry.pick=rnd(1,32); picks.push(entry); }
+    var stock=draftStock(p), rd=draftRoundFor(stock, myDivision());
+    var entry={n:p.n, pos:p.pos, ovr:p.ovr, yr:p.yr, early:!!early, you:true,
+               school:s.school, div:myDivision(), year:year, stock:stock,
+               st:(p.stats&&p.stats.season)||{}};
+    if(rd){ entry.round=rd; picks.push(entry); national.push(entry); }
     else if(senior) undrafted.push(entry);      // an undeclared junior simply stays
   });
-  picks.sort(function(a,b){ return (a.round-b.round) || (a.pick-b.pick); });
-  s.draftHistory=(s.draftHistory||[]).concat(picks);
-  s._lastDraft={year:year, picks:picks, undrafted:undrafted};
-  if(picks.length){
-    var r1=picks.filter(function(d){return d.round===1;}).length;
-    toast("🏈 Draft: "+picks.length+" of your players selected"+(r1?" · "+r1+" in Round 1":""));
+  // ── The rest of the country: every other program's stars are draft-eligible too ──
+  var L=s.league;
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if(t.div!==myDivision() || n===s.school || !t.stars) return;
+    t.stars.forEach(function(stp){
+      var senior=(stp.yr==="SR"), early=starWillDeclare(stp, t);
+      if(!senior && !early) return;
+      if(early) stp._declared=true;
+      var stock=starDraftStock(stp, t), rd=draftRoundFor(stock, t.div);
+      if(!rd) return;                           // undrafted CPU players aren't worth listing
+      national.push({n:stp.n, pos:stp.pos, ovr:stp.ovr, yr:stp.yr, early:!!early, you:false,
+                     school:n, div:t.div, year:year, round:rd, stock:stock, st:stp.s||{}});
+    });
+  });
+  // ── Draft order: best prospect in the country goes first, round by round ──
+  // A real draft is SEVEN ROUNDS OF THIRTY-TWO. Without that cap the board bulged absurdly
+  // (46 players "in round 2"), so overflow slides down a round, and anyone past pick 224
+  // goes undrafted — exactly how a hard-capped board behaves.
+  var PICKS_PER_ROUND=32, MAX_ROUND=7;
+  national.sort(function(a,b){ return (a.round-b.round) || (b.stock-a.stock); });
+  var pickNo={}, board=[];
+  national.forEach(function(e){
+    var rd=e.round;
+    while(rd<=MAX_ROUND && (pickNo[rd]||0)>=PICKS_PER_ROUND) rd++;   // this round is full — slide
+    if(rd>MAX_ROUND) return;                                          // off the board entirely
+    e.round=rd;
+    pickNo[rd]=(pickNo[rd]||0)+1;
+    e.pick=pickNo[rd];
+    board.push(e);
+  });
+  var myPicks=board.filter(function(e){return e.you;});   // only those who actually got picked
+  s.draftHistory=(s.draftHistory||[]).concat(myPicks.map(function(e){
+    return {n:e.n,pos:e.pos,ovr:e.ovr,yr:e.yr,early:e.early,school:e.school,div:e.div,year:e.year,round:e.round,pick:e.pick};
+  }));
+  // Keep the top two rounds for the Draft Night board; the full class is summarised by count.
+  s._lastDraft={year:year, picks:myPicks, undrafted:undrafted,
+                board:board.slice(0,64), total:board.length,
+                r1:board.filter(function(e){return e.round===1;}).length};
+  if(myPicks.length){
+    var r1=myPicks.filter(function(d){return d.round===1;}).length;
+    toast("🏈 Draft: "+myPicks.length+" of your players selected"+(r1?" · "+r1+" in Round 1":""));
   }
+}
+// A CPU star's draft stock, on the same scale as yours (production + rating + level).
+function starDraftStock(stp, t){
+  var st=stp.s||{};
+  var prod=0;
+  prod += (st.py||0)/380 + (st.ptd||0)*0.30;
+  prod += (st.ry||0)/230 + (st.rtd||0)*0.55;
+  prod += (st.recy||0)/230 + (st.rectd||0)*0.55;
+  prod += (st.sack||0)*0.55 + (st.dint||0)*0.55 + (st.tkl||0)/28;
+  return stp.ovr + Math.min(4, prod*0.4) + (DRAFT_POS_VAL[stp.pos]||0);
+}
+function starWillDeclare(stp, t){
+  return stp.yr==="JR" && !!draftRoundFor(starDraftStock(stp,t), t.div) && starDraftStock(stp,t)>=88;
 }
 
 // ── Career record book ───────────────────────────────────
@@ -4517,21 +4735,36 @@ function careerRecordBlock(){
 function awardsCard(){
   var a=ST.save._lastAwards;
   if(!a) return "";
+  var SL=a.slate||awardSlate();
   var row=function(label, w){
-    if(!w) return "";
+    if(!w || !label) return "";
     return '<div class="riv-row'+(w.you?' aw-you':'')+'">'+
       '<span class="drf-cat">'+x(label)+'</span>'+
       '<span class="riv-opp">'+x(w.n)+' <span class="t25-conf">'+x(w.pos)+' · '+x(w.school)+
         (w.you?' <b class="drf-early">YOU</b>':'')+'</span></span>'+
       '<span class="riv-rec">'+awardLine(w)+'</span></div>';
   };
-  var h='<div class="sec-title">🏅 Awards · '+a.year+'</div><div class="rec-tbl">';
-  h+=row(HEISMAN_NAME(), a.heisman);
-  h+=row("Offensive POY", a.offPOY);
-  h+=row("Defensive POY", a.defPOY);
-  h+=row("Freshman of the Year", a.frosh);
+  var h='<div class="sec-title">🏅 National Awards · '+a.year+'</div><div class="rec-tbl">';
+  h+=row(SL.top, a.top);          // FBS only — the FCS has no overall player of the year
+  h+=row(SL.off, a.off);
+  h+=row(SL.def, a.def);
+  h+=row(SL.frosh, a.frosh);
+  // Coach of the Year — the one trophy you can win yourself.
+  if(a.coach){
+    h+='<div class="riv-row'+(a.coach.you?' aw-you':'')+'">'+
+       '<span class="drf-cat">'+x(SL.coach)+'</span>'+
+       '<span class="riv-opp">'+(a.coach.you?'<b>You</b>':x(a.coach.school))+
+         ' <span class="t25-conf">'+x(a.coach.school)+(a.coach.you?' <b class="drf-early">YOU</b>':'')+'</span></span>'+
+       '<span class="riv-rec">'+a.coach.wins+'W · '+(a.coach.over>=0?'+':'')+a.coach.over+'</span></div>';
+  }
   h+=row(ST.save.conf+" POY", a.confPOY);
   h+='</div>';
+  // Positional trophies (FBS only)
+  if((a.posAwards||[]).length){
+    h+='<div class="rec-tbl"><div class="rec-schoolhd"><span>Position Awards</span><span class="rec-lvl">'+x(a.div)+'</span></div>';
+    a.posAwards.forEach(function(pa){ h+=row(pa.award, pa.w); });
+    h+='</div>';
+  }
   var mine=(a.allAmerica||[]).filter(function(w){return w.you;});
   if(mine.length){
     h+='<div class="rec-tbl"><div class="rec-schoolhd"><span>All-America</span><span class="rec-lvl">YOUR PLAYERS</span></div>';
@@ -4546,13 +4779,13 @@ function awardsCard(){
 }
 // The stat line that won it.
 function awardLine(w){
-  var st=w.st||{};
-  if(st.py)   return st.py+" yd · "+(st.ptd||0)+" TD";
-  if(st.ry)   return st.ry+" yd · "+(st.rtd||0)+" TD";
-  if(st.recy) return st.recy+" yd · "+(st.rectd||0)+" TD";
-  if(st.sack) return (st.sack||0)+" sk · "+(st.tkl||0)+" tkl";
-  if(st.dint) return (st.dint||0)+" INT · "+(st.tkl||0)+" tkl";
-  if(st.tkl)  return st.tkl+" tkl";
+  var st=w.st||{}, R=function(v){ return Math.round(v||0); };
+  if(st.py)   return R(st.py)+" yd · "+R(st.ptd)+" TD";
+  if(st.ry)   return R(st.ry)+" yd · "+R(st.rtd)+" TD";
+  if(st.recy) return R(st.recy)+" yd · "+R(st.rectd)+" TD";
+  if(st.sack) return R(st.sack)+" sk · "+R(st.tkl)+" tkl";
+  if(st.dint) return R(st.dint)+" INT · "+R(st.tkl)+" tkl";
+  if(st.tkl)  return R(st.tkl)+" tkl";
   return w.ovr+" OVR";
 }
 // ── Trophy Room: every award your players have ever won ──
@@ -4597,6 +4830,19 @@ function draftNightCard(){
        d.undrafted.map(function(u){return x(u.n)+" ("+x(u.pos)+")";}).join(", ")+'</span></div>';
   }
   h+='</div>';
+  // The national first round — the whole country's draft class, not just yours.
+  var r1=(d.board||[]).filter(function(e){return e.round===1;}).slice(0,20);
+  if(r1.length){
+    h+='<div class="rec-tbl"><div class="rec-schoolhd"><span>First Round</span><span class="rec-lvl">'+(d.total||0)+' DRAFTED</span></div>';
+    r1.forEach(function(e){
+      h+='<div class="riv-row'+(e.you?' aw-you':'')+'">'+
+         '<span class="drf-rd">'+e.pick+'</span>'+
+         '<span class="riv-opp">'+x(e.n)+' <span class="t25-conf">'+x(e.pos)+' · '+x(e.school)+
+           (e.early?' · EARLY':'')+(e.you?' <b class="drf-early">YOU</b>':'')+'</span></span>'+
+         '<span class="riv-rec">'+e.ovr+'</span></div>';
+    });
+    h+='</div>';
+  }
   return h;
 }
 // ── Trophy Room: the program record book ──
@@ -6565,6 +6811,7 @@ function beginSeasonRecruiting(){
   s.recruitPtsLeft=PRESEASON_RECRUIT_POINTS; s._usedFreeScout=false;
   s._signedThisYear=null;
   resetSeasonStats(); // clear last year's per-season stats (career totals persist)
+  resetStarSeasons(); // ...and the rest of the country starts from zero too
   var nilRoll = hasAbility("nil5") ? money2(Math.max(0,(s.nilLeft||0))*0.5) : 0; // Collective Empire: carry half of unused NIL
   s.nilTotal=money2(nilBudgetFor()+nilRoll); s.nilLeft=s.nilTotal; // refill the annual NIL budget
   s.roster.forEach(function(p){ p.nilFund=0; }); // retention funding resets each year
@@ -6992,6 +7239,25 @@ function boxFromPlays(pbp, opp){
 }
 // Reset per-season stats for returning players at the start of a new season (career persists).
 function resetSeasonStats(){ (ST.save.roster||[]).forEach(function(p){ if(p.stats)p.stats.season={}; p.gamelog=[]; }); }
+// ── National statistical leaders: you against the whole country ──
+// Every star's stats are real and accrued, so the leaderboard is a true national board.
+function nationalLeaders(key, n){
+  var s=ST.save, L=s.league, out=[];
+  (s.roster||[]).forEach(function(p){
+    var v=(p.stats&&p.stats.season&&p.stats.season[key])||0;
+    if(v>0) out.push({n:p.n, pos:p.pos, school:s.school, you:true, v:Math.round(v)});
+  });
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(tn){
+    var t=L.teams[tn];
+    if(t.div!==myDivision() || tn===s.school || !t.stars) return;
+    t.stars.forEach(function(st){
+      var v=(st.s&&st.s[key])||0;
+      if(v>0) out.push({n:st.n, pos:st.pos, school:tn, you:false, v:Math.round(v)});
+    });
+  });
+  out.sort(function(a,b){ return b.v-a.v; });
+  return out.slice(0, n||10);
+}
 
 // ── Stats UI ─────────────────────────────────────────────
 function statLeaders(key){
@@ -7027,7 +7293,35 @@ function statsTab(){
     h+=d1+d2+d3; if(d1||d2||d3)any=true;
   }
   if(!any) h+='<div style="padding:24px;text-align:center;font-weight:700;color:var(--muted);line-height:1.5">No stats yet this season. Play some games and your leaders will show up here.</div>';
+  h+=nationalBoard();
   return h;
+}
+// ── The national leaderboard: your players against every star in the country ──
+function nationalBoard(){
+  var cats=[
+    {k:"py",   t:"Passing Yards",  u:" yd"},
+    {k:"ry",   t:"Rushing Yards",  u:" yd"},
+    {k:"recy", t:"Receiving Yards",u:" yd"},
+    {k:"tkl",  t:"Tackles",        u:" tkl"},
+    {k:"sack", t:"Sacks",          u:" sk"},
+    {k:"dint", t:"Interceptions",  u:" INT"}
+  ];
+  var any=false, h='';
+  cats.forEach(function(c){
+    var list=nationalLeaders(c.k, 5);
+    if(!list.length) return;
+    any=true;
+    h+='<div class="sec-title" style="margin:10px 2px 5px">'+c.t+'</div><div class="conf-table" style="margin-bottom:4px">';
+    list.forEach(function(p,i){
+      h+='<div class="stat-row'+(p.you?" me":"")+'"><span class="stat-rk">'+(i+1)+'</span>'+
+         '<span class="stat-nm">'+x(p.n)+'<span class="stat-pos">'+x(p.pos)+' · '+x(p.school)+(p.you?' · YOU':'')+'</span></span>'+
+         '<span class="stat-ln">'+p.v+c.u+'</span></div>';
+    });
+    h+='</div>';
+  });
+  if(!any) return '';
+  return '<div class="sec-title" style="margin:18px 2px 5px">🇺🇸 National Leaders · '+x(myDivision())+'</div>'+
+         '<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Where your players rank against every star in the country.</div>'+h;
 }
 // ── Player stat rendering ────────────────────────────────
 function _n(v){ return v||0; }
@@ -7685,6 +7979,7 @@ function advanceSeason(){
     natlTitle: !!s._wonNatlThisYear
   });
   s._lastWins=s.wins; // feeds next season's NIL budget
+  topUpStarSeasons((s.schedule||[]).length||12);  // put the country on a full slate before judging
   updateRecordBook();  // fold this year's stat lines into the program record book
   runAwards();         // hand out the hardware — your players vs. every other team's stars
   runDraft();          // seniors go pro; juniors good enough to go early declare and leave
