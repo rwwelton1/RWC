@@ -4189,7 +4189,13 @@ function coachTreeScreen(){
 // so stars get real variance and the race stays honest.
 // ═════════════════════════════════════════════════════════
 function starOvrFor(t, pos){
-  return clampN(Math.round((t.ovr||70) + rnd(2,9) + (pos==="QB"?1:0)), 48, 99);
+  // CALIBRATED against real generated rosters. Star ratings REGRESS TOWARD THE MEAN: a
+  // 90-rated Alabama's best QB comes out around 84 (offset -6), while a 70-rated Furman's best
+  // is a 76 (offset +6). A single flat offset therefore can't serve both — it made CPU stars
+  // too strong in FBS (you never won an award) and too weak in FCS (you won them all). This
+  // line is the fitted curve through both, so the field is honest at every level.
+  var base = 0.575*(t.ovr||70) + 34.25;
+  return clampN(Math.round(base + rnd(-4,4) + (pos==="QB"?1:0)), 48, 99);
 }
 function genStars(t){
   return ALL_POS.map(function(pos){
@@ -4209,7 +4215,7 @@ function ensureStars(){
 // A star's season, in the same units the engine produces for your own players.
 function genStarStats(st, games){
   var q=(st.ovr-70), g=games||12;
-  var nz=function(){ return 0.78 + Math.random()*0.44; };   // ±22% — scheme, tempo, game script
+  var nz=function(){ return 0.87 + Math.random()*0.26; };   // ±13% — scheme, tempo, game script
   var sc=function(v){ return Math.max(0, Math.round(v*nz()*g/12)); };
   // TUNED against the engine's measured output. The key finding: the sim's box scores are
   // only WEAKLY tied to rating — a 72 OVR lineman still gets ~10 sacks, and a mid QB can
@@ -4223,8 +4229,11 @@ function genStarStats(st, games){
   else if(st.pos==="TE"){ o.recy=sc(430+q*12); o.rectd=Math.max(0,Math.round(o.recy/150*nz())); }
   else if(st.pos==="OL"){ /* no box score — a lineman is judged on how he plays */ }
   else if(st.pos==="DL"){ o.sack=sc(8+q*0.18); o.tkl=sc(45+q*1.0); }
-  else if(st.pos==="LB"){ o.tkl=sc(80+q*1.6); o.sack=sc(3+q*0.15); o.dint=sc(5+q*0.25); }
-  else { o.dint=sc(5+q*0.25); o.tkl=sc(48+q*0.9); }   // CB / S
+  // Interceptions are matched to the ENGINE's own (generous) output — it hands a good LB
+  // 8-15 picks a year. Starve the CPU here and you'd win Defensive POY literally every season;
+  // the Heisman ballot is kept honest by the offensive weighting below, not by nerfing defenders.
+  else if(st.pos==="LB"){ o.tkl=sc(80+q*1.6); o.sack=sc(3+q*0.15); o.dint=sc(4+q*0.30); }
+  else { o.dint=sc(5+q*0.30); o.tkl=sc(48+q*0.9); }   // CB / S
   return o;
 }
 // One number for "how good was his year". Production leads; rating and team success matter,
@@ -4235,9 +4244,9 @@ function awardScore(pos, st, ovr, teamWins){
   v += (st.py||0)/300   + (st.ptd||0)*0.8;
   v += (st.ry||0)/190   + (st.rtd||0)*1.0;
   v += (st.recy||0)/190 + (st.rectd||0)*1.0;
-  v += (st.tkl||0)/14   + (st.sack||0)*1.3 + (st.dint||0)*1.8;
-  if(pos==="OL") v += (ovr-70)*0.55;    // no box score, so the eye test carries him
-  v += (ovr-70)*0.18;                   // scouts watch the tape too
+  v += (st.tkl||0)/16   + (st.sack||0)*1.3 + (st.dint||0)*1.5;
+  if(pos==="OL") v += (ovr-70)*1.10;    // no box score, so the eye test carries him
+  v += (ovr-70)*0.55;                   // the tape matters: a great player is a great player
   v += (teamWins||0)*0.45;              // winning players win awards
   return v;
 }
@@ -4258,8 +4267,7 @@ function awardField(){
     var t=L.teams[n];
     if(t.div!==myDiv || n===s.school || !t.stars) return;
     t.stars.forEach(function(stp){
-      var st=genStarStats(stp, games);
-      stp._st=st;
+      var st=genStarStats(stp, games);   // rolled fresh each season; never persisted
       field.push({n:stp.n, pos:stp.pos, yr:stp.yr, ovr:stp.ovr, school:n, conf:t.c,
                   you:false, st:st,
                   score:awardScore(stp.pos, st, stp.ovr, t.w||0)});
@@ -4277,7 +4285,13 @@ function runAwards(){
   var off=field.filter(function(p){return OFF_AWARD_POS[p.pos];});
   var def=field.filter(function(p){return !OFF_AWARD_POS[p.pos];});
   var res={year:year, div:myDivision()};
-  res.heisman = best(field);
+  // The Heisman almost always goes to an offensive player; a defender needs a monster year.
+  var ballot=field.map(function(p){
+    var q={}; for(var k in p) q[k]=p[k];
+    if(!OFF_AWARD_POS[p.pos]) q.score=p.score*0.88;
+    return q;
+  });
+  res.heisman = best(ballot);
   res.offPOY  = best(off);
   res.defPOY  = best(def);
   var frosh   = field.filter(function(p){ return /FR$/.test(p.yr); });
