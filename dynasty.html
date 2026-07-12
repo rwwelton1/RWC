@@ -487,6 +487,13 @@ a{color:inherit;text-decoration:none}
 .riv-stk{width:56px;text-align:right;font-weight:800;font-size:10px}
 .riv-w{color:#1a7f37}.riv-l{color:#b42318}
 .rec-empty{padding:14px 11px;font-size:11px;font-weight:700;color:var(--muted);text-align:center}
+.drf-rd{width:26px;flex:none;font-weight:900;font-size:10px;color:var(--gold-dark)}
+.drf-cat{width:112px;flex:none;font-weight:900;font-size:10px;color:var(--muted)}
+.drf-early{color:var(--gold-dark)}
+.rs-btn{flex:none;width:26px;height:22px;border:2px solid var(--border2);background:#fff;color:var(--muted);border-radius:6px;font-size:9px;font-weight:900}
+.rs-btn.on{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+.ros-st.rs{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+.ros-row.rs-row{opacity:.75;background:var(--red-bg)}
 .conf-row{display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1.5px solid var(--border2)}
 .conf-row:last-child{border-bottom:none}
 .conf-row.top2{background:var(--gold-bg)}
@@ -2155,6 +2162,7 @@ function playerMomentum(){
     m += ((y.wins||0) - (y.expect||7)) * 1.6 * w;
   });
   m += (s.natlTitles||0)*3 + (s.titles||0)*1.2; // rings are the loudest recruiting pitch
+  m += Math.min(5, (s.draftHistory||[]).length*0.4); // ...and a pipeline to the league is the next loudest
   return Math.max(-14, Math.min(16, m));
 }
 // Recent success for a CPU program: how far its rating has drifted above/below the static
@@ -2572,8 +2580,66 @@ function genSchedule(team){
 // Players at a position in DEPTH-CHART order. If the user has set a manual order
 // (depthRank), that wins; otherwise fall back to overall rating. This lets you start
 // a promising young player over a higher-rated veteran.
+// ═════════════════════════════════════════════════════════
+// REDSHIRTS — current NCAA rules (the 2018 four-game rule, as amended in 2024):
+//   • Five years to play four: ONE redshirt season per career.
+//   • A player may appear in up to FOUR REGULAR-SEASON games and still keep the year.
+//   • POSTSEASON games (conference title, bowl, CFP, FCS playoff) do NOT count at all.
+//   • Anyone eligible who stays under the limit keeps the year — deep reserves who never
+//     see the field redshirt naturally, exactly as they do in real programs.
+// Holding a starter out costs you his snaps NOW to buy an extra year of him LATER. You can
+// also pull the redshirt off for a four-game cameo and still preserve the season.
+// ═════════════════════════════════════════════════════════
+var RS_GAME_LIMIT=4;
+function rsAvailable(p){ return !p.rsUsed && p.yr!=="SR"; }   // a senior has no year left to save
+function isRedshirting(p){ return !!p.hold && rsAvailable(p); }
+function gamesPlayed(p){ return p.gp||0; }
+function rsSafe(p){ return gamesPlayed(p)<=RS_GAME_LIMIT; }   // still under the four-game cap
+function yrLabel(p){ return (p.rs?"RS ":"")+p.yr; }
+// Hold a player out (or send him back onto the field).
+function toggleHold(id){
+  var s=ST.save, p=(s.roster||[]).filter(function(r){return r.id===id;})[0];
+  if(!p) return;
+  if(!rsAvailable(p)){ toast("⚠️ "+p.n+" has no redshirt left to use."); return; }
+  if(p.hold){
+    p.hold=false;
+    toast(rsSafe(p) ? ("▶️ "+p.n+" is active — "+gamesPlayed(p)+"/"+RS_GAME_LIMIT+" games used, redshirt still safe.")
+                    : ("▶️ "+p.n+" is active. His redshirt is already burned."));
+  } else {
+    p.hold=true;
+    toast("🔴 "+p.n+" is redshirting — held out to preserve the year.");
+  }
+  persist(); draw();
+}
+// Who actually takes the field: the two-deep at every position. Redshirts held out don't.
+function markAppearances(){
+  var s=ST.save;
+  ALL_POS.forEach(function(pos){
+    depthOrder(s.roster,pos).slice(0, startersAt(pos)+1).forEach(function(p){
+      p.gp=(p.gp||0)+1;
+      // warn the moment a redshirt is one game from burning the year
+      if(rsAvailable(p) && p.gp===RS_GAME_LIMIT)
+        toast("⚠️ "+p.n+" has hit "+RS_GAME_LIMIT+" games — one more burns his redshirt.");
+    });
+  });
+}
+// Season's end: anyone eligible who stayed under the four-game cap keeps the year.
+function resolveRedshirts(){
+  var s=ST.save, took=[];
+  (s.roster||[]).forEach(function(p){
+    if(p.cut || p._declared) return;      // cut or off to the draft — nothing to preserve
+    if(!rsAvailable(p)) return;
+    if(!rsSafe(p)) return;                // played too many games; the year is burned
+    p.rsUsed=true; p.rs=true; p._rsHold=true;  // _rsHold: skip his class-year bump below
+    p.hold=false;                          // the designation has done its job
+    took.push(p.n);
+  });
+  if(took.length) toast("🔴 "+took.length+" player"+(took.length===1?"":"s")+" redshirted this season.");
+}
 function depthOrder(roster, pos){
-  return roster.filter(function(p){return p.pos===pos;}).sort(function(a,b){
+  // A redshirt being held out is not in the two-deep and does not play, so he is invisible
+  // to the depth chart, the ratings, and the sim — that's the cost of preserving his year.
+  return roster.filter(function(p){return p.pos===pos && !isRedshirting(p);}).sort(function(a,b){
     var da=(a.depthRank==null?999:a.depthRank), db=(b.depthRank==null?999:b.depthRank);
     if(da!==db) return da-db;         // manual order first
     return b.ovr-a.ovr;               // then by rating
@@ -3367,7 +3433,10 @@ function rosterTable(){
         var yearDelta=p.ovr-(p.ssOvr!=null?p.ssOvr:p.ovr);
         var careerDelta=p.ovr-(p.startOvr!=null?p.startOvr:p.ovr);
         var col=posColor(pos);
-        var rsub=p.yr+(p.arch?' · '+x(p.arch):'')+(careerDelta!==0?' · career '+(careerDelta>0?'+':'')+careerDelta:'');
+        var rsGames = (rsAvailable(p) && s.week>0)
+          ? ' · <b'+(rsSafe(p)?'':' style="color:var(--red2)"')+'>'+gamesPlayed(p)+'/'+RS_GAME_LIMIT+' g</b>'
+          : '';
+        var rsub=yrLabel(p)+(p.arch?' · '+x(p.arch):'')+(careerDelta!==0?' · career '+(careerDelta>0?'+':'')+careerDelta:'')+rsGames;
         var _dem=nilDemand(p), _fund=money2(p.nilFund||0), _funded=(_dem>0 && _fund>=_dem), _risk=retentionRisk(p);
         var _gap=money2(_dem-_fund), _afford=((s.nilLeft||0)+1e-9>=_gap);   // can we cover the full ask?
         var nilCell='';
@@ -3397,7 +3466,18 @@ function rosterTable(){
              '<span class="ros-sub">'+(picked?'<b style="color:var(--purple)">Tap another '+p.pos+' to swap</b>':rsub)+'</span></span>'+
            nilCell+
            '<span class="ros-ovr">'+p.ovr+' '+progArrow(yearDelta)+'</span>'+
-           '<span class="ros-grip">'+(picked?"✕":(swappable?"⇅":"⋮"))+'</span>'+
+           (rsAvailable(p) ? '<button class="rs-btn" data-rshold="'+p.id+'" title="Hold out to redshirt">RS</button>'
+                           : '<span class="ros-grip">'+(picked?"✕":(swappable?"⇅":"⋮"))+'</span>')+
+           '</div>';
+      });
+      // ── Redshirts held out at this position — off the depth chart, banking a year ──
+      s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p); }).forEach(function(p){
+        h+='<div class="ros-row rs-row" style="border-left:5px solid '+posColor(pos)+'">'+
+           '<span class="ros-pos" style="color:#fff;background:'+posColor(pos)+'">'+p.pos+'</span>'+
+           '<span class="ros-name">'+x(p.n)+devBadge(p)+' <span class="ros-st rs">RS</span>'+
+             '<span class="ros-sub">'+yrLabel(p)+' · held out · '+gamesPlayed(p)+'/'+RS_GAME_LIMIT+' games used</span></span>'+
+           '<span class="ros-ovr">'+p.ovr+'</span>'+
+           '<button class="rs-btn on" data-rshold="'+p.id+'" title="Send him back onto the field">RS</button>'+
            '</div>';
       });
     });
@@ -4094,6 +4174,98 @@ function coachTreeScreen(){
   return h+'</div>';
 }
 
+// ═════════════════════════════════════════════════════════
+// PLAYER RECORD BOOK + NFL DRAFT
+// Two payoffs for developing players, both built on stats you already track.
+//   RECORD BOOK — the best single-season and career marks ever posted by a player YOU
+//                 coached, kept per program (and totalled across your career).
+//   DRAFT NIGHT — seniors go pro, and juniors good enough to be early-round picks
+//                 declare early and leave you a hole. Developing talent finally pays.
+// ═════════════════════════════════════════════════════════
+var REC_CATS=[
+  {k:"py",   t:"Passing Yards"},   {k:"ptd",   t:"Passing TDs"},
+  {k:"ry",   t:"Rushing Yards"},   {k:"rtd",   t:"Rushing TDs"},
+  {k:"recy", t:"Receiving Yards"}, {k:"rectd", t:"Receiving TDs"},
+  {k:"tkl",  t:"Tackles"},         {k:"sack",  t:"Sacks"},
+  {k:"dint", t:"Interceptions"}
+];
+// Fold this season's roster into the record book. Called at season's end, while season
+// stats are still live and before seniors graduate — so a senior's final year still counts.
+function updateRecordBook(){
+  var s=ST.save, year=2026+((s.seasonsPlayed||1)-1);
+  s.recordBook=s.recordBook||{};
+  var bk=s.recordBook[s.school]=s.recordBook[s.school]||{season:{},career:{}};
+  (s.roster||[]).forEach(function(p){
+    var ss=(p.stats&&p.stats.season)||{}, cc=(p.stats&&p.stats.career)||{};
+    REC_CATS.forEach(function(c){
+      var sv=ss[c.k]||0;
+      if(sv>0 && (!bk.season[c.k] || sv>bk.season[c.k].val))
+        bk.season[c.k]={n:p.n,pos:p.pos,yr:p.yr,year:year,val:sv};
+      // career marks grow every year a player stays, so his final total is what sticks
+      var cv=cc[c.k]||0;
+      if(cv>0 && (!bk.career[c.k] || cv>bk.career[c.k].val))
+        bk.career[c.k]={n:p.n,pos:p.pos,yr:p.yr,year:year,val:cv};
+    });
+  });
+}
+
+// ── Draft stock ──────────────────────────────────────────
+// Anchored to OVR so it stays intuitive, then nudged by production, position value, and
+// remaining upside. FCS players are scouted less, so they need a bigger year to get picked.
+var DRAFT_POS_VAL={QB:3,OL:1,DL:1,WR:1,CB:1,TE:0,LB:0,S:0,RB:-1};
+function draftStock(p){
+  // TUNED: stock must track OVR closely, or the modifiers swamp it. An earlier version gave
+  // every productive starter the full production bonus, which turned an ordinary 80 OVR WR
+  // into a 2nd-round pick who left early. Talent leads; production and position only nudge.
+  var st=p.ovr;
+  st += Math.min(4, prodScore(p)*0.4);                 // production gets you on the board
+  st += (DRAFT_POS_VAL[p.pos]||0);                     // premium positions get pushed up
+  st += Math.min(1.5, Math.max(0,(p.pot-p.ovr))*0.25); // remaining upside
+  if(myDivision()==="FCS") st -= 6;                    // far fewer scouts at the FCS level
+  return st;
+}
+// Where that stock lands you. null = undrafted. Calibrated so a ~90 OVR star goes in the
+// first round, 85–89 is a day-two pick, low 80s is a late flier, and below that you go UDFA.
+function draftRound(stock){
+  if(stock>=93) return 1;
+  if(stock>=90) return 2;
+  if(stock>=88) return 3;
+  if(stock>=86) return 4;
+  if(stock>=84) return 5;
+  if(stock>=82) return 6;
+  if(stock>=80) return 7;
+  return null;
+}
+// A junior only leaves early if he projects as a TOP-3-ROUND pick — that's the real
+// trade-off: your best players are exactly the ones you can lose a year early.
+function willDeclareEarly(p){
+  return p.yr==="JR" && draftStock(p)>=88;
+}
+// Run the draft. Seniors are all draft-eligible; juniors must declare. Marks early entrants
+// so the graduation pass removes them from the roster.
+function runDraft(){
+  var s=ST.save, year=2026+((s.seasonsPlayed||1)-1);
+  var picks=[], undrafted=[];
+  (s.roster||[]).forEach(function(p){
+    if(p.cut) return;
+    var senior=(p.yr==="SR"), early=willDeclareEarly(p);
+    if(!senior && !early) return;
+    if(early) p._declared=true;                 // he's gone — the graduation pass drops him
+    var stock=draftStock(p), rd=draftRound(stock);
+    var entry={n:p.n, pos:p.pos, ovr:p.ovr, yr:p.yr, early:!!early,
+               school:s.school, div:myDivision(), year:year};
+    if(rd){ entry.round=rd; entry.pick=rnd(1,32); picks.push(entry); }
+    else if(senior) undrafted.push(entry);      // an undeclared junior simply stays
+  });
+  picks.sort(function(a,b){ return (a.round-b.round) || (a.pick-b.pick); });
+  s.draftHistory=(s.draftHistory||[]).concat(picks);
+  s._lastDraft={year:year, picks:picks, undrafted:undrafted};
+  if(picks.length){
+    var r1=picks.filter(function(d){return d.round===1;}).length;
+    toast("🏈 Draft: "+picks.length+" of your players selected"+(r1?" · "+r1+" in Round 1":""));
+  }
+}
+
 // ── Career record book ───────────────────────────────────
 // The coach's own Wikipedia page: every season at every school, with per-school
 // subtotals and a career total. Championships are shown at the LEVEL they were won,
@@ -4176,6 +4348,84 @@ function careerRecordBlock(){
 
   return h;
 }
+// ── Draft Night: this year's class, shown once on the offseason screen ──
+function draftNightCard(){
+  var d=ST.save._lastDraft;
+  if(!d || (!d.picks.length && !d.undrafted.length)) return "";
+  var h='<div class="sec-title">🏈 Draft Night · '+d.year+'</div><div class="rec-tbl">';
+  if(!d.picks.length){
+    h+='<div class="rec-empty">No players drafted this year.</div>';
+  } else {
+    d.picks.forEach(function(pk){
+      h+='<div class="riv-row">'+
+         '<span class="drf-rd">R'+pk.round+'</span>'+
+         '<span class="riv-opp">'+x(pk.n)+' <span class="t25-conf">'+x(pk.pos)+' · '+pk.ovr+' OVR'+(pk.early?' · <b class="drf-early">EARLY</b>':'')+'</span></span>'+
+         '<span class="riv-rec">#'+pk.pick+'</span></div>';
+    });
+  }
+  if(d.undrafted.length){
+    h+='<div class="rec-row"><span class="rec-po" style="color:var(--muted)">Undrafted: '+
+       d.undrafted.map(function(u){return x(u.n)+" ("+x(u.pos)+")";}).join(", ")+'</span></div>';
+  }
+  h+='</div>';
+  return h;
+}
+// ── Trophy Room: the program record book ──
+function recordBookBlock(){
+  var s=ST.save, bk=s.recordBook||{};
+  var schools=Object.keys(bk);
+  var h='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 12px;line-height:1.5">The best marks ever posted by a player you coached, kept for each program you\u2019ve run.</div>';
+  if(!schools.length){
+    return h+'<div class="rec-tbl"><div class="rec-empty">No records yet — they\u2019re set at the end of your first season.</div></div>';
+  }
+  schools.forEach(function(sc){
+    var b=bk[sc];
+    [["season","Single-Season"],["career","Career"]].forEach(function(pair){
+      var kind=pair[0], label=pair[1];
+      var rows=REC_CATS.filter(function(c){ return b[kind] && b[kind][c.k]; });
+      if(!rows.length) return;
+      h+='<div class="rec-tbl"><div class="rec-schoolhd"><span>'+x(sc)+'</span><span class="rec-lvl">'+label.toUpperCase()+'</span></div>';
+      rows.forEach(function(c){
+        var r=b[kind][c.k];
+        h+='<div class="riv-row"><span class="drf-cat">'+c.t+'</span>'+
+           '<span class="riv-opp">'+x(r.n)+' <span class="t25-conf">'+x(r.pos)+' · '+r.year+'</span></span>'+
+           '<span class="riv-rec">'+r.val+'</span></div>';
+      });
+      h+='</div>';
+    });
+  });
+  return h;
+}
+// ── Trophy Room: every player you've sent to the league ──
+function draftBoardBlock(){
+  var s=ST.save, hist=(s.draftHistory||[]);
+  var h='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 12px;line-height:1.5">Every player you\u2019ve coached into the NFL. A pipeline to the league is one of the loudest pitches you have on the recruiting trail.</div>';
+  if(!hist.length){
+    return h+'<div class="rec-tbl"><div class="rec-empty">No draft picks yet.</div></div>';
+  }
+  var r1=hist.filter(function(d){return d.round===1;}).length;
+  var early=hist.filter(function(d){return d.early;}).length;
+  h+='<div class="rec-tbl"><div class="rec-total"><span class="rec-yr">Total:</span>'+
+     '<span class="rec-po">'+hist.length+' drafted · '+r1+' first-round'+(early?' · '+early+' early entrant'+(early===1?'':'s'):'')+'</span></div></div>';
+  // newest class first
+  var byYear={}, years=[];
+  hist.slice().reverse().forEach(function(d){
+    if(!byYear[d.year]){ byYear[d.year]=[]; years.push(d.year); }
+    byYear[d.year].push(d);
+  });
+  years.forEach(function(y){
+    var cls=byYear[y].slice().sort(function(a,b){ return (a.round-b.round)||(a.pick-b.pick); });
+    h+='<div class="rec-tbl"><div class="rec-schoolhd"><span>'+y+'</span><span class="rec-lvl">'+x(cls[0].school)+' · '+x(cls[0].div)+'</span></div>';
+    cls.forEach(function(pk){
+      h+='<div class="riv-row">'+
+         '<span class="drf-rd">R'+pk.round+'</span>'+
+         '<span class="riv-opp">'+x(pk.n)+' <span class="t25-conf">'+x(pk.pos)+' · '+pk.ovr+' OVR'+(pk.early?' · <b class="drf-early">EARLY</b>':'')+'</span></span>'+
+         '<span class="riv-rec">#'+pk.pick+'</span></div>';
+    });
+    h+='</div>';
+  });
+  return h;
+}
 function ordinal(n){
   var v=n%100;
   if(v>=11&&v<=13) return n+"th";
@@ -4216,7 +4466,7 @@ function rivalrySeriesBlock(){
 function champHistoryScreen(){
   var s=ST.save;
   var tab=ST.histTab||"record";
-  var TABS=[{k:"record",t:"My Record"},{k:"rivals",t:"Rivalries"},{k:"league",t:"League"}];
+  var TABS=[{k:"record",t:"Career"},{k:"players",t:"Players"},{k:"draft",t:"Draft"},{k:"rivals",t:"Rivalries"},{k:"league",t:"League"}];
   var h='<div class="wrap">';
   h+='<div class="season-hd"><div class="shd-l"><b>🏆 Trophy Room</b></div>'+
      '<div class="shd-r">'+x(s.school)+' · '+x(s.role)+'</div></div>';
@@ -4225,9 +4475,11 @@ function champHistoryScreen(){
     h+='<button class="conf-tab'+(tab===t.k?" active":"")+'" data-histtab="'+t.k+'">'+t.t+'</button>';
   });
   h+='</div>';
-  if(tab==="record")      h+=careerRecordBlock();
-  else if(tab==="rivals") h+=rivalrySeriesBlock();
-  else                    h+=leagueHistoryBlock();
+  if(tab==="record")       h+=careerRecordBlock();
+  else if(tab==="players") h+=recordBookBlock();
+  else if(tab==="draft")   h+=draftBoardBlock();
+  else if(tab==="rivals")  h+=rivalrySeriesBlock();
+  else                     h+=leagueHistoryBlock();
   h+='<button class="bigbtn btn-gold" id="hist-back">Back →</button>';
   return h+'</div>';
 }
@@ -5836,6 +6088,8 @@ function offseasonScreen(){
      '<p><b style="font-size:16px;color:'+(win>loss?"var(--green)":"var(--red2)")+'">'+win+'–'+loss+'</b><br>'+
      (win>=10?"Elite season! 🏆":win>=7?"Bowl-worthy year. 🎉":win>=5?"Respectable campaign.":"Rebuilding year.")+'</p></div>';
 
+  h+=draftNightCard();
+
   // ── The AD's three goals, judged ──
   var gs=resolvedGoals();
   var nMet=gs.filter(function(g){return g.met;}).length;
@@ -6029,6 +6283,10 @@ function bind(){
   var rsf=q("#rec-star-filter"); if(rsf)rsf.onchange=function(){ ST.recruitStars=rsf.value; ST.recExpand=null; refreshRecOrder(); draw(); };
   document.querySelectorAll("[data-recsort]").forEach(function(b){ b.onclick=function(){ ST.recSort=b.getAttribute("data-recsort"); ST.recExpand=null; refreshRecOrder(); draw(); }; });
   document.querySelectorAll("[data-depthtap]").forEach(function(b){b.onclick=function(){ tapDepth(b.getAttribute("data-depthtap")); };});
+  document.querySelectorAll("[data-rshold]").forEach(function(b){b.onclick=function(e){
+    e.stopPropagation();   // don't let the tap fall through to the row's depth-chart swap
+    toggleHold(b.getAttribute("data-rshold"));
+  };});
   var ts=q("#toggle-scheme"); if(ts)ts.onclick=function(){ ST.showScheme=!ST.showScheme; draw(); };
   var pw=q("#play-week"); if(pw)pw.onclick=playWeek;
   var aw=q("#advance-week"); if(aw)aw.onclick=advanceWeek;
@@ -6785,6 +7043,7 @@ function finishGameSim(){
     }
     recordUserLeagueResult(won, g.oc===s.conf);
     recordGameStats(res, g.opp, r.pbp);
+    markAppearances();   // regular season only — postseason games are exempt from the 4-game cap
     // The rest of the week — the other league games, player development, rivals pushing on
     // the recruiting trail, and the week counter itself — now resolves when you click
     // "Advance to Next Week" (see advanceWeek). That lets you play your game and THEN keep
@@ -7195,6 +7454,9 @@ function advanceSeason(){
     natlTitle: !!s._wonNatlThisYear
   });
   s._lastWins=s.wins; // feeds next season's NIL budget
+  updateRecordBook();  // fold this year's stat lines into the program record book
+  runDraft();          // seniors go pro; juniors good enough to go early declare and leave
+  resolveRedshirts();  // anyone under the four-game cap keeps the year
   recordChampions(); // log this year's national & conference champions to the league history
 
   // ── Coach XP: earn from wins, meeting expectations, and postseason success ──
@@ -7233,7 +7495,7 @@ function advanceSeason(){
   var YR_NEXT={FR:"SO",SO:"JR",JR:"SR"};
   var kept=[], departed=[];
   s.roster.forEach(function(p){
-    if(p.yr==="SR"||p.cut)return; // seniors graduate; anyone you cut is released
+    if(p.yr==="SR"||p.cut||p._declared)return; // seniors graduate; early entrants go pro; cuts are released
     var risk=retentionRisk(p);
     if(risk!=null && risk>0 && Math.random()*100<risk){
       // enters the transfer portal — but you get one shot to buy them back with NIL
@@ -7244,7 +7506,10 @@ function advanceSeason(){
       return;
     }
     var wasYr=p.yr;
-    p.yr=YR_NEXT[p.yr]||p.yr;
+    // A redshirt season doesn't count against eligibility, so his class year holds.
+    if(p._rsHold){ p._rsHold=false; }
+    else { p.yr=YR_NEXT[p.yr]||p.yr; }
+    p.gp=0;   // new season, fresh four-game allowance
 
     // TUNING: late bloomers. Previously the ceiling (pot) was rolled once at signing and never
     // moved, so a player who reached it by his junior year was finished — the senior season
