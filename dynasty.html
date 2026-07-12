@@ -1680,6 +1680,10 @@ function newSave(team, role){
   // Anchor the starting roster to the team's REAL unit ratings (subdivision-aware), so an
   // FCS roster sits at its true, lower overall and every FBS roster matches its rating too.
   var roster=genStarterRoster(team.p, role, teamTargets(team));
+  // Everyone already on campus above freshman year has burned his redshirt — that's what being
+  // a sophomore, junior or senior on a real roster means. So on day one of a dynasty the ONLY
+  // redshirt candidates are true freshmen, and the RS button doesn't appear on anyone else.
+  roster.forEach(function(p){ if(p.yr!=="FR") p.rsUsed=true; });
   var s={
     school:team.n, conf:team.c, prestige:team.p, role:role,
     archetype:(ST.setup&&ST.setup.archetype)||"offensive",
@@ -2644,7 +2648,14 @@ function genSchedule(team){
 var RS_GAME_LIMIT=4;
 function rsAvailable(p){ return !p.rsUsed && p.yr!=="SR"; }   // a senior has no year left to save
 function isRedshirting(p){ return !!p.hold && rsAvailable(p); }
-function gamesPlayed(p){ return p.gp||0; }
+// Games played = games he actually APPEARED IN. The two-deep is only an approximation: the
+// sim hands the ball to third-stringers too, and one of them rushed for 308 yards while his
+// counter still read 0. So a game in the box score always counts as a game played — if a
+// player has stats, he was on the field, full stop.
+function gamesPlayed(p){
+  var boxG = (p.stats && p.stats.season && p.stats.season.g) || 0;
+  return Math.max(p.gp||0, boxG);
+}
 function rsSafe(p){ return gamesPlayed(p)<=RS_GAME_LIMIT; }   // still under the four-game cap
 function yrLabel(p){ return (p.rs?"RS ":"")+p.yr; }
 // Hold a player out (or send him back onto the field).
@@ -3484,8 +3495,14 @@ function rosterTable(){
         var yearDelta=p.ovr-(p.ssOvr!=null?p.ssOvr:p.ovr);
         var careerDelta=p.ovr-(p.startOvr!=null?p.startOvr:p.ovr);
         var col=posColor(pos);
-        var rsGames = (rsAvailable(p) && s.week>0)
-          ? ' · <b'+(rsSafe(p)?'':' style="color:var(--red2)"')+'>'+gamesPlayed(p)+'/'+RS_GAME_LIMIT+' g</b>'
+        // Show games played for EVERY player once the season is under way — a starter with a
+        // stat line should never look like he hasn't taken the field. The /4 limit is only
+        // shown for players who still have a redshirt on the line.
+        var _gp = gamesPlayed(p);
+        var rsGames = (s.week>0 || _gp>0)
+          ? (rsAvailable(p)
+              ? ' · <b'+(rsSafe(p)?'':' style="color:var(--red2)"')+'>'+_gp+'/'+RS_GAME_LIMIT+' G</b>'
+              : ' · '+_gp+' G')
           : '';
         var rsub=yrLabel(p)+(p.arch?' · '+x(p.arch):'')+(careerDelta!==0?' · career '+(careerDelta>0?'+':'')+careerDelta:'')+rsGames;
         var _dem=nilDemand(p), _fund=money2(p.nilFund||0), _funded=(_dem>0 && _fund>=_dem), _risk=retentionRisk(p);
