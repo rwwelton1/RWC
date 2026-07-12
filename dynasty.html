@@ -1080,7 +1080,7 @@ function startersAt(pos){ return STARTERS_AT[pos]||1; }
 // Every position carries at least one body BEYOND the two-deep, or nobody there can ever be
 // redshirted (the two-deep plays, and playing burns the year). TE used to sit at 2 — exactly
 // the two-deep — so a tight end could never take a redshirt. Three now, like the other skill spots.
-var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:3,OL:7, DL:7,LB:6,CB:4,S:4};
+var ROSTER_SIZE={QB:4,RB:4,WR:5,TE:4,OL:7, DL:7,LB:6,CB:4,S:4};
 // ── THE ROTATION: who actually takes the field ────────────
 // Three tiers, and every system reads THIS, so the sim, the games-played counter and the
 // roster badges can never disagree again:
@@ -1088,7 +1088,16 @@ var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:3,OL:7, DL:7,LB:6,CB:4,S:4};
 //   BACKUP   (idx < rotationAt)  — rotates in, gets real snaps and real stats
 //   RESERVE  (idx >= rotationAt) — does NOT play at all, so he's your redshirt candidate
 // Every position carries at least one reserve, so a redshirt is always possible somewhere.
-var ROTATION_AT={QB:2,RB:2,WR:4,TE:2,OL:6, DL:5,LB:4,CB:3,S:3};
+var ROTATION_AT={QB:2,RB:3,WR:4,TE:3,OL:6, DL:5,LB:4,CB:3,S:3};
+// Snap share INSIDE the rotation, per position. A flat curve was badly wrong: sliced to a
+// two-man rotation it handed the backup QB 34% of the snaps. A backup QB mops up; a backup
+// RB gets a real workload. Different jobs, different curves.
+var ROTATION_W={
+  QB:[0.90,0.08,0.02],        // the starter takes it; the backup mops up
+  RB:[0.56,0.30,0.14],        // a genuine committee
+  WR:[0.32,0.27,0.23,0.18],   // four wideouts all eat
+  TE:[0.66,0.25,0.09]
+};
 function rotationAt(pos){ return ROTATION_AT[pos] || (startersAt(pos)+1); }
 function depthTier(pos, idx){
   if(idx < startersAt(pos)) return "ST";
@@ -2373,6 +2382,19 @@ function rivalCandidates(st, exclude){
   });
   return out;
 }
+// ── THE RECRUITING CALENDAR ───────────────────────────────
+// Blue-chips are not recruited on the same clock as everybody else. A 5-star has been courted
+// since he was a sophomore in high school: the offers are already on the table in week one, and
+// if you wait he is gone. A 2-star barely draws a look until late in the cycle, which is exactly
+// why you can still steal him in the closing weeks.
+//   heatWeek = the week the rest of the country starts pushing hard for him.
+var RECRUIT_HEAT={5:0, 4:1, 3:3, 2:5, 1:6};
+function heatWeekFor(st){ return RECRUIT_HEAT[st]!=null ? RECRUIT_HEAT[st] : 4; }
+// How hard the country pushes for him once his recruitment IS live. Blue-chips draw a frenzy.
+function heatPushFor(st){ return st>=5 ? rnd(4,7) : st>=4 ? rnd(2,4) : st>=3 ? rnd(0,2) : 0; }
+// The head start the field already has on a blue-chip before you've made a single call.
+function headStartFor(st){ return st>=5 ? rnd(12,22) : st>=4 ? rnd(5,12) : st>=3 ? rnd(0,4) : 0; }
+function isRecruitingLive(b){ return (ST.save.week||0) >= heatWeekFor(b.st); }
 function pickRivalsFor(st, exclude){
   var L=ST.save.league;
   var cand=rivalCandidates(st, exclude);
@@ -2387,7 +2409,9 @@ function pickRivalsFor(st, exclude){
     var rv=cand.splice(hit,1)[0].t;          // no duplicates
     var rt=L&&L.teams?L.teams[rv.n]:null;
     var rPull = rivalPull(rv.n, rt, rv.p) * starFitMult(st, rv.p, rv.c);
-    rivals.push({name:rv.n, p:rv.p, interest: Math.max(3, Math.min(70, Math.round(rPull*0.62 + rnd(-6,6)))) });
+    // A 5-star's suitors have been at this for a year already — they start ahead of you.
+    var head = headStartFor(st);
+    rivals.push({name:rv.n, p:rv.p, interest: Math.max(3, Math.min(80, Math.round(rPull*0.62 + rnd(-6,6) + head))) });
   }
   return rivals;
 }
@@ -2413,7 +2437,7 @@ function makeProspect(pos, prestige){
   var pull = programPull();
   var fitM = starFitMult(st, prestige, s.conf);
   var coachBonus = ((hasArch("recruiter")||hasAbility("rec2"))?8:0) + (hasAbility("rec5")?10:0)
-    + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0)
+    + (hasAbility("leg2")?12:0) + (hasAbility("pro3")?4:0) + staffBonus("interest")
     + facLvl("academics")*3 + facLvl("stadium")*2;
   // A reach recruit discounts the coaching pitch too — a great recruiter at a 1-star program
   // still isn't landing a 5-star cold, he just gets a slightly better hearing.
@@ -2425,6 +2449,7 @@ function makeProspect(pos, prestige){
     _seed:Math.random(),   // fixed board-order seed: keeps order stable & OVR-blind
     n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev, arch:rollArch(pos),
     interest:startInterest,
+    heatWk:heatWeekFor(st),  // the week the country starts pushing hard for him
     fitM:money2(fitM),      // how much this recruit is reaching; drives weekly progression too
     rivals:rivals,
     status:"open",
@@ -2496,7 +2521,8 @@ function recruitTraitDisplay(b){
 // Points you get to spend each week on recruiting
 function weeklyRecruitPoints(){
   var s=ST.save;
-  return 8 + s.prestige*2 + (s.role==="HC"?10:0) + (hasAbility("rec1")?3:0) + (hasAbility("rec4")?2:0) + (hasAbility("leg2")?3:0) + facLvl("nil"); // HC works the whole board, so more points; Recruiter starts with rec1 (+3)
+  return 8 + s.prestige*2 + (s.role==="HC"?10:0) + (hasAbility("rec1")?3:0) + (hasAbility("rec4")?2:0) + (hasAbility("leg2")?3:0) + facLvl("nil")
+       + staffBonus("recPts"); // ...plus whatever your recruiting coordinator adds
 }
 // Spend a point of recruiting effort on a prospect this week (raises your interest).
 var MAX_WEEKLY_RECRUIT=3; // most "+ Recruit" pushes you can make on one prospect in a single week
@@ -2510,6 +2536,7 @@ function recruitProspect(id){
   if((s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
   s.recruitPtsLeft--;
   b.wkRec=(b.wkRec||0)+1;
+  b.myPush=(b.myPush||0)+1;   // how hard YOU chased him — this is what makes him "the one who got away"
   // Each point adds interest, with diminishing returns as it gets high; a 5★ is harder to sway.
   // Tuned so closing a recruit takes ~7-9 clicks at a program he actually fits.
   //
@@ -2532,17 +2559,51 @@ function toggleWatch(id){
   persist(); draw();
 }
 // Advance recruiting one week: rivals push their prospects, and prospects may commit.
+// ── A recruit you LOSE doesn't vanish — he enrolls ────────
+// He signs somewhere real, puts on weight, plays, develops, and shows up on that team's roster
+// for the rest of his career. Which means two or three years from now he can walk into the
+// transfer portal, and you get a second bite at the one who got away.
+function enrollRecruitAt(b, teamName){
+  var L=ST.save.league; if(!L||!L.teams) return;
+  var t=L.teams[teamName]; if(!t) return;
+  t.stars=t.stars||[];
+  if(t.stars.length>=15) return;                 // keep a team's roster bounded
+  // Only players worth remembering. NOTE: baseline interest can start as high as 70 for a good
+  // fit, so "he had interest" means nothing — what counts is whether YOU actually worked him:
+  // recruiting points spent, or real NIL pledged.
+  var iWasInIt = (b.myPush||0) >= 3 || (b.nil||0) > 0;
+  if(b.st < 5 && !iWasInIt) return;        // 5-stars are always worth tracking; the rest only if you chased them
+  t.stars.push({
+    n:b.n, pos:b.pos, yr:"FR",
+    ovr: Math.max(48, Math.min(99, b.ovr||65)),
+    s:{}, c:{}, form:0.84+Math.random()*0.32,
+    fromHS:true,                                 // a real recruiting-class signee, not a generated star
+    wasTarget:iWasInIt,                          // YOU chased this kid out of high school
+    hsStars:b.st
+  });
+}
 function advanceRecruitingWeek(){
   var s=ST.save; if(!s.board) return;
   s.board.forEach(function(b){
     if(b.status!=="open") return;
     b.wkRec=0; // reset this player's weekly recruiting-push allowance
-    // rivals gain interest each week (higher-prestige rivals push harder; blue-chip gems draw a frenzy)
+    // Rivals push on the CALENDAR. Before a prospect's recruitment goes live the country is
+    // barely looking at him — which is what gives you a quiet window to work a 2-star. A
+    // 5-star has no such window: the phones are ringing from week one.
+    var live = (s.week||0) >= (b.heatWk!=null ? b.heatWk : heatWeekFor(b.st));
     b.rivals.forEach(function(rv){
-      var push = Math.max(1, Math.round(rv.p*1.0) + rnd(0,2));
-      if(b.dev==="elite"||b.dev==="pro") push += rnd(3,5); // every program covets a high-ceiling prospect — poached fast
+      var push;
+      if(!live){
+        push = (Math.random()<0.35) ? 1 : 0;             // the odd early sniff, nothing more
+      } else {
+        push = Math.max(1, Math.round(rv.p*1.0) + rnd(0,2));
+        push += heatPushFor(b.st);                        // blue-chips draw a frenzy
+        if(b.dev==="elite"||b.dev==="pro") push += rnd(2,4); // a high ceiling gets him poached fast
+      }
       rv.interest = Math.min(100, rv.interest + push);
     });
+    // He can't commit before anybody has actually offered him.
+    if(!live) return;
     // COMMITMENT: the leader gets more likely to land the recruit as interest climbs toward 100
     var topRival = b.rivals.reduce(function(m,rv){ return (!m||rv.interest>m.interest)?rv:m; }, null);
     var rivalLead = topRival ? topRival.interest : 0;
@@ -2553,6 +2614,7 @@ function advanceRecruitingWeek(){
       if(youLead){ b.status="committed"; b.committedTo=s.school; }
       else {
         b.status="lost"; b.committedTo=topRival.name;
+        enrollRecruitAt(b, topRival.name);   // he's real now — and he'll remember you
         // he signed elsewhere — the NIL you pledged him never gets paid, so it returns to the pot
         if(b.nil>0){ s.nilLeft=money2((s.nilLeft||0)+b.nil); toast("↩️ "+fmtMoney(b.nil)+" NIL freed up — "+x(b.n)+" chose "+x(topRival.name)); }
       }
@@ -2696,7 +2758,15 @@ function gamesPlayed(p){
   return Math.max(p.gp||0, boxG);
 }
 function rsSafe(p){ return gamesPlayed(p)<=RS_GAME_LIMIT; }   // still under the four-game cap
-function yrLabel(p){ return (p.rs?"RS ":"")+p.yr; }
+// A player's class designation. A redshirt year doesn't count against eligibility, so once he
+// has taken his one redshirt he carries the RS- prefix for the rest of his career:
+//   Fr → (redshirts) → RS-Fr → RS-So → RS-Jr → RS-Sr
+// One redshirt per player, ever — rsUsed is set the moment he takes it and never cleared.
+var YR_PRETTY={FR:"Fr", SO:"So", JR:"Jr", SR:"Sr"};
+function yrLabel(p){
+  var y=YR_PRETTY[p.yr]||p.yr;
+  return (p.rs ? "RS-" : "") + y;
+}
 // Hold a player out (or send him back onto the field).
 function toggleHold(id){
   var s=ST.save, p=(s.roster||[]).filter(function(r){return r.id===id;})[0];
@@ -2721,6 +2791,10 @@ function toggleHold(id){
 function markAppearances(){
   var s=ST.save;
   ALL_POS.forEach(function(pos){
+    // QB is the exception: only ONE quarterback is on the field at a time, so a backup can go a
+    // whole year without a snap. He is credited a game only if he actually shows up in the box
+    // score (gamesPlayed reads that), never merely for being in the rotation.
+    if(pos==="QB") return;
     depthOrder(s.roster,pos).slice(0, rotationAt(pos)).forEach(function(p){
       p.gp=(p.gp||0)+1;
       // warn the moment a redshirt is one game from burning the year
@@ -2770,6 +2844,7 @@ function offenseRating(){
   var tot=0,wsum=0;
   Object.keys(POS_WEIGHT).forEach(function(pos){ var w=POS_WEIGHT[pos]; tot+=posDepthOvr(r,pos)*w; wsum+=w; });
   var abil = (hasAbility("off1")?2:0) + (hasAbility("off3")?3:0) + (hasAbility("off4")?3:0) + (hasAbility("leg1")?3:0) + (hasAbility("leg3")?2:0); // Play Caller + Air Raid + Mastermind + Legend
+  abil += staffBonus("off");   // ...and your OC's on top. A Play Caller with an elite OC is +5.
   return Math.round(tot/wsum) + abil;
 }
 // Defense rating from your recruited defensive players (DC's unit)
@@ -2778,6 +2853,7 @@ function defenseRating(){
   var tot=0,wsum=0;
   Object.keys(DEF_POS_WEIGHT).forEach(function(pos){ var w=DEF_POS_WEIGHT[pos]; tot+=posDepthOvr(r,pos)*w; wsum+=w; });
   var abil = (hasAbility("def1")?2:0) + (hasAbility("def3")?3:0) + (hasAbility("def4")?3:0) + (hasAbility("leg1")?3:0) + (hasAbility("leg3")?2:0); // Coordinator + Lockdown + Mastermind + Legend
+  abil += staffBonus("def");   // ...stacked with your DC
   return Math.round(tot/wsum) + abil;
 }
 // The rating of the unit YOU coach (offense if OC, defense if DC; HC = team avg)
@@ -2883,6 +2959,7 @@ function offSchemeFit(){
   var archScore=schemeArchMatch(sc);                                      // do your starters fit the system?
   var fit01=archScore*0.6 + tendency*0.4;
   var cap = hasAbility("off5")?11:((hasArch("offensive")||hasAbility("off2"))?8:5); // Peak Offense > Scheme Guru/Offensive Mind
+  cap += staffBonus("offFit");   // a top OC raises the ceiling further
   return Math.round(fit01*cap*10)/10;
 }
 function defSchemeFit(){
@@ -2891,6 +2968,7 @@ function defSchemeFit(){
   var archScore=schemeArchMatch(sc);
   var fit01=archScore*0.6 + tendency*0.4;
   var cap = hasAbility("def5")?11:((hasArch("defensive")||hasAbility("def2"))?8:5); // Peak Defense > Disguise/Defensive Mind
+  cap += staffBonus("defFit");
   return Math.round(fit01*cap*10)/10;
 }
 // The scheme-fit bonus applied to a unit you control this game
@@ -2922,6 +3000,7 @@ function developInSeason(){
       if(dev2) youthBoost += 0.12; // developer grows players faster
       if(hasAbility("dev4")) youthBoost += 0.10; // Master Motivator: faster still
       if(facLvl("training")>0) youthBoost += 0.04*facLvl("training"); // Training Facilities
+      youthBoost += staffBonus("dev"); // ...and your Director of Player Development, stacked on top
       var dmult = devMult(p.dev); // Elite 1.8 → Bust 0.5
       var nearCap = Math.min(1, head/6); // taper the final points so nobody snaps to their ceiling
       // TUNING: SOFT per-season growth limit. A hard cap made ~93% of blue-chip freshmen land on
@@ -3434,7 +3513,16 @@ function recruitTab(){
     h+='<div class="rec-pos" style="background:'+col+';color:#fff;border-color:'+col+'">'+b.pos+'</div>';
     var fit = recruitFit(b);
     var fitPill = fit ? ' <span class="fit-dot '+fit+'">'+(fit==="great"?"★ Fits":fit==="ok"?"~ Fit":"✕ Fit")+'</span>' : '';
-    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+recruitStarsDisplay(b)+'</span> · '+recruitOvrDisplay(b)+fitPill+' '+archTag(b)+(b.scout>=maxScoutTier()?' '+recruitTraitDisplay(b):'')+'</div></div>';
+    // Where he sits on the recruiting calendar — blue-chips are live from day one, and the
+    // quiet ones give you a window nobody else is using yet.
+    var heatPill = '';
+    if(open){
+      var hw = (b.heatWk!=null ? b.heatWk : heatWeekFor(b.st));
+      heatPill = ((ST.save.week||0) >= hw)
+        ? ' <span class="fit-dot bad">🔥 Live</span>'
+        : ' <span class="fit-dot ok">🕓 Quiet · wk '+hw+'</span>';
+    }
+    h+='<div class="rec-card-name">'+x(b.n)+'<div class="rec-card-meta"><span class="rec-stars">'+recruitStarsDisplay(b)+'</span> · '+recruitOvrDisplay(b)+fitPill+heatPill+' '+archTag(b)+(b.scout>=maxScoutTier()?' '+recruitTraitDisplay(b):'')+'</div></div>';
     h+='<div class="rec-right">';
     if(open){
       var bs=battleStatus(b.interest, rivalLead);
@@ -3521,7 +3609,12 @@ function rosterTable(){
   else if(s.role==="HC"){ groups=[{t:"Offense",order:POS_ORDER_OFF},{t:"Defense",order:POS_ORDER_DEF}]; }
   else { groups=[{t:"Offense",order:POS_ORDER_OFF}]; }
   var h='';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 8px;line-height:1.5">Tap a player, then tap another at the same position to swap them. Starters play — promote a young gem over a veteran if you like.</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 8px;line-height:1.5">'+
+     'Tap a player, then tap another at the same position to swap them.<br>'+
+     '<span class="ros-st">ST</span> <b>Starter</b> — takes most of the snaps. &nbsp;'+
+     '<span class="ros-st bk">BK</span> <b>Backup</b> — rotates in and <i>will</i> get real snaps and stats. &nbsp;'+
+     '<span class="ros-st dp">RES</span> <b>Reserve</b> — doesn\u2019t play at all, so he\u2019s free to redshirt.<br>'+
+     'Any snap burns a redshirt, so a backup can\u2019t quietly bank a year \u2014 only a reserve can.</div>';
   groups.forEach(function(grp){
     h+='<div class="sec-title" style="margin:6px 2px 6px">'+grp.t+'</div>';
     h+='<div class="conf-table" style="margin-bottom:10px">';
@@ -4037,7 +4130,7 @@ function pickDepth(pos){
   // third-string RB who was supposed to be redshirting quietly rushed for 180 yards.
   var d=depthOrder(ST.save.roster,pos).slice(0, rotationAt(pos));
   if(!d.length) return null;
-  var w=DEPTH_W.slice(0, d.length);
+  var w=(ROTATION_W[pos]||DEPTH_W).slice(0, d.length);
   var tot=0; w.forEach(function(x){ tot+=x; });
   var r=Math.random()*tot, acc=0;
   for(var i=0;i<d.length;i++){ acc+=w[i]; if(r<acc) return d[i]; }
@@ -4263,11 +4356,99 @@ function restartDynasty(){
 
 // ── Setup ────────────────────────────────────────────────
 // ── Coaching skill tree screen ───────────────────────────
+// ── The staff room ───────────────────────────────────────
+function staffBlock(){
+  var s=ST.save;
+  s.staff=s.staff||{};
+  if(!s.staffBudget) s.staffBudget=staffBudgetFor(s);
+  if(!s.staffPool || !s.staffPool.length) s.staffPool=genStaffPool();
+  var left=staffLeft();
+  var h='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:2px 2px 10px;line-height:1.5">'+
+    'Your assistants\u2019 perks <b>stack on top of your own coaching tree</b> \u2014 a Play Caller (+2 offense) with an elite OC (+3) fields a +5 offense. They improve while they work for you, and the good ones get poached.</div>';
+  // budget
+  h+='<div class="xp-hdr" style="margin-bottom:12px"><div class="xp-num">'+fmtMoney(left)+'</div>'+
+     '<div class="xp-lbl">of '+fmtMoney(s.staffBudget)+' staff budget left</div></div>';
+  if(left<0) h+='<div style="font-size:10px;font-weight:800;color:var(--red2);margin:0 2px 10px">⚠️ You are over budget — let someone go.</div>';
+
+  // ── your current staff, with the stack made explicit ──
+  h+='<div class="sec-title">Your Staff</div>';
+  STAFF_ROLES.forEach(function(r){
+    var a=s.staff[r.k];
+    h+='<div class="rec-tbl" style="margin-bottom:8px">';
+    h+='<div class="rec-schoolhd"><span>'+r.ico+' '+x(r.t)+'</span>'+
+       '<span class="rec-lvl">'+(a?fmtMoney(a.salary)+'/yr':'VACANT')+'</span></div>';
+    if(!a){
+      h+='<div class="rec-empty">No '+r.k+' on staff — '+x(r.blurb)+'</div>';
+    } else {
+      var tier=staffTier(a.grade), ti=traitInfo(a.trait);
+      var pr=paidRatio(a);
+      var payLbl = pr>=1.15 ? '<b style="color:#1a7f37">paid over market</b>' : pr>=1.0 ? 'at market' : '<b style="color:var(--red2)">UNDERPAID — he\u2019s taking calls</b>';
+      var loy=a.loyalty||50;
+      var loyLbl = loy>=75 ? '<b style="color:#1a7f37">Loyal ('+loy+')</b>' : loy>=45 ? 'Settled ('+loy+')' : '<b style="color:var(--red2)">Restless ('+loy+')</b>';
+      h+='<div class="riv-row"><span class="riv-opp">'+x(a.n)+' '+ti.ico+
+         ' <span class="t25-conf" style="color:'+tier.c+'">'+tier.t+' · '+a.grade+' grade · yr '+(a.years||0)+'</span></span>'+
+         '<span class="riv-rec" style="width:auto;color:var(--gold-dark)">'+x(staffPerkText(a))+'</span></div>';
+      h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px">'+ti.ico+' <b>'+x(ti.t)+'</b> — '+x(ti.desc)+'</span></div>';
+      h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;color:var(--muted)">'+loyLbl+' · '+payLbl+'</span>'+
+         '<button class="tp-btn" data-raisestaff="'+r.k+'" title="Pay above market to keep him">Raise</button>'+
+         '<button class="rs-btn on" data-firestaff="'+r.k+'" title="Fire him">✕</button></div>';
+    }
+    h+='</div>';
+  });
+
+  // ── what your staff is worth, all together ──
+  var so=staffBonus("off"), sd=staffBonus("def"), sr=staffBonus("recPts"), si=staffBonus("interest"), sv=staffBonus("dev");
+  if(so||sd||sr||si||sv){
+    h+='<div class="sec-title">Stacked On Your Tree</div><div class="rec-tbl" style="margin-bottom:12px">';
+    if(so) h+=stackRow("Offense (game day)", (hasAbility("off1")?2:0)+(hasAbility("off3")?3:0)+(hasAbility("off4")?3:0), so);
+    if(sd) h+=stackRow("Defense (game day)", (hasAbility("def1")?2:0)+(hasAbility("def3")?3:0)+(hasAbility("def4")?3:0), sd);
+    if(sr) h+=stackRow("Recruiting pts / week", (hasAbility("rec1")?3:0)+(hasAbility("rec4")?2:0), sr);
+    if(si) h+=stackRow("Prospect interest", ((hasArch("recruiter")||hasAbility("rec2"))?8:0), si);
+    if(sv) h+='<div class="riv-row"><span class="drf-cat">Player growth</span>'+
+              '<span class="riv-opp">your tree + staff</span>'+
+              '<span class="riv-rec" style="color:var(--gold-dark)">+'+(Math.round(sv*1000)/10)+'%</span></div>';
+    h+='</div>';
+  }
+
+  // ── the hiring pool ──
+  h+='<div class="sec-title">Available Assistants</div><div class="rec-tbl">';
+  (s.staffPool||[]).forEach(function(a){
+    var tier=staffTier(a.grade), cur=s.staff[a.role];
+    var freed=cur?(cur.salary||0):0;
+    var afford=(a.salary <= staffLeft()+freed);
+    var ti=traitInfo(a.trait);
+    h+='<div class="riv-row"><span class="tp-pos" style="background:var(--border);color:#fff;font-size:9px;padding:2px 5px;border-radius:5px;font-weight:900">'+a.role+'</span>'+
+       '<span class="riv-opp" style="margin-left:6px">'+x(a.n)+' '+ti.ico+
+         '<span class="tp-sub" style="color:'+tier.c+'">'+tier.t+' · '+a.grade+' grade · '+x(staffPerkText(a))+'</span>'+
+         '<span class="tp-sub" style="color:var(--muted)">'+ti.ico+' '+x(ti.t)+' — '+x(ti.desc)+'</span></span>'+
+       '<button class="tp-btn'+(afford?'':' broke')+'" data-hirestaff="'+a.id+'">'+fmtMoney(a.salary)+'</button></div>';
+  });
+  h+='</div>';
+  return h;
+}
+function stackRow(label, mine, staff){
+  return '<div class="riv-row"><span class="drf-cat">'+x(label)+'</span>'+
+         '<span class="riv-opp">you +'+mine+' &nbsp;·&nbsp; staff +'+staff+'</span>'+
+         '<span class="riv-rec" style="color:var(--gold-dark)">= +'+(mine+staff)+'</span></div>';
+}
 function coachTreeScreen(){
   var s=ST.save;
   var h='<div class="wrap">';
   h+='<div class="season-hd"><div class="shd-l"><b>Coaching Tree</b></div>'+
      '<div class="shd-r"><span class="pill">'+ARCHETYPES[coachArch()].icon+' '+ARCHETYPES[coachArch()].name+'</span></div></div>';
+  // A head coach hires a staff; a coordinator IS the staff.
+  if(s.role==="HC"){
+    var tTab=ST.treeTab||"tree";
+    h+='<div class="conf-tabs">'+
+       '<button class="conf-tab'+(tTab==="tree"?" active":"")+'" data-treetab="tree">My Tree</button>'+
+       '<button class="conf-tab'+(tTab==="staff"?" active":"")+'" data-treetab="staff">Staff</button>'+
+       '</div>';
+    if(tTab==="staff"){
+      h+=staffBlock();
+      h+='<button class="bigbtn btn-gold" id="tree-back">Back →</button>';
+      return h+'</div>';
+    }
+  }
   h+='<div class="xp-hdr"><div class="xp-num">'+coachXP()+'</div><div class="xp-lbl">Coach XP available</div>'+
      '<div class="legacy-line">🏆 Legacy: <b>'+legacyRank().t+'</b> · '+legacyXP()+' career XP'+(nextLegacy()?' <span style="color:var(--muted);font-weight:700">(next rank at '+nextLegacy().min+')</span>':' <span style="color:var(--muted);font-weight:700">(max rank)</span>')+'</div>'+
      '<div class="xp-hint">Earn XP from wins, titles &amp; meeting expectations. Spend it to unlock abilities. Each branch runs 5 tiers deep — unlock them in order. Master all five branches to open the 👑 Legend track.</div></div>';
@@ -4312,6 +4493,264 @@ function coachTreeScreen(){
   h+='</div>';
   h+='<button class="bigbtn btn-gold" id="tree-back">Back →</button>';
   return h+'</div>';
+}
+
+// ═════════════════════════════════════════════════════════
+// COACHING STAFF (head coaches only)
+// A head coach doesn't do it all himself — he hires people. Every assistant's perk STACKS on
+// top of your own coaching tree at exactly the same place your abilities are applied, so a
+// Play Caller (+2 offense) with an elite OC (+3) genuinely fields a +5 offense.
+// Assistants grow, get poached by programs that can pay more, and cost real money out of a
+// staff budget that has nothing to do with NIL. Building a staff is its own dynasty.
+// ═════════════════════════════════════════════════════════
+var STAFF_ROLES=[
+  {k:"OC", t:"Offensive Coordinator", ico:"⚡", blurb:"Adds to your offense on game day, and lifts your offensive scheme-fit ceiling."},
+  {k:"DC", t:"Defensive Coordinator", ico:"🛡️", blurb:"Adds to your defense on game day, and lifts your defensive scheme-fit ceiling."},
+  {k:"RC", t:"Recruiting Coordinator", ico:"🎯", blurb:"More recruiting points every week, and prospects start warmer on you."},
+  {k:"SC", t:"Director of Player Development", ico:"📈", blurb:"Every player on your roster develops faster in the offseason."}
+];
+function staffRoleInfo(k){ return STAFF_ROLES.filter(function(r){return r.k===k;})[0]; }
+// An assistant's quality band. Grade drives both his perk and his price.
+function staffTier(g){
+  if(g>=92) return {t:"Elite",   c:"var(--gold-dark)"};
+  if(g>=84) return {t:"Strong",  c:"#1a7f37"};
+  if(g>=75) return {t:"Solid",   c:"var(--text)"};
+  if(g>=66) return {t:"Average", c:"var(--muted)"};
+  return {t:"Green", c:"var(--muted)"};
+}
+// What he's actually worth to you. This is the number that stacks with your tree.
+function staffPerk(a){
+  if(!a) return null;
+  var g=a.grade;
+  if(a.role==="OC") return {key:"off",  val:Math.max(0,Math.floor((g-62)/10)), fit:(g>=86?1:0)};
+  if(a.role==="DC") return {key:"def",  val:Math.max(0,Math.floor((g-62)/10)), fit:(g>=86?1:0)};
+  if(a.role==="RC") return {key:"rec",  val:Math.max(0,Math.floor((g-66)/12)), interest:Math.max(0,Math.floor((g-62)/7))};
+  if(a.role==="SC") return {key:"dev",  val:Math.max(0,(g-62)/220)};   // a growth multiplier bump
+  return null;
+}
+function staffPerkText(a){
+  var p=staffPerk(a); if(!p) return "";
+  if(p.key==="off") return "+"+p.val+" offense"+(p.fit?" · +1 scheme-fit ceiling":"");
+  if(p.key==="def") return "+"+p.val+" defense"+(p.fit?" · +1 scheme-fit ceiling":"");
+  if(p.key==="rec") return "+"+p.val+" recruiting pts/wk · +"+p.interest+" prospect interest";
+  if(p.key==="dev") return "+"+Math.round(p.val*1000)/10+"% faster player growth";
+  return "";
+}
+// ── The stacking hook ─────────────────────────────────────
+// Every perk site in the game calls this and ADDS it to whatever your own tree already gives.
+function staffBonus(key){
+  var s=ST.save;
+  if(!s || s.role!=="HC" || !s.staff) return 0;   // only a head coach has a staff
+  var tot=0;
+  Object.keys(s.staff).forEach(function(k){
+    var a=s.staff[k]; if(!a) return;
+    var p=staffPerk(a); if(!p) return;
+    if(key==="off"       && p.key==="off") tot+=p.val;
+    if(key==="def"       && p.key==="def") tot+=p.val;
+    if(key==="offFit"    && p.key==="off") tot+=(p.fit||0);
+    if(key==="defFit"    && p.key==="def") tot+=(p.fit||0);
+    if(key==="recPts"    && p.key==="rec") tot+=p.val;
+    if(key==="interest"  && p.key==="rec") tot+=(p.interest||0);
+    if(key==="dev"       && p.key==="dev") tot+=p.val;
+  });
+  return tot;
+}
+// ── Money ────────────────────────────────────────────────
+// A staff budget, entirely separate from NIL. Bigger programs pay better assistants.
+function staffBudgetFor(s){
+  var base = 0.9 + (s.prestige||3)*0.55;               // $M per year
+  if(myDivision()==="FCS") base *= 0.42;               // FCS staffs run lean
+  base += Math.min(1.2, (s.careerWins||0)*0.01);       // a proven HC commands more from the AD
+  return money2(base);
+}
+function staffSalaryFor(grade){
+  return money2(Math.max(0.08, Math.pow(Math.max(0,grade-55)/40, 2.1) * 1.5 + 0.10));
+}
+function staffSpend(){
+  var s=ST.save, t=0;
+  Object.keys(s.staff||{}).forEach(function(k){ if(s.staff[k]) t+=s.staff[k].salary||0; });
+  return money2(t);
+}
+function staffLeft(){ return money2((ST.save.staffBudget||0) - staffSpend()); }
+// ── Candidates ───────────────────────────────────────────
+// ── PERSONALITIES ────────────────────────────────────────
+// An assistant is not just a number. His trait decides how he grows, how loyal he is, and how
+// badly he wants your job — or somebody else's. This is what makes a staff a gamble: the cheap
+// 62-grade kid might be a prodigy who becomes the best OC in the country, or a wildcard who
+// swings ten points a year and gives you an ulcer.
+var STAFF_TRAITS={
+  rising:   {t:"Rising Star", ico:"🚀", amb:1.7, grow:[2,4],  desc:"Grows fast — and every program in the country knows it."},
+  prodigy:  {t:"Prodigy",     ico:"💎", amb:1.2, grow:[1,4],  desc:"Raw and cheap, with a ceiling nobody can see yet.", hidden:true},
+  guru:     {t:"Guru",        ico:"🧠", amb:0.9, grow:[0,2],  desc:"Already brilliant. Expensive, and he knows his worth."},
+  lifer:    {t:"Lifer",       ico:"⚓", amb:0.25,grow:[0,2],  desc:"Wants to retire here. Almost never leaves."},
+  grinder:  {t:"Grinder",     ico:"🔨", amb:0.6, grow:[1,2],  desc:"Slow, steady, loyal. Never spectacular, never a problem."},
+  wildcard: {t:"Wildcard",    ico:"🎲", amb:1.1, grow:[-4,7], desc:"Brilliant one year, baffling the next."},
+  retread:  {t:"Retread",     ico:"📉", amb:0.5, grow:[-3,1], desc:"A big name on the way down. Buy the reputation, not the future."}
+};
+function traitInfo(k){ return STAFF_TRAITS[k]||STAFF_TRAITS.grinder; }
+function rollStaffTrait(){
+  var r=Math.random();
+  if(r<0.16) return "rising";
+  if(r<0.28) return "prodigy";
+  if(r<0.40) return "guru";
+  if(r<0.55) return "lifer";
+  if(r<0.74) return "grinder";
+  if(r<0.88) return "wildcard";
+  return "retread";
+}
+function genAssistant(role, prestige){
+  var trait=rollStaffTrait(), ti=traitInfo(trait);
+  var base = 58 + (prestige||3)*3 + rnd(-8, 14);
+  if(trait==="prodigy") base -= rnd(6,12);     // he's cheap because nobody's noticed yet
+  if(trait==="guru")    base += rnd(4,9);
+  if(trait==="retread") base += rnd(3,8);      // the name still carries
+  var g = clampN(Math.round(base), 52, 97);
+  var pot = clampN(g + (trait==="prodigy" ? rnd(12,26) : trait==="rising" ? rnd(6,16) : rnd(0,8)), g, 99);
+  return {
+    id:"as"+Math.random().toString(36).slice(2,7),
+    n:genName(), role:role, grade:g, pot:pot,
+    trait:trait, amb:ti.amb,
+    loyalty:rnd(35,60),          // rises the longer he stays, and if you pay him properly
+    salary:staffSalaryFor(g),
+    years:0
+  };
+}
+// What the market says he's worth — pay above it and he stays; pay below and he listens to calls.
+function marketRate(a){ return staffSalaryFor(a.grade); }
+function paidRatio(a){ return (a.salary||0.1) / Math.max(0.05, marketRate(a)); }
+// ── RETENTION: a raise ───────────────────────────────────
+// The lever you were missing. Pay him above market and his loyalty climbs and the poachers
+// struggle. It costs real budget, every year, forever.
+function raiseAssistant(role){
+  var s=ST.save, a=(s.staff||{})[role]; if(!a) return;
+  var bump=money2(Math.max(0.06, marketRate(a)*0.22));
+  if(bump > staffLeft()){ toast("Not enough staff budget for a raise."); return; }
+  a.salary=money2(a.salary+bump);
+  a.loyalty=clampN((a.loyalty||50)+rnd(8,16), 0, 100);
+  toast("💰 Gave "+x(a.n)+" a raise — loyalty now "+a.loyalty+".");
+  persist(); draw();
+}
+// ── RETENTION: match an outside offer ────────────────────
+function matchStaffOffer(id){
+  var s=ST.save, o=(s._staffOffers||[]).filter(function(x){return x.id===id;})[0];
+  if(!o || o.done) return;
+  var a=(s.staff||{})[o.role];
+  if(!a){ o.done=true; return; }
+  var extra=money2(o.newSalary - a.salary);
+  if(extra > staffLeft()){ toast("You can't afford to match — "+x(a.n)+" is gone."); o.done=true; s.staff[o.role]=null; persist(); draw(); return; }
+  a.salary=o.newSalary;
+  a.loyalty=clampN((a.loyalty||50)+rnd(10,20), 0, 100);
+  o.done=true; o.matched=true;
+  toast("🤝 Matched "+x(o.suitor)+"'s offer — "+x(a.n)+" stays.");
+  persist(); draw();
+}
+function declineStaffOffer(id){
+  var s=ST.save, o=(s._staffOffers||[]).filter(function(x){return x.id===id;})[0];
+  if(!o || o.done) return;
+  o.done=true;
+  var a=(s.staff||{})[o.role];
+  s.staff[o.role]=null;
+  toast("👋 "+x(o.n)+" leaves for "+x(o.suitor)+".");
+  persist(); draw();
+}
+function genStaffPool(){
+  var s=ST.save, pool=[];
+  STAFF_ROLES.forEach(function(r){
+    var n=rnd(2,3);
+    for(var i=0;i<n;i++) pool.push(genAssistant(r.k, s.prestige));
+  });
+  pool.sort(function(a,b){ return b.grade-a.grade; });
+  return pool;
+}
+function hireAssistant(id){
+  var s=ST.save;
+  var a=(s.staffPool||[]).filter(function(x){return x.id===id;})[0];
+  if(!a) return;
+  var cur=(s.staff||{})[a.role];
+  var freed = cur ? (cur.salary||0) : 0;
+  if(a.salary > staffLeft()+freed){ toast("Not enough staff budget for "+x(a.n)); return; }
+  s.staff=s.staff||{};
+  if(cur) toast("👋 "+x(cur.n)+" is out as "+a.role);
+  s.staff[a.role]=a;
+  s.staffPool=(s.staffPool||[]).filter(function(x){return x.id!==id;});
+  toast("✅ Hired "+x(a.n)+" — "+a.role+" · "+staffPerkText(a));
+  persist(); draw();
+}
+function fireAssistant(role){
+  var s=ST.save; if(!s.staff||!s.staff[role]) return;
+  var a=s.staff[role];
+  s.staff[role]=null;
+  toast("👋 Let go of "+x(a.n)+" ("+role+")");
+  persist(); draw();
+}
+// ── Offseason churn: they grow, and the good ones get poached ──
+function advanceStaff(){
+  var s=ST.save;
+  if(s.role!=="HC"){ return; }
+  s.staffBudget=staffBudgetFor(s);
+  s.staff=s.staff||{};
+  s._staffOffers=[];
+  var won=((s.wins||0) >= (s.expectWins||6));
+  Object.keys(s.staff).forEach(function(k){
+    var a=s.staff[k]; if(!a) return;
+    a.years=(a.years||0)+1;
+    var ti=traitInfo(a.trait);
+    // ── He develops (or doesn't) according to who he is ──
+    var lo=ti.grow[0], hi=ti.grow[1];
+    var growth = rnd(lo,hi) + (won?1:0);
+    if(a.pot && a.grade>=a.pot) growth=Math.min(growth,0);   // he's hit his ceiling
+    a.grade = clampN(a.grade + growth, 45, 99);
+    if(a.trait==="prodigy" && a.years>=1) a.revealed=true;    // you can see what he really is now
+    // ── Loyalty: time served and money paid ──
+    var pr=paidRatio(a);
+    a.loyalty = clampN((a.loyalty||50)
+      + (a.years>=2 ? 3 : 0)
+      + (pr>=1.15 ? 6 : pr>=1.0 ? 2 : -8)      // underpay him and he starts taking calls
+      + (won ? 2 : -2), 0, 100);
+    // ── Does somebody come for him? ──
+    // Ambition, quality and your success all raise the risk; loyalty and money hold him.
+    var risk = Math.max(0, (a.grade-76)/110) * (ti.amb||1);
+    if((s.wins||0)>=10) risk += 0.08;            // winning makes your assistants famous
+    if(a.years>=3) risk += 0.04;
+    risk *= Math.max(0.15, 1 - (a.loyalty||50)/130);
+    risk = Math.min(0.55, risk);
+    if(Math.random() < risk){
+      // NOT a silent theft — it's an offer you get to answer.
+      var mkt=marketRate(a);
+      s._staffOffers.push({
+        id:"so"+Math.random().toString(36).slice(2,6),
+        role:k, n:a.n, grade:a.grade, trait:a.trait,
+        suitor:staffSuitor(),
+        newSalary:money2(Math.max(a.salary*1.35, mkt*1.30)),
+        done:false
+      });
+    } else {
+      a.salary=money2(Math.max(a.salary, marketRate(a)*0.92)); // the market drags his price up
+    }
+  });
+  s.staffPool=genStaffPool();
+  if(staffLeft() < 0) toast("⚠️ Your staff now costs more than your budget — trim the payroll.");
+  if((s._staffOffers||[]).length) toast("📣 "+s._staffOffers.length+" of your assistants have outside offers — match them or lose them.");
+}
+// Who's trying to hire him away.
+function staffSuitor(){
+  var s=ST.save, L=s.league, cands=[];
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if(t.div!==myDivision() || n===s.school) return;
+    if((t.p||3) >= (s.prestige||3)) cands.push(n);
+  });
+  return cands.length ? pick(cands) : "a bigger program";
+}
+// Any offer you never answered = he walks.
+function resolveStaffOffers(){
+  var s=ST.save;
+  (s._staffOffers||[]).forEach(function(o){
+    if(o.done) return;
+    if(s.staff && s.staff[o.role]){ s.staff[o.role]=null; }
+    o.done=true;
+  });
+  s._staffOffers=[];
 }
 
 // ═════════════════════════════════════════════════════════
@@ -4558,6 +4997,7 @@ function ageStars(){
       // drifted into draftable range. A star can outgrow his program — but only a little.
       var ceil=Math.round(0.575*(t.ovr||70) + 34.25) + 4;
       st.ovr=clampN(st.ovr+rnd(-1,3), 48, Math.min(99, ceil));
+      st.last=st.s;                               // keep the year he just played — the portal shows it
       st.s={};                                    // new season, fresh stat line (career carries)
       st.form=0.84+Math.random()*0.32;            // and a fresh roll of form
       return st;
@@ -4796,6 +5236,25 @@ function careerRecordBlock(){
   }
   h+='</div>';
 
+  return h;
+}
+// ── Outside offers for your assistants: match them, or lose them ──
+function staffOffersCard(){
+  var s=ST.save, offers=(s._staffOffers||[]).filter(function(o){return !o.done;});
+  if(!offers.length) return "";
+  var h='<div class="sec-title">📣 Your Staff Is Being Poached</div><div class="rec-tbl">';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);padding:8px 11px;line-height:1.5;border-bottom:1.5px solid var(--border2)">'+
+     'Match the offer and he stays. Ignore it and he\u2019s gone when the season kicks off. Winning made these men famous \u2014 that\u2019s the price of it.</div>';
+  offers.forEach(function(o){
+    var ti=traitInfo(o.trait);
+    var afford=(money2(o.newSalary - ((s.staff[o.role]||{}).salary||0)) <= staffLeft());
+    h+='<div class="riv-row"><span class="drf-cat">'+o.role+'</span>'+
+       '<span class="riv-opp">'+x(o.n)+' '+ti.ico+
+         '<span class="tp-sub">'+o.grade+' grade · '+x(ti.t)+' · <b>'+x(o.suitor)+'</b> offered '+fmtMoney(o.newSalary)+'</span></span>'+
+       '<button class="tp-btn'+(afford?'':' broke')+'" data-matchstaff="'+o.id+'">Match</button>'+
+       '<button class="rs-btn on" data-declinestaff="'+o.id+'" title="Let him go">✕</button></div>';
+  });
+  h+='</div>';
   return h;
 }
 // ── Awards: this season's national hardware, your winners highlighted ──
@@ -6631,6 +7090,7 @@ function offseasonScreen(){
      '<p><b style="font-size:16px;color:'+(win>loss?"var(--green)":"var(--red2)")+'">'+win+'–'+loss+'</b><br>'+
      (win>=10?"Elite season! 🏆":win>=7?"Bowl-worthy year. 🎉":win>=5?"Respectable campaign.":"Rebuilding year.")+'</p></div>';
 
+  h+=staffOffersCard();
   h+=awardsCard();
   h+=draftNightCard();
 
@@ -6813,6 +7273,24 @@ function bind(){
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
   var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.treeFrom||"offseason"; draw(); };
   var hb=q("#hist-back"); if(hb)hb.onclick=function(){ ST.screen=ST.historyFrom||"offseason"; draw(); };
+  document.querySelectorAll("[data-treetab]").forEach(function(b){
+    b.onclick=function(){ ST.treeTab=b.getAttribute("data-treetab"); draw(); };
+  });
+  document.querySelectorAll("[data-hirestaff]").forEach(function(b){
+    b.onclick=function(){ hireAssistant(b.getAttribute("data-hirestaff")); };
+  });
+  document.querySelectorAll("[data-firestaff]").forEach(function(b){
+    b.onclick=function(){ fireAssistant(b.getAttribute("data-firestaff")); };
+  });
+  document.querySelectorAll("[data-raisestaff]").forEach(function(b){
+    b.onclick=function(){ raiseAssistant(b.getAttribute("data-raisestaff")); };
+  });
+  document.querySelectorAll("[data-matchstaff]").forEach(function(b){
+    b.onclick=function(){ matchStaffOffer(b.getAttribute("data-matchstaff")); };
+  });
+  document.querySelectorAll("[data-declinestaff]").forEach(function(b){
+    b.onclick=function(){ declineStaffOffer(b.getAttribute("data-declinestaff")); };
+  });
   document.querySelectorAll("[data-histtab]").forEach(function(b){
     b.onclick=function(){ ST.histTab=b.getAttribute("data-histtab"); draw(); };
   });
@@ -6871,6 +7349,7 @@ function startDynasty(){
 }
 // Initialize a fresh recruiting board + weekly points for a new season
 function beginSeasonRecruiting(){
+  resolveStaffOffers();   // any offer you never answered: he's gone
   var s=ST.save;
   s.board=genRecruitBoard(s.prestige);
   // A standalone preseason allotment for scouting and building the board. It does NOT roll
@@ -6894,22 +7373,101 @@ function enterPreseason(){
 }
 // ── Transfer portal (Phase 2) ───────────────────────────
 // Generate a pool of incoming transfers — instant-impact upperclassmen with an NIL price.
+// ── THE TRANSFER PORTAL, WITH REAL PLAYERS ────────────────
+// The portal used to be entirely invented: random names, random ratings, and a "previous school"
+// drawn from FBS_TEAMS even in an FCS save. Every other program now carries real, named stars
+// with real accumulated stats — so the portal is drawn from THEM. The man you sign is the man
+// who torched you in week 6, he leaves an actual hole at an actual program, and his old team is
+// measurably worse for losing him.
+function starDevFrom(ovr){
+  var st = ovr>=90 ? 5 : ovr>=85 ? 4 : ovr>=78 ? 3 : 2;
+  return rollDevByStars(st);
+}
+// A one-line résumé from the season he just played — the reason you want him.
+function starProdLine(st){
+  // Prefer the season he just finished. By the time the portal opens, ageStars has already
+  // rolled the calendar over and cleared st.s — so without this every transfer showed "no stats".
+  var x=(st.last && Object.keys(st.last).length) ? st.last : (st.s||{});
+  var R=function(v){return Math.round(v||0);};
+  if(x.py)   return R(x.py)+" pass yd · "+R(x.ptd)+" TD";
+  if(x.ry)   return R(x.ry)+" rush yd · "+R(x.rtd)+" TD";
+  if(x.recy) return R(x.recy)+" rec yd · "+R(x.rectd)+" TD";
+  if(x.sack) return R(x.sack)+" sacks · "+R(x.tkl)+" tkl";
+  if(x.dint) return R(x.dint)+" INT · "+R(x.tkl)+" tkl";
+  if(x.tkl)  return R(x.tkl)+" tackles";
+  return null;
+}
 function genPortalPool(){
-  var s=ST.save, n=rnd(9,14), pool=[];
-  var poslist=rolePositions();
-  for(var i=0;i<n;i++){
-    var pos=pick(poslist);
-    var yr=pick(["SO","JR","JR","SR"]);
-    var st=weightedStars(s.prestige);
-    var ovr=Math.max(64,Math.min(91, recruitOvr(st)+rnd(2,9))); // arrive ready to play, above HS level
-    var dev=rollDevByStars(st);
-    var pay=POS_PAY[pos]||POS_PAY.LB, tT=Math.max(0,Math.min(1,(ovr-70)/23));
+  var s=ST.save, pool=[], poslist=rolePositions(), L=s.league;
+  var myDiv=myDivision();
+  // Who's in the portal? Real stars from around the country. Weaker programs leak talent (they
+  // can't hold on to a good player), and a losing season pushes people out the door.
+  var cands=[];
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(tn){
+    var t=L.teams[tn];
+    if(t.div!==myDiv || tn===s.school || !t.stars) return;
+    t.stars.forEach(function(st, idx){
+      if(poslist.indexOf(st.pos)<0) return;      // only positions you actually coach
+      if(st.yr==="FR") return;                    // a true freshman rarely bails on day one
+      var w = 1;
+      w += Math.max(0, 3-(t.p||3)) * 0.9;         // small programs can't keep their best
+      var losses = (t.l||0);
+      if(losses>=7) w += 1.2;                     // a bad year empties a locker room
+      if(st.ovr>=88) w *= 0.55;                   // a true blue-chip usually stays put
+      if(st.wasTarget) w += 1.6;                  // the one who got away: you already know him,
+                                                  // and he already knows you. Second bite.
+      cands.push({team:tn, t:t, idx:idx, st:st, w:w});
+    });
+  });
+  var n=Math.min(cands.length, rnd(9,14));
+  for(var i=0;i<n && cands.length;i++){
+    var tot=0; cands.forEach(function(c){ tot+=c.w; });
+    var roll=Math.random()*tot, acc=0, hit=cands.length-1;
+    for(var j=0;j<cands.length;j++){ acc+=cands[j].w; if(roll<=acc){ hit=j; break; } }
+    var c=cands.splice(hit,1)[0], st=c.st;
+    var dev=starDevFrom(st.ovr);
+    var pay=POS_PAY[st.pos]||POS_PAY.LB, tT=Math.max(0,Math.min(1,(st.ovr-70)/23));
     var price=Math.max(0.15, Math.min(pay[1], money2((pay[0]+(pay[1]-pay[0])*tT)*0.8 + ((dev==="elite"||dev==="pro")?0.3:0))));
-    var pool2=FBS_TEAMS.filter(function(t){return t.n!==s.school;});
-    pool.push({id:"tp"+Math.random().toString(36).slice(2,7), n:genName(), pos:pos, yr:yr, ovr:ovr, arch:rollArch(pos), dev:dev, pot:rollPotential(ovr,dev), price:price, rival:pick(pool2).n, status:"open"});
+    pool.push({
+      id:"tp"+Math.random().toString(36).slice(2,7),
+      n:st.n, pos:st.pos, yr:st.yr, ovr:st.ovr,
+      arch:rollArch(st.pos), dev:dev, pot:rollPotential(st.ovr,dev),
+      price:price,
+      rival:c.team,                 // the school he's actually leaving
+      prod:starProdLine(st),        // what he did there last season
+      wasTarget:!!st.wasTarget,     // you recruited him out of high school and lost him
+      hsStars:st.hsStars||0,
+      _from:{team:c.team, idx:c.idx},   // so signing him really removes him from their roster
+      status:"open"
+    });
   }
   pool.sort(function(a,b){return b.ovr-a.ovr;});
   return pool;
+}
+// He's gone: strike him from his old team and hand them a lesser replacement. Losing a starter
+// genuinely hurts them, which is what makes a portal raid mean something.
+// Which program beat you to him. Never his old school (he's leaving), never yours.
+function portalSuitor(t){
+  var s=ST.save, L=s.league, myDiv=myDivision(), cands=[];
+  if(L&&L.teams) Object.keys(L.teams).forEach(function(n){
+    var tm=L.teams[n];
+    if(tm.div!==myDiv || n===s.school || n===t.rival) return;
+    if((tm.p||3) >= (s.prestige||3)-1) cands.push(n);   // a program that could plausibly outbid you
+  });
+  return cands.length ? pick(cands) : "another program";
+}
+function poachFromTeam(from){
+  if(!from) return;
+  var L=ST.save.league; if(!L||!L.teams) return;
+  var t=L.teams[from.team]; if(!t||!t.stars||!t.stars[from.idx]) return;
+  var gone=t.stars[from.idx];
+  t.stars[from.idx]={n:genName(), pos:gone.pos, yr:pick(["FR","SO"]),
+                     ovr:Math.max(48, starOvrFor(t,gone.pos)-3), s:{}, c:{},
+                     form:0.84+Math.random()*0.32};
+  var ding=(gone.ovr>=85)?2:1;                     // they're worse for it
+  t.off=Math.max(46,Math.min(99,(t.off||70)-ding));
+  t.def=Math.max(46,Math.min(99,(t.def||70)-ding));
+  t.ovr=Math.round((t.off+t.def)/2);
 }
 function enterPortal(){
   var s=ST.save;
@@ -6932,11 +7490,17 @@ function signTransfer(id){
   s.nilLeft=money2(s.nilLeft-t.price);
   s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(!devInfo(t.dev).hidden),nilFund:0});
   t.status="signed";
+  poachFromTeam(t._from);   // he really leaves — his old program is worse for it
   s.jobSecurity=Math.min(100,(s.jobSecurity||60)+2); // a portal splash excites the fanbase
-  toast("✅ Signed "+x(t.n)+" · "+t.ovr+" OVR "+t.pos);
+  toast("✅ Signed "+x(t.n)+" · "+t.ovr+" OVR "+t.pos+(t.rival?" (from "+x(t.rival)+")":""));
   // rivals are working the portal too — a top target may commit elsewhere
   var others=(s._portalPool||[]).filter(function(x){return x.status==="open";});
-  if(others.length && Math.random()<0.4){ var snipe=others[rnd(0,Math.min(2,others.length-1))]; snipe.status="lost"; }
+  if(others.length && Math.random()<0.4){
+    var snipe=others[rnd(0,Math.min(2,others.length-1))];
+    snipe.status="lost";
+    snipe.lostTo=portalSuitor(snipe);   // the school that BEAT you to him — not the one he left
+    poachFromTeam(snipe._from);          // he still leaves his old program either way
+  }
   persist(); draw();
 }
 // Pull one of your own out of the portal before he's gone for good.
@@ -7011,7 +7575,7 @@ function portalScreen(){
   var s=ST.save;
   var h='<div class="wrap">';
   h+='<div class="season-hd"><div class="shd-l"><b>🔄 Transfer Portal</b> · '+(2026+(s.seasonsPlayed||0))+'</div></div>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Instant-impact upperclassmen — sign them with NIL to plug holes now. Rivals are shopping too, so top targets can commit elsewhere.</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Real players from real programs — the man who torched you in week 6 might be available. Sign them with NIL to plug holes now. Take one and his old school is genuinely worse for it. Rivals are shopping too, so top targets can commit elsewhere.</div>';
   h+=nilBar();
   if(s._portalSecHit>0) h+='<div style="font-size:10px;font-weight:800;color:var(--red2);margin:8px 2px 0">📉 Losing key players cost you '+s._portalSecHit+' job security. Reload through the portal to win the fans back — each signing helps.</div>';
   h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin:8px 2px 10px;line-height:1.5">Rival programs worked the portal too — the league\u2019s balance has shifted for next season.</div>';
@@ -7045,7 +7609,7 @@ function portalScreen(){
       var badge = st==="retained" ? '<span class="tp-signed">✓ Kept</span>'
                : canBuy ? '<button class="tp-btn'+(afford?"":" broke")+'" data-retainplayer="'+p._p.id+'">Keep · '+fmtMoney(p.retainPrice)+'</button>'
                : '<span class="tp-gone">→ portal</span>';
-      h+='<div class="ret-row'+(st!=="open"?" done":"")+'"><span class="ret-nm">'+x(p.n)+'<span class="ret-sub">'+p.pos+' · '+p.yr+' · '+p.ovr+' OVR · '+x(p.arch||"")+'</span></span>'+
+      h+='<div class="ret-row'+(st!=="open"?" done":"")+'"><span class="ret-nm">'+x(p.n)+'<span class="ret-sub">'+p.pos+' · '+yrLabel(p)+' · '+p.ovr+' OVR · '+x(p.arch||"")+'</span></span>'+
          badge+'</div>';
     });
     h+='</div>';
@@ -7057,10 +7621,19 @@ function portalScreen(){
   pool.forEach(function(t){
     var afford=(s.nilLeft||0)>=t.price;
     var badge = t.status==="signed" ? '<span class="tp-signed">✓ Signed</span>'
-             : t.status==="lost" ? '<span class="tp-lost">Committed to '+x(t.rival).slice(0,10)+'</span>'
+             : t.status==="lost" ? '<span class="tp-lost">Committed to '+x(t.lostTo||"another program").slice(0,10)+'</span>'
              : '<button class="tp-btn'+(afford?"":" broke")+'" data-signtransfer="'+t.id+'">Sign · '+fmtMoney(t.price)+'</button>';
+    var devTag=(t.dev==='elite'?' ⭐':(t.dev==='pro'?' 🔥':(t.dev==='slow'?' 🐢':(t.dev==='bust'?' ⚠':''))));
+    // He's a real player from a real program — say so, and show what he actually did there.
+    var origin = t.rival ? ' · <b>from '+x(t.rival)+'</b>' : '';
+    // The one who got away — you chased him out of high school and he picked somebody else.
+    var chase = t.wasTarget ? ' <span class="fit-dot great">🎯 You recruited him'+(t.hsStars?' ('+t.hsStars+'★)':'')+'</span>' : '';
+    var prod   = t.prod ? '<span class="tp-sub" style="color:var(--gold-dark)">'+x(t.prod)+' last season</span>' : '';
     h+='<div class="tp-row'+(t.status!=="open"?" done":"")+'"><span class="tp-pos" style="background:'+posColor(t.pos)+'">'+t.pos+'</span>'+
-       '<span class="tp-nm">'+x(t.n)+'<span class="tp-sub">'+t.yr+' · '+t.ovr+' OVR · '+x(t.arch||"")+(t.dev==='elite'?' ⭐':(t.dev==='pro'?' 🔥':(t.dev==='slow'?' 🐢':(t.dev==='bust'?' ⚠':''))))+'</span></span>'+
+       '<span class="tp-nm">'+x(t.n)+
+         '<span class="tp-sub">'+(YR_PRETTY[t.yr]||t.yr)+' · '+t.ovr+' OVR · '+x(t.arch||"")+devTag+origin+chase+'</span>'+
+         prod+
+       '</span>'+
        badge+'</div>';
   });
   h+='</div>';
@@ -7504,7 +8077,7 @@ function playerStatDetail(id){
   h+='<div class="ps-hero">'+
        '<div class="ps-pos" style="background:'+posColor(p.pos)+'">'+p.pos+'</div>'+
        '<div class="ps-id"><div class="ps-name">'+x(p.n)+devBadge(p)+'</div>'+
-         '<div class="ps-sub">'+p.yr+' · '+x(p.arch||"")+(delta?' · career '+(delta>0?'+':'')+delta:'')+'</div></div>'+
+         '<div class="ps-sub">'+yrLabel(p)+' · '+x(p.arch||"")+(delta?' · career '+(delta>0?'+':'')+delta:'')+'</div></div>'+
        '<div class="ps-ovr"><b>'+p.ovr+'</b><span>OVR</span></div>'+
      '</div>';
 
@@ -8065,6 +8638,7 @@ function advanceSeason(){
   runAwards();         // hand out the hardware — your players vs. every other team's stars
   runDraft();          // seniors go pro; juniors good enough to go early declare and leave
   resolveRedshirts();  // anyone under the four-game cap keeps the year
+  advanceStaff();      // assistants improve, the good ones get poached, the market refreshes
   ageStars();          // the rest of the country graduates and reloads too
   recordChampions(); // log this year's national & conference champions to the league history
 
@@ -8339,12 +8913,19 @@ function genCarousel(fired){
 function takeJob(offer){
   var s=ST.save;
   var newRole = offer.role || s.role;
-  var carry={careerWins:s.careerWins,careerLosses:s.careerLosses,titles:s.titles,seasonsPlayed:s.seasonsPlayed,abilities:s.abilities,jobsHeld:(s.jobsHeld||1)+1,history:s.history,coachXP:s.coachXP,archetype:s.archetype};
+  // What follows a coach to a new job is his CAREER — everything he earned, not the program he
+  // left. Your board and roster stay behind (those belong to the school); your record book,
+  // hardware, draft pipeline and rivalry ledgers come with you, because they're keyed by school
+  // and are meant to span a whole career across several programs.
+  var CARRY=["careerWins","careerLosses","titles","natlTitles","seasonsPlayed","abilities",
+             "history","coachXP","archetype","coachAwards",
+             "awards","draftHistory","recordBook","rivalRec",   // the whole Trophy Room
+             "staff",                                           // his assistants come WITH him
+             "rivalryWins","fbsUpsets","facilities","legacyPts","_rsInit"];
   var fresh=newSave({n:offer.n,c:offer.c,p:offer.p}, newRole);
-  fresh.careerWins=carry.careerWins; fresh.careerLosses=carry.careerLosses; fresh.titles=carry.titles;
-  fresh.seasonsPlayed=carry.seasonsPlayed; fresh.abilities=carry.abilities; fresh.jobsHeld=carry.jobsHeld;
-  fresh.coachXP=carry.coachXP||0; fresh.archetype=carry.archetype||fresh.archetype;
-  fresh.history=carry.history; fresh.jobSecurity=55; // fresh mandate at a new job
+  CARRY.forEach(function(k){ if(s[k]!==undefined) fresh[k]=s[k]; });
+  fresh.jobsHeld=(s.jobsHeld||1)+1;
+  fresh.jobSecurity=55; // fresh mandate at a new job
   if(s.league) fresh.league=s.league; // the world continues — keep the living league
   ST.save=fresh; ST.fired=null; ST.carousel=null;
   beginSeasonRecruiting();       // fresh recruiting board at the new school
