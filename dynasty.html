@@ -7527,7 +7527,11 @@ function simToFinal(){
   ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
   ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
   ST.live.done=true; ST.live.paused=false; ST.live.finalStretch=true; ST.live.quarter=4;
-  finishGameSim();
+  // The game is already decided; recording it is bookkeeping. If any of that throws we must
+  // STILL paint the final — otherwise the screen freezes mid-quarter and the user has to press
+  // a second button to get their result.
+  try{ finishGameSim(); }
+  catch(e){ console.error("finishGameSim failed after Sim-to-Final:", e); }
   ST.live.elapsed=3600;
   renderLiveScore();
 }
@@ -7569,6 +7573,10 @@ function finishGameSim(){
     recordUserLeagueResult(won, g.oc===s.conf);
     recordGameStats(res, g.opp, r.pbp);
     markAppearances();   // regular season only — postseason games are exempt from the 4-game cap
+    // NOTE: everything above is bookkeeping. finishGameSim() sets r._recorded BEFORE doing any
+    // of it, so if a step ever throws, the caller (simToFinal / onLiveStretchEnd) aborts before
+    // repainting — the game looks frozen mid-quarter, and only a SECOND button press finishes
+    // it (the retry skips this block). The callers now guard against that; see simToFinal.
     // The rest of the week — the other league games, player development, rivals pushing on
     // the recruiting trail, and the week counter itself — now resolves when you click
     // "Advance to Next Week" (see advanceWeek). That lets you play your game and THEN keep
@@ -7713,7 +7721,8 @@ function onLiveStretchEnd(){
   if(ST.G && ST.G.done && !li.done){
     li.done=true; li.paused=false;
     rebuildLivePbp();
-    finishGameSim();
+    try{ finishGameSim(); }
+    catch(e){ console.error("finishGameSim failed at final whistle:", e); }
   }
   renderLiveScore();
 }
