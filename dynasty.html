@@ -1077,7 +1077,29 @@ var DEF_POS_WEIGHT={DL:1.6,LB:1.3,CB:1.3,S:1.0}; // impact on defense rating
 var STARTERS_AT={QB:1,RB:1,WR:3,TE:1,OL:5, DL:4,LB:3,CB:2,S:2};
 function startersAt(pos){ return STARTERS_AT[pos]||1; }
 // Target roster size per position (a lean two-deep-ish squad).
-var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:2,OL:7, DL:7,LB:6,CB:4,S:4};
+// Every position carries at least one body BEYOND the two-deep, or nobody there can ever be
+// redshirted (the two-deep plays, and playing burns the year). TE used to sit at 2 — exactly
+// the two-deep — so a tight end could never take a redshirt. Three now, like the other skill spots.
+var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:3,OL:7, DL:7,LB:6,CB:4,S:4};
+// ── THE ROTATION: who actually takes the field ────────────
+// Three tiers, and every system reads THIS, so the sim, the games-played counter and the
+// roster badges can never disagree again:
+//   STARTER  (idx < startersAt)  — takes the bulk of the snaps
+//   BACKUP   (idx < rotationAt)  — rotates in, gets real snaps and real stats
+//   RESERVE  (idx >= rotationAt) — does NOT play at all, so he's your redshirt candidate
+// Every position carries at least one reserve, so a redshirt is always possible somewhere.
+var ROTATION_AT={QB:2,RB:2,WR:4,TE:2,OL:6, DL:5,LB:4,CB:3,S:3};
+function rotationAt(pos){ return ROTATION_AT[pos] || (startersAt(pos)+1); }
+function depthTier(pos, idx){
+  if(idx < startersAt(pos)) return "ST";
+  if(idx < rotationAt(pos)) return "BK";
+  return "RES";
+}
+function tierOf(p){
+  var d=depthOrder(ST.save.roster, p.pos), i=-1;
+  d.forEach(function(x,k){ if(x.id===p.id) i=k; });
+  return i<0 ? "RES" : depthTier(p.pos, i);
+}
 function rosterSizeAt(pos){ return ROSTER_SIZE[pos]||startersAt(pos)+1; }
 // The absolute floor: enough bodies to field a starting lineup. Walk-ons top a
 // position up to here and no further — they're a safety net, not a roster plan.
@@ -1692,7 +1714,8 @@ function newSave(team, role){
     careerWins:0, careerLosses:0, titles:0, seasonsPlayed:0, jobsHeld:1,
     abilities:[], budget:budgetFor(team.p, role),
     coachXP:0, legacyXP:0, facilities:{}, champHistory:[],
-    jobSecurity:60, missedYears:0
+    jobSecurity:60, missedYears:0,
+    _rsInit:true   // starting roster is already stamped: only true freshmen hold a redshirt
   };
   // start with your archetype's matching tier-1 skill already unlocked
   var startSkill=archStartSkill(s.archetype);
@@ -1886,6 +1909,17 @@ function loadData(){
       if(!ST.save.gameplan) ST.save.gameplan={offBalance:50, defBalance:50}; // migrate pre-gameplan saves
       if(!ST.save.offScheme){ ST.save.offScheme="prostyle"; ST.save.gameplan.offBalance=53; } // migrate to named schemes
       if(!ST.save.defScheme){ ST.save.defScheme="base43"; ST.save.gameplan.defBalance=50; }
+      // ── Redshirt migration ──
+      // Anyone already on campus above freshman year has, by definition, burned his redshirt —
+      // that's what being a sophomore/junior/senior on a real roster means. Saves made before
+      // redshirts existed have no such flag, so their upperclassmen wrongly show an RS button.
+      // Stamp them once. Freshmen (and anyone who arrives later as a freshman) keep theirs.
+      if(!ST.save._rsInit){
+        (ST.save.roster||[]).forEach(function(p){
+          if(p.yr!=="FR" && p.rsUsed===undefined && !p.rs) p.rsUsed=true;
+        });
+        ST.save._rsInit=true;
+      }
       // repair bug: older builds failed to reset league records between seasons, so teams
       // accumulated conference records across years (e.g. Boise 21-1). Detect ANY team whose
       // games-played exceeds what one season allows, then resync the whole league to this season.
@@ -2646,8 +2680,13 @@ function genSchedule(team){
 // also pull the redshirt off for a four-game cameo and still preserve the season.
 // ═════════════════════════════════════════════════════════
 var RS_GAME_LIMIT=4;
-function rsAvailable(p){ return !p.rsUsed && p.yr!=="SR"; }   // a senior has no year left to save
-function isRedshirting(p){ return !!p.hold && rsAvailable(p); }
+function rsAvailable(p){ return !p.rsUsed && p.yr!=="SR"; }   // still OWNS a redshirt
+// Can he still redshirt THIS season? Owning a redshirt isn't enough — once he's past the
+// four-game cap the year is already gone, so holding him out buys nothing. He isn't
+// "redshirting" at that point, he's just benched for free. (canRedshirt is defined after
+// rsSafe below; both are function declarations, so the hoisting is safe.)
+function canRedshirt(p){ return rsAvailable(p) && rsSafe(p); }
+function isRedshirting(p){ return !!p.hold && canRedshirt(p); }
 // Games played = games he actually APPEARED IN. The two-deep is only an approximation: the
 // sim hands the ball to third-stringers too, and one of them rushed for 308 yards while his
 // counter still read 0. So a game in the box score always counts as a game played — if a
@@ -2663,6 +2702,11 @@ function toggleHold(id){
   var s=ST.save, p=(s.roster||[]).filter(function(r){return r.id===id;})[0];
   if(!p) return;
   if(!rsAvailable(p)){ toast("⚠️ "+p.n+" has no redshirt left to use."); return; }
+  // Past the four-game cap the year is already burned — holding him out now preserves nothing.
+  if(!p.hold && !rsSafe(p)){
+    toast("⚠️ "+p.n+" has already played "+gamesPlayed(p)+" games — his redshirt is burned for this season.");
+    return;
+  }
   if(p.hold){
     p.hold=false;
     toast(rsSafe(p) ? ("▶️ "+p.n+" is active — "+gamesPlayed(p)+"/"+RS_GAME_LIMIT+" games used, redshirt still safe.")
@@ -2677,7 +2721,7 @@ function toggleHold(id){
 function markAppearances(){
   var s=ST.save;
   ALL_POS.forEach(function(pos){
-    depthOrder(s.roster,pos).slice(0, startersAt(pos)+1).forEach(function(p){
+    depthOrder(s.roster,pos).slice(0, rotationAt(pos)).forEach(function(p){
       p.gp=(p.gp||0)+1;
       // warn the moment a redshirt is one game from burning the year
       if(rsAvailable(p) && p.gp===RS_GAME_LIMIT)
@@ -3486,12 +3530,12 @@ function rosterTable(){
       if(!atPos.length) return;
       var nStart=startersAt(pos);
       atPos.forEach(function(p,idx){
-        var isStarter=(idx<nStart);
-        var isBackup=(idx===nStart);
+        var tier=depthTier(pos, idx);
+        var isStarter=(tier==="ST");
         var depthTag;
-        if(isStarter){ depthTag = (nStart>1)?'<span class="ros-st">ST'+(idx+1)+'</span>':'<span class="ros-st">ST</span>'; }
-        else if(isBackup){ depthTag='<span class="ros-st bk">BK</span>'; }
-        else { depthTag='<span class="ros-st dp">'+(idx+1)+'</span>'; }
+        if(isStarter){ depthTag = (nStart>1)?'<span class="ros-st" title="Starter — takes most of the snaps">ST'+(idx+1)+'</span>':'<span class="ros-st" title="Starter — takes most of the snaps">ST</span>'; }
+        else if(tier==="BK"){ depthTag='<span class="ros-st bk" title="Backup — rotates in and will get real snaps">BK</span>'; }
+        else { depthTag='<span class="ros-st dp" title="Reserve — does not play. Free to redshirt.">RES</span>'; }
         var yearDelta=p.ovr-(p.ssOvr!=null?p.ssOvr:p.ovr);
         var careerDelta=p.ovr-(p.startOvr!=null?p.startOvr:p.ovr);
         var col=posColor(pos);
@@ -3534,7 +3578,7 @@ function rosterTable(){
              '<span class="ros-sub">'+(picked?'<b style="color:var(--purple)">Tap another '+p.pos+' to swap</b>':rsub)+'</span></span>'+
            nilCell+
            '<span class="ros-ovr">'+p.ovr+' '+progArrow(yearDelta)+'</span>'+
-           (rsAvailable(p) ? '<button class="rs-btn" data-rshold="'+p.id+'" title="Hold out to redshirt">RS</button>'
+           (canRedshirt(p) ? '<button class="rs-btn" data-rshold="'+p.id+'" title="Hold out to redshirt">RS</button>'
                            : '<span class="ros-grip">'+(picked?"✕":(swappable?"⇅":"⋮"))+'</span>')+
            '</div>';
       });
@@ -3989,10 +4033,14 @@ function goesForTwo(down, q){
 // Pick a real player from your depth chart, weighted toward starters.
 var DEPTH_W=[0.55,0.28,0.12,0.05];
 function pickDepth(pos){
-  var d=depthOrder(ST.save.roster,pos);
+  // Only the ROTATION touches the ball. Previously this ran four deep at every position, so a
+  // third-string RB who was supposed to be redshirting quietly rushed for 180 yards.
+  var d=depthOrder(ST.save.roster,pos).slice(0, rotationAt(pos));
   if(!d.length) return null;
-  var r=Math.random(), acc=0;
-  for(var i=0;i<d.length && i<DEPTH_W.length;i++){ acc+=DEPTH_W[i]; if(r<acc) return d[i]; }
+  var w=DEPTH_W.slice(0, d.length);
+  var tot=0; w.forEach(function(x){ tot+=x; });
+  var r=Math.random()*tot, acc=0;
+  for(var i=0;i<d.length;i++){ acc+=w[i]; if(r<acc) return d[i]; }
   return d[0];
 }
 // Who touched the ball? Only our own roster is named; opponents get a generated
@@ -4000,7 +4048,9 @@ function pickDepth(pos){
 // A game's named cast. The starting QB takes nearly every snap, so he is fixed
 // for the game rather than re-rolled per play; the opponent gets one QB name too.
 function newCast(oppName){
-  var qb=depthOrder(ST.save.roster,"QB")[0];
+  // The backup QB actually plays now — a share of snaps in relief. He used to be charged a full
+  // season of games while never once touching the ball, which quietly burned his redshirt.
+  var qb=pickDepth("QB") || depthOrder(ST.save.roster,"QB")[0];
   // The opponent has a REAL cast now: their actual star QB and skill players, pulled from the
   // league. (This used to invent a fresh random name on literally every snap.)
   var stars=starsOf(oppName);
@@ -7087,10 +7137,15 @@ function genDefenseBox(ptsAllowed, opp, driveStats){
   ];
   var players=[],tW=[],sW=[],iW=[],fW=[],pW=[];
   groups.forEach(function(gr){
-    top(gr.pos,startersAt(gr.pos)).forEach(function(p){
+    // Starters AND the rotation backups. A backup takes a smaller share of the snaps, so he
+    // gets a smaller share of the box score — but he does get one, instead of being charged a
+    // full season of games with nothing to show for it.
+    top(gr.pos, rotationAt(gr.pos)).forEach(function(p,i){
       players.push(p);
+      var share=(i < startersAt(gr.pos)) ? 1 : 0.30;   // rotation backup: ~30% of a starter's snaps
       var am=(p.arch==="Pass Rusher")?1.6:1, bh=(p.arch==="Ball-Hawk")?1.7:1, th=(p.arch==="Thumper")?1.4:1, bz=(p.arch==="Blitzer")?1.5:1;
-      tW.push(gr.tkl*th); sW.push(gr.sack*am*bz); iW.push(gr.int*bh); fW.push(gr.tfl*am); pW.push(gr.pbu);
+      tW.push(gr.tkl*th*share); sW.push(gr.sack*am*bz*share); iW.push(gr.int*bh*share);
+      fW.push(gr.tfl*am*share); pW.push(gr.pbu*share);
     });
   });
   if(!players.length) return;
