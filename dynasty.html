@@ -531,6 +531,31 @@ a{color:inherit;text-decoration:none}
 .chip{font-size:9.5px;font-weight:800;padding:1.5px 6px;border-radius:6px;background:var(--cream);
       border:1.5px solid var(--border2);color:var(--muted);white-space:nowrap;line-height:1.4}
 .pl-meta{font-size:10px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* ── Needs-attention strip ── */
+.attn{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
+.attn-item{display:flex;align-items:center;gap:9px;width:100%;padding:9px 11px;text-align:left;cursor:pointer;
+  background:#fff;border:2px solid var(--border2);border-radius:11px;box-shadow:2px 2px 0 var(--border2)}
+.attn-item.hi{border-color:var(--red2);box-shadow:2px 2px 0 var(--red2);background:var(--red-bg)}
+.attn-item.md{border-color:var(--gold-dark);box-shadow:2px 2px 0 var(--gold-dark);background:var(--gold-bg)}
+.attn-item:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--border2)}
+.attn-ico{font-size:16px;flex:none}
+.attn-txt{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.3}
+.attn-txt b{font-size:12px;font-weight:900;color:var(--text)}
+.attn-txt span{font-size:10px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.attn-item.hi .attn-txt b{color:var(--red2)}
+.attn-go{flex:none;font-size:17px;font-weight:900;color:var(--muted)}
+/* ── Roster filters ── */
+.ros-filters{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;-webkit-overflow-scrolling:touch}
+.ros-filters::-webkit-scrollbar{display:none}
+.ros-filt{flex:none;display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:9px;
+  background:#fff;border:2px solid var(--border);box-shadow:2px 2px 0 var(--border);
+  font-size:11px;font-weight:800;color:var(--text);white-space:nowrap;cursor:pointer}
+.ros-filt.on{background:var(--purple);border-color:var(--border);color:#fff}
+.ros-filt .rf-n{font-size:9.5px;font-weight:900;background:var(--cream);color:var(--muted);
+  padding:1px 5px;border-radius:6px}
+.ros-filt.on .rf-n{background:rgba(255,255,255,.28);color:#fff}
+.ros-filt-note{display:flex;align-items:center;gap:8px;font-size:10.5px;font-weight:800;color:var(--muted);margin:0 2px 8px}
+.ros-filt-clear{font-size:10px;font-weight:900;color:var(--purple);background:none;border:none;cursor:pointer;padding:0}
 .pl-meta b{color:var(--text);font-weight:800}
 .chip.yr{background:#fff;color:var(--text);border-color:var(--border)}
 .chip.pers{background:var(--gold-bg);border-color:var(--gold-dark);color:var(--gold-dark)}
@@ -3803,6 +3828,31 @@ var POS_COLORS={
   OL:"#c9a227", DL:"#7d5bd6", LB:"#4a7dc1", CB:"#c14a8a", S:"#4aa3c1"
 };
 function posColor(pos){ return POS_COLORS[pos]||"#888"; }
+// ── ROSTER FILTERS ────────────────────────────────────────
+// Recruiting has filters, sorting and position tabs. The roster had NOTHING — 44 players in one
+// long scroll, so "which of my guys can I still redshirt?" meant scanning by eye. These are the
+// questions you actually ask of a roster, and the attention strip deep-links straight into them.
+var ROSTER_FILTERS=[
+  {k:"all",  t:"All",       f:function(p){ return true; }},
+  {k:"risk", t:"🚪 Portal risk", f:function(p){ return p.yr!=="SR" && nilDemand(p)>0 && retentionRisk(p)>=60; }},
+  {k:"nil",  t:"💰 Underfunded", f:function(p){ var d=nilDemand(p); return p.yr!=="SR" && d>0 && money2(p.nilFund||0)<d; }},
+  {k:"rs",   t:"🔴 Redshirt",    f:function(p){ return canRedshirt(p) || isRedshirting(p); }},
+  {k:"st",   t:"Starters",  f:function(p){ return tierOf(p)==="ST"; }},
+  {k:"res",  t:"Reserves",  f:function(p){ return tierOf(p)==="RES"; }},
+  {k:"young",t:"Underclass",f:function(p){ return p.yr==="FR"||p.yr==="SO"; }}
+];
+function rosterFilter(){ return ROSTER_FILTERS.filter(function(f){return f.k===(ST.rosFilter||"all");})[0] || ROSTER_FILTERS[0]; }
+function rosterFilterBar(){
+  var s=ST.save, cur=ST.rosFilter||"all";
+  var h='<div class="ros-filters">';
+  ROSTER_FILTERS.forEach(function(f){
+    var n=(s.roster||[]).filter(function(p){ return !p.cut && f.f(p); }).length;
+    if(f.k!=="all" && !n) return;                 // don't offer a filter that finds nobody
+    h+='<button class="ros-filt'+(cur===f.k?" on":"")+'" data-rosfilt="'+f.k+'">'+x(f.t)+
+       ' <span class="rf-n">'+n+'</span></button>';
+  });
+  return h+'</div>';
+}
 function rosterTable(){
   var s=ST.save;
   // which position group is mid-swap? derived from the roster so it can't drift
@@ -3821,14 +3871,27 @@ function rosterTable(){
      '<span class="ros-st bk">BK</span> <b>Backup</b> — rotates in and <i>will</i> get real snaps and stats. &nbsp;'+
      '<span class="ros-st dp">RES</span> <b>Reserve</b> — doesn\u2019t play at all, so he\u2019s free to redshirt.<br>'+
      'Any snap burns a redshirt, so a backup can\u2019t quietly bank a year \u2014 only a reserve can.</div>';
+  h+=rosterFilterBar();
+  var _fl=rosterFilter();
+  if(_fl.k!=="all"){
+    var _n=(s.roster||[]).filter(function(p){ return !p.cut && _fl.f(p); }).length;
+    h+='<div class="ros-filt-note">Showing <b>'+_n+'</b> · '+x(_fl.t)+
+       ' <button class="ros-filt-clear" data-rosfilt="all">✕ clear</button></div>';
+  }
   groups.forEach(function(grp){
     h+='<div class="sec-title" style="margin:6px 2px 6px">'+grp.t+'</div>';
     h+='<div class="conf-table" style="margin-bottom:10px">';
     grp.order.forEach(function(pos){
       var atPos=depthOrder(s.roster, pos);
       if(!atPos.length) return;
+      // Depth order is computed on the FULL room first, so ST/BK/RES stay truthful even when
+      // you're only looking at a slice of it. Filter after, never before.
+      var _flt=rosterFilter();
+      var _shown=atPos.filter(function(p){ return _flt.f(p); });
+      if(!_shown.length && !s.roster.some(function(p){ return p.pos===pos && isRedshirting(p) && _flt.f(p); })) return;
       var nStart=startersAt(pos);
       atPos.forEach(function(p,idx){
+        if(!_flt.f(p)) return;                    // filtered out — but idx is still the true depth
         var tier=depthTier(pos, idx);
         var isStarter=(tier==="ST");
         var depthTag;
@@ -3898,7 +3961,7 @@ function rosterTable(){
            '</div>';
       });
       // ── Redshirts held out at this position — off the depth chart, banking a year ──
-      s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p); }).forEach(function(p){
+      s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p) && _flt.f(p); }).forEach(function(p){
         var _pi2=p.pers?persInfo(p.pers):null;
         h+='<div class="pl-row rs-held" style="border-left:5px solid '+posColor(pos)+'">'+
            '<span class="pl-pos" style="background:'+posColor(pos)+'">'+p.pos+'</span>'+
@@ -6010,6 +6073,102 @@ function preTabBtn(id,label){
   return '<button class="tab-btn'+(active?" active":"")+'" data-pretab="'+id+'">'+label+'</button>';
 }
 
+// ═════════════════════════════════════════════════════════
+// NEEDS ATTENTION
+// The game quietly generates a dozen things that EXPIRE if you don't act: unspent recruiting
+// points, a starter at 90% portal risk with nothing funded, a staff offer that lapses at kickoff,
+// a freshman one snap from burning his redshirt. None of it announced itself. This gathers every
+// pending decision into one strip, and each item jumps you straight to the screen that fixes it.
+// ═════════════════════════════════════════════════════════
+function attentionItems(){
+  var s=ST.save, out=[];
+  if(!s) return out;
+  var inSeason = (s.week||0) < (s.schedule||[]).length;
+
+  // ── A staff offer lapses at kickoff and you lose the man for nothing ──
+  var offers=(s._staffOffers||[]).filter(function(o){return !o.done;});
+  if(offers.length) out.push({
+    sev:"hi", ico:"📣",
+    t:offers.length+" staff offer"+(offers.length>1?"s":""),
+    sub:"Match or lose them at kickoff",
+    go:function(){ ST.menuFrom=ST.screen; ST.screen="staff"; }
+  });
+
+  // ── A vacant coordinator seat is free ratings you're leaving on the table ──
+  if(s.role==="HC"){
+    var vac=STAFF_ROLES.filter(function(r){ return !(s.staff||{})[r.k]; });
+    if(vac.length) out.push({
+      sev:"md", ico:"👔",
+      t:vac.length+" staff seat"+(vac.length>1?"s":"")+" vacant",
+      sub:vac.map(function(r){return r.k;}).join(", ")+" — their perks stack on yours",
+      go:function(){ ST.menuFrom=ST.screen; ST.screen="staff"; }
+    });
+  }
+
+  // ── Players about to walk ──
+  var risky=(s.roster||[]).filter(function(p){
+    if(p.cut||p.yr==="SR") return false;
+    var d=nilDemand(p); if(d<=0) return false;
+    if(money2(p.nilFund||0)>=d) return false;
+    return retentionRisk(p)>=60;
+  });
+  if(risky.length) out.push({
+    sev:"hi", ico:"🚪",
+    t:risky.length+" at high portal risk",
+    sub:"Underfunded — "+risky.slice(0,2).map(function(p){return p.n;}).join(", ")+(risky.length>2?"…":""),
+    go:function(){ ST.seasonTab="roster"; ST.rosFilter="risk"; }
+  });
+
+  // ── A redshirt one snap from being burned ──
+  var burning=(s.roster||[]).filter(function(p){
+    return canRedshirt(p) && gamesPlayed(p)===RS_GAME_LIMIT && !p.hold;
+  });
+  if(inSeason && burning.length) out.push({
+    sev:"hi", ico:"🔴",
+    t:burning.length+" redshirt"+(burning.length>1?"s":"")+" about to burn",
+    sub:burning.slice(0,2).map(function(p){return p.n;}).join(", ")+" — "+RS_GAME_LIMIT+"/"+RS_GAME_LIMIT+" games used",
+    go:function(){ ST.seasonTab="roster"; ST.rosFilter="rs"; }
+  });
+
+  // ── Recruiting points evaporate at the end of the week ──
+  var pts=s.recruitPtsLeft||0;
+  if(inSeason && pts>0) out.push({
+    sev:pts>=8?"md":"lo", ico:"🎯",
+    t:pts+" recruiting point"+(pts>1?"s":"")+" unspent",
+    sub:"They don't carry over to next week",
+    go:function(){ ST.seasonTab="recruit"; }
+  });
+
+  // ── NIL sitting idle while people are unfunded ──
+  var unfunded=(s.roster||[]).filter(function(p){
+    if(p.cut||p.yr==="SR") return false;
+    var d=nilDemand(p);
+    return d>0 && money2(p.nilFund||0)<d;
+  }).length;
+  if((s.nilLeft||0)>0 && unfunded>0) out.push({
+    sev:"lo", ico:"💰",
+    t:fmtMoney(s.nilLeft)+" NIL unspent",
+    sub:unfunded+" player"+(unfunded>1?"s":"")+" still underfunded",
+    go:function(){ ST.seasonTab="roster"; ST.rosFilter="nil"; }
+  });
+
+  var order={hi:0, md:1, lo:2};
+  out.sort(function(a,b){ return order[a.sev]-order[b.sev]; });
+  return out;
+}
+function attentionStrip(){
+  var items=attentionItems();
+  if(!items.length) return '';
+  ST._attn=items;   // the click handler reads back from here
+  var h='<div class="attn">';
+  items.forEach(function(it,i){
+    h+='<button class="attn-item '+it.sev+'" data-attn="'+i+'">'+
+       '<span class="attn-ico">'+it.ico+'</span>'+
+       '<span class="attn-txt"><b>'+x(it.t)+'</b><span>'+x(it.sub)+'</span></span>'+
+       '<span class="attn-go">›</span></button>';
+  });
+  return h+'</div>';
+}
 function seasonScreen(){
   var s=ST.save, g=s.schedule[s.week];
   var isDC=(s.role==="DC");
@@ -6037,6 +6196,7 @@ function seasonScreen(){
 
   h+='<div class="tab-body">';
   if(tab==="week"){
+    h+=attentionStrip();   // everything that expires if you ignore it
     if(PC){
       h+= PC.kind==="confchamp"   ? confChampBody()
         : PC.kind==="bowl"        ? bowlBody()
@@ -7364,6 +7524,7 @@ function offseasonScreen(){
      '<p><b style="font-size:16px;color:'+(win>loss?"var(--green)":"var(--red2)")+'">'+win+'–'+loss+'</b><br>'+
      (win>=10?"Elite season! 🏆":win>=7?"Bowl-worthy year. 🎉":win>=5?"Respectable campaign.":"Rebuilding year.")+'</p></div>';
 
+  h+=attentionStrip();
   h+=staffOffersCard();
   h+=awardsCard();
   h+=draftNightCard();
@@ -7493,6 +7654,16 @@ function bind(){
   var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
   // season
   document.querySelectorAll("[data-plan]").forEach(function(b){b.onclick=function(){ST.planPick=b.getAttribute("data-plan");draw();};});
+  // Each attention item jumps you to the screen that fixes it.
+  document.querySelectorAll("[data-rosfilt]").forEach(function(b){
+    b.onclick=function(){ ST.rosFilter=b.getAttribute("data-rosfilt"); ST.swapPick=null; draw(); };
+  });
+  document.querySelectorAll("[data-attn]").forEach(function(b){
+    b.onclick=function(){
+      var it=(ST._attn||[])[parseInt(b.getAttribute("data-attn"),10)];
+      if(it && it.go){ it.go(); draw(); }
+    };
+  });
   document.querySelectorAll("[data-tab]").forEach(function(b){b.onclick=function(){ST.seasonTab=b.getAttribute("data-tab");ST.editGame=null;ST.statPlayer=null;ST.swapPick=null; if(b.getAttribute("data-tab")==="recruit") refreshRecOrder(); draw();};});
   document.querySelectorAll("[data-statp]").forEach(function(b){b.onclick=function(){ST.statPlayer=b.getAttribute("data-statp");ST.statScope="season";draw();};});
   document.querySelectorAll("[data-statscope]").forEach(function(b){b.onclick=function(){ST.statScope=b.getAttribute("data-statscope");draw();};});
