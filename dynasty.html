@@ -2015,6 +2015,10 @@ function loadData(){
       // that's what being a sophomore/junior/senior on a real roster means. Saves made before
       // redshirts existed have no such flag, so their upperclassmen wrongly show an RS button.
       // Stamp them once. Freshmen (and anyone who arrives later as a freshman) keep theirs.
+      // Migration: "quiet" used to be a stored personality meaning "no personality". Now absence
+      // IS that state, so clear it — otherwise old saves carry a value the game no longer knows.
+      (ST.save.roster||[]).forEach(function(p){ if(p.pers==="quiet") delete p.pers; });
+      (ST.save.board||[]).forEach(function(b){ if(b.pers==="quiet") delete b.pers; });
       if(!ST.save._rsInit){
         (ST.save.roster||[]).forEach(function(p){
           if(p.yr!=="FR" && p.rsUsed===undefined && !p.rs) p.rsUsed=true;
@@ -2220,15 +2224,20 @@ var PERSONALITIES={
   streaky:  {t:"Streaky",   ico:"🎲", desc:"Unpredictable week to week. Can win you a game on his own — or lose one."},
   diva:     {t:"Diva",      ico:"💅", desc:"Knows his worth. Costs far more in NIL, and takes the portal call."},
   loyal:    {t:"Homegrown", ico:"⚓", desc:"Loves it here. Cheap to keep, and he isn't going anywhere."},
-  problem:  {t:"Toxic",     ico:"☠️", desc:"Talented and toxic. Stunts the players around him and wants out."},
-  quiet:    {t:"Quiet",     ico:"🎧", desc:"No drama, no headlines. Just does his job."}
+  problem:  {t:"Toxic",     ico:"☠️", desc:"Talented and toxic. Stunts the players around him and wants out."}
 };
-function persInfo(k){ return PERSONALITIES[k] || PERSONALITIES.quiet; }
+// NOTE: there is no "neutral" personality object, on purpose. A player with nothing notable about
+// him simply HAS NO `pers` field. Previously the same state was represented two ways — pers:"quiet"
+// AND a missing pers — which is exactly the kind of duplicate representation that rots later.
+// One state, one representation: absence.
+function persInfo(k){ return PERSONALITIES[k] || null; }
+function hasPersonality(p){ return !!(p && p.pers && PERSONALITIES[p.pers]); }
 function persBadge(p){
-  if(!p || !p.pers) return "";
+  if(!hasPersonality(p)) return "";
   var i=persInfo(p.pers);
   return ' <span class="pers-b" title="'+x(i.t)+' — '+x(i.desc)+'">'+i.ico+'</span>';
 }
+// Roughly one player in five has no personality at all — he's just a football player.
 function rollPersonality(){
   var r=Math.random();
   if(r<0.10) return "leader";
@@ -2239,7 +2248,7 @@ function rollPersonality(){
   if(r<0.61) return "diva";
   if(r<0.73) return "loyal";
   if(r<0.78) return "problem";
-  return "quiet";
+  return null;                      // no trait. Not a trait CALLED "none" — genuinely none.
 }
 // ── Roster-wide effects: a leader lifts everybody, a problem drags them down ──
 function leadershipMod(){
@@ -3488,7 +3497,6 @@ function retentionRisk(p, fundOverride){
   if(p.pers==="problem") base*=1.6;
   if(p.pers==="loyal")   base*=0.35;           // he isn't going anywhere
   if(p.pers==="leader")  base*=0.75;
-  if(p.pers==="quiet")   base*=0.9;
   // A strong locker room keeps people; a toxic one empties it.
   base *= (1 - leadershipMod()*1.4);
   if(hasAbility("nil3")) base*=0.8;            // Loyalty Culture: a stickier roster
@@ -3744,8 +3752,8 @@ function recruitTab(){
     var rmeta=x(b.pos)+(b.arch?' · '+x(b.arch):'');
     // Order: personality → scheme fit → dev trait. The dev trait reads last, to the RIGHT of fit.
     var rchips='';
-    if(b.pers){ var _rp=persInfo(b.pers);
-      rchips+='<span class="chip pers" title="'+x(_rp.t)+' — '+x(_rp.desc)+'">'+_rp.ico+' '+x(_rp.t)+'</span>'; }
+    if(hasPersonality(b)){ var _rp=persInfo(b.pers);
+      rchips+='<span class="chip pers" title="'+x(_rp.desc)+'">'+_rp.ico+' '+x(_rp.t)+'</span>'; }
     if(fit) rchips+='<span class="chip '+(fit==="great"?"good":(fit==="bad"?"bad":""))+'" title="Scheme fit">'+(fit==="great"?"★ Fit":fit==="ok"?"~ Fit":"✕ Fit")+'</span>';
     if(b.scout>=maxScoutTier()) rchips+=recruitTraitDisplay(b);   // already a chip — do NOT wrap it
     h+='<div class="rec-card-name">'+
@@ -3918,8 +3926,8 @@ function rosterTable(){
         }
         if(careerDelta!==0) meta += ' · <b style="color:'+(careerDelta>0?'#1a7f37':'var(--red2)')+'">'+(careerDelta>0?'+':'')+careerDelta+'</b>';
         var chips='';
-        if(p.pers){ var _pi=persInfo(p.pers);
-          chips+='<span class="chip pers" title="'+x(_pi.t)+' — '+x(_pi.desc)+'">'+_pi.ico+' '+x(_pi.t)+'</span>'; }
+        if(hasPersonality(p)){ var _pi=persInfo(p.pers);
+          chips+='<span class="chip pers" title="'+x(_pi.desc)+'">'+_pi.ico+' '+x(_pi.t)+'</span>'; }
         if(p.walkOn) chips+='<span class="chip" title="Walk-on">🚶 Walk-on</span>';
         else if(p.revealed) chips+=devChip(p.dev);   // dev trait reads last, same as the recruit card
 
@@ -3962,7 +3970,7 @@ function rosterTable(){
       });
       // ── Redshirts held out at this position — off the depth chart, banking a year ──
       s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p) && _flt.f(p); }).forEach(function(p){
-        var _pi2=p.pers?persInfo(p.pers):null;
+        var _pi2=hasPersonality(p)?persInfo(p.pers):null;
         h+='<div class="pl-row rs-held" style="border-left:5px solid '+posColor(pos)+'">'+
            '<span class="pl-pos" style="background:'+posColor(pos)+'">'+p.pos+'</span>'+
            '<div class="pl-main">'+
@@ -3972,7 +3980,7 @@ function rosterTable(){
              '<div class="chips"><span class="chip yr">'+yrLabel(p)+'</span>'+
                (p.arch?'<span class="chip">'+x(p.arch)+'</span>':'')+
                (p.revealed?devChip(p.dev):'')+
-               (_pi2?'<span class="chip pers">'+_pi2.ico+' '+x(_pi2.t)+'</span>':'')+
+               (hasPersonality(p)?'<span class="chip pers">'+_pi2.ico+' '+x(_pi2.t)+'</span>':'')+
                '<span class="chip">held out · '+gamesPlayed(p)+'/'+RS_GAME_LIMIT+' G used</span></div>'+
            '</div>'+
            '<span class="pl-act"><button class="rs-btn on" data-rshold="'+p.id+'" title="Send him back onto the field">RS</button></span>'+
@@ -8074,7 +8082,7 @@ function portalScreen(){
     var prod   = t.prod ? '<span class="tp-sub" style="color:var(--gold-dark)">'+x(t.prod)+' last season</span>' : '';
     h+='<div class="tp-row'+(t.status!=="open"?" done":"")+'"><span class="tp-pos" style="background:'+posColor(t.pos)+'">'+t.pos+'</span>'+
        '<span class="tp-nm">'+x(t.n)+
-         '<span class="tp-sub">'+(YR_PRETTY[t.yr]||t.yr)+' · '+t.ovr+' OVR · '+x(t.arch||"")+devTag+(t.pers?' · '+persInfo(t.pers).ico+' '+x(persInfo(t.pers).t):'')+origin+chase+'</span>'+
+         '<span class="tp-sub">'+(YR_PRETTY[t.yr]||t.yr)+' · '+t.ovr+' OVR · '+x(t.arch||"")+devTag+(hasPersonality(t)?' · '+persInfo(t.pers).ico+' '+x(persInfo(t.pers).t):'')+origin+chase+'</span>'+
          prod+
        '</span>'+
        badge+'</div>';
