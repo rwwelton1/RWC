@@ -569,6 +569,13 @@ a{color:inherit;text-decoration:none}
 .pc-cell span{font-size:9px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .pc-cell b{font-size:12px;font-weight:800;color:var(--text);line-height:1.5}
 [data-pcard]{cursor:pointer}
+/* ── Offseason hub tabs ── */
+.os-tabs{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.os-tabs::-webkit-scrollbar{display:none}
+.os-tabs .tab-btn{flex:none;white-space:nowrap;position:relative}
+.os-tabs .tab-btn.locked{opacity:.45}
+.tb-badge{display:inline-block;margin-left:5px;background:var(--red2);color:#fff;font-size:9px;font-weight:900;
+  padding:1px 5px;border-radius:7px}
 /* ── Offseason jump-nav ── */
 .jump-nav{display:flex;gap:6px;overflow-x:auto;padding:6px 2px;margin:0 -2px 12px;
   position:sticky;top:6px;z-index:40;background:var(--bg)}
@@ -840,6 +847,7 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(-
 <div id="app"></div>
 <div id="toast"></div>
 <div id="nil-overlay"></div>
+<div id="info-overlay"></div>
 
 <script>
 // Comprehensive FBS team dataset (2025-26 alignment). p = prestige 1-5.
@@ -1266,10 +1274,21 @@ function rosterCounts(mode){
   var future=(mode==="future");
   myPositions().forEach(function(pos){ out[pos]={have:0, min:rosterMinAt(pos), cap:rosterSizeAt(pos)}; });
   (s.roster||[]).forEach(function(p){
-    if(future && (p.yr==="SR" || p.cut)) return;
+    // "future" = who will actually be here next season. Graduating seniors, cuts, early NFL
+    // entrants and anyone leaving in the portal all vacate their spot; a transfer you've already
+    // signed already holds one. Without this the ledger showed holes you'd just filled.
+    if(future && (p.yr==="SR" || p.cut || p._declared || p._leaving)) return;
     if(!out[p.pos]) out[p.pos]={have:0, min:rosterMinAt(p.pos), cap:rosterSizeAt(p.pos)};
     out[p.pos].have++; total++;
   });
+  // your signed class counts toward next year's roster too
+  if(future){
+    committedRecruits().forEach(function(b){
+      if(!out[b.pos]) out[b.pos]={have:0, min:rosterMinAt(b.pos), cap:rosterSizeAt(b.pos)};
+      if(out[b.pos].have < out[b.pos].cap){ out[b.pos].have++; total++; }
+    });
+    out._total=total;
+  }
   out._total=total;
   return out;
 }
@@ -2162,7 +2181,7 @@ function loadData(){
       else if(ST.carousel && ST.carousel.length){ ST.screen="carousel"; } // pending job offers survive reload
       else if(v.week>=v.schedule.length && !v._postDone){ draw(); if(ST.confchamp&&ST.confchamp.done){ enterPostseason(); } else { enterConfChampionship(); } return; }
       else if(v.week>=v.schedule.length){ ST.screen="offseason"; }
-      else if(v._inPortal){ ST.screen="portal"; } // transfer-portal window survives reload
+      else if(v.week>=v.schedule.length){ ST.screen="offseason"; } // the portal is a tab in the offseason hub
       else if(!v._recruited){ ST.screen="preseason"; ST.preTab=ST.preTab||"overview"; } // preseason not yet kicked off
       else ST.screen="season";
     }
@@ -4696,7 +4715,7 @@ function draw(){
   else if(ST.screen==="coachtree")app.innerHTML=coachTreeScreen();
   else if(ST.screen==="staff")    app.innerHTML=staffScreen();
   else if(ST.screen==="history")  app.innerHTML=champHistoryScreen();
-  else if(ST.screen==="portal")   app.innerHTML=portalScreen();
+  else if(ST.screen==="portal")   app.innerHTML=offseasonScreen();   // portal is a TAB in the hub now
   else if(ST.screen==="season") app.innerHTML=seasonScreen();
   else if(ST.screen==="live"){ if(!ST.G && !(ST.live&&ST.live.done)){ ST.screen="season"; ST.weekResult=null; ST.live=null; draw(); return; } app.innerHTML=liveScreen(); if(ST.live)ST.live._tacKey=null; bindLiveControls(); renderLiveScore(); }
   else if(ST.screen==="offseason")app.innerHTML=offseasonScreen();
@@ -4705,7 +4724,12 @@ function draw(){
   else if(ST.screen==="carousel") app.innerHTML=carouselScreen();
   else if(ST.screen==="fired")    app.innerHTML=firedScreen();
   else app.innerHTML=setupScreen();
-  app.innerHTML += infoSheet() + playerCardSheet();   // explainer / player card, if open
+  // NEVER do `app.innerHTML += ...` here. That re-serialises and re-parses the ENTIRE app DOM,
+  // which destroys every existing node and silently strips their event listeners — including the
+  // live-game controls, which are bound once when a game starts and not on every draw. That's how
+  // the "Sim to Final" button quietly went dead. Overlays get their own container.
+  var ov=document.getElementById("info-overlay");
+  if(ov) ov.innerHTML = infoSheet() + playerCardSheet();
   bind();
   renderNilOverlay();
 }
@@ -7722,118 +7746,211 @@ function rosterLedger(mode, opts){
   return h;
 }
 
+// ═════════════════════════════════════════════════════════
+// THE OFFSEASON HUB
+// The offseason used to be one enormous scroll — awards, draft, staff offers, goals, roster
+// outlook, cuts, class — and then the TRANSFER PORTAL was a completely separate screen you only
+// reached AFTER advancing. So player management was split across two screens and a page of
+// scrolling, and you couldn't hold "who's leaving / who's arriving / who can I sign" in your head
+// at once. It's now ONE tabbed hub. The portal is a tab like everything else.
+// ═════════════════════════════════════════════════════════
+// The portal used to open AFTER you advanced — so you shopped with a roster that had already
+// graduated, aged and been gutted (0 RB, 0 WR, 19 walk-ons on the way). You couldn't see what you
+// were fixing. Departures are now decided when the OFFSEASON opens, the portal runs alongside your
+// real roster, and NOTHING is applied until you hit Advance.
+function prepareOffseason(){
+  var s=ST.save;
+  if(s._osReady) return;                    // once per offseason
+  var YR_NEXT={FR:"SO",SO:"JR",JR:"SR"};
+  var out=[];
+  (s.roster||[]).forEach(function(p){
+    if(p.yr==="SR" || p.cut || p._declared) return;   // graduating / cut / gone pro — not a portal case
+    var risk=retentionRisk(p);
+    if(risk!=null && risk>0 && Math.random()*100<risk){
+      p._leaving=true;                      // marked, NOT removed — you can still buy him back
+      out.push({id:p.id, n:p.n, pos:p.pos, ovr:p.ovr, arch:p.arch, dev:p.dev,
+                yr:YR_NEXT[p.yr]||p.yr, retainPrice:retainPrice(p), status:"open"});
+    }
+  });
+  s._portalOut=out;
+  s._portalPool=genPortalPool();
+  s._portalSigned=[];
+  var sigOut=out.filter(function(d){return d.ovr>=75;}).length;
+  s._portalSecHit=Math.min(18, sigOut*4);
+  if(s._portalSecHit>0) s.jobSecurity=Math.max(1,(s.jobSecurity||60)-s._portalSecHit);
+  s._osReady=true;
+  persist();
+}
+function osStage(){ return "review"; }   // one stage now — the portal is just a tab
+function osTabs(){
+  var stage=osStage();
+  return [
+    {k:"summary", t:"📋 Summary"},
+    {k:"roster",  t:"👥 Roster"},
+    {k:"class",   t:"🖊️ Class"},
+    {k:"portal",  t:"🔄 Portal", locked:false}
+  ];
+}
 function offseasonScreen(){
   var s=ST.save;
-  var win=s.wins, loss=s.losses;
-  var bowlWin = win>=7;
-  var h='<div class="wrap">';
-  h+='<div class="hero" style="text-align:center"><h1>Season '+s.season+' Complete</h1>'+
-     '<p><b style="font-size:16px;color:'+(win>loss?"var(--green)":"var(--red2)")+'">'+win+'–'+loss+'</b><br>'+
-     (win>=10?"Elite season! 🏆":win>=7?"Bowl-worthy year. 🎉":win>=5?"Respectable campaign.":"Rebuilding year.")+'</p></div>';
+  prepareOffseason();            // decide who's leaving; open the portal
+  var stage=osStage();
+  // Default to the tab that matters right now — but if you deliberately tap the locked Portal tab,
+  // let it show you WHY it's locked rather than silently bouncing you back to Summary.
+  if(!ST.osTab) ST.osTab = (stage==="portal") ? "portal" : "summary";
+  var tab=ST.osTab;
 
-  // ── Jump-nav: the offseason is a very long scroll (awards → draft → staff → goals →
-  // facilities → roster → class → kick off). These chips pin to the top and jump you.
-  var _secs=[
-    {id:"os-attn",   t:"⚠️ To-do",   on:attentionItems().length>0},
-    {id:"os-awards", t:"🏅 Awards",  on:!!s._lastAwards},
-    {id:"os-draft",  t:"🏈 Draft",   on:!!(s._lastDraft && (s._lastDraft.picks||[]).length)},
-    {id:"os-staff",  t:"👔 Staff",   on:(s._staffOffers||[]).filter(function(o){return !o.done;}).length>0},
-    {id:"os-goals",  t:"🎯 Goals",   on:true},
-    {id:"os-roster", t:"📋 Roster",  on:true},
-    {id:"os-class",  t:"🖊️ Class",   on:true}
-  ].filter(function(x){return x.on;});
-  h+='<div class="jump-nav">';
-  _secs.forEach(function(sec){ h+='<button class="jump-chip" data-jump="'+sec.id+'">'+sec.t+'</button>'; });
+  var h='<div class="wrap">';
+  h+='<div class="season-hd"><div class="shd-l"><b>'+(stage==="portal"?"🔄 Portal Window":"🏁 Offseason")+'</b> · Season '+s.season+'</div>'+
+     '<div class="shd-r">'+x(s.school)+' · '+x(s.role)+'</div></div>';
+
+  // ── one tab bar for the whole offseason ──
+  var attn=attentionItems().length;
+  h+='<div class="tabbar os-tabs">';
+  osTabs().forEach(function(t){
+    var badge = (t.k==="summary" && attn) ? '<span class="tb-badge">'+attn+'</span>' : '';
+    h+='<button class="tab-btn'+(tab===t.k?" active":"")+(t.locked?" locked":"")+'" data-ostab="'+t.k+'">'+t.t+badge+'</button>';
+  });
   h+='</div>';
 
-  h+='<a id="os-attn"></a>'+attentionStrip();
-  h+='<a id="os-staff"></a>'+staffOffersCard();
-  h+='<a id="os-awards"></a>'+awardsCard();
-  h+='<a id="os-draft"></a>'+draftNightCard();
-  h+='<a id="os-goals"></a>';
+  if(tab==="summary")      h+=osSummaryTab();
+  else if(tab==="roster")  h+=osRosterTab();
+  else if(tab==="class")   h+=osClassTab();
+  else if(tab==="portal")  h+=osPortalTab();
 
-  // ── The AD's three goals, judged ──
+  // ── one action button. Everything you've done here is applied when you hit it. ──
+  h+='<button class="bigbtn btn-green" id="advance-season">Advance to Season '+(s.season+1)+' →</button>';
+  return h+'</div>';
+}
+// ── Summary: everything that happened, and everything that needs you ──
+function osSummaryTab(){
+  var s=ST.save, h='';
+  h+=attentionStrip();
+  h+=staffOffersCard();
+  h+=awardsCard();
+  h+=draftNightCard();
   var gs=resolvedGoals();
   var nMet=gs.filter(function(g){return g.met;}).length;
   var resTxt = nMet===3 ? "A clean sweep. The boosters are thrilled and your seat is ice cold." :
                nMet===2 ? "Two of three. The AD is satisfied, if not delighted." :
                nMet===1 ? "One box ticked. Questions are being asked." :
                           "Nothing to show for the year. The AD is not happy.";
+  h+='<div class="sec-title">🎯 The AD\u2019s Expectations</div>';
   h+='<div class="result-card '+(nMet>=2?"win":"loss")+'" style="padding:14px">'+
      '<div style="font-size:13px;font-weight:900">'+nMet+' of 3 expectations met</div>'+
      goalChecklist()+
      '<p style="font-size:11px;font-weight:700;color:var(--muted);margin-top:5px">'+resTxt+'</p></div>';
-
-  // ── Where the roster stands, and where it's going ──
-  var grads=s.roster.filter(function(p){return p.yr==="SR";}).length;
-  var cuts =s.roster.filter(function(p){return p.cut && p.yr!=="SR";}).length;
-  var nowN =s.roster.length, futureN=nowN-grads-cuts;
-  h+='<a id="os-roster"></a><div class="sec-title">📋 Roster Outlook</div>';
-  h+='<div class="flow-strip">'+
-       '<div class="flow-box"><b>'+nowN+'</b><span>Now</span></div>'+
-       '<div class="flow-op">−</div>'+
-       '<div class="flow-box'+(grads?' out':'')+'"><b>'+grads+'</b><span>Graduating</span></div>'+
-       '<div class="flow-op">−</div>'+
-       '<div class="flow-box'+(cuts?' out':'')+'"><b>'+cuts+'</b><span>Cut</span></div>'+
-       '<div class="flow-op">=</div>'+
-       '<div class="flow-box res"><b>'+futureN+'</b><span>Returning</span></div>'+
-     '</div>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Recruits sign on top of this, then the portal opens — players may still transfer out.</div>';
-  // recruits sign into these spots BEFORE walk-ons ever arrive, so don't promise walk-ons here
-  h+=rosterLedger("future", {walkOnNote:false, prefix:"Counts below exclude graduating seniors and anyone you cut. Your class signs into these spots. "});
-
-  h+='<div class="sec-title">Roster · Manage Cuts</div>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">Graduating seniors free up their spots automatically. <b>Cut</b> a player to open room for a better signee below.</div>';
-  s.roster.slice().sort(function(a,b){return b.ovr-a.ovr;}).forEach(function(p){
-    var grad=p.yr==="SR";
-    var cut=!!p.cut;
-    h+='<div class="roster-row'+(grad?" grad":(cut?" cut":""))+'"><div class="rr-pos">'+p.pos+'</div>'+
-       '<div class="rr-name">'+x(p.n)+(p.dev==='elite'?' ⭐':(p.dev==='pro'?' 🔥':''))+'</div>'+
-       '<div class="rr-yr">'+(grad?"GRADUATING":(cut?"CUT":p.yr))+'</div><div class="rr-ovr">'+p.ovr+'</div>'+
-       (grad?'':'<button class="rr-cut'+(cut?' undo':'')+'" data-cut="'+p.id+'">'+(cut?"Undo":"Cut")+'</button>')+
-       '</div>';
-  });
-
-  // Recruiting class recap — who committed, and who will actually make the roster (position caps)
+  return h;
+}
+// ── Roster: who's leaving, who's staying, who you're cutting ──
+function osRosterTab(){
+  var s=ST.save, h='';
+  // ── Everything moving, in one place ────────────────────
+  // OUT: graduating, cut, or leaving in the portal.  IN: transfers you've signed + your class.
+  var grads = s.roster.filter(function(p){ return p.yr==="SR"; });
+  var pros  = s.roster.filter(function(p){ return p._declared; });
+  var cuts  = s.roster.filter(function(p){ return p.cut && p.yr!=="SR"; });
+  var leaving=s.roster.filter(function(p){ return p._leaving; });
+  var inbound=s.roster.filter(function(p){ return p._incoming; });
   var commits=committedRecruits();
-  if(commits.length){
-    // simulate the position-cap signing to flag who fits and who's over the limit
-    var capFor=function(pos){ return rosterSizeAt(pos); };
-    // Only players who will actually still be here next year hold a spot:
-    // graduating seniors leave, and anyone you've cut is gone too.
-    // Walk-ons don't hold a real spot — a signee displaces one. Don't count them.
-    var have={}; s.roster.forEach(function(p){ if(p.yr==="SR"||p.cut||p.walkOn)return; have[p.pos]=(have[p.pos]||0)+1; });
-    var sorted=commits.slice().sort(function(a,b){return b.st-a.st||b.ovr-a.ovr;});
-    var willSign=0, willCut=0;
-    var flags={};
-    sorted.forEach(function(b){
-      var cap=capFor(b.pos), cur=have[b.pos]||0;
-      if(cur<cap){ flags[b.id]="sign"; have[b.pos]=cur+1; willSign++; }
-      else { flags[b.id]="cut"; willCut++; }
-    });
-    h+='<a id="os-class"></a><div class="sec-title">🖊️ Recruiting Class <span class="pill">'+willSign+' signing</span></div>';
-    var note='These commits sign as freshmen when you advance.';
-    if(willCut>0) note+=' <b>'+willCut+'</b> more committed but you\u2019re full at their position — cut a player above to open a spot for one.';
-    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">'+note+'</div>';
-    sorted.forEach(function(b){
-      var cut=(flags[b.id]==="cut");
-      h+='<div class="roster-row"'+(cut?' style="opacity:.5"':'')+'><div class="rr-pos">'+b.pos+'</div>'+
-         '<div class="rr-name">'+x(b.n)+' <span class="rec-stars" style="font-size:10px">'+stars(b.st)+'</span></div>'+
-         '<div class="rr-yr" style="color:'+(cut?"var(--red2)":"var(--green)")+'">'+(cut?"NO ROOM":"SIGNING")+'</div><div class="rr-ovr">'+b.ovr+'</div></div>';
-    });
+  var staying=s.roster.filter(function(p){
+    return p.yr!=="SR" && !p.cut && !p._declared && !p._leaving && !p._incoming;
+  });
+  var outN=grads.length+pros.length+cuts.length+leaving.length;
+  var nextN=staying.length+inbound.length+commits.length;
+
+  h+='<div class="flow-strip">'+
+       '<div class="flow-box"><b>'+s.roster.filter(function(p){return !p._incoming;}).length+'</b><span>Now</span></div>'+
+       '<div class="flow-op">−</div>'+
+       '<div class="flow-box'+(outN?' out':'')+'"><b>'+outN+'</b><span>Outgoing</span></div>'+
+       '<div class="flow-op">+</div>'+
+       '<div class="flow-box'+((inbound.length+commits.length)?' res':'')+'"><b>'+(inbound.length+commits.length)+'</b><span>Incoming</span></div>'+
+       '<div class="flow-op">=</div>'+
+       '<div class="flow-box res"><b>'+nextN+'</b><span>Next year</span></div>'+
+     '</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
+     'Nothing here is final until you hit <b>Advance</b>. Keep a man in the <b>Portal</b> tab, cut someone to make room, or sign a transfer to plug a hole \u2014 this updates as you go.</div>';
+  h+=rosterLedger("future", {walkOnNote:false, prefix:"Counts reflect who\u2019ll actually be here next season. "});
+
+  var row=function(p, tag, cls, btn){
+    var pi=hasPersonality(p)?persInfo(p.pers):null;
+    return '<div class="roster-row '+cls+'"><div class="rr-pos">'+p.pos+'</div>'+
+      '<div class="rr-name"'+(p.id?pcardAttr(p.id):'')+'>'+x(p.n)+
+        (p.dev==='elite'?' ⭐':(p.dev==='pro'?' 🔥':''))+(pi?' '+pi.ico:'')+'</div>'+
+      '<div class="rr-yr">'+tag+'</div><div class="rr-ovr">'+p.ovr+'</div>'+(btn||'')+'</div>';
+  };
+
+  // ── OUTGOING ───────────────────────────────────────────
+  h+='<div class="sec-title">📤 Outgoing <span class="pill">'+outN+'</span></div>';
+  if(!outN){
+    h+='<div class="rec-tbl"><div class="rec-empty">Nobody is leaving. Remarkable.</div></div>';
   } else {
-    h+='<a id="os-class"></a><div class="sec-title">🖊️ Recruiting Class</div>';
-    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px">No commits landed this season. Spend more recruiting points on the <b>Recruit</b> tab during the year to build a class.</div>';
+    if(leaving.length){
+      h+='<div style="font-size:10px;font-weight:800;color:var(--red2);margin:0 2px 6px">'+
+         '🚪 <b>'+leaving.length+'</b> in the transfer portal \u2014 you can still buy them back on the <b>Portal</b> tab.</div>';
+      leaving.forEach(function(p){ h+=row(p,"PORTAL","cut"); });
+    }
+    grads.forEach(function(p){ h+=row(p,"GRADUATING","grad"); });
+    pros.forEach(function(p){ h+=row(p,"NFL DRAFT","grad"); });
+    cuts.forEach(function(p){ h+=row(p,"CUT","cut",'<button class="rr-cut undo" data-cut="'+p.id+'">Undo</button>'); });
   }
 
-  h+='<button class="btn" id="open-tree" style="width:100%;margin-bottom:8px;padding:11px;font-size:13px;font-weight:900;background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border)">🌳 Coaching Tree <span class="pill" style="margin-left:6px">'+coachXP()+' XP</span></button>';
-  h+='<button class="bigbtn btn-green" id="advance-season">Advance to Season '+(s.season+1)+' →</button>';
-  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center;margin:8px 2px 0;line-height:1.5">Job offers come every offseason — the better your season, the better the jobs (including <b>Head Coach</b> promotions).</div>';
-  h+='<div style="display:flex;gap:8px;margin-top:10px">'+
-     '<button class="btn btn-red" id="reset-dynasty" style="flex:1;padding:10px">Reset Dynasty</button>'+
-     '</div>';
-  return h+'</div>';
+  // ── INCOMING ───────────────────────────────────────────
+  h+='<div class="sec-title">📥 Incoming <span class="pill">'+(inbound.length+commits.length)+'</span></div>';
+  if(!inbound.length && !commits.length){
+    h+='<div class="rec-tbl"><div class="rec-empty">No signings yet. Work the <b>Portal</b> tab, or check your <b>Class</b>.</div></div>';
+  } else {
+    inbound.forEach(function(p){ h+=row(p,"🔄 TRANSFER","res"); });
+    commits.forEach(function(b){
+      var pi=(hasPersonality(b)&&persKnown(b))?persInfo(b.pers):null;
+      h+='<div class="roster-row res"><div class="rr-pos">'+b.pos+'</div>'+
+         '<div class="rr-name">'+x(b.n)+(pi?' '+pi.ico:'')+'</div>'+
+         '<div class="rr-yr">🖊️ '+stars(b.st)+'</div><div class="rr-ovr">'+b.ovr+'</div></div>';
+    });
+  }
+
+  // ── RETURNING ──────────────────────────────────────────
+  h+='<div class="sec-title">✅ Returning <span class="pill">'+staying.length+'</span></div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 6px"><b>Cut</b> a player to open a roster spot for a signee.</div>';
+  staying.slice().sort(function(a,b){return b.ovr-a.ovr;}).forEach(function(p){
+    h+=row(p, yrLabel(p), "", '<button class="rr-cut" data-cut="'+p.id+'">Cut</button>');
+  });
+  return h;
 }
+
+// ── Class: who committed, and who actually fits ──
+function osClassTab(){
+  var s=ST.save, h='';
+  var commits=committedRecruits();
+  if(!commits.length){
+    return '<div class="rec-tbl"><div class="rec-empty">No commits landed this season. Spend recruiting points on the <b>Recruit</b> tab during the year to build a class.</div></div>';
+  }
+  var capFor=function(pos){ return rosterSizeAt(pos); };
+  var have={}; s.roster.forEach(function(p){ if(p.yr==="SR"||p.cut||p.walkOn)return; have[p.pos]=(have[p.pos]||0)+1; });
+  var sorted=commits.slice().sort(function(a,b){return b.st-a.st||b.ovr-a.ovr;});
+  var willSign=0, willCut=0, flags={};
+  sorted.forEach(function(b){
+    var cap=capFor(b.pos), cur=have[b.pos]||0;
+    if(cur<cap){ flags[b.id]="sign"; have[b.pos]=cur+1; willSign++; }
+    else { flags[b.id]="cut"; willCut++; }
+  });
+  h+='<div class="sec-title">Signing <span class="pill">'+willSign+' of '+commits.length+'</span></div>';
+  var note='These commits sign as freshmen when you advance.';
+  if(willCut>0) note+=' <b>'+willCut+'</b> more committed but you\u2019re full at their position \u2014 cut someone on the <b>Roster</b> tab to open a spot.';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">'+note+'</div>';
+  sorted.forEach(function(b){
+    var cut=(flags[b.id]==="cut");
+    var pi=hasPersonality(b)&&persKnown(b)?persInfo(b.pers):null;
+    h+='<div class="roster-row"'+(cut?' style="opacity:.5"':'')+'><div class="rr-pos">'+b.pos+'</div>'+
+       '<div class="rr-name">'+x(b.n)+(pi?' '+pi.ico:'')+'</div>'+
+       '<div class="rr-yr">'+stars(b.st)+'</div><div class="rr-ovr">'+b.ovr+'</div>'+
+       (cut?'<span class="rr-cut" style="background:var(--red-bg);color:var(--red2);border-color:var(--red2)">No room</span>':'')+
+       '</div>';
+  });
+  return h;
+}
+// ── Portal: a tab now, not a separate screen ──
+function osPortalTab(){ return portalBody(); }
 
 // Toggle a roster player's "cut" flag in the offseason. Cut players are released
 // when you advance, freeing their position spot so a better incoming signee can sign.
@@ -7880,6 +7997,13 @@ function bind(){
   // Each attention item jumps you to the screen that fixes it.
   // Any element with an explainer opens it on TAP. `title` only works on desktop hover, which
   // meant every explanation in this game was invisible on the device it's actually played on.
+  document.querySelectorAll("[data-ostab]").forEach(function(b){
+    b.onclick=function(){
+      var k=b.getAttribute("data-ostab");
+      if(k==="portal" && osStage()!=="portal"){ ST.osTab="portal"; draw(); return; }  // shows the "not yet" note
+      ST.osTab=k; draw();
+    };
+  });
   document.querySelectorAll("[data-pcard]").forEach(function(b){
     b.addEventListener("click", function(e){
       e.stopPropagation(); e.preventDefault();
@@ -7891,12 +8015,6 @@ function bind(){
   if(_px)_px.onclick=_pc;
   if(_po)_po.onclick=_pc;
   if(_ps)_ps.onclick=_pc;
-  document.querySelectorAll("[data-jump]").forEach(function(b){
-    b.onclick=function(){
-      var el=document.getElementById(b.getAttribute("data-jump"));
-      if(el && el.scrollIntoView) el.scrollIntoView({behavior:"smooth", block:"start"});
-    };
-  });
   document.querySelectorAll("[data-info-t]").forEach(function(b){
     b.addEventListener("click", function(e){
       e.stopPropagation();   // don't also trigger the row's swap / depth-chart tap
@@ -7968,7 +8086,6 @@ function bind(){
       o.classList.toggle("on", o.getAttribute("data-simspeed")===ST.simSpeed); });
     if(ST.live && !ST.live.done){ resumeLiveSim(); }   // retime, don't rewind
   };});
-  var pdn=q("#portal-done"); if(pdn)pdn.onclick=finishPortal;
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
   var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.menuFrom||"offseason"; draw(); };
@@ -8171,14 +8288,19 @@ function enterPortal(){
   var s=ST.save;
   s._portalPool=genPortalPool();
   s._inPortal=true;
-  ST.screen="portal"; ST.editGame=null;
+  ST.screen="portal"; ST.editGame=null; ST.osTab="portal";
   persist(); draw();
 }
 function signTransfer(id){
   var s=ST.save, t=(s._portalPool||[]).filter(function(x){return x.id===id;})[0];
   if(!t||t.status!=="open") return;
   if((s.nilLeft||0)<t.price){ toast("Not enough NIL for "+x(t.n)); return; }
-  var atPos=s.roster.filter(function(p){return p.pos===t.pos;});
+  // Count only players who'll still be here next season — graduating seniors, cuts and portal
+  // departures don't hold a spot. Previously this counted the CURRENT roster, so you couldn't sign
+  // a replacement for a man who was already walking out the door.
+  var atPos=s.roster.filter(function(p){
+    return p.pos===t.pos && p.yr!=="SR" && !p.cut && !p._declared && !p._leaving;
+  });
   if(atPos.length>=rosterSizeAt(t.pos)){
     // roster full: replace your weakest at the position if this transfer is an upgrade
     var worst=atPos.slice().sort(function(a,b){return a.ovr-b.ovr;})[0];
@@ -8186,7 +8308,10 @@ function signTransfer(id){
     else { toast("Roster full at "+t.pos+" — and this isn\u2019t an upgrade. Cut someone first."); return; }
   }
   s.nilLeft=money2(s.nilLeft-t.price);
-  s.roster.push({id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pot:t.pot,startOvr:t.ovr,ssOvr:t.ovr,revealed:(!devInfo(t.dev).hidden),nilFund:0});
+  var np={id:t.id,n:t.n,pos:t.pos,ovr:t.ovr,yr:t.yr,dev:t.dev,arch:t.arch,pers:t.pers,pot:t.pot,
+          startOvr:t.ovr,ssOvr:t.ovr,revealed:(!devInfo(t.dev).hidden),nilFund:0,_incoming:true};
+  s.roster.push(np);
+  s._portalSigned=(s._portalSigned||[]).concat([np.id]);   // so the Roster tab can show him as INCOMING
   t.status="signed";
   poachFromTeam(t._from);   // he really leaves — his old program is worse for it
   s.jobSecurity=Math.min(100,(s.jobSecurity||60)+2); // a portal splash excites the fanbase
@@ -8204,24 +8329,22 @@ function signTransfer(id){
 // Pull one of your own out of the portal before he's gone for good.
 function retainPlayer(id){
   var s=ST.save, out=s._portalOut||[];
-  var d=out.filter(function(o){return (o._p&&o._p.id)===id;})[0];
+  var d=out.filter(function(o){return o.id===id;})[0];
   if(!d || d.status!=="open") return;
   var price=d.retainPrice||0;
   if((s.nilLeft||0)<price){ toast("Not enough NIL to keep "+x(d.n)); return; }
-  if(s.roster.filter(function(p){return p.pos===d.pos;}).length>=rosterSizeAt(d.pos)){
-    toast("Roster full at "+d.pos+" — cut someone first."); return;
-  }
   s.nilLeft=money2(s.nilLeft-price);
-  var p=d._p;
-  p.nilFund=money2((p.nilFund||0)+price); // the money he wanted, finally
-  s.roster.push(p);
+  // He never actually left — he was MARKED as leaving. Meet his number and he stays put, which
+  // also means no roster-cap problem: he's already occupying his own spot.
+  var p=(s.roster||[]).filter(function(q){return q.id===id;})[0];
+  if(p){ p._leaving=false; p.nilFund=money2((p.nilFund||0)+price); }
   d.status="retained";
   // win back some of the fan-confidence you lost when he announced
   if(d.ovr>=75 && (s._portalSecHit||0)>0){
     var back=Math.min(s._portalSecHit,4);
     s._portalSecHit-=back; s.jobSecurity=Math.min(100,(s.jobSecurity||60)+back);
   }
-  toast("🤝 Kept "+x(p.n)+" · "+p.ovr+" OVR "+p.pos);
+  toast("🤝 Kept "+x(d.n)+" · "+d.ovr+" OVR "+d.pos);
   // word travels: another departure may lock in with a rival while you're negotiating
   var others=out.filter(function(o){return o.status==="open";});
   if(others.length && Math.random()<0.35){ others[rnd(0,others.length-1)].status="gone"; }
@@ -8269,10 +8392,10 @@ function finishPortal(){
   persist();
   enterPreseason();
 }
-function portalScreen(){
+// The portal is now a TAB inside the offseason hub, so this returns a body, not a screen.
+function portalBody(){
   var s=ST.save;
-  var h='<div class="wrap">';
-  h+='<div class="season-hd"><div class="shd-l"><b>🔄 Transfer Portal</b> · '+(2026+(s.seasonsPlayed||0))+'</div></div>';
+  var h='';
   h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">Real players from real programs — the man who torched you in week 6 might be available. Sign them with NIL to plug holes now. Take one and his old school is genuinely worse for it. Rivals are shopping too, so top targets can commit elsewhere.</div>';
   h+=nilBar();
   if(s._portalSecHit>0) h+='<div style="font-size:10px;font-weight:800;color:var(--red2);margin:8px 2px 0">📉 Losing key players cost you '+s._portalSecHit+' job security. Reload through the portal to win the fans back — each signing helps.</div>';
@@ -8280,10 +8403,12 @@ function portalScreen(){
 
   // ── what the roster needs, before you decide who to sign ──
   // (recomputed live: retaining a departure or signing a transfer updates it)
-  var counts=rosterCounts("now");
+  // Look FORWARD: what the roster becomes after graduation, cuts, departures and signings. That's
+  // the hole you're actually shopping to fill.
+  var counts=rosterCounts("future");
   var short=rosterShortfall(counts), open=rosterOpenings(counts);
-  h+='<div class="sec-title" style="margin:12px 2px 6px">📋 Roster Check</div>';
-  h+=rosterLedger("now");
+  h+='<div class="sec-title" style="margin:12px 2px 6px">📋 Roster Next Season</div>';
+  h+=rosterLedger("future");
   if(open._total>0){
     var bits=[]; myPositions().forEach(function(pos){ if(open[pos]) bits.push(open[pos]+" "+pos); });
     var urgent = short._total>0
@@ -8335,8 +8460,7 @@ function portalScreen(){
        badge+'</div>';
   });
   h+='</div>';
-  h+='<button class="bigbtn btn-green" id="portal-done">Head to Preseason →</button>';
-  return h+'</div>';
+  return h;   // the hub adds the action button
 }
 // Leave preseason and start the real season at Week 1
 function kickoffSeason(){
@@ -9379,16 +9503,17 @@ function advanceSeason(){
 
   // graduate seniors, age up, develop — and let underfunded/unhappy players hit the portal
   var YR_NEXT={FR:"SO",SO:"JR",JR:"SR"};
+  // Departures were DECIDED when the offseason opened and you've had the whole portal window to
+  // buy them back. This just applies the result — no fresh rolls, no surprises after the fact.
   var kept=[], departed=[];
   s.roster.forEach(function(p){
+    // A transfer you signed during the portal window ARRIVES for next season — he must not be run
+    // through graduation and aging. Left alone he'd age a second time, and a senior transfer would
+    // graduate the instant you signed him.
+    if(p._incoming){ delete p._incoming; p.gp=0; kept.push(p); return; }
     if(p.yr==="SR"||p.cut||p._declared)return; // seniors graduate; early entrants go pro; cuts are released
-    var risk=retentionRisk(p);
-    if(risk!=null && risk>0 && Math.random()*100<risk){
-      // enters the transfer portal — but you get one shot to buy them back with NIL
-      var gone=JSON.parse(JSON.stringify(p));
-      gone.yr=YR_NEXT[p.yr]||p.yr;
-      departed.push({n:p.n,pos:p.pos,ovr:p.ovr,arch:p.arch,yr:gone.yr,dev:p.dev,
-        retainPrice:retainPrice(p), status:"open", _p:gone});
+    if(p._leaving){                            // he entered the portal and you didn't keep him
+      departed.push({n:p.n,pos:p.pos,ovr:p.ovr,arch:p.arch,dev:p.dev,yr:YR_NEXT[p.yr]||p.yr});
       return;
     }
     var wasYr=p.yr;
@@ -9431,7 +9556,7 @@ function advanceSeason(){
     kept.push(p);
   });
   s.roster=kept;
-  s._portalOut=departed; // players who transferred out — shown in the portal window
+  s._departed=departed;          // for the record; the portal window has already closed
   // living league: teams' ratings drift based on how they performed vs their rating
   driftLeagueRatings();
   simLeaguePortal(); // rivals work the portal too — the league's balance shifts
@@ -9445,10 +9570,7 @@ function advanceSeason(){
     persist();
     ST.screen="fired"; draw(); return;
   }
-  // portal fallout: losing notable players dents fan confidence (applied after the firing check)
-  var sigOut=departed.filter(function(d){return d.ovr>=75;}).length;
-  s._portalSecHit=Math.min(18, sigOut*4);
-  if(s._portalSecHit>0) s.jobSecurity=Math.max(1, s.jobSecurity - s._portalSecHit);
+  // (the job-security hit for losing key players was applied when the portal opened)
 
   // ── carousel: offers may appear if you're doing well ──
   ST.carousel=genCarousel(false);
@@ -9485,7 +9607,13 @@ function startNextSeason(){
   s._recruited=false;
   stampSeasonStart();
   persist();
-  enterPortal();
+  // The portal window is closed — everything's applied. Walk-ons fill whatever's still empty.
+  fillWalkOns();
+  s._inPortal=false; s._osReady=false;
+  s._portalOut=[]; s._portalPool=[]; s._portalSigned=[]; s._portalSecHit=0;
+  ST.osTab=null;
+  persist();
+  enterPreseason();
 }
 // Add all committed recruits to the roster as freshmen (signing day)
 function signCommittedRecruits(){
