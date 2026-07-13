@@ -564,6 +564,7 @@ a{color:inherit;text-decoration:none}
 .chip.st{background:var(--gold);border-color:var(--border);color:var(--text)}
 .chip.bk{background:#fff;border-color:var(--border2);color:var(--muted)}
 .chip.res{background:#f3f0e6;border-color:var(--border2);color:var(--muted)}
+.chip.unk{background:#f3f0f8;border-color:var(--purple);color:var(--purple);border-style:dashed}
 .chip.dev-elite{color:var(--gold-dark);border-color:var(--gold-dark);background:var(--gold-bg)}
 .chip.dev-pro{color:var(--green);border-color:var(--green);background:var(--green-bg)}
 .chip.dev-slow{color:var(--red2);border-color:var(--red2);background:var(--red-bg)}
@@ -2223,7 +2224,7 @@ var PERSONALITIES={
   clutch:   {t:"Big-Game",  ico:"🔥", desc:"Rises for rivalries and ranked opponents. Sleepwalks the cupcakes."},
   streaky:  {t:"Streaky",   ico:"🎲", desc:"Unpredictable week to week. Can win you a game on his own — or lose one."},
   diva:     {t:"Diva",      ico:"💅", desc:"Knows his worth. Costs far more in NIL, and takes the portal call."},
-  loyal:    {t:"Homegrown", ico:"⚓", desc:"Loves it here. Cheap to keep, and he isn't going anywhere."},
+  loyal:    {t:"Loyal",     ico:"⚓", desc:"Commits and stays committed. Cheap to keep, and nobody flips him."},
   problem:  {t:"Toxic",     ico:"☠️", desc:"Talented and toxic. Stunts the players around him and wants out."}
 };
 // NOTE: there is no "neutral" personality object, on purpose. A player with nothing notable about
@@ -2232,6 +2233,10 @@ var PERSONALITIES={
 // One state, one representation: absence.
 function persInfo(k){ return PERSONALITIES[k] || null; }
 function hasPersonality(p){ return !!(p && p.pers && PERSONALITIES[p.pers]); }
+// A RECRUIT's character stays hidden until you've actually spent time with him. A player already
+// on your roster is an open book — you see him every day.
+function persKnown(b){ return (b.myPush||0) >= (b.persReveal!=null ? b.persReveal : 3); }
+function persVisitsLeft(b){ return Math.max(0, (b.persReveal!=null?b.persReveal:3) - (b.myPush||0)); }
 function persBadge(p){
   if(!hasPersonality(p)) return "";
   var i=persInfo(p.pers);
@@ -2613,6 +2618,11 @@ function makeProspect(pos, prestige){
     id:"r"+Math.random().toString(36).slice(2,8),
     _seed:Math.random(),   // fixed board-order seed: keeps order stable & OVR-blind
     n:genName(), pos:pos, st:st, ovr:recruitOvr(st), dev:dev, arch:rollArch(pos), pers:rollPersonality(),
+    // How many visits before you know what kind of man he is. It varies PER RECRUIT, not by
+    // personality — some kids you read in one meeting, others keep it back for weeks. So you can't
+    // infer "he's taking a while, must be a diva". Scouting tells you how GOOD he is; only contact
+    // tells you WHO HE IS.
+    persReveal: rnd(2,6),
     interest:startInterest,
     heatWk:heatWeekFor(st),  // the week the country starts pushing hard for him
     fitM:money2(fitM),      // how much this recruit is reaching; drives weekly progression too
@@ -2706,7 +2716,17 @@ function recruitProspect(id){
   if((s.recruitPtsLeft||0)<=0){ toast("No recruiting points left this week"); return; }
   s.recruitPtsLeft--;
   b.wkRec=(b.wkRec||0)+1;
+  var _knewHim=persKnown(b);
   b.myPush=(b.myPush||0)+1;   // how hard YOU chased him — this is what makes him "the one who got away"
+  if(!_knewHim && persKnown(b)){
+    // You've spent enough time with him to read him.
+    if(hasPersonality(b)){
+      var _pi=persInfo(b.pers);
+      toast("👁️ You've got a read on "+x(b.n)+" — "+_pi.ico+" "+_pi.t);
+    } else {
+      toast("👁️ You've got a read on "+x(b.n)+" — no flags either way.");
+    }
+  }
   // Each point adds interest, with diminishing returns as it gets high; a 5★ is harder to sway.
   // Tuned so closing a recruit takes ~7-9 clicks at a program he actually fits.
   //
@@ -2716,6 +2736,10 @@ function recruitProspect(id){
   var fitM = (b.fitM!=null) ? b.fitM : starFitMult(b.st, s.prestige, s.conf);
   var base = 8 - Math.floor(b.st*0.7) - Math.floor(b.interest/22);
   var gain = Math.max(1, Math.round(Math.max(3, base) * (0.30 + 0.70*fitM)));
+  // WHO HE IS decides what actually moves him. Points are relationship-building — face time,
+  // film, a coach who believes in him. Some kids are bought; some are coached.
+  gain *= persRecruitMult(b, "points");
+  gain = Math.max(1, Math.round(gain));
   b.interest = Math.min(100, b.interest + gain);
   if(b.interest>=100){ b.status="committed"; b.committedTo=s.school; toast("🎉 "+x(b.n)+" committed to you!"); }
   persist(); draw();
@@ -2770,6 +2794,12 @@ function advanceRecruitingWeek(){
         push += heatPushFor(b.st);                        // blue-chips draw a frenzy
         if(b.dev==="elite"||b.dev==="pro") push += rnd(2,4); // a high ceiling gets him poached fast
       }
+      // How hard he is to flip. A LOYAL kid who likes you barely hears the other phones; a
+      // TOXIC one takes the last call he gets, right up to signing day.
+      push *= persRecruitMult(b, "hold");
+      // ...and loyalty only kicks in once he actually likes you. Leading matters.
+      if(b.pers==="loyal" && b.interest >= 55) push *= 0.55;
+      push = Math.max(0, Math.round(push));
       rv.interest = Math.min(100, rv.interest + push);
     });
     // He can't commit before anybody has actually offered him.
@@ -3525,7 +3555,41 @@ function nilRate(st){
   var marketScale = (ST.save && isFCSConf(ST.save.conf)) ? (NIL_BASE_FCS[5]/NIL_BASE[5]) : 1;
   return base / marketScale;
 }
-function nilInterestGain(b, amt){ var g=amt * nilRate(b.st); if(hasAbility("nil2")||hasArch("nil")) g*=1.4; return Math.round(g); }
+function nilInterestGain(b, amt){
+  var g=amt * nilRate(b.st);
+  if(hasAbility("nil2")||hasArch("nil")) g*=1.4;
+  g *= persRecruitMult(b, "nil");
+  return Math.round(g);
+}
+// ── Personality in the recruiting race ─────────────────────
+// The chip on the board used to be pure information: it told you what he'd be like once you
+// landed him, but did nothing to help or hinder you landing him. Now it shapes the chase.
+//   points = coaching contact · nil = money · hold = how hard he is for a rival to flip
+function persRecruitMult(b, kind){
+  var k=b && b.pers;
+  if(!k) return 1;
+  if(kind==="points"){
+    if(k==="coachable") return 1.35;   // he wants to be coached — face time works
+    if(k==="loyal")     return 1.25;   // he wants to be somewhere, and you're courting him
+    if(k==="leader")    return 1.10;
+    if(k==="diva")      return 0.65;   // you cannot charm him. Bring money.
+    if(k==="problem")   return 0.80;
+  }
+  if(kind==="nil"){
+    if(k==="diva")      return 1.60;   // money is the only language he speaks
+    if(k==="problem")   return 1.35;
+    if(k==="coachable") return 0.80;
+    if(k==="loyal")     return 0.55;   // he isn't for sale — he wants the right place
+  }
+  if(kind==="hold"){                    // resistance to a rival's weekly push
+    if(k==="loyal")     return 0.45;   // once he likes you, nobody flips him
+    if(k==="leader")    return 0.70;
+    if(k==="coachable") return 0.90;
+    if(k==="problem")   return 1.45;   // he'll take the last call he gets
+    if(k==="diva")      return 1.25;   // always listening to a better offer
+  }
+  return 1;
+}
 function riskLabel(pct){ return pct>=60?"High":(pct>=30?"Medium":"Low"); }
 // Open the NIL slider sheet for a recruit ("recruit") or a roster player ("retain").
 function openNIL(kind, id){
@@ -3752,8 +3816,13 @@ function recruitTab(){
     var rmeta=x(b.pos)+(b.arch?' · '+x(b.arch):'');
     // Order: personality → scheme fit → dev trait. The dev trait reads last, to the RIGHT of fit.
     var rchips='';
-    if(hasPersonality(b)){ var _rp=persInfo(b.pers);
-      rchips+='<span class="chip pers" title="'+x(_rp.desc)+'">'+_rp.ico+' '+x(_rp.t)+'</span>'; }
+    if(!persKnown(b)){
+      rchips+='<span class="chip unk" title="Spend recruiting points on him to learn what kind of man he is. '+
+              persVisitsLeft(b)+' more visit'+(persVisitsLeft(b)===1?'':'s')+'.">? Character</span>';
+    } else if(hasPersonality(b)){ var _rp=persInfo(b.pers);
+      rchips+='<span class="chip pers" title="'+x(_rp.desc)+'">'+_rp.ico+' '+x(_rp.t)+'</span>';
+    }
+    // (if he's known and has no trait, no chip at all — you've learned there's nothing to learn)
     if(fit) rchips+='<span class="chip '+(fit==="great"?"good":(fit==="bad"?"bad":""))+'" title="Scheme fit">'+(fit==="great"?"★ Fit":fit==="ok"?"~ Fit":"✕ Fit")+'</span>';
     if(b.scout>=maxScoutTier()) rchips+=recruitTraitDisplay(b);   // already a chip — do NOT wrap it
     h+='<div class="rec-card-name">'+
