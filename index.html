@@ -2246,7 +2246,18 @@ function renderProfile() {
         if(!final.length){ toast("No standings to finalize","err"); return; }
         var _pool = poolById(pid);
         var _nm = (_pool && (_pool.shortName||_pool.name)) || pid;
-        if(!confirm("Finalize "+_nm+" for \""+gname+"\"?\n\n🥇 "+(final[0]?final[0].name:"—")+
+
+        // The tournament name is NOT the group name. It lives at globalSettings/{poolId}/name
+        // (written by pgatour.html's tournament config — "The Open Championship" etc).
+        // It's global and gets overwritten for the next event, so snapshot it at finalize
+        // time and freeze it into this group's results.
+        DB.ref("globalSettings/"+pid+"/name").once("value", function(tsn){
+          var tName = tsn.val() || (_pool && _pool.name) || _nm;
+          _finalizeWith(tName);
+        }, function(){ _finalizeWith((_pool && _pool.name) || _nm); });
+
+        function _finalizeWith(tName){
+        if(!confirm("Finalize "+tName+"\nGroup: "+gname+"\n\n🥇 "+(final[0]?final[0].name:"—")+
                     "\n🥈 "+(final[1]?final[1].name:"—")+
                     "\n🥉 "+(final[2]?final[2].name:"—")+
                     "\n\nThis mints trophies for everyone in the group.")) return;
@@ -2255,7 +2266,8 @@ function renderProfile() {
           first:  final[0] ? final[0].name : null,
           second: final[1] ? final[1].name : null,
           third:  final[2] ? final[2].name : null,
-          tournamentName: gname || _nm,   // recurring pools: the group IS the tournament
+          tournamentName: tName,   // frozen — global name changes with the next event
+          groupName: gname,
           finalizedAt: Date.now()
         };
         Object.keys(results).forEach(function(k){ if(results[k]===null) delete results[k]; });
@@ -2277,8 +2289,8 @@ function renderProfile() {
 
             writeActivityEvent(gid, {
               type:"pool_finalized", actor:results.first||"",
-              text:"<strong>"+x(results.first||"—")+"</strong> won "+x(gname||_nm),
-              icon:"🏆", poolId:pid, poolName:_nm
+              text:"<strong>"+x(results.first||"—")+"</strong> won "+x(tName),
+              icon:"🏆", poolId:pid, poolName:tName
             });
             toast("Finalized ✓ trophies awarded","ok");
             // Rebuild the trophy case so wins/podiums update without a reload
@@ -2287,6 +2299,7 @@ function renderProfile() {
             if(c2) renderGroupCards(_allGroupsCache||[], c2);
           });
         });
+        } // end _finalizeWith
       });
     });
 
@@ -3539,7 +3552,7 @@ function renderTrophyCase() {
           if(_t.finish===1)      { totalWins++; totalPodiums++; sportMap[sid].wins++; }
           else if(_t.finish===2) { totalPodiums++; sportMap[sid].seconds++; }
           else if(_t.finish===3) { totalPodiums++; sportMap[sid].thirds++; }
-          sportMap[sid].groups.push({ name:_t.groupName||g.name, finish:_t.finish, pts:_t.pts||0, year:_t.year||new Date().getFullYear(), archived:true });
+          sportMap[sid].groups.push({ name:_t.groupName||g.name, tournament:_t.poolName||pool.name, finish:_t.finish, pts:_t.pts||0, year:_t.year||new Date().getFullYear(), archived:true });
           return;
         }
 
@@ -3630,6 +3643,7 @@ function renderTrophyCase() {
             if(tgid && tgid !== g.id) return;
             sportMap[sid].groups.push({
               name: t.groupName||g.name,
+              tournament: t.poolName||pool.name,
               finish: t.finish||null,
               pts: t.pts||0,
               year: t.year||new Date().getFullYear(),
@@ -3637,7 +3651,7 @@ function renderTrophyCase() {
             });
           });
         } else if(isFinished){
-          sportMap[sid].groups.push({ name:g.name, finish:finish, pts:pts, year:new Date().getFullYear() });
+          sportMap[sid].groups.push({ name:g.name, tournament:((r&&r.tournamentName)||pool.name), finish:finish, pts:pts, year:new Date().getFullYear() });
           // Permanently write to trophies
           var archiveKey = pool.id + "_" + new Date().getFullYear() + "_" + g.id;
           var _displayName = (r && r.tournamentName) || pool.name;
@@ -3720,7 +3734,7 @@ function renderTrophyCase() {
       else if(t.finish===2) { totalPodiums++; sportMap[poolId].seconds++; }
       else if(t.finish===3) { totalPodiums++; sportMap[poolId].thirds++; }
       var gName = t.groupName || "";
-      sportMap[poolId].groups.push({ name:gName, finish:t.finish, pts:t.pts||0, year:t.year });
+      sportMap[poolId].groups.push({ name:gName, tournament:t.poolName||pool.name, finish:t.finish, pts:t.pts||0, year:t.year });
       historyEntries.push({ pool:pool, group:gName, finish:t.finish, pts:t.pts||0, year:t.year, ts:t.ts });
     });
 
@@ -3897,7 +3911,10 @@ function renderTrophyCase() {
                 var finColor=ge.finish===1?"var(--gold-dark)":ge.finish===2?"#666":ge.finish===3?"#b45309":"var(--blue)";
                 var finTxt=ge.finish===1?"1st":ge.finish===2?"2nd":ge.finish===3?"3rd":ge.finish===99?"Competed":"—";
                 var yearStr=ge.year?String(ge.year):"";
-                var _meta=[x(ge.name||'—'),x(pool.name),yearStr].filter(Boolean).join(' · ');
+                // Show the actual event ("The Open Championship"), not the generic
+                // library name ("PGA Tour") — recurring pools reuse one pool id.
+                var _tour = ge.tournament || pool.name;
+                var _meta=[x(ge.name||'—'),x(_tour),yearStr].filter(Boolean).join(' · ');
                 deckHtml+='<div style="display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border2)">';
                 deckHtml+='<div style="font-size:11px;font-weight:900;color:'+finColor+';flex-shrink:0;width:48px">'+finTxt+'</div>';
                 deckHtml+='<div style="flex:1;font-size:11px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_meta+'</div>';
