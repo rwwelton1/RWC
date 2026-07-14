@@ -8652,7 +8652,6 @@ function bind(){
   };
   // recruit
   document.querySelectorAll("[data-sign]").forEach(function(b){b.onclick=function(){toggleSign(b.getAttribute("data-sign"));};});
-  var fr=q("#finish-recruit"); if(fr)fr.onclick=finishRecruiting;
   // season
   document.querySelectorAll("[data-plan]").forEach(function(b){b.onclick=function(){ST.planPick=b.getAttribute("data-plan");draw();};});
   // Each attention item jumps you to the screen that fixes it.
@@ -8838,8 +8837,8 @@ function beginSeasonRecruiting(){
   resolveStaffOffers();   // any offer you never answered: he's gone
   var s=ST.save;
   s.board=genRecruitBoard(s.prestige);
-  // A standalone preseason allotment for scouting and building the board. It does NOT roll
-  // into week 1 — finishRecruiting() hands you a fresh weekly allowance at kickoff.
+  // A standalone preseason allotment for scouting and building the board. It does NOT roll into
+  // week 1 — kickoffSeason() hands you a fresh weekly allowance when the season starts.
   s.recruitPtsLeft=PRESEASON_RECRUIT_POINTS; s._usedFreeScout=false;
   s._signedThisYear=null;
   resetSeasonStats(); // clear last year's per-season stats (career totals persist)
@@ -9177,9 +9176,21 @@ function portalBody(){
 }
 // Leave preseason and start the real season at Week 1
 function kickoffSeason(){
+  var s=ST.save;
   // Your word is now on the record. The board will hold you to it in December.
-  ST.save._pledgeLocked=true;
-  ST.save._recruited=true;
+  s._pledgeLocked=true;
+  s._recruited=true;
+
+  // ── TWO SEPARATE POOLS ─────────────────────────────────
+  // The preseason grant is its OWN budget for building the board. It must not bleed into the
+  // season. This refill lived in finishRecruiting() — which is dead code from an old flow and has
+  // never once been called — so whatever you spent in the preseason came straight out of week 1,
+  // and a coach who used his allotment kicked off the season with zero points and had to wait
+  // until week 2 (advanceRecruitingWeek only fires AFTER a game).
+  s.recruitPtsLeft = weeklyRecruitPoints();
+  s._usedFreeScout = false;                   // Bird Dog's free scout resets too
+  (s.board||[]).forEach(function(b){ b.wkRec=0; });   // per-prospect weekly caps reset as well
+
   ST.screen="season"; ST.seasonTab="week"; ST.editGame=null;
   persist(); draw();
 }
@@ -9188,26 +9199,6 @@ function toggleSign(id){
   if(ST.signed[id]){ delete ST.signed[id]; }
   else { if(spent()+r.cost>ST.save.budget){ toast("Not enough points"); return; } ST.signed[id]=true; }
   draw();
-}
-function finishRecruiting(){
-  var s=ST.save;
-  // add signed recruits to roster as FR
-  ST.recruitClass.forEach(function(r){ if(ST.signed[r.id]){ s.roster.push({id:r.id,n:r.n,pos:r.pos,ovr:r.ovr,yr:"FR",dev:r.dev,arch:r.arch||rollArch(r.pos),pot:rollPotential(r.ovr,r.dev),st:r.st,startOvr:r.ovr,ssOvr:r.ovr,revealed:false}); } });
-  s._recruited=true; s.week=0;
-
-  // ── Week 1 starts with a FULL allotment ──
-  // The preseason grant is its own budget for building the board. Previously whatever you
-  // didn't spend simply carried over, so a coach who used it all opened the season with zero
-  // points and had to wait until week 2 — advanceRecruitingWeek() only fires after a game.
-  // Refill here, at the preseason → week 1 boundary, so week 1 is a week like any other.
-  s.recruitPtsLeft = weeklyRecruitPoints();
-  s._usedFreeScout = false;                  // Bird Dog's free scout resets too
-  // Per-prospect push caps are weekly. Preseason pushes must not eat into week 1's allowance.
-  (s.board||[]).forEach(function(b){ b.wkRec=0; });
-
-  stampSeasonStart();  // baseline for "this year" progression
-  persist();
-  ST.screen="season"; ST.planPick=null; draw();
 }
 // ── Player stats (Phase 3) ───────────────────────────────
 // Box scores are SYNTHESIZED from the final score + your scheme + starter archetypes +
