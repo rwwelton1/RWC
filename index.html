@@ -1922,8 +1922,15 @@ function renderProfile() {
       if(!hasVisiblePool) return;
 
       var standings = calcStandings(g, data);
-      var myRank = -1;
-      for(var ri=0;ri<standings.length;ri++){ if(standings[ri].name===u.username){myRank=ri;break;} }
+      var myRank = -1, myRankNum = 0, myTied = false;
+      for(var ri=0;ri<standings.length;ri++){
+        if(standings[ri].name===u.username){
+          myRank=ri;
+          myRankNum = standings[ri].rank||(ri+1);   // competition rank (ties share)
+          myTied = !!standings[ri].tied;
+          break;
+        }
+      }
 
       // Pills
       var pillsHtml = "";
@@ -1990,9 +1997,9 @@ function renderProfile() {
       // ── Header ──
       gh += '<div class="gcard-head" style="padding:10px 10px 8px;display:flex;align-items:flex-start;gap:4px">';
       var memberCount = (g.players||[]).length;
-      var rc2 = myRank===0?'var(--gold-dark)':myRank===1?'var(--muted)':myRank===2?'#b45309':'var(--blue)';
+      var rc2 = myRankNum===1?'var(--gold-dark)':myRankNum===2?'var(--muted)':myRankNum===3?'#b45309':'var(--blue)';
       var rankStr2 = myRank>=0
-        ? '<span style="color:'+rc2+';font-weight:900;font-size:9px">#'+(myRank+1)+'</span><span style="color:var(--muted);font-weight:700;font-size:9px"> of '+memberCount+'</span>'
+        ? '<span style="color:'+rc2+';font-weight:900;font-size:9px">'+(myTied?'T':'')+'#'+myRankNum+'</span><span style="color:var(--muted);font-weight:700;font-size:9px"> of '+memberCount+'</span>'
         : '<span style="color:var(--muted);font-weight:700;font-size:9px">'+memberCount+' player'+(memberCount!==1?'s':'')+'</span>';
       // Status label from stackedPills
       var _stText = "";
@@ -2068,7 +2075,7 @@ function renderProfile() {
         var snapshotKeyS = g.id+"_season";
         var prevRanksS = loadRankSnapshot(snapshotKeyS);
         var currentRankMapS = {};
-        standings.forEach(function(p,i){ currentRankMapS[p.name]=i+1; });
+        standings.forEach(function(p,i){ currentRankMapS[p.name]=p.rank||(i+1); });
         saveRankSnapshot(snapshotKeyS, currentRankMapS);
         gh += '<div style="padding:6px 10px 2px;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Standings</div>';
         // Build a set of players who have submitted picks for any active pool
@@ -2105,12 +2112,13 @@ function renderProfile() {
           var _missingPicks = _hasLockedPool && !_submittedPlayers[_pUkey];
           var _rowBg = isMe?'var(--blue-bg)':'transparent';
           var _nameColor = _missingPicks?'var(--red2)':isMe?'var(--blue)':'var(--text)';
-          var _rankCol = rankColors2[i]||'var(--dim)';
+          var _rk = p.rank||(i+1);
+          var _rankCol = rankColors2[_rk-1]||'var(--dim)';
           if(_prevShowIdx>=0&&i>_prevShowIdx+1)
             gh+='<div style="padding:1px 10px;font-size:8px;color:var(--dim);border-bottom:1px solid var(--border2)">·</div>';
           _prevShowIdx=i;
           gh+='<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-bottom:1px solid var(--border2);background:'+_rowBg+'">';
-          gh+='<span style="font-size:10px;width:18px;text-align:center;flex-shrink:0">'+(medals2[i]||'<span style="font-size:8px;font-weight:900;color:var(--dim)">'+(i+1)+'</span>')+'</span>';
+          gh+='<span style="font-size:10px;width:18px;text-align:center;flex-shrink:0">'+(medals2[_rk-1]||'<span style="font-size:8px;font-weight:900;color:var(--dim)">'+_rk+'</span>')+'</span>';
           gh+='<div style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
           if(isMe) gh+='<span style="font-size:6px;font-weight:800;background:var(--gold);border:1px solid var(--border);border-radius:3px;padding:1px 3px;color:var(--text);flex-shrink:0">YOU</span>';
           var _scoreHtml="";
@@ -2151,10 +2159,11 @@ function renderProfile() {
         ? encodeURIComponent(JSON.stringify({
             poolId: _sharePoolId,
             entries: standings.map(function(s,i){
+              var _rk = s.rank||(i+1), _td = !!s.tied;
               var prev = prevRanksShare && prevRanksShare[s.name] !== undefined ? prevRanksShare[s.name] : null;
               var mv = prev !== null ? prev - (i+1) : 0;
               var gs = s.golfScores && _sharePoolId && s.golfScores[_sharePoolId] ? s.golfScores[_sharePoolId][s.name] : null;
-              return {name:s.name, pts:s.pts, mv:mv, golfScore: gs ? gs.score : null, golfCut: gs ? gs.cut : false};
+              return {name:s.name, pts:s.pts, mv:mv, rank:_rk, tied:_td, golfScore: gs ? gs.score : null, golfCut: gs ? gs.cut : false};
             })
           }))
         : "";
@@ -2188,6 +2197,29 @@ function renderProfile() {
         var pid = this.getAttribute("data-pid");
         var st  = this.getAttribute("data-st");
         if(!DB||!gid||!pid||!st) return;
+
+        // Freeze the tournament name the moment the pool goes Final.
+        // globalSettings/{pid}/name is a LIVE value — it gets overwritten when the next
+        // tournament is configured, which would silently re-label every past trophy for
+        // this recurring pool. Snapshot it onto the group so the pool id can be reused.
+        if(st==="complete"){
+          DB.ref("groups/"+gid+"/data/"+pid+"/tournamentName").once("value", function(existing){
+            if(existing.val()) return;  // already frozen — never overwrite
+            DB.ref("globalSettings/"+pid+"/name").once("value", function(nsn){
+              var nm = nsn.val();
+              if(!nm) return;
+              DB.ref("groups/"+gid+"/data/"+pid+"/tournamentName").set(nm);
+              (_allGroupsCache||[]).forEach(function(gg){
+                if(gg && gg.id===gid){
+                  if(!gg.data) gg.data={};
+                  if(!gg.data[pid]) gg.data[pid]={};
+                  gg.data[pid].tournamentName = nm;
+                }
+              });
+            });
+          });
+        }
+
         // Write to groups/{id}/data/statuses/{poolId}
         DB.ref("groups/"+gid+"/data/statuses/"+pid).set(st, function(){
           toast("Status updated ✓","ok");
@@ -2274,15 +2306,28 @@ function renderProfile() {
         }
 
         function _finalizeWith(tName){
-        if(!confirm("Finalize "+tName+"\nGroup: "+gname+"\n\n🥇 "+(final[0]?final[0].name:"—")+
-                    "\n🥈 "+(final[1]?final[1].name:"—")+
-                    "\n🥉 "+(final[2]?final[2].name:"—")+
+        // Group by competition rank so ties are preserved. first/second/third can only
+        // hold one name each, so they'd silently drop a co-2nd — `ranks` is the source
+        // of truth and holds everyone.
+        var byRank = {};
+        final.forEach(function(e){ (byRank[e.rank] = byRank[e.rank] || []).push(e.name); });
+        function _lbl(rk){ return (byRank[rk]||[]).join(" & ") || "—"; }
+
+        if(!confirm("Finalize "+tName+"\nGroup: "+gname+"\n\n🥇 "+_lbl(1)+
+                    "\n🥈 "+_lbl(2)+
+                    "\n🥉 "+_lbl(3)+
                     "\n\nThis mints trophies for everyone in the group.")) return;
 
+        var ranks = {};
+        final.forEach(function(e){ ranks[e.name] = e.rank; });
+
         var results = {
-          first:  final[0] ? final[0].name : null,
-          second: final[1] ? final[1].name : null,
-          third:  final[2] ? final[2].name : null,
+          // Legacy podium fields — kept for older readers. With a tie for 2nd there is
+          // no 3rd, so `third` is correctly absent rather than promoting the 4th player.
+          first:  (byRank[1]||[])[0] || null,
+          second: (byRank[2]||[])[0] || null,
+          third:  (byRank[3]||[])[0] || null,
+          ranks:  ranks,           // {name: rank} — ties intact, authoritative
           tournamentName: tName,   // frozen — global name changes with the next event
           groupName: gname,
           finalizedAt: Date.now()
@@ -3376,7 +3421,10 @@ function openStandingsShareModal(groupName, standings, poolId) {
       list.forEach(function(p, i){
         var arrow = p.mv > 0 ? " ▲"+p.mv : p.mv < 0 ? " ▼"+Math.abs(p.mv) : "";
         var name = p.name.length > 16 ? p.name.substring(0,15)+"…" : p.name;
-        lines.push(medals[i] + " " + name + "  " + fmtPts(p) + arrow);
+        var _rk = p.rank || (i+1);
+        // Tied players share a medal; mark it T so the tie is obvious in the share text
+        var _badge = (medals[_rk-1] || ("#"+_rk)) + (p.tied ? "T" : "");
+        lines.push(_badge + " " + name + "  " + fmtPts(p) + arrow);
       });
     } else {
       lines.push("No scores yet — picks still open!");
@@ -3405,7 +3453,9 @@ function openStandingsShareModal(groupName, standings, poolId) {
           ? '<span style="color:var(--red);font-size:9px;font-weight:900"> ▼'+Math.abs(p.mv)+'</span>'
           : '<span style="color:var(--dim);font-size:9px"> —</span>';
         var name = p.name.length > 16 ? p.name.substring(0,15)+"…" : p.name;
-        html += medals[i]+" "+name+"  "+fmtPts(p)+arrowHtml+"\n";
+        var _rk2 = p.rank || (i+1);
+        var _badge2 = (medals[_rk2-1] || ("#"+_rk2)) + (p.tied ? "T" : "");
+        html += _badge2+" "+name+"  "+fmtPts(p)+arrowHtml+"\n";
       });
     } else {
       html = "No scores yet — picks still open!\n";
@@ -3603,6 +3653,13 @@ function renderTrophyCase() {
             else if(t.finish===3){ finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
             else finish=99;
           });
+        } else if(r && r.ranks && r.ranks[u.username]) {
+          // Authoritative: ties preserved. Two players tied for 2nd BOTH get a silver.
+          var _rk = Number(r.ranks[u.username]) || 99;
+          if(_rk===1)      { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
+          else if(_rk===2) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
+          else if(_rk===3) { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
+          else             { finish=99; }
         } else if(r && (r.first||r.second||r.third)){
           if(r.first===u.username)       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
           else if(r.second===u.username) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
@@ -3648,10 +3705,23 @@ function renderTrophyCase() {
               return lowerBetter ? -diff : diff;
             });
             var myIdx2 = sorted2.indexOf(u.username);
-            if(myIdx2===0)      { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
-            else if(myIdx2===1) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
-            else if(myIdx2===2) { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
-            else if(myIdx2>2)   { finish=99; }
+            if(myIdx2 >= 0){
+              // Competition rank: 1 + the number of players strictly ahead of me.
+              // Using the array index would hand a co-2nd a bronze.
+              var _myKey2 = u.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
+              var _myVal2 = salaryTotal(_myKey2);
+              var _ahead2 = 0;
+              (g.players||[]).forEach(function(op){
+                if(op===u.username) return;
+                var _ov = salaryTotal(op.toLowerCase().replace(/[^a-z0-9_]/g,""));
+                if(lowerBetter ? (_ov < _myVal2) : (_ov > _myVal2)) _ahead2++;
+              });
+              var _myRank2 = _ahead2 + 1;
+              if(_myRank2===1)      { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
+              else if(_myRank2===2) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
+              else if(_myRank2===3) { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
+              else                  { finish=99; }
+            }
           }
         }
 
@@ -6580,11 +6650,22 @@ function calcStandings(g, data) {
       if(r.third&&scores[r.third]!==undefined){scores[r.third]+=1;finishes[r.third][pool.id]=3;}
     }
   });
-  return players.slice().sort(function(a,b){return scores[b]-scores[a];})
+  var result = players.slice().sort(function(a,b){return scores[b]-scores[a];})
     .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p],golfScores:golfScores};});
-  _standingsCache[cacheKey] = result;
-  var keys = Object.keys(_standingsCache);
-  if(keys.length > 50) delete _standingsCache[keys[0]];
+
+  // Standard competition ranking ("1224"): equal points share a rank, and the next
+  // player skips the rank(s) consumed by the tie. Two players tied on 8 pts behind a
+  // leader are BOTH 2nd, and the player after them is 4th — not 3rd.
+  // Everything downstream must read .rank, never the array index.
+  var _rank = 0;
+  result.forEach(function(e, i){
+    if(i === 0 || e.pts !== result[i-1].pts) _rank = i + 1;  // new score -> rank = position
+    e.rank = _rank;                                          // else inherit the tied rank
+    e.tied = false;
+  });
+  result.forEach(function(e){
+    e.tied = result.filter(function(o){ return o.rank === e.rank; }).length > 1;
+  });
   return result;
 }
 
