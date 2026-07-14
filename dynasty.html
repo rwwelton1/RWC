@@ -1327,7 +1327,7 @@ function startersAt(pos){ return STARTERS_AT[pos]||1; }
 // QB sat at 4 by mistake: it was bumped to 4 when every position briefly ran a 3-man rotation,
 // but QB was then put back to a 2-man rotation (a third QB never takes a snap) and the roster
 // size was never walked back — leaving two quarterbacks who could never play. Back to 3.
-var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:4,OL:7, DL:7,LB:6,CB:4,S:4};
+var ROSTER_SIZE={QB:3,RB:3,WR:5,TE:3,OL:7, DL:7,LB:6,CB:4,S:4};
 // ── THE ROTATION: who actually takes the field ────────────
 // Three tiers, and every system reads THIS, so the sim, the games-played counter and the
 // roster badges can never disagree again:
@@ -2115,7 +2115,7 @@ function seasonGoals(){
   if(pl.p.v){
     var LAD=["\u2014","a bowl","the playoff","the quarterfinals","the semifinals","the title"];
     var got=pledgeLadder();
-    post={key:"post", label:pl.p.t, met:(got >= (PLEDGE_RANK[pl.p.v]||0)),
+    post={key:"post", label:pl.p.t, met:(got >= pledgePostNeeded(pl.p.v)),
           detail: got>0 ? "reached "+LAD[got] : (played<games ? "in progress" : "missed")};
   } else {
     post={key:"post", label:"Show clear progress", met:((s.wins||0) > (s._lastWins||0)),
@@ -3630,6 +3630,15 @@ function postSlot(){
   ];
   // At a program with real expectations, "we might not play in January" isn't on the table.
   var floorIdx = (s.prestige>=5) ? 2 : (s.prestige>=4) ? 1 : 0;
+  // ...but never slice out a goal you've ALREADY pledged this season. If prestige rose after you
+  // made the promise, the floor would drop your option and pledge() would silently fall back to a
+  // HARDER goal (P[1]) — so your "Make the FCS playoff" box could never be checked. Keep your own
+  // pledged tier in range.
+  if(s.pl && s.pl.post!=null){
+    var pledgedIdx=-1;
+    all.forEach(function(o,i){ if(o.v===s.pl.post) pledgedIdx=i; });
+    if(pledgedIdx>=0 && pledgedIdx<floorIdx) floorIdx=pledgedIdx;
+  }
   return all.slice(floorIdx).map(function(o,i){ return {v:o.v, amb:i, t:o.t}; });
 }
 function progSlot(){
@@ -3751,6 +3760,19 @@ function setGoal(slot, idx){
 }
 // How far you ACTUALLY got, on the promise's own ladder.
 var PLEDGE_RANK={bowl:1, playoff:2, semis:4, title:5};
+// The minimum pledgeLadder() score that SATISFIES a given pledge tier. This is division-aware
+// because the same value key means different things in each: for FCS, "bowl" is labeled
+// "Make the FCS playoff" (just reach the bracket) and "playoff" is "Reach the quarterfinals".
+// Using one authoritative map here keeps the banner label and the checkmark in agreement.
+function pledgePostNeeded(v){
+  var fcs=(myDivision()==="FCS");
+  if(fcs){
+    // ladder: 0 none · 2 made bracket · 3 quarterfinals · 4 semifinals · 5 title
+    return ({bowl:2, playoff:3, semis:4, title:5})[v] || 0;
+  }
+  // FBS ladder: 0 none · 1 bowl · 2 playoff(top12) · 3 quarterfinals · 4 semifinals · 5 title
+  return ({bowl:1, playoff:2, semis:4, title:5})[v] || 0;
+}
 function pledgeLadder(){
   var P=ST.post, s=ST.save;
   if(s._wonNatlThisYear) return 5;
@@ -4410,16 +4432,24 @@ function rosterTable(){
   }
   groups.forEach(function(grp){
     h+='<div class="sec-title" style="margin:6px 2px 6px">'+grp.t+'</div>';
-    h+='<div class="conf-table" style="margin-bottom:10px">';
     grp.order.forEach(function(pos){
       var atPos=depthOrder(s.roster, pos);
-      if(!atPos.length) return;
+      var _rsAtPos=s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p); });
+      if(!atPos.length && !_rsAtPos.length) return;
       // Depth order is computed on the FULL room first, so ST/BK/RES stay truthful even when
       // you're only looking at a slice of it. Filter after, never before.
       var _flt=rosterFilter();
       var _shown=atPos.filter(function(p){ return _flt.f(p); });
-      if(!_shown.length && !s.roster.some(function(p){ return p.pos===pos && isRedshirting(p) && _flt.f(p); })) return;
-      var nStart=startersAt(pos);
+      if(!_shown.length && !_rsAtPos.some(function(p){ return _flt.f(p); })) return;
+      var nStart=startersAt(pos), rot=rotationAt(pos), cap=rosterSizeAt(pos);
+      var onField=atPos.length;                        // bodies currently on the depth chart
+      var thin=(onField < rot);                        // can't even field the rotation
+      var col=posColor(pos);
+      // ── Position card, styled like the offseason depth chart ──
+      h+='<div class="rec-tbl" style="margin-bottom:8px">';
+      h+='<div class="rec-schoolhd" style="background:'+col+';color:#fff;border-bottom-color:var(--border)">'+
+         '<span>'+pos+'</span><span class="rec-lvl" style="color:#fff">'+onField+' of '+cap+
+         (thin?' · THIN':'')+'</span></div>';
       atPos.forEach(function(p,idx){
         if(!_flt.f(p)) return;                    // filtered out — but idx is still the true depth
         var tier=depthTier(pos, idx);
@@ -4436,7 +4466,6 @@ function rosterTable(){
         else { depthTag='<span class="chip res"'+infoAttr(_ti[0],_ti[1])+'>RES</span>'; }
         var yearDelta=p.ovr-(p.ssOvr!=null?p.ssOvr:p.ovr);
         var careerDelta=p.ovr-(p.startOvr!=null?p.startOvr:p.ovr);
-        var col=posColor(pos);
         var picked=(ST.swapPick===p.id);
         var swappable=(!!_pickPos && !picked && _pickPos===p.pos);
 
@@ -4479,8 +4508,7 @@ function rosterTable(){
         var tierChip = depthTag;   // built above, with a tappable explainer
 
         h+='<div class="pl-row'+(isStarter?" starter":"")+(picked?" picked":"")+(swappable?" swappable":"")+
-             '" data-depthtap="'+p.id+'" style="border-left:5px solid '+col+'">'+
-           '<span class="pl-pos" style="background:'+col+'">'+p.pos+'</span>'+
+             '" data-depthtap="'+p.id+'">'+
            '<div class="pl-main">'+
              '<div class="pl-top"><span class="pl-nm"'+pcardAttr(p.id)+'>'+x(p.n)+'</span>'+tierChip+
                '<span class="pl-ovr">'+p.ovr+' '+progArrow(yearDelta)+'</span></div>'+
@@ -4495,10 +4523,9 @@ function rosterTable(){
            '</div>';
       });
       // ── Redshirts held out at this position — off the depth chart, banking a year ──
-      s.roster.filter(function(p){ return p.pos===pos && isRedshirting(p) && _flt.f(p); }).forEach(function(p){
+      _rsAtPos.filter(function(p){ return _flt.f(p); }).forEach(function(p){
         var _pi2=hasPersonality(p)?persInfo(p.pers):null;
-        h+='<div class="pl-row rs-held" style="border-left:5px solid '+posColor(pos)+'">'+
-           '<span class="pl-pos" style="background:'+posColor(pos)+'">'+p.pos+'</span>'+
+        h+='<div class="pl-row rs-held">'+
            '<div class="pl-main">'+
              '<div class="pl-top"><span class="pl-nm">'+x(p.n)+'</span>'+
                '<span class="chip bad">🔴 REDSHIRTING</span>'+
@@ -4512,8 +4539,8 @@ function rosterTable(){
            '<span class="pl-act"><button class="rs-btn on" data-rshold="'+p.id+'" title="Send him back onto the field">RS</button></span>'+
            '</div>';
       });
+      h+='</div>'; // rec-tbl
     });
-    h+='</div>';
   });
   return h;
 }
