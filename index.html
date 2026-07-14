@@ -894,6 +894,18 @@ function ukey(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");
 
 function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(id); }).filter(Boolean); }
 
+// Effective status for a pool WITHIN a group.
+// Recurring pools (pgatour, usopen…) reuse one pool id across many tournaments, so the
+// per-group override at groups/{id}/data/statuses/{poolId} is authoritative — the global
+// status is only a fallback. Anything that asks "is this pool done?" must use this,
+// otherwise a group set to Final never archives a trophy.
+function poolStatusFor(g, poolId){
+  var grpSt = (g && g.data && g.data.statuses && g.data.statuses[poolId]);
+  return grpSt || (SC.globalStatuses||{})[poolId] || "coming-soon";
+}
+// Golf pools score low-to-high regardless of the library's scoringDirection flag.
+function poolIsGolf(pool){ return !!(pool && (pool.sport==="Golf" || pool.id==="usopen" || pool.id==="pgatour" || pool.id==="masters")); }
+
 // Returns a compact countdown string from now to a future timestamp, or elapsed since a past one
 
 // ── COUNTDOWN TICKER ─────────────────────────────────────────────────────────
@@ -2152,6 +2164,14 @@ function renderProfile() {
       var _btnStyle = "flex:0 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:3px;border-radius:7px;padding:5px 10px;font-size:8px;font-weight:800;cursor:pointer;font-family:inherit;border:1.5px solid var(--border2);box-shadow:1px 1px 0 var(--border2);white-space:nowrap";
       gh += '<button class="gcard-share-btn" data-gid="'+x(g.id)+'" data-gname="'+x(g.name)+'" data-standings="'+shareStandingsData+'" style="'+_btnStyle+';background:var(--cream);color:var(--muted)">📤 Share</button>';
       if(_showInvite) gh += '<button class="gcard-invite-btn" data-gid="'+x(g.id)+'" style="'+_btnStyle+';background:var(--green-bg);color:var(--green)">🔗 Invite</button>';
+      // Admin: manually finalize this group's active pool — writes the podium to
+      // groups/{id}/data/{poolId}/results and flips the group's status to complete,
+      // which is what actually mints the trophy. Use it for recurring pools whose
+      // global status never goes to "complete".
+      if(_gcIsAdmin && activePool && standings.length > 0 && _inviteStatus !== "coming-soon"){
+        gh += '<button class="gcard-final-btn" data-gid="'+x(g.id)+'" data-pid="'+x(activePool.id)+'" data-gname="'+x(g.name)+'" '+
+              'style="'+_btnStyle+';background:#dbeafe;color:#2563eb">🏁 Finalize</button>';
+      }
       gh += '</div>';
 
       gh += '</div>'; // end gcard
@@ -2204,6 +2224,68 @@ function renderProfile() {
             icon:_icon, poolId:pid});
           var container2 = document.getElementById("profile-groups");
           if(container2) renderGroupCards(_allGroupsCache||[], container2);
+        });
+      });
+    });
+
+    // ── Admin: manual Finalize (mints the trophy) ──────────────────────────
+    container.querySelectorAll(".gcard-final-btn").forEach(function(btn){
+      btn.addEventListener("click", function(e){
+        e.stopPropagation();
+        var gid = this.getAttribute("data-gid");
+        var pid = this.getAttribute("data-pid");
+        var gname = this.getAttribute("data-gname") || "";
+        if(!DB||!gid||!pid) return;
+        var grp = null;
+        (_allGroupsCache||[]).forEach(function(gg){ if(gg && gg.id===gid) grp = gg; });
+        if(!grp){ toast("Group not loaded","err"); return; }
+
+        // Podium comes from calcStandings — the exact same numbers shown on the card,
+        // so the trophy can never disagree with the leaderboard.
+        var final = calcStandings(grp, grp.data||{});
+        if(!final.length){ toast("No standings to finalize","err"); return; }
+        var _pool = poolById(pid);
+        var _nm = (_pool && (_pool.shortName||_pool.name)) || pid;
+        if(!confirm("Finalize "+_nm+" for \""+gname+"\"?\n\n🥇 "+(final[0]?final[0].name:"—")+
+                    "\n🥈 "+(final[1]?final[1].name:"—")+
+                    "\n🥉 "+(final[2]?final[2].name:"—")+
+                    "\n\nThis mints trophies for everyone in the group.")) return;
+
+        var results = {
+          first:  final[0] ? final[0].name : null,
+          second: final[1] ? final[1].name : null,
+          third:  final[2] ? final[2].name : null,
+          tournamentName: gname || _nm,   // recurring pools: the group IS the tournament
+          finalizedAt: Date.now()
+        };
+        Object.keys(results).forEach(function(k){ if(results[k]===null) delete results[k]; });
+
+        DB.ref("groups/"+gid+"/data/"+pid+"/results").set(results, function(err){
+          if(err){ toast("Finalize failed","err"); return; }
+          DB.ref("groups/"+gid+"/data/statuses/"+pid).set("complete", function(){
+            // Mirror the status-switcher behaviour: auto-cycle back to Soon in 3 days
+            var _at = Date.now() + 3*24*60*60*1000;
+            DB.ref("groups/"+gid+"/data/statusSchedule/"+pid).set({status:"coming-soon", at:_at});
+            DB.ref("groups/"+gid+"/data/statusResetAt/"+pid).set(_at);
+
+            // Keep the local cache in step so the re-render shows it immediately
+            if(!grp.data) grp.data = {};
+            if(!grp.data.statuses) grp.data.statuses = {};
+            grp.data.statuses[pid] = "complete";
+            if(!grp.data[pid]) grp.data[pid] = {};
+            grp.data[pid].results = results;
+
+            writeActivityEvent(gid, {
+              type:"pool_finalized", actor:results.first||"",
+              text:"<strong>"+x(results.first||"—")+"</strong> won "+x(gname||_nm),
+              icon:"🏆", poolId:pid, poolName:_nm
+            });
+            toast("Finalized ✓ trophies awarded","ok");
+            // Rebuild the trophy case so wins/podiums update without a reload
+            if(typeof renderTrophyCase==="function"){ try{ renderTrophyCase(); }catch(ex){} }
+            var c2 = document.getElementById("profile-groups");
+            if(c2) renderGroupCards(_allGroupsCache||[], c2);
+          });
         });
       });
     });
@@ -2621,7 +2703,7 @@ function computeAndWritePoolResults(groups, ukey) {
 
     var gPools = groupPools(g);
     gPools.forEach(function(pool){
-      var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+      var st = poolStatusFor(g, pool.id);   // per-group override wins over global
       if(st !== "complete") return;
 
       var _dataKey = pool.id;
@@ -2827,7 +2909,7 @@ function buildActivityFeed(groups, callback) {
       var gPools = groupPools(g);
       gPools.forEach(function(pool){
         var result = (SC.globalResults||{})[pool.id];
-        var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+        var st = poolStatusFor(g, pool.id);   // per-group override wins over global
         if(result&&result.first&&st==="complete"){
           var cts = (SC.completedAt||{})[pool.id] || result.ts || null;
           if(!cts) return;
@@ -3431,7 +3513,7 @@ function renderTrophyCase() {
       pools.forEach(function(pool){
         var r = (g.data && g.data[pool.id] && g.data[pool.id].results) || null;
         var sid = pool.id;
-        var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
+        var st = poolStatusFor(g, pool.id);   // per-group override wins over global
         var isFinished = st==="complete";
         var isActive = st==="locked"||st==="open";
         livePoolIds[sid] = true; // always track — needed for trophy display
@@ -3499,7 +3581,10 @@ function renderTrophyCase() {
           var playerTotals2 = poolData2 ? (poolData2.playerTotals||null) : null;
           var poolScores2 = poolData2 ? (poolData2.scores||poolData2.playerscores||null) : null;
           if(playerTotals2 || poolScores2){
-            var lowerBetter = pool.scoringDirection === "lower-better";
+            // Golf totals are lower-better even though the library flags these pools
+            // "higher-better" (calcStandings inverts with 100-total; this path did not,
+            // so it was ranking the worst score first).
+            var lowerBetter = poolIsGolf(pool) || pool.scoringDirection === "lower-better";
 
             function salaryTotal(playerKey){
               // Use pre-computed totals if available
@@ -3596,12 +3681,17 @@ function renderTrophyCase() {
     // Only touches a trophy if ITS SPECIFIC group is still live (not just any group
     // sharing the same pool type) — otherwise a new tournament cycling the same pool
     // type would wrongly wipe out an older, unrelated group's finished result.
+    var _gById = {};
+    groups.forEach(function(g){ if(g && g.id) _gById[g.id] = g; });
     Object.keys(archivedTrophies).forEach(function(archiveKey){
       var t = archivedTrophies[archiveKey];
       var poolId = t.poolId;
       if(!poolId) return;
       var gid = _archiveGroupId(archiveKey, t);
-      var currentStatus = (SC.globalStatuses||{})[poolId]||"coming-soon";
+      // Must use the per-group status. Using the global one meant a recurring pool
+      // (pgatour) left globally "open" would purge every trophy the moment a group
+      // finalized — the trophy would be written and immediately deleted.
+      var currentStatus = poolStatusFor(_gById[gid], poolId);
       // Only purge if explicitly rolled back to open or locked — not coming-soon
       if(gid && liveGroupKeys[poolId+"|"+gid] && (currentStatus === "open" || currentStatus === "locked")){
         DB.ref("users/"+ukey+"/trophies/"+archiveKey).remove();
