@@ -861,6 +861,87 @@ try {
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
 function x(s){ var t=String(s||""); t=t.replace(/&/g,"&amp;"); t=t.replace(/</g,"&lt;"); t=t.replace(/>/g,"&gt;"); t=t.replace(/'/g,"&#39;"); return t; }
+// ── STYLED DIALOGS ────────────────────────────────────────────────────────────
+// Replaces native confirm()/prompt(), which render as OS chrome and look nothing
+// like the rest of the app. Promise-based, so call sites just `await` them.
+// scDialog({title, message, input, placeholder, defaultValue, okLabel, danger})
+//   -> resolves to: false on cancel · true on OK (confirm) · the string (prompt)
+function scDialog(opts){
+  opts = opts || {};
+  return new Promise(function(resolve){
+    var prev = document.getElementById("sc-dialog-overlay");
+    if(prev) prev.remove();
+
+    var isInput = !!opts.input;
+    var okColor = opts.danger ? "var(--red2)" : "var(--gold)";
+    var okText  = opts.danger ? "#ffffff" : "var(--text)";
+
+    var el = document.createElement("div");
+    el.id = "sc-dialog-overlay";
+    el.className = "auth-modal-overlay";
+    el.style.zIndex = "900";   // above every other overlay, incl. share sheets
+
+    var msgHtml = opts.message
+      ? '<div style="font-size:12px;font-weight:700;color:var(--muted);line-height:1.5;text-align:center;margin-bottom:'+(isInput?'14px':'18px')+';white-space:pre-line">'+x(opts.message)+'</div>'
+      : '';
+    var inputHtml = isInput
+      ? '<input class="auth-input" id="sc-dialog-input" type="'+(opts.password?'password':'text')+'" '+
+        'placeholder="'+x(opts.placeholder||"")+'" value="'+x(opts.defaultValue||"")+'" '+
+        'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" '+
+        'style="width:100%;margin-bottom:18px">'
+      : '';
+
+    el.innerHTML =
+      '<div class="auth-modal-box" style="max-width:320px;padding:22px 20px">' +
+        '<div style="font-size:14px;font-weight:900;color:var(--text);text-align:center;margin-bottom:'+((opts.message||isInput)?'12px':'18px')+'">'+x(opts.title||"Confirm")+'</div>' +
+        msgHtml +
+        inputHtml +
+        '<div style="display:flex;gap:10px">' +
+          '<button id="sc-dialog-cancel" style="flex:1;padding:11px 8px;border-radius:10px;border:2px solid var(--border);background:#ffffff;color:var(--text);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:3px 3px 0 var(--border)">Cancel</button>' +
+          '<button id="sc-dialog-ok" style="flex:1;padding:11px 8px;border-radius:10px;border:2px solid var(--border);background:'+okColor+';color:'+okText+';font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;box-shadow:3px 3px 0 var(--border)">'+x(opts.okLabel||"OK")+'</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(el);
+
+    var input = document.getElementById("sc-dialog-input");
+    if(input){ input.focus(); input.select(); }
+
+    var done = false;
+    function finish(val){
+      if(done) return;         // guard against double-fire (Enter + click)
+      done = true;
+      document.removeEventListener("keydown", onKey);
+      el.remove();
+      resolve(val);
+    }
+    function ok(){ finish(isInput ? String(input ? input.value : "") : true); }
+    function cancel(){ finish(false); }
+
+    function onKey(e){
+      if(e.key === "Escape") cancel();
+      else if(e.key === "Enter" && (isInput || document.activeElement !== document.getElementById("sc-dialog-cancel"))) ok();
+    }
+    document.addEventListener("keydown", onKey);
+
+    document.getElementById("sc-dialog-ok").addEventListener("click", ok);
+    document.getElementById("sc-dialog-cancel").addEventListener("click", cancel);
+    el.addEventListener("click", function(e){ if(e.target===el) cancel(); });  // tap outside = cancel
+  });
+}
+// Drop-in async equivalents of the natives.
+// scConfirm -> true/false · scPrompt -> string, or false if cancelled
+function scConfirm(message, opts){
+  opts = opts || {};
+  return scDialog({ title: opts.title || "Confirm", message: message,
+                    okLabel: opts.okLabel || "OK", danger: opts.danger });
+}
+function scPrompt(title, defaultValue, opts){
+  opts = opts || {};
+  return scDialog({ title: title, message: opts.message, input: true,
+                    defaultValue: defaultValue || "", placeholder: opts.placeholder,
+                    password: opts.password, okLabel: opts.okLabel || "OK" });
+}
+
 function toast(msg, type){
   var t=document.getElementById("toast");
   t.innerHTML=msg;
@@ -1346,8 +1427,8 @@ function render(h) {
   if(topbarLogin) topbarLogin.addEventListener("click", function(){ showAuthModal("login"); });
 
   var tlogin = document.getElementById("btn-topbar-admin-login");
-  if(tlogin) tlogin.addEventListener("click", function(){
-    var pw = prompt("Master password:");
+  if(tlogin) tlogin.addEventListener("click", async function(){
+    var pw = await scPrompt("Master password", "", {password:true});
     if(!pw) return;
     if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
     else toast("Wrong password","err");
@@ -1513,8 +1594,8 @@ function showProfileModal() {
     });
   });
 
-  document.getElementById("pm-signout").addEventListener("click", function(){
-    if(!confirm("Sign out of Scorecery?")) return;
+  document.getElementById("pm-signout").addEventListener("click", async function(){
+    if(!await scConfirm("Sign out of Scorecery?", {title:"Sign Out", okLabel:"Sign Out"})) return;
     clearSession();
     SC.currentUser = null;
     SC.group = null; SC.isAdmin = false; SC.isMaster = false; SC.groupAdmin = false;
@@ -1650,8 +1731,8 @@ function renderAuth() {
   document.getElementById("root").innerHTML = h;
 
   var tlogin = document.getElementById("btn-topbar-admin-login");
-  if(tlogin) tlogin.addEventListener("click", function(){
-    var pw = prompt("Master password:");
+  if(tlogin) tlogin.addEventListener("click", async function(){
+    var pw = await scPrompt("Master password", "", {password:true});
     if(!pw) return;
     if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
     else toast("Wrong password","err");
@@ -2291,21 +2372,22 @@ function renderProfile() {
           _askName(_preset || tsn.val() || "");
         }, function(){ _askName(_preset || ""); });
 
-        function _askName(guess){
+        async function _askName(guess){
           // If the best guess is just the generic pool name, it tells us nothing —
           // make the admin name the actual event.
           var _generic = !guess || guess===_nm || guess===(_pool&&_pool.name);
-          var tName = prompt(
-            "Tournament name for \""+gname+"\":" + (_generic ? "\n(e.g. Genesis Scottish Open)" : ""),
-            _generic ? "" : guess
+          var tName = await scPrompt(
+            "Tournament name",
+            _generic ? "" : guess,
+            { message: "Group: "+gname, placeholder: _generic ? "e.g. Genesis Scottish Open" : "" }
           );
-          if(tName===null) return;              // cancelled
+          if(tName===false) return;             // cancelled
           tName = String(tName).trim();
           if(!tName) tName = (_pool && _pool.name) || _nm;
           _finalizeWith(tName);
         }
 
-        function _finalizeWith(tName){
+        async function _finalizeWith(tName){
         // Group by competition rank so ties are preserved. first/second/third can only
         // hold one name each, so they'd silently drop a co-2nd — `ranks` is the source
         // of truth and holds everyone.
@@ -2313,10 +2395,12 @@ function renderProfile() {
         final.forEach(function(e){ (byRank[e.rank] = byRank[e.rank] || []).push(e.name); });
         function _lbl(rk){ return (byRank[rk]||[]).join(" & ") || "—"; }
 
-        if(!confirm("Finalize "+tName+"\nGroup: "+gname+"\n\n🥇 "+_lbl(1)+
-                    "\n🥈 "+_lbl(2)+
-                    "\n🥉 "+_lbl(3)+
-                    "\n\nThis mints trophies for everyone in the group.")) return;
+        if(!await scConfirm(
+              "Group: "+gname+"\n\n🥇 "+_lbl(1)+
+              "\n🥈 "+_lbl(2)+
+              "\n🥉 "+_lbl(3)+
+              "\n\nThis mints trophies for everyone in the group.",
+              { title: "Finalize "+tName, okLabel: "Finalize" })) return;
 
         var ranks = {};
         final.forEach(function(e){ ranks[e.name] = e.rank; });
@@ -4875,9 +4959,9 @@ function renderHub() {
   document.getElementById("btn-invite").addEventListener("click", function(){ openInviteModal(); });
 
   var dg = document.getElementById("btn-delete-group");
-  if(dg) dg.addEventListener("click", function(){
+  if(dg) dg.addEventListener("click", async function(){
     if(!SC.isMaster && !SC.groupAdmin){ toast("You don't have permission to delete this group"); return; }
-    if(!confirm("Delete group \""+SC.group.name+"\"? Cannot be undone.")) return;
+    if(!await scConfirm("Delete group \""+SC.group.name+"\"? Cannot be undone.", {title:"Delete Group", okLabel:"Delete", danger:true})) return;
     deleteGroup(SC.group.id);
   });
 
@@ -4938,10 +5022,10 @@ function renderHub() {
   });
 
   document.querySelectorAll("[data-master-revoke-admin]").forEach(function(btn){
-    btn.addEventListener("click", function(){
+    btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-master-revoke-admin");
       if(player === SC.group.createdBy){ toast("Can't revoke the group creator"); return; }
-      if(!confirm("Revoke admin access for " + player + "?")) return;
+      if(!await scConfirm("Revoke admin access for " + player + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
       var adminUsers = (SC.group.adminUsers || []).filter(function(u){ return u !== player; });
@@ -4972,9 +5056,9 @@ function renderHub() {
   });
 
   document.querySelectorAll("[data-revoke-admin]").forEach(function(btn){
-    btn.addEventListener("click", function(){
+    btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-revoke-admin");
-      if(!confirm("Revoke admin access for " + player + "?")) return;
+      if(!await scConfirm("Revoke admin access for " + player + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
       var adminUsers = (SC.group.adminUsers || []).filter(function(u){ return u !== player; });
@@ -4989,9 +5073,9 @@ function renderHub() {
 
   // Remove player buttons
   document.querySelectorAll("[data-remove-player]").forEach(function(btn){
-    btn.addEventListener("click", function(){
+    btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-remove-player");
-      if(!confirm("Remove " + player + " from this group?")) return;
+      if(!await scConfirm("Remove " + player + " from this group?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
       DB.ref("groups/" + gid).once("value", function(sn){
@@ -5575,10 +5659,10 @@ function renderAdmin() {
     container.innerHTML = html;
     var delBtns = container.querySelectorAll("[data-admin-del-group]");
     for(var di=0; di<delBtns.length; di++){
-      delBtns[di].addEventListener("click", function(){
+      delBtns[di].addEventListener("click", async function(){
         var gid = this.getAttribute("data-admin-del-group");
         var gname = this.getAttribute("data-admin-del-name");
-        if(!confirm('Delete group "'+gname+'"? This cannot be undone.')) return;
+        if(!await scConfirm('Delete group "'+gname+'"? This cannot be undone.', {title:"Delete Group", okLabel:"Delete", danger:true})) return;
         adminDeleteGroup(gid, this);
       });
     }
@@ -5603,10 +5687,10 @@ function renderAdmin() {
     html += '</div>';
     container.innerHTML = html;
     container.querySelectorAll("[data-admin-del-pool-player]").forEach(function(btn){
-      btn.addEventListener("click", function(){
+      btn.addEventListener("click", async function(){
         var uk = this.getAttribute("data-admin-del-pool-player");
         var pname = this.getAttribute("data-admin-del-pool-name");
-        if(!confirm('Remove "'+pname+'" from the World Cup Game Picks pool? Their picks will be deleted.')) return;
+        if(!await scConfirm('Remove "'+pname+'" from the World Cup Game Picks pool? Their picks will be deleted.', {title:"Remove Player", okLabel:"Remove", danger:true})) return;
         var b = this;
         b.textContent="Removing..."; b.style.pointerEvents="none";
         var updates = {};
@@ -5693,11 +5777,11 @@ function renderGroupAdminMembers(group, container) {
   });
 
   container.querySelectorAll("[data-ga-revoke]").forEach(function(btn){
-    btn.addEventListener("click", function(){
+    btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-ga-revoke");
       var gid = this.getAttribute("data-ga-gid");
       if(player===group.createdBy){ toast("Can't revoke the group creator"); return; }
-      if(!confirm("Revoke admin for "+player+" in "+group.name+"?")) return;
+      if(!await scConfirm("Revoke admin for "+player+" in "+group.name+"?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) return;
       DB.ref("groups/"+gid+"/adminUsers").once("value", function(sn){
         var adminUsers = (sn.val()||[]).filter(function(u){ return u!==player; });
@@ -5712,11 +5796,11 @@ function renderGroupAdminMembers(group, container) {
   });
 
   container.querySelectorAll("[data-ga-remove]").forEach(function(btn){
-    btn.addEventListener("click", function(){
+    btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-ga-remove");
       var gid = this.getAttribute("data-ga-gid");
       if(player===group.createdBy){ toast("Can't remove the group creator"); return; }
-      if(!confirm("Remove "+player+" from "+group.name+"?")) return;
+      if(!await scConfirm("Remove "+player+" from "+group.name+"?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
       if(!DB) return;
       DB.ref("groups/"+gid).once("value", function(sn){
         var g = sn.val()||{};
@@ -5792,9 +5876,9 @@ function loadAdminGuests(q) {
       h+='</tbody></table>';
       list.innerHTML=h;
       list.querySelectorAll("[data-del-guest]").forEach(function(btn){
-        btn.addEventListener("click", function(){
+        btn.addEventListener("click", async function(){
           var gname = this.getAttribute("data-del-guest");
-          if(!confirm('Remove guest "'+gname+'" from all groups and delete their picks? This cannot be undone.')) return;
+          if(!await scConfirm('Remove guest "'+gname+'" from all groups and delete their picks? This cannot be undone.', {title:"Remove Guest", okLabel:"Remove", danger:true})) return;
           var groupIds = guestMap[gname].groups.filter(function(g){ return g !== "root"; });
           var hasRoot = guestMap[gname].groups.indexOf("root") >= 0;
           deleteGuest(gname, groupIds, hasRoot);
@@ -5949,9 +6033,9 @@ function loadAdminUsers(q) {
     h+='</tbody></table>';
     list.innerHTML=h;
     list.querySelectorAll("[data-del-user]").forEach(function(btn){
-      btn.addEventListener("click", function(){
+      btn.addEventListener("click", async function(){
         var uname = this.getAttribute("data-del-user");
-        if(!confirm("Permanently delete user \""+uname+"\"? This cannot be undone.")) return;
+        if(!await scConfirm("Permanently delete user \""+uname+"\"? This cannot be undone.", {title:"Delete User", okLabel:"Delete", danger:true})) return;
         deleteUser(uname);
       });
     });
@@ -5983,13 +6067,13 @@ function loadAdminUsers(q) {
       });
     });
     list.querySelectorAll("[data-confirm-merge]").forEach(function(btn){
-      btn.addEventListener("click", function(){
+      btn.addEventListener("click", async function(){
         var guestName = this.getAttribute("data-confirm-merge");
         var key = this.getAttribute("data-user-key");
         var input = document.getElementById("merge-input-"+key);
         var targetName = input ? input.value.trim() : "";
         if(!targetName){ toast("Enter the registered username"); return; }
-        if(!confirm("Merge \""+guestName+"\" into \""+targetName+"\"?\nGuest groups will be added to "+targetName+". Guest account deleted. This cannot be undone.")) return;
+        if(!await scConfirm("Guest groups will be added to "+targetName+". Guest account deleted.\n\nThis cannot be undone.", {title:"Merge \""+guestName+"\" into \""+targetName+"\"?", okLabel:"Merge", danger:true})) return;
         mergeGuestIntoUser(guestName, key, targetName);
       });
     });
@@ -6094,10 +6178,10 @@ function loadUserHistory(username, key) {
       });
     });
     area.querySelectorAll("[data-hist-del]").forEach(function(btn){
-      btn.addEventListener("click", function(){
+      btn.addEventListener("click", async function(){
         var tk = this.getAttribute("data-hist-del");
         var ukey2 = this.getAttribute("data-user-key");
-        if(!confirm("Delete this pool history entry? This cannot be undone.")) return;
+        if(!await scConfirm("Delete this pool history entry? This cannot be undone.", {title:"Delete Entry", okLabel:"Delete", danger:true})) return;
         DB.ref("users/"+ukey2+"/trophies/"+tk).remove(function(err){
           if(err){ toast("Delete failed"); return; }
           toast("Entry removed ✓");
