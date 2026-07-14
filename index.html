@@ -6289,6 +6289,12 @@ function calcStandings(g, data) {
   pools.forEach(function(pool){
     var s = (data[pool.id]||{}).scores||{};
     fingerprint += "|" + pool.id + ":" + JSON.stringify(s);
+    // hrderby is scored from picks+results, not /scores — they must be in the fingerprint
+    // or the cache would never invalidate when the admin enters a result.
+    if(pool.id==="hrderby"){
+      var _hd = data[pool.id]||{};
+      fingerprint += "|hd:" + JSON.stringify(_hd.results||{}) + JSON.stringify(_hd.picks||{});
+    }
   });
   var cacheKey = (g.id||"") + "_" + fingerprint;
   if(_standingsCache[cacheKey]) return _standingsCache[cacheKey];
@@ -6379,6 +6385,41 @@ function calcStandings(g, data) {
         });
         golfScores[pool.id][p]={score:total,cut:false};
         scores[p]+=(100-total);
+      });
+      return;
+    }
+    // hrderby: compute totals from picks + results directly (same pattern as usopen/pgatour)
+    // so the hub doesn't depend on hrderby.html having synced a /scores node.
+    // Scoring: 2 pts per correct R1 advancer (4), 4 per correct finalist (2), 8 for champion.
+    if(pool.id==="hrderby"){
+      var _hdData=data[_poolDataKey]||{};
+      var _hdPicks=_hdData.picks||{};
+      var _hdRes=_hdData.results||{};
+      var _hdAdv=_hdRes.advance||[], _hdFin=_hdRes.finalists||[], _hdChamp=_hdRes.champion||null;
+      // No results entered yet -> fall through to globalSettings/results below
+      if(!((_hdAdv.length||_hdFin.length||_hdChamp))){
+        var _hdSynced=_hdData.scores||_hdData.playerTotals||_hdData.playerscores||null;
+        if(!_hdSynced) return;
+      }
+      // hrderby.html's ukey() strips accents + periods, index's doesn't — try each variant
+      function _hdPick(name){
+        var s=String(name||""), i;
+        var cands=[
+          s.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,""),
+          s.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\./g,""),
+          s.toLowerCase().replace(/[^a-z0-9_]/g,"")
+        ];
+        for(i=0;i<cands.length;i++){ if(_hdPicks[cands[i]]) return _hdPicks[cands[i]]; }
+        return null;
+      }
+      players.forEach(function(p){
+        var pk=_hdPick(p);
+        if(!pk) return;
+        var pts=0;
+        (pk.advance||[]).forEach(function(n){ if(_hdAdv.indexOf(n)>=0) pts+=2; });
+        (pk.finalists||[]).forEach(function(n){ if(_hdFin.indexOf(n)>=0) pts+=4; });
+        if(pk.champion && _hdChamp && pk.champion===_hdChamp) pts+=8;
+        scores[p]+=pts;
       });
       return;
     }

@@ -313,6 +313,41 @@ function scoreFor(user){
 }
 function maxPossible(){ return 4*PTS_ADVANCE + 2*PTS_FINALIST + PTS_CHAMP; } // 24
 
+// ── Sync totals to the hub ───────────────────────────────
+// index.html's calcStandings() reads groups/{id}/data/{poolId}/scores.
+// Without this node the HR Derby contributes 0 pts to the hub standings.
+// Written under every ukey variant the hub uses, so name normalization can't miss.
+var _lastSync=null;
+function hubKeys(name){
+  var s=String(name||"");
+  var out=[], seen={};
+  [ s.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,""), // index.html ukey()
+    s.toLowerCase().replace(/[^a-z0-9_]/g,""),               // index.html stats/badge key
+    ukey(s)                                                  // this page's ukey()
+  ].forEach(function(k){ if(k&&!seen[k]){seen[k]=1;out.push(k);} });
+  return out;
+}
+function syncScores(){
+  if(!DB) return;
+  var r=ST.results||{};
+  var hasResults=((r.advance||[]).length||(r.finalists||[]).length||r.champion)?true:false;
+  // No results entered yet — clear the node so the hub falls back to globalSettings/results
+  // instead of seeing a full set of zeroes and treating them as real scores.
+  if(!hasResults){
+    if(_lastSync!=="__none__"){ _lastSync="__none__"; DB.ref(BASE+"/scores").remove(); }
+    return;
+  }
+  var out={};
+  PARTS.forEach(function(p){
+    var pts=scoreFor(p).pts;
+    hubKeys(p).forEach(function(k){ out[k]=pts; });
+  });
+  var sig=JSON.stringify(out);
+  if(sig===_lastSync) return;   // nothing changed, don't hammer the DB
+  _lastSync=sig;
+  DB.ref(BASE+"/scores").set(out);
+}
+
 // ── Firebase load ────────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
@@ -420,6 +455,7 @@ function pickUser(n){ST.user=n;draw();}
 // RENDER
 // =====================================================
 function draw(){
+  syncScores();
   renderTopbar();renderPublicBanner();renderPageBar();
   var app=document.getElementById("app");
   if(!PUBLIC_VIEW && !ST.user){app.innerHTML=userScreen();bindUserScreen();return;}
