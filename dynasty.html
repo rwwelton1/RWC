@@ -446,6 +446,25 @@ a{color:inherit;text-decoration:none}
 .goal-row.met .goal-box{background:var(--green);color:#fff;border-color:var(--border)}
 .goal-txt{flex:1;min-width:0;font-size:10.5px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .goal-detail{font-size:9px;font-weight:900;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+.goal-list.pickable{gap:6px}
+.goal-wrap{display:flex;flex-direction:column;gap:0}
+.goal-row.tappable{cursor:pointer}
+.goal-row.tappable:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--border)}
+.goal-row.open{border-color:var(--gold-dark);border-bottom-left-radius:0;border-bottom-right-radius:0;box-shadow:none}
+.goal-amb{font-size:9px;font-weight:900;color:var(--gold-dark);flex-shrink:0;letter-spacing:.02em}
+.goal-chev{width:16px;text-align:center;font-size:11px;font-weight:900;color:var(--gold-dark);flex-shrink:0}
+.goal-opts{display:flex;gap:5px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:7px;background:var(--gold-bg);
+  border:2px solid var(--gold-dark);border-top:none;border-bottom-left-radius:9px;border-bottom-right-radius:9px}
+.goal-opts::-webkit-scrollbar{display:none}
+.goal-opt{flex:none;position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:7px 10px;
+  border:2px solid var(--border);border-radius:8px;background:#fff;box-shadow:2px 2px 0 var(--border)}
+.goal-opt.on{background:#fff;border-color:var(--gold-dark);box-shadow:2px 2px 0 var(--gold-dark)}
+.goal-opt b{font-size:11px;font-weight:900;color:var(--text);white-space:nowrap}
+.goal-opt span{font-size:8.5px;font-weight:800;color:var(--muted)}
+.goal-opt span.hot{color:var(--red2)}
+.goal-opt.barred{opacity:.38;border-style:dashed}
+.goal-opt-on{position:absolute;top:-6px;right:-6px;width:15px;height:15px;background:var(--gold-dark);color:#fff;
+  border-radius:50%;font-size:9px;font-weight:900;line-height:15px;text-align:center}
 .exp-secfill{display:block;height:100%;border-radius:4px;transition:width .3s}
 /* job offers */
 .job-offer{display:flex;align-items:center;gap:10px;background:#fff;border:2px solid var(--border);border-radius:11px;padding:10px 12px;box-shadow:3px 3px 0 var(--border);margin-bottom:8px}
@@ -1775,6 +1794,7 @@ var ST={
   feedMode:"all",  // live game tab: "all" (full log) | "scoring" | "stats"
   simSpeed:"normal", // sim speed: fast | normal | slow
   swapPick:null,   // roster depth chart: id of the player picked for a tap-to-swap
+  goalPick:null,   // preseason goal picker: which slot's options are expanded ("wins"|"post"|"prog")
   statScope:"season", // player stat detail: "season" or "career"
   tacticsOpen:false,  // live game: is the tactics picker expanded?
   G:null           // live game state (resumable); not persisted — a reload restarts the week
@@ -3693,16 +3713,20 @@ function pledge(){
 // Crucially it discounts the AMBITION PREMIUM, not your base budget — so a liar still gets funded
 // like the coach he actually is, he just can't sell the moon twice.
 function boardTrust(){
-  var t=ST.save && ST.save.boardTrust;
+  // Board trust and job security are ONE standing with the board — the same bar. We keep it in
+  // jobSecurity (which every result already moves: wins, titles, portal losses, the season verdict)
+  // and read it here so the "trust" that gates NIL ambition is exactly your security on the seat.
+  var s=ST.save;
+  var t=(s && s.jobSecurity!=null) ? s.jobSecurity : (s && s.boardTrust);
   return (t==null) ? 55 : Math.max(0, Math.min(100, t));
 }
 function trustBand(){
   var t=boardTrust();
-  if(t>=80) return {t:"Total faith",  c:"#1a7f37", d:"They'll bankroll anything you say."};
-  if(t>=60) return {t:"Trusted",      c:"var(--gold-dark)", d:"Your word carries weight."};
-  if(t>=40) return {t:"Wary",         c:"var(--gold-dark)", d:"They've been burned before."};
-  if(t>=20) return {t:"Sceptical",    c:"#e8944a", d:"They've heard this from you already."};
-  return {t:"They don't believe you", c:"var(--red2)", d:"Promise what you like — the money isn't coming."};
+  if(t>=80) return {t:"Total faith",  s:"SECURE",   c:"#1a7f37", d:"They'll bankroll anything you say. Your seat is rock-solid."};
+  if(t>=60) return {t:"Trusted",      s:"TRUSTED",  c:"var(--gold-dark)", d:"Your word carries weight and your job is safe."};
+  if(t>=40) return {t:"Wary",         s:"WARM SEAT",c:"var(--gold-dark)", d:"They've been burned before — the seat's getting warm."};
+  if(t>=20) return {t:"Sceptical",    s:"HOT SEAT", c:"#e8944a", d:"They've heard this from you already. Hot seat."};
+  return {t:"They don't believe you", s:"HOT SEAT", c:"var(--red2)", d:"The money isn't coming and the seat is on fire."};
 }
 // How much of the ambition premium the board is actually willing to fund.
 function trustFactor(){ return 0.25 + (boardTrust()/100)*1.15; }   // 0.25x at zero, 1.4x at full faith
@@ -3807,22 +3831,18 @@ function settlePledge(){
     }
     delta+=miss;
   });
+  var was=Math.round(Math.max(0,Math.min(100,(s.jobSecurity!=null?s.jobSecurity:50)-delta))); // standing before this verdict
   s.jobSecurity=Math.max(0, Math.min(100,(s.jobSecurity||50)+delta));
   if(xp>0) awardCoachXP(xp, "delivered on the board's goals");
-  // ── Your credibility with the board ──
-  // Delivering on a BOLD promise is what earns real faith. Missing a bold one is what destroys it —
-  // and a coach who promises little and delivers it barely moves the needle either way.
+  // ── Your standing with the board ──
+  // Board trust and job security are the same bar now, so the goal-stakes delta above IS the
+  // change in how much they believe you. Delivering a bold promise moved it up; whiffing on one
+  // moved it down. We just record the swing for the recap and the NIL-ambition gate.
   var amb=pl.amb, share=(gs.length?hit/gs.length:0);
-  var tDelta;
-  if(share>=1)      tDelta = 6 + Math.round(amb*1.4);      // said it, did it
-  else if(share>=0.67) tDelta = 2 + Math.round(amb*0.3);
-  else if(share>=0.34) tDelta = -4 - Math.round(amb*0.8);
-  else                 tDelta = -10 - Math.round(amb*1.6); // sold them a dream and delivered nothing
-  var was=boardTrust();
-  s.boardTrust=Math.max(0, Math.min(100, was + tDelta));
-  s._pledgeTrust={was:was, now:s.boardTrust, d:tDelta};
-  if(tDelta<=-10) toast("🧊 The board has heard it before. Trust "+was+" → "+s.boardTrust+".");
-  else if(tDelta>=10) toast("🤝 You said it and you did it. Board trust "+was+" → "+s.boardTrust+".");
+  var tDelta=delta;
+  s._pledgeTrust={was:was, now:s.jobSecurity, d:tDelta};
+  if(share<0.34 && delta<=-10) toast("🧊 The board has heard it before. Standing "+was+" → "+s.jobSecurity+".");
+  else if(share>=1 && delta>=8) toast("🤝 You said it and you did it. Board standing "+was+" → "+s.jobSecurity+".");
   var pts=[];
   gs.forEach(function(g,i){
     var st=goalStakes(ambs[i]||0);
@@ -6550,7 +6570,7 @@ function spent(){ var s=0; ST.recruitClass.forEach(function(r){ if(ST.signed[r.i
 // row of its own. Opens at the start of each season, then remembers your choice.
 function expectBanner(){
   var s=ST.save;
-  var sec=securityLabel(s.jobSecurity);
+  var sec=trustBand();
   var gs=resolvedGoals();
   var nMet=0; gs.forEach(function(g){ if(g.met)nMet++; });
   var open = !s._goalsCollapsed;
@@ -6569,54 +6589,27 @@ function expectBanner(){
   h+='<span class="exp-right">'+
      '<span class="exp-nil">'+fmtMoney(locked ? (s.nilLeft||0) : (s.nilTotal||nilBudgetFor()))+'</span>'+
      '<span class="exp-secbar"><span class="exp-secfill" style="width:'+Math.max(4,Math.min(100,s.jobSecurity))+'%;background:'+sec.c+'"></span></span>'+
-     '<span class="exp-sub" style="color:'+sec.c+'">'+sec.t+' &middot; NIL '+(locked?'left':'')+'</span></span>';
+     '<span class="exp-sub" style="color:'+sec.c+'">'+sec.s+' &middot; NIL '+(locked?'left':'')+'</span></span>';
   h+='<span class="exp-toggle"><span class="exp-cnt">'+nMet+'/'+gs.length+'</span>'+
      '<span class="exp-chev">'+(open?"▾":"▸")+'</span></span>';
   h+='</button>';
 
   if(open){
-    // Preseason: the expectation is a CHOICE. Pick it here, and everything below re-reads.
+    // Preseason: the expectation is a CHOICE. The checklist below IS the picker — tap a goal to
+    // change it. Pick it here, and everything (NIL budget, board standing) re-reads.
     if(!locked){
-      // THREE SLOTS you swap independently. Ambition on any one of them buys money — and only
-      // that goal's stake is at risk if you miss it.
-      var pl=pledge();
-      var SLOTS=[
-        {k:"wins", t:"Wins",        opts:winsSlot(), cur:pl.w},
-        {k:"post", t:"Postseason",  opts:postSlot(), cur:pl.p},
-        {k:"prog", t:"Recruiting",  opts:progSlot(), cur:pl.g}
-      ];
-      h+='<div class="pledge-pick">';
-      SLOTS.forEach(function(sl){
-        h+='<div class="slot">';
-        h+='<div class="slot-h"><span>'+sl.t+'</span>'+
-           '<span class="slot-amb">'+(sl.cur.amb ? '★'.repeat(Math.min(5,sl.cur.amb)) : 'no promise')+'</span></div>';
-        h+='<div class="slot-opts">';
-        var others=pl.amb - sl.cur.amb;
-        sl.opts.forEach(function(o,i){
-          var on=(o.t===sl.cur.t);
-          var stk=goalStakes(o.amb);
-          var barred=(others + o.amb) > maxAmbAllowed();   // your word isn't worth this much
-          h+='<button class="slot-opt'+(on?" on":"")+(barred?" barred":"")+'" data-goal="'+sl.k+':'+i+'">'+
-             '<b>'+x(o.t)+'</b>'+
-             '<span class="'+(o.amb>=4?'hot':'')+'">'+(barred?"won\u2019t hear it":('+'+stk.win+' / '+stk.miss))+'</span>'+
-             '</button>';
-        });
-        h+='</div></div>';
-      });
-      h+='</div>';
       var tb=trustBand(), tf=trustFactor();
+      h+=goalChecklist(true);
       h+='<div class="trust-row">'+
-           '<span class="trust-l">Board trust'+
-             '<span class="trust-bar"><span class="trust-fill" style="width:'+Math.max(3,boardTrust())+'%;background:'+tb.c+'"></span></span>'+
-           '</span>'+
+           '<span class="trust-l">Board standing</span>'+
            '<span class="trust-r" style="color:'+tb.c+'"><b>'+x(tb.t)+'</b><span>'+x(tb.d)+'</span></span>'+
          '</div>';
-      h+='<div class="pledge-foot">Each goal is judged on its own \u2014 <b>hit two of three and you\u2019re rewarded for two of three</b>.<br>'+
+      h+='<div class="pledge-foot">Tap a goal to change it. Each is judged on its own \u2014 <b>hit two of three and you\u2019re rewarded for two of three</b>.<br>'+
          'Ambition buys NIL, but only as far as they believe you'+
          (tf<0.95 ? ' \u2014 they\u2019re funding <b>'+Math.round(tf*100)+'%</b> of what you\u2019re asking for' : '')+
          '. <b>'+x(pledgeLabel())+'</b> \u2192 '+fmtMoney(nilBudgetFor())+'.</div>';
     }
-    h+=goalChecklist(false);
+    if(locked) h+=goalChecklist(false);
     if(locked){
       // The promise is live all season, and so is what it's doing to your standing.
       var tb3=trustBand();
@@ -6626,9 +6619,7 @@ function expectBanner(){
       var swing=0;
       gsx.forEach(function(g,i){ var st=goalStakes(ambs[i]||0); swing += g.met ? st.win : st.miss; });
       h+='<div class="trust-row">'+
-         '<span class="trust-l">Board trust'+
-           '<span class="trust-bar"><span class="trust-fill" style="width:'+Math.max(3,boardTrust())+'%;background:'+tb3.c+'"></span></span>'+
-         '</span>'+
+         '<span class="trust-l">Board standing</span>'+
          '<span class="trust-r" style="color:'+tb3.c+'"><b>'+x(tb3.t)+'</b>'+
            '<span>If the season ended now: <b style="color:'+(swing>=0?'#1a7f37':'var(--red2)')+'">'+
              (swing>=0?'+':'')+swing+' security</b></span></span></div>';
@@ -6641,15 +6632,48 @@ function expectBanner(){
 }
 // Just the three goal rows, with a live tick as you meet them. The expectation card owns the
 // collapsing; the season recap renders this bare, since the verdict should always be read.
-function goalChecklist(){
+// The checklist is now the goal PICKER too. When picking is allowed (preseason, pledge not yet
+// locked) each row is tappable: tap it to expand that slot's options inline, tap an option to set
+// it. Locked in-season, it's the same clean read-only checklist it always was.
+function goalChecklist(canPick){
   var gs=resolvedGoals();
-  var h='<div class="goal-list">';
+  var GOAL_SLOT={wins:"wins", post:"post", build:"prog"};   // checklist key → setGoal slot
+  var pl = canPick ? pledge() : null;
+  var SLOTDATA = canPick ? {
+    wins:{opts:winsSlot(), cur:pl.w},
+    post:{opts:postSlot(), cur:pl.p},
+    prog:{opts:progSlot(), cur:pl.g}
+  } : null;
+  var h='<div class="goal-list'+(canPick?" pickable":"")+'">';
   gs.forEach(function(g){
-    h+='<div class="goal-row'+(g.met?" met":"")+(g.dead&&!g.met?" dead":"")+'">'+
+    var slot = canPick ? GOAL_SLOT[g.key] : null;
+    var expanded = (canPick && ST.goalPick===slot);
+    var cur = slot ? SLOTDATA[slot].cur : null;
+    h+='<div class="goal-wrap">';
+    h+='<div class="goal-row'+(g.met?" met":"")+(g.dead&&!g.met?" dead":"")+(canPick?" tappable":"")+(expanded?" open":"")+'"'+
+       (canPick?' data-goalpick="'+slot+'"':'')+'>'+
        '<span class="goal-box">'+(g.met?"✓":(g.dead?"✕":""))+'</span>'+
        '<span class="goal-txt">'+x(g.label)+'</span>'+
-       (g.detail?'<span class="goal-detail">'+x(g.detail)+'</span>':'')+
+       (canPick
+          ? '<span class="goal-amb">'+(cur.amb?'★'.repeat(Math.min(5,cur.amb)):'none')+'</span><span class="goal-chev">'+(expanded?"▾":"✎")+'</span>'
+          : (g.detail?'<span class="goal-detail">'+x(g.detail)+'</span>':''))+
        '</div>';
+    if(expanded){
+      var others=pl.amb - cur.amb;
+      h+='<div class="goal-opts">';
+      SLOTDATA[slot].opts.forEach(function(o,i){
+        var on=(o.t===cur.t);
+        var stk=goalStakes(o.amb);
+        var barred=(others + o.amb) > maxAmbAllowed();
+        h+='<button class="goal-opt'+(on?" on":"")+(barred?" barred":"")+'" data-goal="'+slot+':'+i+'">'+
+           '<b>'+x(o.t)+'</b>'+
+           '<span class="'+(o.amb>=4?'hot':'')+'">'+(barred?"won\u2019t hear it":('+'+stk.win+' / '+stk.miss))+'</span>'+
+           (on?'<span class="goal-opt-on">✓</span>':'')+
+           '</button>';
+      });
+      h+='</div>';
+    }
+    h+='</div>';
   });
   h+='</div>';
   return h;
@@ -8420,7 +8444,7 @@ function pledgeVerdictCard(){
   if(tr){
     var tb2=trustBand();
     h+='<div class="trust-row" style="border-top:1.5px solid var(--border2);margin-top:8px">'+
-       '<span class="trust-l">Board trust'+
+       '<span class="trust-l">Board standing'+
          '<span class="trust-bar"><span class="trust-fill" style="width:'+Math.max(3,tr.now)+'%;background:'+tb2.c+'"></span></span>'+
        '</span>'+
        '<span class="trust-r" style="color:'+(tr.d>=0?'#1a7f37':'var(--red2)')+'">'+
@@ -8705,9 +8729,19 @@ function bind(){
   if(_po)_po.onclick=_pc;
   if(_ps)_ps.onclick=_pc;
   var fa=document.getElementById("fund-all"); if(fa)fa.onclick=fundAll;
+  document.querySelectorAll("[data-goalpick]").forEach(function(b){
+    b.onclick=function(e){
+      e.stopPropagation();
+      var slot=b.getAttribute("data-goalpick");
+      ST.goalPick = (ST.goalPick===slot) ? null : slot;   // toggle this row's options
+      draw();
+    };
+  });
   document.querySelectorAll("[data-goal]").forEach(function(b){
-    b.onclick=function(){
+    b.onclick=function(e){
+      e.stopPropagation();
       var p=b.getAttribute("data-goal").split(":");
+      ST.goalPick=null;                    // collapse the picker after choosing
       setGoal(p[0], parseInt(p[1],10));
     };
   });
@@ -9208,6 +9242,7 @@ function kickoffSeason(){
   var s=ST.save;
   // Your word is now on the record. The board will hold you to it in December.
   s._pledgeLocked=true;
+  ST.goalPick=null;   // no dangling picker once the promise is locked
   s._recruited=true;
 
   // ── TWO SEPARATE POOLS ─────────────────────────────────
@@ -10359,6 +10394,10 @@ function startNextSeason(){
   s.expectWins=expectWinsFor(s.prestige, s.conf);
   s._goals=null; s._goalsMet=0;   // last year's verdict doesn't carry over
   s._goalsCollapsed=false;        // new season, new goals — show them again
+  s._pledgeLocked=false;          // a fresh promise each year — the board wants new terms
+  s._pledgeSettled=false;         // this season's pledge hasn't been judged yet
+  s._pledgeResult=null; s._pledgeTrust=null;
+  ST.goalPick=null;               // no stale picker carried in
   s.schedule=genSchedule({n:s.school,c:s.conf,p:s.prestige});
   s.budget=budgetFor(s.prestige,s.role);
   if(s.league && s.league.teams){
@@ -10519,7 +10558,6 @@ function takeJob(offer){
              "history","coachXP","archetype","coachAwards",
              "awards","draftHistory","recordBook","rivalRec",   // the whole Trophy Room
              "staff",                                           // his assistants come WITH him
-             "boardTrust",                                      // a reputation for over-promising follows you
              "rivalryWins","fbsUpsets","facilities","legacyPts","_rsInit"];
   var fresh=newSave({n:offer.n,c:offer.c,p:offer.p}, newRole);
   CARRY.forEach(function(k){ if(s[k]!==undefined) fresh[k]=s[k]; });
