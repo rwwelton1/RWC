@@ -2247,14 +2247,31 @@ function renderProfile() {
         var _pool = poolById(pid);
         var _nm = (_pool && (_pool.shortName||_pool.name)) || pid;
 
-        // The tournament name is NOT the group name. It lives at globalSettings/{poolId}/name
-        // (written by pgatour.html's tournament config — "The Open Championship" etc).
-        // It's global and gets overwritten for the next event, so snapshot it at finalize
-        // time and freeze it into this group's results.
+        // Where the tournament name comes from, in priority order:
+        //   1. groups/{gid}/data/{pid}/tournamentName — per-group, set here. The only
+        //      thing that works when several tournaments run concurrently on one pool id.
+        //   2. globalSettings/{pid}/name — pgatour.html's config. Global, so it only
+        //      describes whichever event was configured last.
+        //   3. the library name ("PGA Tour") — generic, last resort.
+        var _gPool = (grp.data && grp.data[pid]) || {};
+        var _preset = _gPool.tournamentName || null;
         DB.ref("globalSettings/"+pid+"/name").once("value", function(tsn){
-          var tName = tsn.val() || (_pool && _pool.name) || _nm;
+          _askName(_preset || tsn.val() || "");
+        }, function(){ _askName(_preset || ""); });
+
+        function _askName(guess){
+          // If the best guess is just the generic pool name, it tells us nothing —
+          // make the admin name the actual event.
+          var _generic = !guess || guess===_nm || guess===(_pool&&_pool.name);
+          var tName = prompt(
+            "Tournament name for \""+gname+"\":" + (_generic ? "\n(e.g. Genesis Scottish Open)" : ""),
+            _generic ? "" : guess
+          );
+          if(tName===null) return;              // cancelled
+          tName = String(tName).trim();
+          if(!tName) tName = (_pool && _pool.name) || _nm;
           _finalizeWith(tName);
-        }, function(){ _finalizeWith((_pool && _pool.name) || _nm); });
+        }
 
         function _finalizeWith(tName){
         if(!confirm("Finalize "+tName+"\nGroup: "+gname+"\n\n🥇 "+(final[0]?final[0].name:"—")+
@@ -2272,6 +2289,10 @@ function renderProfile() {
         };
         Object.keys(results).forEach(function(k){ if(results[k]===null) delete results[k]; });
 
+        // Persist on the group's pool node too, so it survives the next tournament
+        // overwriting globalSettings and is available before any finalize.
+        DB.ref("groups/"+gid+"/data/"+pid+"/tournamentName").set(tName);
+
         DB.ref("groups/"+gid+"/data/"+pid+"/results").set(results, function(err){
           if(err){ toast("Finalize failed","err"); return; }
           DB.ref("groups/"+gid+"/data/statuses/"+pid).set("complete", function(){
@@ -2286,6 +2307,7 @@ function renderProfile() {
             grp.data.statuses[pid] = "complete";
             if(!grp.data[pid]) grp.data[pid] = {};
             grp.data[pid].results = results;
+            grp.data[pid].tournamentName = tName;
 
             writeActivityEvent(gid, {
               type:"pool_finalized", actor:results.first||"",
@@ -3651,10 +3673,11 @@ function renderTrophyCase() {
             });
           });
         } else if(isFinished){
-          sportMap[sid].groups.push({ name:g.name, tournament:((r&&r.tournamentName)||pool.name), finish:finish, pts:pts, year:new Date().getFullYear() });
+          var _gTour = (g.data && g.data[pool.id] && g.data[pool.id].tournamentName) || null;
+          sportMap[sid].groups.push({ name:g.name, tournament:((r&&r.tournamentName)||_gTour||pool.name), finish:finish, pts:pts, year:new Date().getFullYear() });
           // Permanently write to trophies
           var archiveKey = pool.id + "_" + new Date().getFullYear() + "_" + g.id;
-          var _displayName = (r && r.tournamentName) || pool.name;
+          var _displayName = (r && r.tournamentName) || _gTour || pool.name;
           var snap = { poolId:pool.id, poolName:_displayName, poolIcon:pool.icon,
             poolSport:(pool.sport||pool.name), poolSportIcon:(pool.sportIcon||pool.icon),
             finish:finish, pts:pts, groupName:g.name, groupId:g.id, year:new Date().getFullYear(), ts:Date.now() };
