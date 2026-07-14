@@ -7360,6 +7360,7 @@ function playConfChampGame(){
   ST.weekResult={us:0,them:0,oppName:opp.name,edge:setup.edge,oppDefType:"",off:setup.off,home:game.home,pbp:[],
                  live:true, gameKey:"confchamp", postseason:true, confchamp:true, roundName:s.conf+" Championship"};
   ST.live={elapsed:0,shownCount:0,done:false,timer:null,quarter:1,paused:false};
+  ST.feedMode="stats";   // sims open on the box score by default
   persist();
   ST.screen="live"; draw(); runQuarter();
 }
@@ -8155,6 +8156,7 @@ function playPostGame(){
   ST.weekResult={us:0,them:0,oppName:oppName,edge:setup.edge,oppDefType:"",off:setup.off,home:home,pbp:[],
                  live:true, gameKey:"post", postseason:true, roundName:rName};
   ST.live={elapsed:0,shownCount:0,done:false,timer:null,quarter:1,paused:false};
+  ST.feedMode="stats";   // sims open on the box score by default
   persist();
   ST.screen="live"; draw(); runQuarter();
 }
@@ -9354,6 +9356,17 @@ function liveStatsPanel(revealed){
   if(!revealed || !revealed.length){
     return '<div class="ls-empty">No plays yet — stats appear as the game unfolds.</div>';
   }
+  // Team totals are all cumulative counts, so clamp them to a per-game high-water. Without
+  // this, a rebuilt play-by-play could momentarily drop the last play back over the clock
+  // and the whole box score would tick backward for a frame.
+  var _li=ST.live || {};
+  if(!_li._team){ _li._team={us:{},them:{}}; }
+  ["us","them"].forEach(function(side){
+    var cur=T[side], hi=_li._team[side];
+    Object.keys(cur).forEach(function(k){
+      if(typeof cur[k]==="number"){ if(hi[k]==null || cur[k]>hi[k]) hi[k]=cur[k]; cur[k]=hi[k]; }
+    });
+  });
   function yds(s){ return s.rushYds+s.passYds; }
   function third(s){ return s.thirdAtt ? (s.thirdConv+"/"+s.thirdAtt) : "0/0"; }
   function cmp(s){ return s.att ? (s.comp+"/"+s.att) : "0/0"; }
@@ -9387,6 +9400,25 @@ function liveStatsPanel(revealed){
 
   // your players
   var t=tallyFromPlays(revealed), acc=t.acc, order=t.order;
+  // ── Monotonic, stable box score ──────────────────────────────────
+  // The revealed slice can wobble by a play when the play-by-play is rebuilt (a snap's
+  // clock stamp shifts across the current game clock), which used to make players and
+  // their lines flicker in and out. We keep a per-game high-water cache: a player, once
+  // shown, stays; every counting stat only ever climbs. Display order is locked to the
+  // order players first appeared, so nobody jumps around as yardage changes.
+  var li=ST.live || {};
+  if(!li._box){ li._box={acc:{}, order:[]}; }
+  var box=li._box;
+  order.forEach(function(id){
+    var a=acc[id];
+    if(!box.acc[id]){ box.acc[id]={p:a.p, pa:0,pc:0,py:0,ptd:0,pint:0, rc:0,ry:0,rtd:0, rec:0,recy:0,rectd:0}; box.order.push(id); }
+    var b=box.acc[id];
+    b.p=a.p;
+    ["pa","pc","py","ptd","pint","rc","ry","rtd","rec","recy","rectd"].forEach(function(k){
+      if(a[k]>b[k]) b[k]=a[k];      // never regress a stat mid-game
+    });
+  });
+  acc=box.acc; order=box.order;
   var pass=[], rush=[], recv=[];
   order.forEach(function(id){
     var a=acc[id];
@@ -9394,8 +9426,12 @@ function liveStatsPanel(revealed){
     if(a.rc)  rush.push(a);
     if(a.rec) recv.push(a);
   });
-  rush.sort(function(a,b){return b.ry-a.ry;});
-  recv.sort(function(a,b){return b.recy-a.recy;});
+  // Sort ONCE by production, breaking ties by first-appearance order so the list is
+  // stable tick-to-tick (no swapping when two players share a yardage total).
+  var ord={}; order.forEach(function(id,i){ ord[id]=i; });
+  pass.sort(function(a,b){return b.py-a.py || ord[a.p.id]-ord[b.p.id];});
+  rush.sort(function(a,b){return b.ry-a.ry || ord[a.p.id]-ord[b.p.id];});
+  recv.sort(function(a,b){return b.recy-a.recy || ord[a.p.id]-ord[b.p.id];});
   function section(title, list, fmt){
     if(!list.length) return "";
     var o='<div class="ls-sec">'+title+'</div><div class="ls-tbl">';
@@ -9695,6 +9731,7 @@ function playWeek(){
   ST.weekResult={us:0, them:0, oppName:g.opp, edge:setup.edge, oppDefType:"", off:setup.off,
                  home:g.home, pbp:[], live:true, gameKey:"week"};
   ST.live={elapsed:0, shownCount:0, done:false, timer:null, quarter:1, paused:false};
+  ST.feedMode="stats";   // sims open on the box score by default
   persist();
   ST.screen="live"; draw();
   runQuarter();
