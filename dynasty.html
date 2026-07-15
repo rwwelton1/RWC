@@ -4520,7 +4520,7 @@ function retentionRisk(p, fundOverride){
 //     instead. This is the one place retention should legitimately cost MORE than signing.
 // Division scaling comes free, since transferPrice already handles it.
 function retainPrice(p){
-  var market = transferPrice(p.ovr, p.dev);          // replacement cost, already FCS-scaled
+  var market = transferPrice(p.ovr, p.dev, p.pos);   // replacement cost, position- and market-scaled
   var dem = nilDemand(p), fund = (p.nilFund||0);
   var funded = dem>0 ? clampN(fund/dem, 0, 1) : 1;   // 0 = you've paid him nothing, 1 = fully funded
   var mult = 1.15 - 0.35*funded;                     // 1.15x if starved, 0.80x if fully funded
@@ -9853,12 +9853,28 @@ function genPortalPool(){
   pool.sort(function(a,b){return b.ovr-a.ovr;});
   return pool;
 }
-function transferPrice(ovr, dev){
-  var pay=POS_PAY.LB, tT=Math.max(0,Math.min(1,(ovr-70)/23));
-  var base=(0.10 + 1.7*Math.pow(tT,1.9));          // a depth guy is cheap; a star is not
-  if(dev==="elite"||dev==="pro") base+=0.25;
-  if(myDivision()==="FCS") base*=0.45;             // FCS money is FCS money
-  return Math.max(0.05, money2(base));
+// What a portal player costs to sign.
+//
+// This used to open with `var pay=POS_PAY.LB` and then never use it — dead code that froze
+// every position at linebacker money. POS_PAY says a WR is worth $0.8-2.0M and an LB $0.3-0.7M,
+// so a 91 OVR WR was being priced as if he were the cheapest position on the field, ~2.7x under.
+// It also used a flat `*0.45` for FCS while nilDemand scales by the real market ratio (~0.061),
+// so the two systems disagreed about what money even means.
+//
+// Now it's built on the SAME POS_PAY band and the SAME market scale as nilDemand, so a player's
+// salary demand and his market price are denominated in the same currency and can be compared.
+// `pos` is optional for back-compat with older call sites; it falls back to the LB band.
+function transferPrice(ovr, dev, pos){
+  var pay=POS_PAY[pos]||POS_PAY.LB;
+  var tT=Math.max(0,Math.min(1,(ovr-70)/23));            // 70 → band floor, 93 → band ceiling
+  // Same curve shape as before (a depth guy is cheap, a star is not), but expressed as a
+  // fraction of the position's real pay band rather than an absolute number.
+  var band = pay[0] + (pay[1]-pay[0])*Math.pow(tT,1.9);
+  var base = band*0.55;                                   // a one-year portal deal, not a career
+  if(dev==="elite"||dev==="pro") base*=1.15;
+  var marketScale = nilElitePool()/NIL_BASE[5];           // FBS = 1.0, FCS ≈ 0.061
+  base *= marketScale;
+  return Math.max(0.02, money2(base));
 }
 function makeStarTransfer(c){
   var st=c.st, dev=starDevFrom(st.ovr);
@@ -9866,7 +9882,7 @@ function makeStarTransfer(c){
     id:"tp"+Math.random().toString(36).slice(2,7),
     n:st.n, pos:st.pos, yr:st.yr, ovr:st.ovr,
     arch:rollArch(st.pos), dev:dev, pers:rollPersonality(), pot:rollPotential(st.ovr,dev),
-    price:transferPrice(st.ovr, dev),
+    price:transferPrice(st.ovr, dev, st.pos),
     rival:c.team,
     prod:starProdLine(st),
     wasTarget:!!st.wasTarget, hsStars:st.hsStars||0,
@@ -9880,7 +9896,7 @@ function makeDepthTransfer(c){
     id:"tp"+Math.random().toString(36).slice(2,7),
     n:genName(), pos:c.pos, yr:pick(["SO","JR","SR"]), ovr:c.ovr,
     arch:rollArch(c.pos), dev:dev, pers:rollPersonality(), pot:rollPotential(c.ovr,dev),
-    price:transferPrice(c.ovr, dev),
+    price:transferPrice(c.ovr, dev, c.pos),
     rival:c.team,
     prod:null,                       // a backup has no headline stat line — that's WHY he's leaving
     depth:true,
