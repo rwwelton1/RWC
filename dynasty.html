@@ -3405,7 +3405,7 @@ function offSchemeFit(){
   var tendency=Math.max(0, 1 - Math.abs(sc.lean - idealOffBalance())/55); // does the system suit your talent?
   var archScore=schemeArchMatch(sc);                                      // do your starters fit the system?
   var fit01=archScore*0.6 + tendency*0.4;
-  var cap = hasAbility("off5")?11:((hasArch("offensive")||hasAbility("off2"))?8:5); // Peak Offense > Scheme Guru/Offensive Mind
+  var cap = hasAbility("off5")?7:((hasArch("offensive")||hasAbility("off2"))?5:3); // Peak Offense > Scheme Guru/Offensive Mind
   cap += staffBonus("offFit");   // a top OC raises the ceiling further
   return Math.round(fit01*cap*10)/10;
 }
@@ -3414,7 +3414,7 @@ function defSchemeFit(){
   var tendency=Math.max(0, 1 - Math.abs(sc.lean - idealDefBalance())/55);
   var archScore=schemeArchMatch(sc);
   var fit01=archScore*0.6 + tendency*0.4;
-  var cap = hasAbility("def5")?11:((hasArch("defensive")||hasAbility("def2"))?8:5); // Peak Defense > Disguise/Defensive Mind
+  var cap = hasAbility("def5")?7:((hasArch("defensive")||hasAbility("def2"))?5:3); // Peak Defense > Disguise/Defensive Mind
   cap += staffBonus("defFit");
   return Math.round(fit01*cap*10)/10;
 }
@@ -3477,7 +3477,7 @@ function traitFrac(wants){   // wants: {pos:[archetypes]} → fraction of those 
   });
   return total? matched/total : 0.4;
 }
-var TRAIT_W=3.4;   // a fully-fitted skill group is worth ~+2 on that call; an unfitted one ~-1.4
+var TRAIT_W=2.4;   // a fully-fitted skill group is worth ~+1.4 on that call; an unfitted one ~-1
 function traitEdgeFrom(wants){ return (traitFrac(wants)-0.40)*TRAIT_W; }
 // The four things you can be built to do. OL is deliberately absent here — the run/pass line
 // tilt is already its own system (olBlock → dRun/dPass), so folding it in would double-count.
@@ -3551,16 +3551,58 @@ function identityCost(side, tactics){
 // Nothing here is free — "Air It Out" against a Blitz-Heavy defense is the biggest payoff
 // on the board and also the surest way to throw a pick, because dPass's aggro term doesn't
 // care how clever the read was.
-var OFF_COUNTER={   // your offensive call  →  vs THEIR defensive system
-  run:      {nickel:+2.4, zone:+1.0, base43:-1.8, multiple34:-0.6, blitz:+1.6},
+// BALANCED WEB: every call-row sums to ~0, so no call is a free default — each one beats some
+// formations and loses to others, and the only way to gain is to match your call to the
+// formation across from you. Run attacks light boxes and vacated gaps (Nickel, Blitz-Heavy)
+// and dies on stout fronts (4-3, 3-4). Pass attacks the base fronts and the house, and dies
+// against coverage (Nickel, Bend-Don't-Break). Both beat Blitz-Heavy — a blitz takes nothing
+// away reliably — which is balanced by blitz's own signature upside (pressure, takeaways).
+var OFF_COUNTER={   // your offensive call  →  vs THEIR defensive formation   (rows sum to 0)
+  run:      {nickel:+2.0, zone:-0.8, base43:-1.4, multiple34:-1.4, blitz:+1.6},
   balanced: {},
-  pass:     {nickel:-1.6, zone:-2.2, base43:+0.8, multiple34:+0.2, blitz:+2.2}
+  pass:     {nickel:-1.8, zone:-2.0, base43:+1.2, multiple34:+0.6, blitz:+2.0}
 };
-var DEF_COUNTER={   // your defensive call  →  vs THEIR offensive system
-  blitz:    {airraid:+2.4, westcoast:-0.8, spread:-1.6, prostyle:+0.2, pound:-2.2},
+var DEF_COUNTER={   // your defensive call  →  vs THEIR offensive formation   (rows sum to 0)
+  blitz:    {airraid:+2.4, westcoast:-0.8, spread:-1.0, prostyle:+0.6, pound:-1.2},
   standard: {},
-  prevent:  {airraid:+1.6, westcoast:+0.4, spread:-0.6, prostyle:-1.0, pound:-2.4}
+  prevent:  {airraid:+1.8, westcoast:+1.0, spread:-0.8, prostyle:-0.6, pound:-1.4}
 };
+// ── CPU ADJUSTMENT: the defense keys on your tendencies ──
+// A balanced web still gets solved if the opponent never reacts — you'd read the scouting
+// card once and camp the right counter all game. So the defense ADJUSTS: lean on one call and
+// they start sitting on it, and its edge bleeds away until you make them defend the whole
+// field again. Not a full play-calling AI — just the "they've keyed on your run" adjustment a
+// real coordinator makes. It's what turns the read into a running conversation instead of a
+// lookup: the right answer keeps moving. Committal calls only — you can't key on "balanced".
+var KEY_W=6.0;   // a fully predictable call (same thing 8+ snaps running) bleeds ~2.7 off its edge
+function keyingPenalty(hist, call){
+  if(call!=="run" && call!=="pass" && call!=="blitz" && call!=="prevent") return 0;
+  var recent=hist.slice(-8);
+  if(recent.length<4) return 0;                       // give it a few snaps before they read you
+  var n=0; for(var i=0;i<recent.length;i++) if(recent[i]===call) n++;
+  var freq=n/recent.length;
+  return clampN(freq-0.55, 0, 0.45) * KEY_W;          // mix freely up to ~55%, then it bites
+}
+// True when the unit you coach is currently getting keyed on the tactic you've selected — used
+// to warn you in the live panel so the adjustment is legible, not a silent nerf.
+function beingKeyed(G, side){
+  if(!G||!G.userHist) return false;
+  var s=ST.save; if(!s) return false;
+  if(side==="off"){ if(s.role==="DC") return false; return keyingPenalty(G.userHist.off, (G.tactics||{}).off)>0.6; }
+  if(s.role==="OC") return false; return keyingPenalty(G.userHist.def, (G.tactics||{}).def)>0.6;
+}
+// Keying is applied to the SAME direct channel as the counter (dm), not the divided edge —
+// otherwise it's a rounding error next to the counter it's meant to claw back. A keyed run
+// gets stuffed; a keyed pass gets blanketed. When you spam the correct counter, this grows
+// until it swallows the counter whole; mix, and it stays small.
+function keyingMods(penalty, call, sign){
+  var p=(penalty||0)*(sign||1);
+  if(call==="run")     return {runYds:-p*0.30};
+  if(call==="pass")    return {comp:-p*0.020, sack:+p*0.004};
+  if(call==="blitz")   return {runYds:p*0.30, explosive:p*0.006};   // sign flips for D (helps opp offense)
+  if(call==="prevent") return {comp:p*0.020, explosive:p*0.004};
+  return {};
+}
 function counterBonus(table, call, oppSchemeId){
   if(!oppSchemeId) return 0;
   var row=table[call]; if(!row) return 0;
@@ -3571,12 +3613,15 @@ function counterBonus(table, call, oppSchemeId){
 // front conceding the run, because that's exactly what it is.) `sign` is +1 when the user
 // has the ball and the counter helps him, −1 when he's defending and it hurts the offense.
 // TUNING: at runYds 0.30 the harness had a perfect read swinging ~10 points a game, which
-// made the matchup — not the roster — the game. At 0.22 the best call on the board is worth
-// roughly half a yard a carry (~6 pts over four quarters): enough to steal one you shouldn't
-// win, never enough to carry a bad team.
+// made the matchup — not the roster — the game. At 0.16 the best call on the board is worth
+// roughly a third of a yard a carry: enough to steal one you shouldn't win, never to carry a
+// bad team. The int term is deliberately strong: a good read attacks the space the defense
+// vacated (throwing hot into a blitz), which de-risks the throw enough to offset the pick-
+// proneness of airing it out — so the aggressive "great call" the panel names actually earns
+// it, instead of quietly losing EV to a safe run.
 function counterMods(v, sign){
   var k=(v||0)*sign;
-  return {sack:-k*0.005, comp:k*0.010, explosive:k*0.004, runYds:k*0.22, int:-k*0.0015, shorten:0};
+  return {sack:-k*0.004, comp:k*0.008, explosive:k*0.004, runYds:k*0.16, int:-k*0.0042, shorten:0};
 }
 // mergeMods deliberately drops the second operand's sack/int (tempo has neither). Counters
 // have both, so they need a merge that actually adds everything.
@@ -3782,7 +3827,7 @@ function matchupLegend(){
        '<div class="mu-row"><span class="mu-c">💥 Blitz</span><span class="mu-good">Air Raid</span><span class="mu-bad">Ground &amp; Pound · Spread</span></div>'+
        '<div class="mu-row"><span class="mu-c">🚧 Prevent</span><span class="mu-good">Air Raid</span><span class="mu-bad">Ground &amp; Pound · Pro-Style</span></div>';
   }
-  h+='<div class="scheme-wants-note">Countering is only half of it. A <b>specialist</b> system (Air Raid, Ground &amp; Pound, Blitz-Heavy) is devastating on script but pays to leave its lane, while a <b>multiple</b> system (Pro-Style, 4-3 Base) calls anything for free. And what you\u2019re actually good at on a given call comes down to your <b>players</b> — a roster of Power Backs and maulers is a running team no matter the label.</div></div>';
+  h+='<div class="scheme-wants-note">No call is a free win — each one beats some formations and loses to others, so the edge is in matching your call to the formation across from you. And lean on one call too long and they\u2019ll key on it: the edge bleeds away until you make them defend the whole field again. Read the matchup, then keep them honest.</div></div>';
   return h;
 }
 function schemePickerCard(side, list, current, fit){
@@ -4934,7 +4979,10 @@ function redrawKeepScroll(){
 // yl = yards from the OFFENSE's own goal line; yl>=100 is a touchdown.
 // =====================================================
 var XP_RATE=0.95, TWO_RATE=0.45;
-var EDGE_DIV=42;   // how sharply a rating advantage bends play outcomes (tune me)
+var EDGE_DIV=30;   // how sharply a rating advantage bends play outcomes. Lower = talent matters
+                   // more. Set so the whole coaching budget (fit + reads + calls) can flip a
+                   // close game or steal a mild upset, but a two-score talent gap still wins:
+                   // a good coach helps a bad roster, he can't save it.
 var PACE=1.00;     // >1 = fewer plays per drive (tune points-per-drive here)
 
 // Box-Muller: yardage is normal-ish with a fat right tail.
@@ -4945,11 +4993,13 @@ function clampN(v,a,b){ return Math.max(a,Math.min(b,v)); }
 // `rblk` = the run-blocking tilt of the line doing the blocking (see olBlock). It's the
 // single biggest reason a system can't just flip on a whim: an Air Raid five is +5 in pass
 // pro and MINUS five in the run game, which is over a yard a carry.
-var BLK_RUN_YDS=0.22;   // yards per carry, per point of run-block tilt
+var BLK_RUN_YDS=0.15;   // yards per carry, per point of run-block tilt. Kept below what a real
+                        // talent gap is worth per carry — your line identity shapes the run
+                        // game, but it can't out-muscle a defense that's simply better.
 function dRun(edge, dm, rblk){
   dm=dm||defMods("standard"); rblk=rblk||0;
   var e=edge/EDGE_DIV;
-  var y=(4.75+e*1.6+dm.runYds+rblk*BLK_RUN_YDS)+gauss()*4.7;   // soft fronts concede the run
+  var y=(4.5+e*2.0+dm.runYds+rblk*BLK_RUN_YDS)+gauss()*4.7;   // soft fronts concede the run; a real talent edge shows up here
   // `runExpl` shapes how often a run breaks — Spread springs QB keepers and space; Ground &
   // Pound trades the home-run for a steady, high-floor grind.
   if(Math.random()<clampN(0.058+e*0.02+rblk*0.004+(dm.runExpl||0),0.02,0.16)) y+=Math.abs(gauss())*16;
@@ -4965,8 +5015,8 @@ function dPass(edge, obvious, dm, aggro, pblk){
   if(Math.random()<clampN(0.062-e*0.02+(obvious?0.030:0)+dm.sack-pblk*0.005,0.02,0.20))
     return {yards:-rnd(4,9), turnover:false, kind:"sack", incomplete:false};
   // "Air it out" means deeper throws: fewer completions, bigger when they land.
-  var compP=clampN(0.625+e*0.10-(obvious?0.075:0)+dm.comp-aggro*0.055+pblk*0.004,0.28,0.88);
-  var intP =clampN(0.026-e*0.010+(obvious?0.012:0)+dm.int+aggro*0.011,0.006,0.070);
+  var compP=clampN(0.625+e*0.10-(obvious?0.075:0)+dm.comp-aggro*0.045+pblk*0.004,0.28,0.88);
+  var intP =clampN(0.026-e*0.010+(obvious?0.012:0)+dm.int+aggro*0.008,0.006,0.070);
   if(Math.random()<intP)   return {yards:0, turnover:true,  kind:"int",  incomplete:true};
   if(Math.random()>=compP) return {yards:0, turnover:false, kind:"pass", incomplete:true};
   var y=(obvious?5.4:6.8)-(dm.shorten||0)+e*1.9+aggro*2.4+Math.abs(gauss())*(obvious?5.2:6.0);
@@ -4999,17 +5049,26 @@ function coachesOff(){ var r=ST.save&&ST.save.role; return r!=="DC"; }
 function coachesDef(){ var r=ST.save&&ST.save.role; return r!=="OC"; }
 var STRAIGHT={off:"balanced", tempo:"normal", def:"standard"};
 function tacticsOf(G, side){
-  // side 0 is the user's team; the CPU always plays it straight
-  if(side!==0 || !G || !G.tactics) return {off:"balanced", tempo:"normal", def:"standard"};
-  var t=G.tactics;
-  // The unit you DON'T coach is run by your CPU counterpart, so it plays it straight —
-  // no blitz from an OC, no hurry-up from a DC. This is the single choke point every snap
-  // reads, so gating here (not just in the UI) is what actually keeps a coordinator honest.
-  return {
-    off:   coachesOff() ? (t.off||"balanced")   : "balanced",
-    tempo: coachesOff() ? (t.tempo||"normal")   : "normal",
-    def:   coachesDef() ? (t.def||"standard")   : "standard"
-  };
+  // side 0 is the user's team
+  if(side===0){
+    if(!G || !G.tactics) return {off:"balanced", tempo:"normal", def:"standard"};
+    var t=G.tactics;
+    // The unit you DON'T coach is run by your CPU counterpart, so it plays it straight —
+    // no blitz from an OC, no hurry-up from a DC. This is the single choke point every snap
+    // reads, so gating here (not just in the UI) is what actually keeps a coordinator honest.
+    return {
+      off:   coachesOff() ? (t.off||"balanced")   : "balanced",
+      tempo: coachesOff() ? (t.tempo||"normal")   : "normal",
+      def:   coachesDef() ? (t.def||"standard")   : "standard"
+    };
+  }
+  // side 1 = the CPU. In a user game it now coaches itself; league sims stay straight & fast.
+  if(!G || !G.userGame || !G.teams || !G.teams[1] || !G.teams[1].offId)
+    return {off:"balanced", tempo:"normal", def:"standard"};
+  // For this snap the CPU is either the offense (has the ball) or the defense — call the side
+  // it's actually on, and leave the other neutral.
+  if(side===G.poss) return {off:cpuOffCall(G), tempo:cpuTempo(G), def:"standard"};
+  return {off:"balanced", tempo:"normal", def:cpuDefCall(G)};
 }
 // Offensive tactics bend the run/pass lean. Defensive tactics belong to the team
 // NOT holding the ball, so they're looked up from the defender's side.
@@ -5096,6 +5155,7 @@ function newGameState(teamA, teamB){
     clock:1800, yl:25, down:1, dist:10,
     done:false, guard:0,
     userGame:false,   // set true only for games the user actually coaches
+    userHist:{off:[], def:[]},   // your recent committal calls, so the CPU can key on tendencies
     tactics:{off:"balanced", tempo:"normal", def:"standard"}
   };
 }
@@ -5136,17 +5196,30 @@ function simSnap(G, stopQ){
   //   counter  — does it beat THIS opponent's system (counterMods), which is the read
   // Only the user's coached unit is affected; CPU-vs-CPU league games never touch it.
   if(G.userGame){
+    if(!G.userHist) G.userHist={off:[],def:[]};
+    // ── OFFENSE side (whoever has the ball) gets its scheme texture and its read of the D ──
     if(poss===0){
+      G.userHist.off.push(oT.off); if(G.userHist.off.length>12) G.userHist.off.shift();
       edge += offTraitEdge(oT.off) - identityCost("off", oT);
-      // your offense's own texture (deep shots vs timing throws vs tempo runs)...
       dm = addMods(dm, offSchemeSig());
       dm = addMods(dm, counterMods(counterBonus(OFF_COUNTER, oT.off, G.teams[1].defId), +1));
+      dm = addMods(dm, keyingMods(keyingPenalty(G.userHist.off, oT.off), oT.off, +1));
+    } else {
+      // CPU offense: its own play-style, and it reads YOUR defensive formation.
+      dm = addMods(dm, OFF_SIG[G.teams[1].offId]||{});
+      dm = addMods(dm, counterMods(counterBonus(OFF_COUNTER, oT.off, G.teams[0].defId), +1));
     }
-    if(def===0){   // your defense lowers the offense's edge — and takes away what it does best
+    // ── DEFENSE side (whoever's defending) reshapes the offense above ──
+    if(def===0){
+      G.userHist.def.push(dT.def); if(G.userHist.def.length>12) G.userHist.def.shift();
       edge -= defTraitEdge(dT.def) - identityCost("def", dT);
-      // ...and your defense's texture, reshaping what the opponent can do against you.
       dm = addMods(dm, defSchemeSig());
       dm = addMods(dm, counterMods(counterBonus(DEF_COUNTER, dT.def, G.teams[1].offId), -1));
+      dm = addMods(dm, keyingMods(keyingPenalty(G.userHist.def, dT.def), dT.def, +1));
+    } else {
+      // CPU defense: its own texture, and it reads YOUR offensive formation (hurts your O).
+      dm = addMods(dm, DEF_SIG[G.teams[1].defId]||{});
+      dm = addMods(dm, counterMods(counterBonus(DEF_COUNTER, dT.def, G.teams[0].offId), -1));
     }
   }
   var blk=blkOf(G, poss);
@@ -5308,6 +5381,65 @@ function oppOffScheme(name){ return OFF_SCHEMES[nameHash(name,3)%OFF_SCHEMES.len
 function oppDefScheme(name){ return DEF_SCHEMES[nameHash(name,11)%DEF_SCHEMES.length]; }
 function oppLean(name){
   return clampN(oppOffScheme(name).lean + (nameHash(name,5)%7) - 3, 5, 95);
+}
+
+// ── THE CPU COACH ────────────────────────────────────────
+// Until now the opponent was talent-only: no fit, no signature, no calls. These give it a real
+// sideline, scaled by program prestige — a blue blood is genuinely better coached than a
+// cupcake. cpuFit puts its rating on the SAME scale as yours (you bake in scheme fit, so must
+// it), and cpuIQ is how often it makes the smart call instead of playing it straight.
+function cpuFit(prestige){ return clampN(1.4 + (prestige||3)*0.42, 1.4, 4.8); }   // sits near a typical user's fit
+function cpuIQ(prestige){ return clampN(0.32 + (prestige||3)*0.07, 0.32, 0.81); }
+// Pick the call that best answers the formation across from it.
+function cpuBestCounter(table, calls, oppSchemeId){
+  var best=calls[0], bv=-99;
+  for(var i=0;i<calls.length;i++){ var v=counterBonus(table, calls[i], oppSchemeId); if(v>bv){bv=v; best=calls[i];} }
+  return best;
+}
+// The CPU's OFFENSIVE call. It reads your defense AND respects its own identity — a Ground &
+// Pound team keeps pounding even when a pass would counter you, because it isn't built to sling
+// it. (Same identity discipline you play under.) Situational football overrides both.
+function cpuOffCall(G){
+  var iq=(G.teams[1].iq!=null?G.teams[1].iq:0.5), userDefId=G.teams[0].defId;
+  var sc=schemeById("off", G.teams[1].offId), c=(sc&&sc.comfort)||{run:0.7,pass:0.7};
+  var margin=G.S[1]-G.S[0], late=(G.clock<600);
+  if(G.down>=3 && G.dist>=7) return "pass";            // obvious passing down
+  if(G.down>=3 && G.dist<=2) return "run";             // short yardage, pound it
+  if(late && margin>0)  return "run";                  // protect the lead, drain clock
+  if(late && margin<-8) return "pass";                 // two scores down, air it out
+  // a smart CPU will shade to the call that counters you — but only if its system can run it.
+  if(Math.random()<iq*0.6){
+    var cc=cpuBestCounter(OFF_COUNTER, ["run","balanced","pass"], userDefId);
+    var comf = cc==="run"?c.run:(cc==="pass"?c.pass:(c.run+c.pass)/2);
+    if(comf>=0.62) return cc;
+  }
+  // otherwise play to identity: run-first, pass-first, or genuinely balanced
+  if(c.run > c.pass+0.12) return "run";
+  if(c.pass > c.run+0.12) return "pass";
+  return "balanced";
+}
+// The CPU's DEFENSIVE call. Pressure fronts tee off (especially on obvious downs); coverage
+// fronts sit back and protect leads. It'll take a counter only if its identity allows it —
+// a Bend-Don't-Break defense won't suddenly bring the house.
+function cpuDefCall(G){
+  var iq=(G.teams[1].iq!=null?G.teams[1].iq:0.5), userOffId=G.teams[0].offId;
+  var sc=schemeById("def", G.teams[1].defId), c=(sc&&sc.comfort)||{blitz:0.7,cover:0.7};
+  var canBlitz=(c.blitz>=0.75), canCover=(c.cover>=0.9), margin=G.S[1]-G.S[0];
+  if(G.down>=3 && G.dist>=7 && canBlitz && Math.random()<iq*0.8) return "blitz"; // pressure the pass
+  if(G.clock<420 && margin>8 && canCover) return "prevent";                      // sit on a big lead
+  if(Math.random()<iq*0.55){
+    var cc=cpuBestCounter(DEF_COUNTER, ["blitz","standard","prevent"], userOffId);
+    if(cc==="blitz" && !canBlitz) cc="standard";     // don't blitz if you're not built for it
+    if(cc==="prevent" && !canCover) cc="standard";
+    return cc;
+  }
+  return (c.blitz>=0.9) ? "blitz" : "standard";        // identity base
+}
+function cpuTempo(G){
+  var margin=G.S[1]-G.S[0];
+  if(G.clock<300 && margin<0) return "hurry";   // behind late — speed up
+  if(G.clock<420 && margin>0) return "burn";    // ahead late — milk it
+  return "normal";
 }
 
 // Break a final score into a believable sequence of scoring plays across 4 quarters.
@@ -10257,12 +10389,15 @@ function gameSetup(game){
   }
   // Both teams take the field with a system and a line built for it. The opponent's is
   // scoutable (it's on the pre-game card); yours is whatever you've been recruiting toward.
+  // The CPU now carries its own scheme fit (so its rating sits on your scale, not below it)
+  // and an IQ that scales with prestige — a blue blood coaches circles around a cupcake.
   var theirOff=oppOffScheme(game.opp), theirDef=oppDefScheme(game.opp);
+  var cFit=cpuFit(game.op);
   return {
     us:  {off:usOff, def:usDef, lean:getGameplan().offBalance,
           blk:olBlock(), offId:offScheme().id, defId:defScheme().id},
-    them:{off:oppOff, def:oppDef, lean:oppLean(game.opp),
-          blk:cpuBlock(game.opp), offId:theirOff.id, defId:theirDef.id},
+    them:{off:oppOff+cFit, def:oppDef+cFit, lean:oppLean(game.opp),
+          blk:cpuBlock(game.opp), offId:theirOff.id, defId:theirDef.id, iq:cpuIQ(game.op)},
     edge:usedFit>=3, off:myUnit, rivalry:rivalry
   };
 }
@@ -10577,38 +10712,16 @@ function tacticsPanel(){
        (cOff?"defense":"offense")+' and plays it straight. Win a head-coaching job to call both.</div>';
   }
 
-  // ── The read, graded. You aren't told the answer up front; you're told how the call you
-  // made lands against THIS opponent, and what it's costing your own system to make it.
-  var s=ST.save, reads=[];
-  if(theirDef && s.role!=="DC" && t.off!=="balanced"){
-    var ov=counterBonus(OFF_COUNTER, t.off, theirDef.id), oj=counterVerdict(ov);
-    reads.push('<span style="color:'+oj.col+'">'+oj.mark+'</span> '+x(OFF_TACTICS[t.off].label)+
-               ' vs '+x(theirDef.name)+' — '+x(oj.lbl));
-  }
-  if(theirOff && s.role!=="OC" && t.def!=="standard"){
-    var dv=counterBonus(DEF_COUNTER, t.def, theirOff.id), dj=counterVerdict(dv);
-    reads.push('<span style="color:'+dj.col+'">'+dj.mark+'</span> '+x(DEF_TACTICS[t.def].label)+
-               ' vs '+x(theirOff.name)+' — '+x(dj.lbl));
-  }
-  // ...and what going off-script costs you. This is the Air Raid running the ball. No number —
-  // the severity is the message, and a rigid system saying "fighting your own reps" reads louder
-  // than any minus sign.
-  var ic=identityCost("off",t)+identityCost("def",t);
-  if(ic>=0.6){
-    var sysName=(s.role==="DC")?defScheme().name:offScheme().name;
-    var icNote = ic>=2.2 ? "fighting your own reps" : (ic>=1.2 ? "off what you practise" : "a little off-script");
-    reads.push('<span style="color:var(--red2)">⚠</span> Your <b>'+x(sysName)+
-               '</b> team doesn\u2019t rep this — '+icNote);
-  }
-
-  // Only describe what you've actually changed — three lines of default text is noise.
+  // NO in-game tells. You scouted them before kickoff; from here you're a coach on the sideline,
+  // reading the drive log to figure out what's working and what they've taken away. The panel
+  // shows only what each call DOES (playbook knowledge), never how it's grading against this
+  // opponent, never whether they've keyed on you. Those are the reads you have to make yourself.
   var lines=[];
   if(t.off!=="balanced")  lines.push(x(OFF_TACTICS[t.off].desc));
   if(t.tempo!=="normal")  lines.push(x(TEMPO_TACTICS[t.tempo].desc));
   if(t.def!=="standard")  lines.push(x(DEF_TACTICS[t.def].desc));
-  if(reads.length) h+='<div class="tac-read">'+reads.join("<br>")+'</div>';
   h+='<div class="tac-desc">'+(lines.length?lines.join("<br>")
-      :"Playing it straight — your system, run the way you rep it. Change a call to see what it buys and what it costs.")+'</div>';
+      :"Playing it straight. Watch the drive log to see what's working — then adjust.")+'</div>';
   return h+'</div>';
 }
 function setTactic(kind, val){
