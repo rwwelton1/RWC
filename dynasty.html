@@ -1773,6 +1773,16 @@ function tierMove(tier){
   if(tier===-3) return rnd(-3,-2);
   return rnd(-1,1);                  // as expected: hold, tiny noise
 }
+// What this program IS, independent of last season: its real rating if we know it, else a
+// division-aware prestige baseline. This is the anchor drift pulls toward — the thing a
+// program regresses to when the coaching and the luck run out.
+function teamBaseline(t, name){
+  var fcs = (t.div==="FCS") || (t.c && teamDivision(t.c)==="FCS");
+  var r = fcs ? (typeof FCS_TEAM_RATINGS!=="undefined" && FCS_TEAM_RATINGS[name]) : TEAM_RATINGS[name];
+  if(r) return (r.o + r.d)/2;
+  var p = (t.p!=null?t.p:3);
+  return fcs ? (44+p*6) : (58+p*6);
+}
 function driftLeagueRatings(){
   var L=ST.save.league; if(!L)return;
   Object.keys(L.teams).forEach(function(n){
@@ -1780,12 +1790,34 @@ function driftLeagueRatings(){
     var games=t.w+t.l;
     if(games){
       var winPct=t.w/games;
-      var expPct=Math.max(0.1,Math.min(0.9,(t.ovr-52)/45)); // what this rating "should" win
+      // EXPECTATION IS ANCHORED TO THE PROGRAM, NOT TO LAST YEAR'S RATING.
+      // This used to read expPct off t.ovr itself, which made the whole system a ratchet with
+      // no equilibrium: win -> rating up -> but expectation rises WITH it, so the team keeps
+      // "beating expectations" by winning again, and nothing ever pulls it back. Measured over
+      // 20 simulated seasons, Southeast Missouri (an FCS p4) reached 99 while Purdue and
+      // Cincinnati fell to the 46 floor, and the two divisions crossed over: FBS average fell
+      // 78.2 -> 72.2 while FCS climbed 71.2 -> 72.6. Both tails simply ran until they hit the
+      // hard clamps. Judging a team against its BASELINE means a 60-rated program overachieving
+      // still gets a big year, but the bar it must clear next season doesn't move with it.
+      var base=teamBaseline(t,n);
+      var expPct=Math.max(0.1,Math.min(0.9,(base-52)/45));
       var tier=seasonTier(winPct, expPct);
       var move=tierMove(tier);
-      // gentle pull toward the middle (74) so ratings don't runaway to the extremes over many seasons
-      if(t.ovr>86 && move>0) move=Math.max(0,move-1);
-      if(t.ovr<62 && move<0) move=Math.min(0,move+1);
+      // MEAN REVERSION toward the baseline. The further a team has drifted from what it is, the
+      // harder it's pulled back — this is what gives the system an equilibrium instead of a
+      // wall. A program can still sit well above its baseline for years on the back of real
+      // seasons; it just has to keep earning it, and the climb gets steeper the higher it goes.
+      var dev=t.ovr-base;                            // + = overrated vs the program's true level
+      var pull=-dev*0.22;                            // ~1/5 of the gap closes each offseason
+      move += pull;
+      // Prestige is the hard ceiling: a 1-star program does not become a blue blood by winning
+      // its league every year. It can exceed its baseline, but not without limit.
+      var cap=base+ (t.p>=5?14:t.p>=4?11:t.p>=3?9:7);
+      var floor=base-(t.p>=4?12:10);
+      var next=t.ovr+move;
+      if(next>cap)   move -= (next-cap)*0.75;
+      if(next<floor) move += (floor-next)*0.75;
+      move=Math.round(move);
       t.off=Math.max(48,Math.min(99,t.off+move));
       t.def=Math.max(48,Math.min(99,t.def+move));
       t.ovr=Math.round((t.off+t.def)/2);
@@ -1804,6 +1836,13 @@ function simLeaguePortal(){
     if(n===ST.save.school) return; // your own roster is handled by the real portal
     var t=L.teams[n];
     var swing=Math.round((t.p-3)*0.6 + rnd(-2,2)); // prestige tilts who wins the portal
+    // Don't let this compound off its own output. Applied blind, a p5 program gains ~+1.2/yr
+    // forever and a p1 bleeds the same, on top of the win-drift — two unanchored ratchets
+    // stacked. Damp the swing as a team gets far from what it actually is, so the portal moves
+    // teams around their baseline rather than launching them away from it.
+    var base=teamBaseline(t,n), dev=(t.ovr||70)-base;
+    if(dev>0 && swing>0) swing=Math.round(swing*Math.max(0, 1-dev/12));   // already overrated: gains dry up
+    if(dev<0 && swing<0) swing=Math.round(swing*Math.max(0, 1+dev/12));   // already underrated: losses ease
     t.off=Math.max(46,Math.min(99,(t.off||70)+swing));
     t.def=Math.max(46,Math.min(99,(t.def||70)+swing));
     t.ovr=Math.round((t.off+t.def)/2);
