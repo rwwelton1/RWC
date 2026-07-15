@@ -8122,7 +8122,13 @@ function playConfChampGame(){
   ST.screen="live"; draw(); runQuarter();
 }
 function finishConfChampGame(){
-  var s=ST.save, C=ST.confchamp, won=ST._confWon;
+  var s=ST.save, C=ST.confchamp;
+  // Same stale-global hazard as finishPostGame: ST._confWon is only written by finishGameSim(),
+  // which early-returns on `!G || r._recorded`, and is never cleared — so it can carry a result
+  // over from a previous season's title game. The scoreline below is this game's own, so trust it.
+  var wr=ST.weekResult||{};
+  var won=(wr.us>wr.them);
+  ST._confWon=won;
   C.done=true;
   C.result={winner: won?s.school:(C.top2[0].name===s.school?C.top2[1].name:C.top2[0].name), auto:false,
             us:(ST.weekResult?ST.weekResult.us:null), them:(ST.weekResult?ST.weekResult.them:null)};
@@ -8923,7 +8929,17 @@ function playPostGame(){
 }
 // Called by finishLive when the game was a postseason game
 function finishPostGame(){
-  var P=ST.post, won=ST._postWon;
+  var P=ST.post;
+  // Read the WIN OFF THE SCOREBOARD, not off ST._postWon. That global is written only by
+  // finishGameSim(), which early-returns on `!G || r._recorded` — so any path that finishes a
+  // game without it (a restored save, a repaint, a retry after a throw) leaves _postWon holding
+  // whatever the LAST postseason game set, and nothing ever clears it. A #2 seed opening in R2
+  // off a first-round bye would then inherit last season's elimination and get told its 42-13
+  // win was a loss: "Your run ended in the Second Round."
+  // ST.weekResult is this game's own scoreline, so it cannot be stale.
+  var wr=ST.weekResult||{};
+  var won=(wr.us>wr.them);
+  ST._postWon=won;   // keep in sync for anything downstream that still reads it
   // ── Celebration Bowl: a single title game, not a bracket. Winning it IS the championship
   //    for SWAC/MEAC teams — there is no further round to advance to. ──
   if(P.mode==="celebration"){
