@@ -1345,11 +1345,17 @@ var ALL_TEAMS = FBS_TEAMS.concat(FCS_TEAMS);
 var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 
-var DB=null;
+var DB=null, DB_ERR=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB=firebase.database();
-}catch(e){}
+}catch(e){
+  // Do NOT swallow this. If the SDK didn't load, DB stays null and persist() becomes a
+  // permanent no-op — a whole dynasty played and nothing written, with no sign anything is
+  // wrong. Keep the reason so the save badge can say so out loud.
+  DB_ERR=(e&&e.message)||"Firebase unavailable";
+  try{ console.error("Dynasty: database unavailable — saves will not persist.", e); }catch(_){}
+}
 
 function x(s){var t=String(s||"");return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/'/g,"&#39;");}
 var _tt;function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2200);}
@@ -2364,7 +2370,54 @@ function loadData(){
     draw();
   },function(){ ST.screen="setup"; draw(); });
 }
-function persist(){ if(DB&&ST.save){ ST.save._post = ST.post || null; ST.save._confchamp = ST.confchamp || null; ST.save._carousel = ST.carousel || null; DB.ref(BASE()).set(ST.save); } }
+// Write the whole save. This is called after every meaningful state change (every week
+// advance, every game, every portal move), so it's the only thing standing between a dynasty
+// and an evening of lost progress.
+//
+// It used to be a one-liner whose every failure mode was silent:
+//   • `if(DB&&ST.save)` — if the Firebase SDK failed to load, DB is null and this became a
+//     permanent no-op. You'd play a whole season and save nothing, with no indication.
+//   • `.set()` returns a Promise. A rejection (offline, permission denied, quota) went
+//     unhandled, so a write could fail mid-dynasty and the game would look perfectly normal.
+// Now every failure is recorded on ST._saveState and surfaced (see saveBadge). A save that
+// silently doesn't happen is worse than one that loudly fails.
+var _saveSeq=0;
+function persist(cb){
+  if(!ST.save) return;
+  if(!DB){
+    ST._saveState={ok:false, at:Date.now(), err:"offline — no database connection"};
+    if(cb) cb(false);
+    return;
+  }
+  ST.save._post = ST.post || null;
+  ST.save._confchamp = ST.confchamp || null;
+  ST.save._carousel = ST.carousel || null;
+  var seq=++_saveSeq;
+  ST._saveState={ok:null, at:Date.now(), pending:true};   // in flight
+  try{
+    var p=DB.ref(BASE()).set(ST.save);
+    if(p && typeof p.then==="function"){
+      p.then(function(){
+        // Only the LATEST write may claim success — an older, slower write landing after a
+        // newer one shouldn't repaint the badge green over a failure that came after it.
+        if(seq===_saveSeq) ST._saveState={ok:true, at:Date.now()};
+        if(cb) cb(true);
+      }).catch(function(e){
+        if(seq===_saveSeq) ST._saveState={ok:false, at:Date.now(), err:(e&&e.message)||"write failed"};
+        if(cb) cb(false);
+        try{ toast("⚠️ Save failed — your progress may not be stored."); }catch(_){}
+      });
+    } else {
+      // Older SDK with no Promise return: assume it went out.
+      ST._saveState={ok:true, at:Date.now()};
+      if(cb) cb(true);
+    }
+  }catch(e){
+    ST._saveState={ok:false, at:Date.now(), err:(e&&e.message)||"write threw"};
+    if(cb) cb(false);
+    try{ toast("⚠️ Save failed — your progress may not be stored."); }catch(_){}
+  }
+}
 
 // ── Generators ───────────────────────────────────────────
 function genName(){ return pick(FIRST)+" "+pick(LAST); }
@@ -7737,6 +7790,17 @@ function attentionStrip(){
   });
   return h+'</div>';
 }
+// A save that silently fails is the worst bug this app can have — you'd find out an evening
+// later. This makes the state legible: nothing when all is well (green pills are noise), a
+// loud pill when a write failed or there's no database at all.
+function saveBadge(){
+  var st=ST._saveState;
+  if(!DB) return '<span class="pill" style="background:#fdd;border-color:#c33;color:#900" '+
+                 'title="'+x(DB_ERR||"no database")+'">⚠️ NOT SAVING</span> ';
+  if(st && st.ok===false) return '<span class="pill" style="background:#fdd;border-color:#c33;color:#900" '+
+                 'title="'+x(st.err||"write failed")+'">⚠️ SAVE FAILED</span> ';
+  return '';
+}
 function seasonScreen(){
   var s=ST.save, g=s.schedule[s.week];
   var isDC=(s.role==="DC");
@@ -7749,7 +7813,7 @@ function seasonScreen(){
   // compact header row
   var wkLbl = PC ? '<b>'+PC.wk+'</b> · '+x(PC.label) : '<b>Wk '+Math.min(s.week+1,s.schedule.length)+'</b>';
   h+='<div class="season-hd"><div class="shd-l">'+wkLbl+' · Season '+s.season+' · '+(2026+(s.seasonsPlayed||0))+'</div>'+
-     '<div class="shd-r"><span class="pill">'+s.wins+'-'+s.losses+'</span> <span class="pill">'+unitLbl+' '+unit+'</span></div></div>';
+     '<div class="shd-r">'+saveBadge()+'<span class="pill">'+s.wins+'-'+s.losses+'</span> <span class="pill">'+unitLbl+' '+unit+'</span></div></div>';
 
   // tab bar
   h+='<div class="tabbar tabbar-7">'+
@@ -10529,7 +10593,15 @@ function advanceWeek(){
   advanceRecruitingWeek();              // rivals push, prospects may commit, points refill for next week
   s.week++;
   persist();
-  if(s.week>=s.schedule.length){ enterConfChampionship(); return; } // regular season over → title game → postseason
+  if(s.week>=s.schedule.length){
+    // Regular season over → title game → postseason. enterConfChampionship() builds ST.confchamp
+    // (or skips straight to the postseason), and that new state is part of the save — the
+    // persist() above ran BEFORE it existed, so without this a crash or a closed tab right at
+    // the season boundary would reload into a save that has week==13 but no postseason state.
+    enterConfChampionship();
+    persist();
+    return;
+  }
   ST.seasonTab="week"; ST.editGame=null; ST.screen="season"; draw();
 }
 function playWeek(){
