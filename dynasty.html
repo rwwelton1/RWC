@@ -3091,7 +3091,11 @@ function genSchedule(team){
       if(myRivals.indexOf(t.n)>=0 && games.length<total) addRival(t,false);
     });
     add(others,total-games.length,false);
-    return rivalryWeek(games.slice(0,total));
+    games=games.slice(0,total);
+    // An independent has no conference block, so balance the slate as a whole. Without this
+    // it kept the raw coin flip and Notre Dame could draw a 9-road-game year.
+    balanceVenues(games, targetFor(games.length));
+    return rivalryWeek(games);
   }
   // ── SLOT ORDER MATTERS ────────────────────────────────
   // Non-conference games open the season (weeks 1-3, editable); conference play follows.
@@ -3129,7 +3133,8 @@ function genSchedule(team){
     var fbsPool = FBS_TEAMS.filter(function(t){ return t.p>=2; });
     var mg = fbsPool[Math.floor(Math.random()*fbsPool.length)];
     used[mg.n]=1;
-    nonConf.push({opp:mg.n, oc:mg.c, op:mg.p, home:false, conf:false, moneyGame:true, div:"FBS"});
+    nonConf.push({opp:mg.n, oc:mg.c, op:mg.p, home:false, conf:false, moneyGame:true, div:"FBS",
+                  _venueFixed:true});   // a money game is a road trip by definition — never flip it
     nonConfSlots -= 1;   // the money game spends one of them
   }
   // Out-of-conference rivals spend a non-conference slot, in PRIORITY order — the marquee
@@ -3147,10 +3152,47 @@ function genSchedule(team){
   });
   fill(confG, conf, total-nonConf.length-confG.length, true);
 
+  // ── HOME / AWAY BALANCE ──────────────────────────────────
+  // Venues used to be an independent coin flip per game (Math.random()<0.55), which is not how
+  // a schedule is built: a real league alternates, so a 9-game conference slate is 4 or 5 at
+  // home nearly every year. Left to chance the MEAN was right (4.92 of 9) but the VARIANCE was
+  // not — over 4000 Alabama seasons only ~48% landed on 4-5, while 17% got 2-3 conference home
+  // games (a 6-7 road-game league season) and 14% got 7+. Those tails are what a coin flip
+  // guarantees at sd~1.5, and they swing a season by multiple wins on home field alone.
+  //
+  // So assign venues by CONSTRUCTION: pick the target count, then deal exactly that many. Games
+  // whose venue is already fixed are honored and counted against the target — an FCS money game
+  // is always away, and a rivalry venue is set when the game is created (real rivalries alternate
+  // home sites, so those stay a flip and just get absorbed into the balance).
+  //
+  // `fixed` marks games whose home flag must not be touched.
+  function balanceVenues(list, targetHome){
+    var free=[], fixedHome=0;
+    list.forEach(function(g){
+      if(g._venueFixed){ if(g.home) fixedHome++; }
+      else free.push(g);
+    });
+    var need = clampN(targetHome - fixedHome, 0, free.length);
+    // Fisher-Yates so WHICH games are home is still random — only the COUNT is pinned.
+    for(var i=free.length-1;i>0;i--){
+      var j=Math.floor(Math.random()*(i+1)); var tmp=free[i]; free[i]=free[j]; free[j]=tmp;
+    }
+    free.forEach(function(g,i){ g.home = (i<need); });
+  }
+  // An odd number of games can't split evenly, so alternate which way the extra falls — over a
+  // career that's a true 50/50, and in any one year it's the 4-or-5 a real schedule produces.
+  function targetFor(n){ return Math.floor(n/2) + (Math.random()<0.5?1:0); }
+
   var games = nonConf.concat(confG);
   // Safety net: if anything still came up short, top up with non-conference games.
   if(games.length<total) fill(games, others, total-games.length, false);
-  return rivalryWeek(games.slice(0,total));
+  games = games.slice(0, total);
+  // Balance the two blocks SEPARATELY. Conference home/away is the number that actually
+  // matters (it's the slate you're judged on), and balancing the whole season at once would
+  // let a 3-0 home non-conference slate quietly eat the league games' home dates.
+  balanceVenues(games.filter(function(g){ return g.conf; }),  targetFor(confG.length));
+  balanceVenues(games.filter(function(g){ return !g.conf; }), targetFor(nonConf.length));
+  return rivalryWeek(games);
 }
 
 // ── Ratings & sim ────────────────────────────────────────
@@ -3586,11 +3628,21 @@ function keyingPenalty(hist, call){
 }
 // True when the unit you coach is currently getting keyed on the tactic you've selected — used
 // to warn you in the live panel so the adjustment is legible, not a silent nerf.
+// Only warns for a unit YOU call: sideHist now also records your CPU counterpart's calls
+// (he's keyable too — that's the point), but he doesn't need a panel warning, and his calls
+// don't live in G.tactics, so the role gates below are what keep the two sources aligned.
 function beingKeyed(G, side){
   if(!G||!G.userHist) return false;
   var s=ST.save; if(!s) return false;
-  if(side==="off"){ if(s.role==="DC") return false; return keyingPenalty(G.userHist.off, (G.tactics||{}).off)>0.6; }
-  if(s.role==="OC") return false; return keyingPenalty(G.userHist.def, (G.tactics||{}).def)>0.6;
+  if(side==="off"){
+    if(s.role==="DC") return false;
+    return keyingPenalty(G.userHist.off, (G.tactics||{}).off)>0.6;
+  }
+  if(side==="def"){
+    if(s.role==="OC") return false;
+    return keyingPenalty(G.userHist.def, (G.tactics||{}).def)>0.6;
+  }
+  return false;
 }
 // Keying is applied to the SAME direct channel as the counter (dm), not the divided edge —
 // otherwise it's a rounding error next to the counter it's meant to claw back. A keyed run
@@ -5021,10 +5073,19 @@ function redrawKeepScroll(){
 // yl = yards from the OFFENSE's own goal line; yl>=100 is a touchdown.
 // =====================================================
 var XP_RATE=0.95, TWO_RATE=0.45;
-var EDGE_DIV=30;   // how sharply a rating advantage bends play outcomes. Lower = talent matters
-                   // more. Set so the whole coaching budget (fit + reads + calls) can flip a
-                   // close game or steal a mild upset, but a two-score talent gap still wins:
-                   // a good coach helps a bad roster, he can't save it.
+// TUNING: at 30 the rating scale was so compressed that talent barely mattered. An 89 defense
+// — a wall, ~10 pts above the FBS mean offense of 78.8 — conceded 15.3 pts and 322 yds to a
+// 75 offense, and the whole 75->92 offensive range moved scoring only 15.3 -> 24.0. That's a
+// 17-point talent chasm worth under 9 points of scoreboard, so every game collapsed toward
+// .500 and no roster ever felt built. At 18 the same 89 D holds a 75 offense to ~10.6 and
+// still gives up ~27 to a 92 offense: the spread widens from 10.9 to 16.7, good defenses
+// stifle bad offenses, and elite offenses still move the ball.
+//
+// This scales DIFFERENCES only, so an even matchup is untouched (89-vs-89 sits at ~24 pts at
+// every value) — it changes how much separation a rating gap buys, not the baseline.
+// Lower = talent matters more. Raise it back toward 30 to make coaching (fit + reads + calls)
+// loom larger relative to the roster; drop it toward 14 to make recruiting king.
+var EDGE_DIV=18;
 var PACE=1.00;     // >1 = fewer plays per drive (tune points-per-drive here)
 
 // Box-Muller: yardage is normal-ish with a fat right tail.
@@ -5090,6 +5151,71 @@ var DEF_TACTICS={
 function coachesOff(){ var r=ST.save&&ST.save.role; return r!=="DC"; }
 function coachesDef(){ var r=ST.save&&ST.save.role; return r!=="OC"; }
 var STRAIGHT={off:"balanced", tempo:"normal", def:"standard"};
+// ── AUTO-PILOT ───────────────────────────────────────────
+// The CPU calls a fresh play every snap; a user who sets a tactic once a quarter is static by
+// comparison. Measured, that asymmetry alone was worth ~3.4 pts a game between even teams —
+// not a scoring bug, just one sideline coaching and the other frozen. So your stated tactic
+// is a LEAN, not a script: your coordinator honors it whenever the situation is neutral, and
+// overrides it when the situation is loud enough that any real coach would (3rd-and-long,
+// short yardage, clock management). Override the auto-pilot by changing the tactic — that's
+// still your call, and on a neutral down it's followed exactly.
+//
+// `pref` is what you asked for; returns what actually gets called.
+function autoOff(G, pref){
+  // NOTE: do NOT re-apply down-and-distance here. callPlay() already shifts run/pass hard by
+  // situation (3rd & 7+ is runP-0.28, i.e. a "balanced" team already passes ~75% there).
+  // Returning "pass" on top of that stacks OFF_TACTICS.pass's lean:-32 onto the same read and
+  // ratchets: pass begets pass, which is how a balanced team ended up throwing 40+ times.
+  // Situational calls here are only for what callPlay does NOT already know: the score.
+  var margin=G.S[0]-G.S[1], late=(G.clock<600);
+  if(late && margin>0  && pref!=="pass") return "run";    // protect a lead
+  if(late && margin<-8 && pref!=="run")  return "pass";   // two scores down
+  // Shade to the call that counters THEIR defense — the same read cpuOffCall makes against
+  // you. Without this the CPU's counter-reads were worth ~1.7 pts a game that you could never
+  // reciprocate: measured, the margin at equal ratings tracked cpuIQ almost linearly
+  // (-0.37 at iq 0 -> -2.14 at iq 0.67). Gated by YOUR prestige, so it's the same coach the
+  // CPU gets, and only from a neutral lean — an explicit run/pass call is always honored.
+  if((!pref || pref==="balanced") && Math.random() < userIQ()*0.6){
+    var cc=cpuBestCounter(OFF_COUNTER, ["run","balanced","pass"], G.teams[1].defId);
+    var sc=schemeById("off", offScheme().id), c=(sc&&sc.comfort)||{run:0.7,pass:0.7};
+    var comf = cc==="run"?c.run:(cc==="pass"?c.pass:(c.run+c.pass)/2);
+    if(comf>=0.62) return cc;   // only if your system can actually run it
+  }
+  return pref||"balanced";   // otherwise: exactly what you asked for; callPlay does the rest
+}
+function autoTempo(G, pref){
+  // Clock management is the least "tactical" thing a coach does and the easiest to forget —
+  // the CPU does it every game (cpuTempo), which was worth ~1 pt of the gap on its own.
+  var margin=G.S[0]-G.S[1];
+  if(pref && pref!=="normal") return pref;      // an explicit hurry/burn is always honored
+  if(G.clock<300 && margin<0) return "hurry";
+  if(G.clock<420 && margin>0) return "burn";
+  return "normal";
+}
+// Your coordinator's smarts, on the same scale (and from the same formula) as the CPU's, so
+// neither sideline is structurally sharper than the other. Your program's prestige is the
+// input, exactly as the opponent's prestige is the input to cpuIQ.
+function userIQ(){ return cpuIQ((ST.save && ST.save.prestige) || 3); }
+function autoDef(G, pref){
+  var margin=G.S[0]-G.S[1];
+  var sc=schemeById("def", defScheme().id), c=(sc&&sc.comfort)||{blitz:0.7,cover:0.7};
+  // Mirror cpuDefCall's pressure read: an obvious passing down is when a coordinator brings
+  // it, gated by the same scheme comfort the CPU is gated by. Without this the CPU blitzed on
+  // 3rd-and-long and you never did — a free down for their offense, every drive.
+  if(G.down>=3 && G.dist>=7 && c.blitz>=0.75 && pref!=="prevent"){
+    // don't walk into a call the offense across from you punishes (same veto cpuDefCall uses)
+    if(counterBonus(DEF_COUNTER, "blitz", G.teams[1].offId) >= 0) return "blitz";
+  }
+  if(G.clock<420 && margin>8 && pref!=="blitz" && c.cover>=0.8) return "prevent";
+  // Shade to the call that counters THEIR offense, same as cpuDefCall does against you.
+  if((!pref || pref==="standard") && Math.random() < userIQ()*0.55){
+    var cc=cpuBestCounter(DEF_COUNTER, ["blitz","standard","prevent"], G.teams[1].offId);
+    if(cc==="blitz"   && c.blitz<0.75) cc="standard";   // not built to bring it
+    if(cc==="prevent" && c.cover<0.8)  cc="standard";   // not built to sit back
+    return cc;
+  }
+  return pref||"standard";
+}
 function tacticsOf(G, side){
   // A skipped ("Sim to Final") game has nobody on the sideline calling plays, so neither team
   // gets the in-game coaching layer — no counters, no keying, no situational calls. Both play
@@ -5100,13 +5226,23 @@ function tacticsOf(G, side){
   if(side===0){
     if(!G || !G.tactics) return {off:"balanced", tempo:"normal", def:"standard"};
     var t=G.tactics;
-    // The unit you DON'T coach is run by your CPU counterpart, so it plays it straight —
-    // no blitz from an OC, no hurry-up from a DC. This is the single choke point every snap
-    // reads, so gating here (not just in the UI) is what actually keeps a coordinator honest.
+    // The unit you DON'T coach is run by your CPU counterpart — a real coordinator, not a
+    // mannequin. Freezing it on "balanced"/"standard" meant DEF_COUNTER.standard ({}) and
+    // OFF_COUNTER.balanced ({}) returned a 0 counter on your side EVERY snap while the CPU
+    // read you live: one side conversing, the other mute. So run the same CPU coach for it.
+    //
+    // Index convention (from cpuOffCall/cpuDefCall): teams[1] is the coach being called FOR,
+    // teams[0] is the opponent he READS. So your counterpart goes at [1] and the CPU at [0] —
+    // the exact opposite of the real G. S flips to match, so margin (S[1]-S[0]) is YOUR lead.
+    var mirror = {
+      teams:[G.teams[1], G.teams[0]], S:[G.S[1], G.S[0]], poss:1-G.poss,
+      down:G.down, dist:G.dist, clock:G.clock
+    };
+    // Your unit: auto-pilot on your lean. Their unit: your CPU counterpart, calling for himself.
     return {
-      off:   coachesOff() ? (t.off||"balanced")   : "balanced",
-      tempo: coachesOff() ? (t.tempo||"normal")   : "normal",
-      def:   coachesDef() ? (t.def||"standard")   : "standard"
+      off:   coachesOff() ? autoOff(G, t.off)     : cpuOffCall(mirror),
+      tempo: coachesOff() ? autoTempo(G, t.tempo) : cpuTempo(mirror),
+      def:   coachesDef() ? autoDef(G, t.def)     : cpuDefCall(mirror)
     };
   }
   // side 1 = the CPU. In a user game it now coaches itself; league sims stay straight & fast.
@@ -5178,11 +5314,18 @@ function fourthDown(yl,dist,clock,q,margin,bias){
   return (dist<=1 && Math.random()<0.45)?"go":"punt";
 }
 // `lean` 0..100 (low = pass-heavy), matching OFF_SCHEMES / gameplan.offBalance.
+// TUNING: these situational shifts are asymmetric by nature — every passing situation
+// (2nd & long, 3rd & long, must-throw, late & trailing) is far more COMMON than its rushing
+// counterpart (3rd & short, goal line, milking a lead), and a failed pass manufactures the
+// next long down. That ratchet compounds: at runP-0.42 a "balanced" team ran 8% on 3rd & 7+
+// and finished games throwing 40+ times off a neutral lean. Real teams run ~20-25% on
+// 3rd & long. Softened so the down still clearly dictates the call without the feedback loop
+// running away with the whole game plan.
 function callPlay(down,dist,yl,clock,q,margin,lean){
   var runP=lean/100;
-  if(down===3 && dist>=7) runP-=0.42; else if(down===3 && dist<=2) runP+=0.22;
-  if(down===2 && dist>=9) runP-=0.12;
-  if(yl>=95) runP+=0.18;                                   // goal line
+  if(down===3 && dist>=7) runP-=0.28; else if(down===3 && dist<=2) runP+=0.26;
+  if(down===2 && dist>=9) runP-=0.08;
+  if(yl>=95) runP+=0.20;                                   // goal line
   if(q>=4 && margin>7  && clock<420) runP+=0.35;           // milk the clock
   if(q>=4 && margin<-7 && clock<420) runP-=0.40;           // must throw
   if(clock<90 && margin<=0) runP-=0.35;
@@ -5446,7 +5589,16 @@ function oppLean(name){
 // sideline, scaled by program prestige — a blue blood is genuinely better coached than a
 // cupcake. cpuFit puts its rating on the SAME scale as yours (you bake in scheme fit, so must
 // it), and cpuIQ is how often it makes the smart call instead of playing it straight.
-function cpuFit(prestige){ return clampN(1.4 + (prestige||3)*0.42, 1.4, 4.8); }   // sits near a typical user's fit
+// cpuFit is a flat bonus to BOTH opponent units on every snap, so it's the single biggest
+// dial on how hard the game feels — and unlike a talent gap it never goes away, which is what
+// made grinding a rebuild feel like running in sand. Measured over full autopilot seasons at
+// the old 1.4+p*0.42, it was worth roughly a win a year to every program, and it hit the
+// BOTTOM hardest (Purdue 4.9 wins, Stanford 4.8) because a weak roster has no margin to eat a
+// permanent +3.5 on the other side. Halved, every program gains ~1 win, the floor rises more
+// than the ceiling (Purdue 5.6, Stanford 5.4, Ohio State 9.7->9.9), and the prestige scaling
+// survives so a blue blood is still genuinely better coached than a cupcake. This is a
+// difficulty choice, not a correctness fix: raise the coefficients to make the league meaner.
+function cpuFit(prestige){ return clampN(0.7 + (prestige||3)*0.21, 0.7, 2.4); }
 function cpuIQ(prestige){ return clampN(0.32 + (prestige||3)*0.07, 0.32, 0.81); }
 // Pick the call that best answers the formation across from it.
 function cpuBestCounter(table, calls, oppSchemeId){
@@ -5461,8 +5613,10 @@ function cpuOffCall(G){
   var iq=(G.teams[1].iq!=null?G.teams[1].iq:0.5), userDefId=G.teams[0].defId;
   var sc=schemeById("off", G.teams[1].offId), c=(sc&&sc.comfort)||{run:0.7,pass:0.7};
   var margin=G.S[1]-G.S[0], late=(G.clock<600);
-  if(G.down>=3 && G.dist>=7) return "pass";            // obvious passing down
-  if(G.down>=3 && G.dist<=2) return "run";             // short yardage, pound it
+  // Down-and-distance is callPlay()'s job — it already makes 3rd & 7+ a ~92% passing down all
+  // by itself. Returning "pass" here too stacked lean:-32 on top of that (~95%) for BOTH
+  // sidelines, and because a failed pass creates the next long down, it compounded: the CPU
+  // was throwing 41-44 times a game off a neutral lean of 50. Only the score is added here.
   if(late && margin>0)  return "run";                  // protect the lead, drain clock
   if(late && margin<-8) return "pass";                 // two scores down, air it out
   // a smart CPU will shade to the call that counters you — but only if its system can run it.
@@ -5482,16 +5636,27 @@ function cpuOffCall(G){
 function cpuDefCall(G){
   var iq=(G.teams[1].iq!=null?G.teams[1].iq:0.5), userOffId=G.teams[0].offId;
   var sc=schemeById("def", G.teams[1].defId), c=(sc&&sc.comfort)||{blitz:0.7,cover:0.7};
-  var canBlitz=(c.blitz>=0.75), canCover=(c.cover>=0.9), margin=G.S[1]-G.S[0];
-  if(G.down>=3 && G.dist>=7 && canBlitz && Math.random()<iq*0.8) return "blitz"; // pressure the pass
-  if(G.clock<420 && margin>8 && canCover) return "prevent";                      // sit on a big lead
+  var canBlitz=(c.blitz>=0.75), canCover=(c.cover>=0.8), margin=G.S[1]-G.S[0];
+  // Identity and down-and-distance say what you'd LIKE to call; the counter table says what
+  // the offense across from you punishes. A coordinator who blitzes on 3rd-and-long without
+  // looking at who he's blitzing isn't smart, he's loud — and a Ground & Pound team eats it
+  // (DEF_COUNTER.blitz vs pound is -1.2, strictly worse than just playing standard). So a
+  // call that the table says is negative gets vetoed back to standard, in proportion to IQ:
+  // a blue blood almost never walks into it, a cupcake still does.
+  function vetoed(call){
+    if(counterBonus(DEF_COUNTER, call, userOffId) >= 0) return false;
+    return Math.random() < iq;      // the smarter he is, the likelier he sees it coming
+  }
+  function pick(call){ return vetoed(call) ? "standard" : call; }
+  if(G.down>=3 && G.dist>=7 && canBlitz && Math.random()<iq*0.8) return pick("blitz");
+  if(G.clock<420 && margin>8 && canCover) return pick("prevent");
   if(Math.random()<iq*0.55){
     var cc=cpuBestCounter(DEF_COUNTER, ["blitz","standard","prevent"], userOffId);
     if(cc==="blitz" && !canBlitz) cc="standard";     // don't blitz if you're not built for it
     if(cc==="prevent" && !canCover) cc="standard";
     return cc;
   }
-  return (c.blitz>=0.9) ? "blitz" : "standard";        // identity base
+  return (c.blitz>=0.9) ? pick("blitz") : "standard";  // identity base, still has to look
 }
 function cpuTempo(G){
   var margin=G.S[1]-G.S[0];
@@ -5661,9 +5826,19 @@ function ordDown(d){ return ["","1st","2nd","3rd","4th"][d]||String(d); }
 // Dress the drive engine's real plays as a play-by-play feed.
 // The score is NOT reconstructed here — these events already produced it.
 // Every row carries `scoring:true|false` so the UI can filter to scoring plays.
+//
+// ATTRIBUTION IS STICKY. This runs on EVERY live tick over the WHOLE play list, so anything
+// random in here gets re-rolled per rebuild: the same snap would draw a different QB and a
+// different receiver each time. The box score's high-water cache (which only ever climbs)
+// then unions every one of those re-rolls together — that's how you get two QBs who each
+// "threw" the whole game, player yardage above the team total, and TDs that scatter off
+// whoever was drawn last. So the cast is memoized per game, and each play's attribution is
+// stamped onto the play object the first time it's seen and reused forever after.
 function buildPlayByPlay(drivePlays, usName, themName){
   var usAb=abbr(usName), themAb=abbr(themName);
-  var cast=newCast(themName);
+  var G=ST.G;
+  if(G){ if(!G._cast) G._cast=newCast(themName); }
+  var cast=(G && G._cast) ? G._cast : newCast(themName);
   var out=[], ut=0, tt=0;
   drivePlays.forEach(function(p){
     var team=(p.t===0)?"us":"them";
@@ -5675,7 +5850,10 @@ function buildPlayByPlay(drivePlays, usName, themName){
 
     if(p.snap){
       // ── a normal snap: down, distance, field position, result ──
-      at=attribute(p,cast);
+      // Stamp once, reuse forever: attribute() rolls pickDepth(), so calling it again on the
+      // next rebuild would hand this same snap to a different player.
+      if(!p._at) p._at=attribute(p,cast);
+      at=p._at;
       var spot=fieldPos(p.yl, off, def);
       var sit=ordDown(p.down)+" & "+((p.yl+p.dist>=100)?"Goal":p.dist)+" at "+spot;
       // a gain is capped at the goal line only when the play actually scored
@@ -10001,19 +10179,16 @@ function liveStatsPanel(revealed){
   // their lines flicker in and out. We keep a per-game high-water cache: a player, once
   // shown, stays; every counting stat only ever climbs. Display order is locked to the
   // order players first appeared, so nobody jumps around as yardage changes.
+  // Attribution is now stamped per play (see buildPlayByPlay), so a rebuild re-derives the
+  // SAME numbers and there's nothing to flicker. The old high-water cache here took a max
+  // per stat per player across rebuilds — which, when attribution was still being re-rolled,
+  // silently unioned every re-roll into one box score (two QBs each credited with the whole
+  // game, player yards exceeding the team line). Keep display ORDER stable; trust the tally.
   var li=ST.live || {};
-  if(!li._box){ li._box={acc:{}, order:[]}; }
+  if(!li._box) li._box={order:[]};
   var box=li._box;
-  order.forEach(function(id){
-    var a=acc[id];
-    if(!box.acc[id]){ box.acc[id]={p:a.p, pa:0,pc:0,py:0,ptd:0,pint:0, rc:0,ry:0,rtd:0, rec:0,recy:0,rectd:0}; box.order.push(id); }
-    var b=box.acc[id];
-    b.p=a.p;
-    ["pa","pc","py","ptd","pint","rc","ry","rtd","rec","recy","rectd"].forEach(function(k){
-      if(a[k]>b[k]) b[k]=a[k];      // never regress a stat mid-game
-    });
-  });
-  acc=box.acc; order=box.order;
+  order.forEach(function(id){ if(box.order.indexOf(id)<0) box.order.push(id); });
+  order=box.order.filter(function(id){ return acc[id]; });
   var pass=[], rush=[], recv=[];
   order.forEach(function(id){
     var a=acc[id];
@@ -10458,8 +10633,12 @@ function gameSetup(game){
   var theirOff=oppOffScheme(game.opp), theirDef=oppDefScheme(game.opp);
   var cFit=cpuFit(game.op);
   return {
+    // `iq` scales the unit you DON'T coach: your CPU counterpart is a coordinator at
+    // YOUR program's prestige, so a blue blood's other side of the ball is well-run even
+    // though you never touch it. Without this it defaulted to 0.5 and under-coached you.
     us:  {off:usOff, def:usDef, lean:getGameplan().offBalance,
-          blk:olBlock(), offId:offScheme().id, defId:defScheme().id},
+          blk:olBlock(), offId:offScheme().id, defId:defScheme().id,
+          iq:cpuIQ((ST.save && ST.save.prestige) || 3)},
     them:{off:oppOff+cFit, def:oppDef+cFit, lean:oppLean(game.opp),
           blk:cpuBlock(game.opp), offId:theirOff.id, defId:theirDef.id, iq:cpuIQ(game.op)},
     edge:usedFit>=3, off:myUnit, rivalry:rivalry
