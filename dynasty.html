@@ -4445,12 +4445,37 @@ function retentionRisk(p, fundOverride){
 }
 // Cost to pull a departing player back out of the portal. Their unmet demand, plus a
 // premium for the mess — stars and buried blue-chips cost the most to talk down.
+// What it costs to talk a player out of the portal.
+//
+// This used to price the GAP between his NIL demand and what you'd funded — times a multiplier —
+// with a Math.max(0.2, gap) floor. Three things were wrong with that, and they compounded:
+//   1. The 0.2 floor is FBS dollars and was never scaled, so at FCS (market scale ~0.06) it was
+//      ~16x too high. It swallowed the gap term whole at every OVR.
+//   2. Because the floor always won, a FULLY FUNDED player cost exactly the same to keep as one
+//      you'd paid nothing — funding a player did literally nothing for retention. The one lever
+//      the NIL screen gives you was dead.
+//   3. It priced a DIFFERENT THING than transferPrice: a gap, not a player. So a fully-funded
+//      76 OVR QB cost $450K to keep while an identical 76 OVR off the portal signed for $100K.
+//      The curve was inverted too — flat ~$370-500K regardless of talent, so a 72 OVR ran 7.4x
+//      the cost of signing his replacement while a 90 OVR ran 0.8x.
+//
+// Now: start from what the same player would cost on the open market (transferPrice — the true
+// replacement cost), then adjust for the things that are real about re-signing YOUR guy:
+//   • A LOYALTY DISCOUNT for money already committed. He's here, he's funded, he's less likely to
+//     listen. Fund a man fully and he's meaningfully cheaper to keep — that's the whole point.
+//   • A PREMIUM for a buried backup: he wants snaps, and money is the only thing you can offer
+//     instead. This is the one place retention should legitimately cost MORE than signing.
+// Division scaling comes free, since transferPrice already handles it.
 function retainPrice(p){
-  var dem=nilDemand(p), gap=Math.max(0.2, dem-(p.nilFund||0));
-  var mult=1.5 + Math.max(0,(p.ovr-72))*0.035;              // an 85 OVR runs ~1.95x the gap
-  if(!isStarterPlayer(p)) mult+=0.35;                        // he wants snaps, not just money
-  if(p.dev==="elite") mult+=0.25; else if(p.dev==="pro") mult+=0.12;
-  return Math.max(0.25, money2(gap*mult));
+  var market = transferPrice(p.ovr, p.dev);          // replacement cost, already FCS-scaled
+  var dem = nilDemand(p), fund = (p.nilFund||0);
+  var funded = dem>0 ? clampN(fund/dem, 0, 1) : 1;   // 0 = you've paid him nothing, 1 = fully funded
+  var mult = 1.15 - 0.35*funded;                     // 1.15x if starved, 0.80x if fully funded
+  if(!isStarterPlayer(p)) mult += 0.30;              // he wants snaps, not just money
+  // NOTE: no dev term here. transferPrice already charges +0.25 for elite/pro, so adding another
+  // premium on top would double-count the same trait and make your own developed players the
+  // most expensive men on the board.
+  return Math.max(0.02, money2(market*mult));
 }
 // Interest a recruit gains from an NIL offer of $amt (M) — strong, but diminishing as they warm.
 // Interest per $1M by star rating — blue-chips are expensive to buy, low-stars are cheap.
