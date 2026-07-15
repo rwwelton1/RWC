@@ -612,6 +612,7 @@ a{color:inherit;text-decoration:none}
 .slot-opt span.hot{color:var(--red2)}
 .slot-opt.barred{opacity:.38;border-style:dashed}
 .goal-row.dead{opacity:.55}
+.goal-over{font-size:8.5px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.03em}
 .goal-row.dead .goal-box{color:var(--red2);border-color:var(--red2)}
 .goal-row.dead .goal-detail{color:var(--red2)}
 .trust-row{display:flex;align-items:center;gap:10px;padding:8px 11px;background:var(--cream)}
@@ -4169,16 +4170,51 @@ function pledgePostNeeded(v){
 function pledgeLadder(){
   var P=ST.post, s=ST.save;
   if(s._wonNatlThisYear) return 5;
-  if(!P || P.mode==="none") return 0;
-  if(P.mode==="bowl" || P.mode==="celebration") return 1;
-  if(P.mode!=="playoff" && P.mode!=="fcsPlayoff") return 0;
+  // Making the field is remembered on the save, so "make the playoff" is credited even if the
+  // postseason state has been cleared by the time we settle up (which is what could leave a
+  // playoff team's pledge wrongly showing as failed).
+  var floor = s._madePlayoffThisYear ? 2 : 0;
+  if(!P || P.mode==="none") return floor;
+  if(P.mode==="bowl" || P.mode==="celebration") return Math.max(floor, 1);
+  if(P.mode!=="playoff" && P.mode!=="fcsPlayoff") return floor;
   if(P.champion!=null && P.champion===P.mySeed) return 5;
   var R={r1:2, r2:2, qf:3, sf:4, champ:5};
-  return Math.max(2, R[P.round]||2);
+  return Math.max(2, R[P.round]||2, floor);
 }
 function pledgeMet(){
   var g=seasonGoals();
   return g.every(function(x){ return x.met; });
+}
+// Over-delivery on the postseason pledge. The `met` check is already ">=" — reaching your
+// pledged round OR ANY ROUND BEYOND satisfies it. But satisfying isn't the whole story: promise
+// the playoff and win a couple of games and you've exceeded the deal, so the board rewards it.
+// We measure this in GAMES ACTUALLY WON, not the round label — because seeds 1-8 get a bye into
+// the Round of 16, so "reached the R16" means a won game for a low seed but nothing for a bye
+// seed. Winning your opener is the real over-delivery, and that's what pays.
+var OVERDELIVER_PTS=2;   // job-security bonus per playoff game won beyond your pledge
+// How many playoff games you've actually won (bye-aware).
+function playoffGamesWon(){
+  var P=ST.post;
+  if(!P || (P.mode!=="playoff" && P.mode!=="fcsPlayoff")) return 0;
+  var order = (P.mode==="fcsPlayoff") ? ["r1","r2","qf","sf","champ"] : ["r1","qf","sf","champ"];
+  var start = order.indexOf(P.startRound || "r1"); if(start<0) start=0;
+  var reached = order.indexOf(P.round); if(reached<0) reached=start;
+  var wins = Math.max(0, reached - start);              // one win per round you advanced past your entry
+  if(P.champion!=null && P.champion===P.mySeed) wins += 1;  // and the final itself, if you took it
+  return wins;
+}
+// The minimum playoff games a pledge required you to win (the bye path), so meeting it exactly
+// is zero over-delivery. Division-aware, mirroring pledgePostNeeded.
+function pledgeWinsRequired(v){
+  if(myDivision()==="FCS") return ({bowl:0, playoff:1, semis:2, title:4})[v] || 0;
+  return ({bowl:0, playoff:0, semis:1, title:3})[v] || 0;   // FBS "playoff" = make the top 12 (no win needed)
+}
+function postOverBonus(){
+  var pl=pledge(); if(!pl.p || !pl.p.v) return 0;
+  var post=seasonGoals()[1];                 // [wins, post, build] — post is always index 1
+  if(!post || !post.met) return 0;           // only over-deliver on a pledge you actually met
+  var beyond = playoffGamesWon() - pledgeWinsRequired(pl.p.v);
+  return beyond>0 ? Math.min(8, beyond*OVERDELIVER_PTS) : 0;
 }
 // Settle up — GOAL BY GOAL. Hit two of three and you're rewarded for two of three.
 function settlePledge(){
@@ -4190,7 +4226,11 @@ function settlePledge(){
   gs.forEach(function(g,i){
     var st=goalStakes(ambs[i]||0);
     if(ambs[i]===0 && !g.label) return;
-    if(g.met){ delta+=st.win; xp+=Math.max(1, Math.round(ambs[i]*1.2)); hit++; return; }
+    if(g.met){
+      delta+=st.win; xp+=Math.max(1, Math.round(ambs[i]*1.2)); hit++;
+      if(g.key==="post"){ var ob=postOverBonus(); if(ob>0){ delta+=ob; xp+=Math.round(ob/2); } }
+      return;
+    }
     var miss=st.miss;
     // HOW BADLY you missed matters. Falling one win short of your promise is a disappointment;
     // falling six short is a collapse — and they were being scored identically.
@@ -4215,7 +4255,7 @@ function settlePledge(){
   var pts=[];
   gs.forEach(function(g,i){
     var st=goalStakes(ambs[i]||0);
-    if(g.met){ pts.push(st.win); return; }
+    if(g.met){ pts.push(st.win + (g.key==="post"?postOverBonus():0)); return; }
     var m=st.miss;
     if(g.key==="wins"){
       var sb=Math.max(0, pl.w.v-(s.wins||0));
@@ -4223,8 +4263,10 @@ function settlePledge(){
     }
     pts.push(m);
   });
-  s._pledgeResult={label:pledgeLabel(), hit:hit, of:gs.length, delta:delta,
-                   goals:gs.map(function(g,i){ return {label:g.label, met:g.met, amb:ambs[i]||0, pts:pts[i]}; })};
+  var overB=postOverBonus();
+  s._pledgeResult={label:pledgeLabel(), hit:hit, of:gs.length, delta:delta, overBonus:overB,
+                   goals:gs.map(function(g,i){ return {label:g.label, met:g.met, amb:ambs[i]||0, pts:pts[i], over:(g.key==="post"?overB:0)}; })};
+  if(overB>0){ var LADX=["\u2014","a bowl","the playoff","the quarterfinals","the semifinals","the title"]; toast("🏆 You promised "+(seasonGoals()[1].label||"the postseason").toLowerCase()+" and reached "+LADX[pledgeLadder()]+" — the board noticed. +"+overB+" for over-delivering."); }
   toast(hit===gs.length ? ("🤝 You delivered on all "+gs.length+". +"+delta+" job security.")
       : hit===0         ? ("📉 You promised "+pledgeLabel().toLowerCase()+" and delivered nothing. "+delta+" job security.")
                         : ("🤝 "+hit+" of "+gs.length+" delivered. "+(delta>=0?"+":"")+delta+" job security."));
@@ -5049,6 +5091,11 @@ function coachesOff(){ var r=ST.save&&ST.save.role; return r!=="DC"; }
 function coachesDef(){ var r=ST.save&&ST.save.role; return r!=="OC"; }
 var STRAIGHT={off:"balanced", tempo:"normal", def:"standard"};
 function tacticsOf(G, side){
+  // A skipped ("Sim to Final") game has nobody on the sideline calling plays, so neither team
+  // gets the in-game coaching layer — no counters, no keying, no situational calls. Both play
+  // their base identity and it resolves on team quality + fit + scheme signature. Without this,
+  // a skip left the CPU actively coaching against a frozen user, a big and unfair edge.
+  if(G && G._autoSim) return {off:"balanced", tempo:"normal", def:"standard"};
   // side 0 is the user's team
   if(side===0){
     if(!G || !G.tactics) return {off:"balanced", tempo:"normal", def:"standard"};
@@ -5197,6 +5244,16 @@ function simSnap(G, stopQ){
   // Only the user's coached unit is affected; CPU-vs-CPU league games never touch it.
   if(G.userGame){
     if(!G.userHist) G.userHist={off:[],def:[]};
+    if(G._autoSim){
+      // Skipped game: identity/texture only, applied to BOTH teams evenly. No counters, keying,
+      // or identity cost — those need a coach making live reads, and in a skip nobody is. But
+      // roster quality (how well your players' archetypes fit the call) is TEAM quality, not a
+      // read, so it still counts — mirroring the CPU's fit, which stays baked into its rating.
+      if(poss===0){ edge += offTraitEdge("balanced"); dm = addMods(dm, offSchemeSig()); }
+      else dm = addMods(dm, OFF_SIG[G.teams[1].offId]||{});
+      if(def===0){ edge -= defTraitEdge("standard"); dm = addMods(dm, defSchemeSig()); }
+      else dm = addMods(dm, DEF_SIG[G.teams[1].defId]||{});
+    } else {
     // ── OFFENSE side (whoever has the ball) gets its scheme texture and its read of the D ──
     if(poss===0){
       G.userHist.off.push(oT.off); if(G.userHist.off.length>12) G.userHist.off.shift();
@@ -5220,6 +5277,7 @@ function simSnap(G, stopQ){
       // CPU defense: its own texture, and it reads YOUR offensive formation (hurts your O).
       dm = addMods(dm, DEF_SIG[G.teams[1].defId]||{});
       dm = addMods(dm, counterMods(counterBonus(DEF_COUNTER, dT.def, G.teams[0].offId), -1));
+    }
     }
   }
   var blk=blkOf(G, poss);
@@ -8072,6 +8130,7 @@ function bestTeamInConf(conf){
 // Bracket flow: R1 (8 games) -> R2/Round of 16 (byes enter) -> QF -> SF -> Championship.
 function setupFCSPlayoff(){
   var s=ST.save, L=s.league;
+  s._madePlayoffThisYear=true;   // remembered even if ST.post is later cleared — making the field always counts
   var myScore = fcsResumeScore(s.wins, s.prestige, s._wonConfThisYear, (L?L.teams[s.school].ovr:60), !!s._beatFBSThisYear);
   var field=[{name:s.school, p:s.prestige, you:true, score:myScore}];
   var others=[];
@@ -8094,6 +8153,7 @@ function setupFCSPlayoff(){
   ST.post={
     mode:"fcsPlayoff", field:field, mySeed:mySeed,
     round: (mySeed<=8 ? "r2" : "r1"),   // top 8 seeds open in the Round of 16
+    startRound: (mySeed<=8 ? "r2" : "r1"),   // where you entered — so we can count games actually won
     bracket: buildFCSBracketState(field),
     log:[], done:false, champion:null
   };
@@ -8245,6 +8305,7 @@ function fcsSimRest(fromRound){
 // Build the 12-team bracket seeded by strength-weighted resume score.
 function setupPlayoff(ranks){
   var s=ST.save, L=s.league;
+  s._madePlayoffThisYear=true;   // making the field always counts, even if postseason state is later cleared
   // The field IS the top 12 of the résumé rankings — the exact list the CFP tab shows, so the
   // bracket and the rankings can never disagree. You are in it only if you ranked top 12.
   ranks = ranks || rankedTeams();
@@ -8265,6 +8326,7 @@ function setupPlayoff(ranks){
   ST.post={
     mode:"playoff", field:field, mySeed:mySeed,
     round: (mySeed<=4?"qf":"r1"),
+    startRound: (mySeed<=4?"qf":"r1"),   // byes (seeds 1-4) open in the quarterfinals
     roundIdx:0,
     bracket: buildBracketState(field),
     done:false, champion:null
@@ -8930,9 +8992,10 @@ function pledgeVerdictCard(){
      '<b style="color:'+(r.delta>=0?'#1a7f37':'var(--red2)')+'">'+(r.delta>=0?'+':'')+r.delta+' job security</b>.</p>';
   h+='<div class="goal-list">';
   (r.goals||[]).forEach(function(g){
+    var overNote = (g.over>0) ? '<span class="goal-over"> · over-delivered</span>' : '';
     h+='<div class="goal-row'+(g.met?" met":"")+'">'+
        '<span class="goal-box">'+(g.met?"✓":"")+'</span>'+
-       '<span class="goal-txt">'+x(g.label)+'</span>'+
+       '<span class="goal-txt">'+x(g.label)+overNote+'</span>'+
        '<span class="goal-detail" style="color:'+(g.met?'#1a7f37':'var(--red2)')+'">'+
          (g.pts>=0?'+':'')+g.pts+'</span></div>';
   });
@@ -10293,6 +10356,7 @@ function rebuildLivePbp(){
 function simToFinal(){
   var G=ST.G; if(!G || G.done) return;
   stopLiveSim();
+  G._autoSim=true;   // no one's calling plays for the rest — resolve it fairly, both sides on identity
   simUntil(G, 0);
   ST.weekResult.pbp=buildPlayByPlay(G.plays, ST.save.school, ST.weekResult.oppName);
   ST.weekResult.us=G.S[0]; ST.weekResult.them=G.S[1];
@@ -10946,7 +11010,7 @@ function startNextSeason(){
   }
   beginSeasonRecruiting();     // fresh recruiting board for the new season
   ST.carousel=null; s._carousel=null; ST.post=null; s._post=null; s._postDone=false;
-  ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false; s._wonNatlThisYear=false;
+  ST.confchamp=null; s._confchamp=null; s._wonConfThisYear=false; s._wonNatlThisYear=false; s._madePlayoffThisYear=false;
   s._beatFBSThisYear=false;
   s._beatRivalThisYear=false;
   s._recruited=false;
