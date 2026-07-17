@@ -3498,12 +3498,42 @@ function schemeById(side,id){
 function offScheme(){ var id=ST.save&&ST.save.offScheme; return OFF_SCHEMES.filter(function(x){return x.id===id;})[0]||OFF_SCHEMES[3]; }
 function defScheme(){ var id=ST.save&&ST.save.defScheme; return DEF_SCHEMES.filter(function(x){return x.id===id;})[0]||DEF_SCHEMES[2]; }
 // Fraction (0..1) of a scheme's key STARTERS whose archetype matches what it wants.
+// What fraction of a scheme's key STARTERS fit what it wants.
+//
+// This was a binary string match: want.indexOf(p.arch)>=0. For most positions that's fine — a
+// Dual-Threat either is or isn't what the Spread wants. But a LINEMAN now carries real pass/run
+// block ratings, and the binary threw them away: a lineman elite at BOTH jobs has arch
+// "Balanced", which appears in no scheme's wants list, so he matched NOTHING and graded out as
+// the worst possible fit in every system. Measured: a line of five 90-rated Balanced linemen
+// scored 1.0 fit in the Air Raid — identical to five Run Blockers, the worst case — while five
+// Pass Protectors scored 2.5. A guy who can do both should be FINE everywhere, not useless
+// everywhere.
+//
+// So linemen are scored on the rating the scheme actually cares about, normalized against the
+// rest of the line. Everyone else keeps the archetype match, which is the right model for them.
+function _olSchemeCredit(p, want){
+  // Which job does this system ask its line to do?
+  var wantsPass = (want.indexOf("Pass Protector")>=0);
+  var wantsRun  = (want.indexOf("Run Blocker")>=0);
+  if(!wantsPass && !wantsRun) return (want.indexOf(p.arch)>=0)?1:0;
+  var rel = wantsPass ? passBlkOf(p) : runBlkOf(p);
+  var off = wantsPass ? runBlkOf(p)  : passBlkOf(p);
+  // Credit is how good he is at the job asked of him, relative to his own overall — so this
+  // measures FIT, not talent (talent is already in the team's off rating; double-counting it
+  // here would make good rosters doubly good). A specialist pointed the right way earns ~1;
+  // pointed the wrong way, ~0; a man equally good at both lands in the middle, which is
+  // exactly right — he's never a liability and never a perfect scheme fit either.
+  var edge = rel - off;                       // +BLK_ARCH_SPLIT*2 if a perfect specialist
+  return clampN(0.5 + edge/(BLK_ARCH_SPLIT*4), 0, 1);
+}
 function schemeArchMatch(scheme){
   var s=ST.save, matched=0, total=0;
   Object.keys(scheme.wants).forEach(function(pos){
     var want=scheme.wants[pos];
     depthOrder(s.roster,pos).slice(0, startersAt(pos)).forEach(function(p){
-      total++; if(want.indexOf(p.arch)>=0) matched++;
+      total++;
+      if(pos==="OL") matched += _olSchemeCredit(p, want);
+      else if(want.indexOf(p.arch)>=0) matched++;
     });
   });
   return total? matched/total : 0;
@@ -3566,21 +3596,216 @@ function idealDefBalance(){
 //   · what you rep — a pass-first system drills pass sets, a run-first system drills combo blocks
 // The tilt is what the sim reads (see blkOf/dRun/dPass); `base` is only for display.
 // A Blocking TE is a sixth run blocker, so he shows up on the run side only.
-var BLK_ARCH_TILT=4.0;    // an all-Pass-Protector five is +4 pass / -4 run
-var BLK_SCHEME_TILT=3.0;  // ...and the system you rep moves it up to another 3
+// ── PLAYER SKILLS: ARCHETYPES AS LENSES ──────────────────
+// An archetype used to be a BOX. A player was a "Power Back" and that was the whole truth about
+// him: offTraitEdge returned 0.24 for a Power Back whether he was rated 60 or 99 (ovr was
+// literally not read), and Power Back vs Elusive returned the identical number, so the box
+// didn't even distinguish what it named. Eliteness bought nothing and the label did nothing.
+//
+// Now the SKILLS are the truth and the archetype is a LENS onto them. Every player carries a
+// rating at each of his position's jobs, derived from ovr + his archetype's tilt + a
+// deterministic per-player wobble. A back who's genuinely good at power AND hands reads as both
+// a Power Back and a Receiving Back, and gets rewarded through both — instead of being forced
+// into one box and scoring zero in the other. This generalizes the passBlk/runBlk model that
+// already works for the offensive line.
+//
+// SKILL_DEFS: for each position, the jobs, and which archetype pushes each one up.
+var SKILL_DEFS={
+  QB: {arm:  ["Pocket Passer"], acc: ["Pocket Passer","Game Manager"],
+       mob:  ["Dual-Threat"],   poise:["Game Manager"]},
+  RB: {power:["Power Back"],    speed:["Elusive"],  hands:["Receiving Back"], care:["Power Back"]},
+  WR: {speed:["Vertical Threat"], hands:["Possession"], route:["Slot","Possession"]},
+  TE: {hands:["Receiving TE"],  block:["Blocking TE"]},
+  OL: {pass: ["Pass Protector"], run:  ["Run Blocker"]},
+  DL: {rush: ["Pass Rusher"],   stuff:["Run Stuffer"]},
+  LB: {cover:["Coverage LB"],   thump:["Thumper"],  blitz:["Blitzer"]},
+  CB: {press:["Press-Man CB"],  zone: ["Zone CB"],  speed:["Press-Man CB"]},
+  S:  {ball: ["Ball-Hawk"],     box:  ["Box Safety"]}
+};
+// Display names for the skill keys. Terse in code; these are what a coach would call them.
+var SKILL_LABEL={
+  arm:"Arm", acc:"Accuracy", mob:"Mobility", poise:"Poise",
+  power:"Power", speed:"Speed", hands:"Hands", care:"Ball Security",
+  route:"Routes", block:"Blocking",
+  pass:"Pass Block", run:"Run Block",
+  rush:"Pass Rush", stuff:"Run Stuff",
+  cover:"Coverage", thump:"Run Stop", blitz:"Blitz",
+  press:"Press", zone:"Zone",
+  ball:"Ball Skills", box:"Run Support"
+};
+// A skill number only says something the OVR doesn't if it's graded against the player HIMSELF.
+// A 90 on a 92 overall is a weakness; a 78 on a 70 overall is his calling card.
+function skillTone(v, ovr){
+  var d=v-(ovr||70);
+  if(d>=4)  return "#1a7f37";        // a real strength
+  if(d<=-4) return "var(--red2)";    // a real hole
+  return "var(--muted)";
+}
+// SIZING, measured rather than guessed. Everything downstream reads (skill - ovr), so this pair
+// of constants sets how much signal the whole system has to work with. At 4.0/3.0 a real roster
+// produced deviations spanning only -6..+7 with means near zero, and once _groupSkillDev
+// averaged 3-5 starters the signal collapsed to sd 2.3 — which at any sane weight is a quarter
+// point of margin. The skills existed, were displayed, and did nothing.
+//
+// Widened so a starting group's deviation carries real information. The archetype tilt is what
+// survives averaging (every Possession receiver shares it), so THAT is the number that has to
+// be big; the wobble is per-player colour that mostly washes out in a group and shouldn't try
+// to do the heavy lifting.
+var SKILL_SPLIT=9.0;    // how far an archetype pulls a skill from the player's overall
+var SKILL_WOBBLE=3.5;   // per-player spread, so two same-archetype players aren't clones
+// The whole point: a player can be genuinely good at a job his archetype DOESN'T name. That's
+// what lets a man read through multiple lenses instead of exactly one.
+//
+// The first version of this failed that test. It gave the archetype's skill +SPLIT and every
+// other skill -SPLIT*0.75, which meant a non-archetype skill could NEVER exceed the player's
+// own overall — at any rating. A Pocket Passer could not have poise above his ovr, ever, so
+// "high arm AND high poise" was literally unbuildable. That is the archetype box rebuilt with
+// extra steps.
+//
+// So the off-archetype penalty SHRINKS as a player gets better. A 62 is a specialist — he does
+// one thing and the rest of his game is a hole. A 95 is elite precisely BECAUSE he has no real
+// holes: his archetype says what he's best at, not what he's limited to. That's what makes
+// eliteness worth paying for, and it's why a great player fits any scheme.
+function skillOf(p, skill){
+  if(!p) return 60;
+  var defs=SKILL_DEFS[p.pos]; if(!defs || !defs[skill]) return p.ovr||60;
+  var ovr=p.ovr||60;
+  var owners=defs[skill];
+  var tilt;
+  if(owners.indexOf(p.arch)>=0){
+    tilt = +SKILL_SPLIT;                       // his archetype names this job
+  } else {
+    // How much a man is defined by his specialism, by level. At 60 the off-skills sit ~4.5
+    // below him (a true one-trick player); by 95 they're ~0.9 below (he can do everything).
+    var elite = clampN((ovr-60)/35, 0, 1);     // 60 -> 0, 95 -> 1
+    tilt = -SKILL_SPLIT*(1.15 - 0.9*elite);
+  }
+  var h=nameHash((p.id||p.n||"x")+"|"+skill, 61);
+  var wob=((h%1000)/500-1)*SKILL_WOBBLE;
+  return clampN(Math.round(ovr + tilt + wob), 40, 99);
+}
+// Every skill a player has, as a map. For UI and for scoring.
+function skillsOf(p){
+  var defs=SKILL_DEFS[p.pos]; if(!defs) return {};
+  var out={};
+  Object.keys(defs).forEach(function(k){ out[k]=skillOf(p,k); });
+  return out;
+}
+// ARCHETYPES AS READINGS. Which lenses does this player actually fit? A player is "a Power Back"
+// if his power is high relative to himself — and he can be several things at once. This is what
+// gets displayed: not the box he was born in, but what he has actually become.
+// Returns [{arch, skill, score}] sorted strongest first, only those he genuinely fits.
+function archLenses(p){
+  var defs=SKILL_DEFS[p.pos]; if(!defs) return [];
+  var sk=skillsOf(p);
+  var mean=0, n=0;
+  Object.keys(sk).forEach(function(k){ mean+=sk[k]; n++; });
+  mean = n?mean/n:60;
+  // A skill owned by SEVERAL archetypes can't distinguish between them — if QB.acc belongs to
+  // both Pocket Passer and Game Manager, then every accurate QB "is" both, which is an artifact
+  // of the table rather than a fact about the player. Measured: shared skills produced 701 of
+  // 715 dual labels, while genuinely versatile players (Elusive/Power Back, Dual-Threat/Pocket
+  // Passer) made up 14. So a shared skill contributes only a FRACTION of its strength — enough
+  // to support a reading, never enough to create one on its own. A real second lens has to come
+  // from a skill only that archetype claims.
+  var seen={};
+  Object.keys(defs).forEach(function(skill){
+    var owners=defs[skill];
+    var exclusive=(owners.length===1);
+    var v=sk[skill]-mean;                    // how much this job stands out FOR HIM
+    if(v<=1.0) return;
+    if(!exclusive) v*=0.45;                  // shared: supporting evidence, not proof
+    owners.forEach(function(arch){
+      if(seen[arch]==null || v>seen[arch]) seen[arch]=v;
+    });
+  });
+  var out=[];
+  Object.keys(seen).forEach(function(a){ if(seen[a]>1.0) out.push({arch:a, score:seen[a]}); });
+  out.sort(function(a,b){ return b.score-a.score; });
+  return out;
+}
+// The label(s) to show. His top lens always; a second if he genuinely fits it too.
+function archLabel(p){
+  var L=archLenses(p);
+  if(!L.length) return p.arch||"Balanced";     // fits nothing strongly: he's a generalist
+  if(L.length>1 && L[1].score>=L[0].score*0.6) return L[0].arch+" / "+L[1].arch;
+  return L[0].arch;
+}
+// A lineman used to be a binary: "Pass Protector" or "Run Blocker", and olBlock() just COUNTED
+// them ((pp-rb)/n). That meant every Pass Protector on earth was identical, a 92 and a 61 moved
+// the tilt exactly the same amount, and there was no such thing as a lineman who was simply good
+// at both — the thing every real line wants.
+//
+// Now each lineman carries two derived ratings. DERIVED, not stored: computed from ovr + arch +
+// a per-player deterministic wobble, so every lineman in every existing save has them instantly
+// with no migration, and they track ovr as he develops. `arch` still drives which way he leans
+// (and still feeds scheme.wants / schemeArchMatch, which must keep working), but now it's a tilt
+// on a real number instead of the whole story.
+var BLK_SCHEME_TILT=3.0;  // the system you rep moves the line's tilt this far
+// Calibrated so a UNIFORM line lands where the old archetype-counting code put it (an all-Pass-
+// Protector five ~+3.3 tilt, an all-Run-Blocker five ~-4.7), which keeps dRun/dPass tuning
+// intact. At 7.0 the swing nearly doubled and an all-Run-Blocker line pinned the -6.5 clamp.
+// The new value is in the SPECTRUM, not a bigger swing: a mixed line of good and bad players
+// now reads differently from a mixed line of equals, which archetype-counting could never see.
+var BLK_ARCH_SPLIT=4.0;   // how far an archetype pulls a lineman from his own overall
+function _blkWobble(p, salt){
+  // Deterministic per-player, so a lineman's strengths don't shuffle every time he's looked at.
+  var h=nameHash((p.id||p.n||"x"), salt);
+  return ((h%1000)/500-1)*2.2;    // ±2.2
+}
+function passBlkOf(p){
+  if(!p) return 60;
+  var tilt = (p.arch==="Pass Protector") ? +BLK_ARCH_SPLIT : (p.arch==="Run Blocker" ? -BLK_ARCH_SPLIT : 0);
+  return clampN(Math.round(p.ovr + tilt + _blkWobble(p,23)), 40, 99);
+}
+function runBlkOf(p){
+  if(!p) return 60;
+  var tilt = (p.arch==="Run Blocker") ? +BLK_ARCH_SPLIT : (p.arch==="Pass Protector" ? -BLK_ARCH_SPLIT : 0);
+  return clampN(Math.round(p.ovr + tilt + _blkWobble(p,47)), 40, 99);
+}
 function olBlock(){
   var r=(ST.save&&ST.save.roster)||[];
   var base=posDepthOvr(r,"OL");
   var st=depthOrder(r,"OL").slice(0, startersAt("OL"));
-  var pp=0, rb=0;
-  st.forEach(function(p){ if(p.arch==="Pass Protector")pp++; else if(p.arch==="Run Blocker")rb++; });
-  var n=Math.max(1, st.length);
-  var tilt = ((pp-rb)/n)*BLK_ARCH_TILT + ((50-offScheme().lean)/50)*BLK_SCHEME_TILT;
-  tilt = clampN(tilt, -6.5, 6.5);
+  // Averaging alone CANNOT see this: avg(ovr + archTilt) separates into avg(ovr) + avg(tilt),
+  // so a line of elite protectors + weak maulers averages out identical to the reverse. The
+  // pairing of WHO is good with WHICH job is exactly the thing worth modelling, so:
+  //   · pass protection is a WEAK-LINK phase — one turnstile gets the quarterback killed
+  //     regardless of how good the other four are, so the worst protector is weighted heavily.
+  //   · run blocking is closer to a SUM — you run behind your best, and a mauler can pull to
+  //     cover for a weak man next to him, so it leans toward the best.
+  var pv=[], rv=[];
+  st.forEach(function(p){ pv.push(passBlkOf(p)); rv.push(runBlkOf(p)); });
+  var passR, runR;
+  if(pv.length){
+    pv.sort(function(a,b){return a-b;});   // ascending: pv[0] is the turnstile
+    rv.sort(function(a,b){return b-a;});   // descending: rv[0] is the mauler
+    var pMean=pv.reduce(function(a,b){return a+b;},0)/pv.length;
+    var rMean=rv.reduce(function(a,b){return a+b;},0)/rv.length;
+    // Weights tuned so a UNIFORM line reproduces the old archetype-counting tilt exactly
+    // (5x80 Pass Protectors -> +3.32, 5x80 Run Blockers -> -4.68), keeping dRun/dPass tuning
+    // intact. At 0.45 the worst man dominated and a line of three 92 protectors read as
+    // run-heavy, which is nonsense. What these buy is the NON-uniform case: four studs and a
+    // turnstile now grade +0.28 where five solid men grade +3.32 — the same average, a worse
+    // pass-protecting line, which averaging alone can never see.
+    passR = pMean*0.80 + pv[0]*0.20;                 // the weak link drags protection down
+    runR  = rMean*0.85 + rv[0]*0.15;                 // the best blocker lifts the run game
+  } else { passR=base; runR=base; }
+  // The system you rep still moves the needle — a pass-first offense drills pass sets.
+  var schemeTilt = ((50-offScheme().lean)/50)*BLK_SCHEME_TILT;
+  passR += schemeTilt; runR -= schemeTilt;
+  // A Blocking TE is a sixth run blocker.
   var teRun=0;
   depthOrder(r,"TE").slice(0, startersAt("TE")).forEach(function(p){ if(p.arch==="Blocking TE") teRun+=1.2; });
-  return {pass: base+tilt, run: base-tilt+teRun, base: base, tilt: tilt,
-          passAdj: tilt, runAdj: -tilt+teRun};
+  runR += teRun;
+  // The sim reads a TILT (how much better this line is at one than the other), not the level —
+  // level is already priced into the team's off rating via posDepthOvr. Keep the same contract
+  // and the same clamp the old tilt had, so dRun/dPass are unchanged.
+  var tilt = clampN((passR-runR)/2, -6.5, 6.5);
+  return {pass: base+tilt, run: base-tilt, base: base, tilt: tilt,
+          passAdj: tilt, runAdj: -tilt,
+          // the raw group ratings, for the roster/scouting UI
+          passR: Math.round(passR), runR: Math.round(runR)};
 }
 // A CPU line tilts with its system, same as yours. No roster to read, so the system is all of it.
 function cpuBlock(name){
@@ -3612,14 +3837,47 @@ function traitFrac(wants){   // wants: {pos:[archetypes]} → fraction of those 
   });
   return total? matched/total : 0.4;
 }
+// Which SKILLS each call leans on. This replaces the old archetype headcount: the question is
+// no longer "how many men wear the right label" but "how good are the men at the job".
+var TRAIT_SKILLS={
+  run:   {RB:["power","speed"],           TE:["block"]},
+  pass:  {QB:["arm","acc"],               WR:["speed","hands","route"], TE:["hands"]},
+  rush:  {DL:["rush"],                    LB:["blitz"]},
+  cover: {CB:["press","zone"],            S:["ball"],                   LB:["cover"]}
+};
+// A 0..1 read of how well your STARTERS are equipped for a call.
+//
+// This used to be traitFrac(): a headcount of matching archetype labels. It ignored ovr
+// entirely — offTraitEdge returned exactly 0.24 for a Power Back whether he was a 60 or a 99 —
+// and it couldn't tell Power Back from Elusive, since both were merely "in the list". Eliteness
+// bought nothing and the label bought everything.
+//
+// Now it reads the actual skills. 0.40 is the neutral point (an average roster), matching the
+// old baseline so TRAIT_W and everything tuned against it still holds. A 75 is average, so it
+// lands at 0.40; a group of 95s pushes toward 1.0; a group of 55s toward 0.
+function traitSkillFrac(call){
+  var s=ST.save; if(!s||!s.roster) return 0.40;
+  var want=TRAIT_SKILLS[call]; if(!want) return 0.40;
+  var tot=0, n=0;
+  Object.keys(want).forEach(function(pos){
+    depthOrder(s.roster,pos).slice(0, startersAt(pos)).forEach(function(p){
+      want[pos].forEach(function(sk){ tot+=skillOf(p,sk); n++; });
+    });
+  });
+  if(!n) return 0.40;
+  var avg=tot/n;
+  // Map skill 55..95 onto 0..1 with 75 (average) sitting at the old 0.40 neutral point, so a
+  // roster that was "40% fitted" before and one that's plain average now agree.
+  return clampN(0.40 + (avg-75)/50, 0, 1);
+}
 var TRAIT_W=2.4;   // a fully-fitted skill group is worth ~+1.4 on that call; an unfitted one ~-1
-function traitEdgeFrom(wants){ return (traitFrac(wants)-0.40)*TRAIT_W; }
+function traitEdgeFrom(call){ return (traitSkillFrac(call)-0.40)*TRAIT_W; }
 // The four things you can be built to do. OL is deliberately absent here — the run/pass line
 // tilt is already its own system (olBlock → dRun/dPass), so folding it in would double-count.
-function runTraitEdge(){  return traitEdgeFrom({RB:["Power Back","Elusive"], TE:["Blocking TE"]}); }
-function passTraitEdge(){ return traitEdgeFrom({QB:["Pocket Passer","Dual-Threat"], WR:["Vertical Threat","Slot","Possession"], TE:["Receiving TE"]}); }
-function rushTraitEdge(){ return traitEdgeFrom({DL:["Pass Rusher"], LB:["Blitzer"]}); }
-function coverTraitEdge(){return traitEdgeFrom({CB:["Press-Man CB","Zone CB"], S:["Ball-Hawk"], LB:["Coverage LB"]}); }
+function runTraitEdge(){  return traitEdgeFrom("run"); }
+function passTraitEdge(){ return traitEdgeFrom("pass"); }
+function rushTraitEdge(){ return traitEdgeFrom("rush"); }
+function coverTraitEdge(){return traitEdgeFrom("cover"); }
 // The trait edge for the call you actually made. `balanced`/`standard` blends the two, so a
 // team lopsided toward one side of the ball is quietly telling you which call to lean on.
 function offTraitEdge(off){
@@ -3689,19 +3947,168 @@ function identityCost(side, tactics){
 // BALANCED WEB: every call-row sums to ~0, so no call is a free default — each one beats some
 // formations and loses to others, and the only way to gain is to match your call to the
 // formation across from you. Run attacks light boxes and vacated gaps (Nickel, Blitz-Heavy)
-// and dies on stout fronts (4-3, 3-4). Pass attacks the base fronts and the house, and dies
-// against coverage (Nickel, Bend-Don't-Break). Both beat Blitz-Heavy — a blitz takes nothing
-// away reliably — which is balanced by blitz's own signature upside (pressure, takeaways).
+// and dies on stout fronts (4-3, 3-4). Pass attacks the base fronts and dies against coverage
+// (Nickel, Bend-Don't-Break) and against pressure (Blitz-Heavy).
+//
+// CORRECTED: pass used to be listed at +2.0 vs blitz — rated the single best counter in the
+// table — on the theory that a blitz "takes nothing away reliably". The sim says otherwise and
+// always did: blitz carries sack +0.040 and comp -0.034, which costs a passing play far more
+// than +2.0 buys it. Measured head-to-head against a blitz, running gained 5.50 ypp and passing
+// 5.10 even after the run's own bonus was zeroed out — the pass CANNOT win that matchup at any
+// sane counter value. So cpuBestCounter was confidently calling the play the engine punished,
+// for both sidelines, every time it saw pressure. Blitz is now what a blitz actually is: it
+// vacates gaps (the run gets the reward) and it hunts the quarterback (the pass pays for it).
 var OFF_COUNTER={   // your offensive call  →  vs THEIR defensive formation   (rows sum to 0)
-  run:      {nickel:+2.0, zone:-0.8, base43:-1.4, multiple34:-1.4, blitz:+1.6},
+  run:      {nickel:+2.0, zone:-0.8, base43:-1.4, multiple34:-1.4, blitz:+2.2},
   balanced: {},
-  pass:     {nickel:-1.8, zone:-2.0, base43:+1.2, multiple34:+0.6, blitz:+2.0}
+  pass:     {nickel:-1.8, zone:-2.0, base43:+1.2, multiple34:+0.6, blitz:-2.2}
 };
 var DEF_COUNTER={   // your defensive call  →  vs THEIR offensive formation   (rows sum to 0)
   blitz:    {airraid:+2.4, westcoast:-0.8, spread:-1.0, prostyle:+0.6, pound:-1.2},
   standard: {},
   prevent:  {airraid:+1.8, westcoast:+1.0, spread:-0.8, prostyle:-0.6, pound:-1.4}
 };
+// ── GROUP MATCHUPS ───────────────────────────────────────
+// The exploit layer. A play doesn't happen against a team's OVERALL rating — a pass happens
+// against their corners and safeties, a run happens against their line and backers. Two teams
+// rated 82 play completely differently if one is 90-at-the-line/71-in-the-secondary. This is
+// what makes scouting worth doing: find the soft group and attack it.
+//
+// Deliberately modest. `edge` (talent) and the counter web are the primary forces; this is a
+// third, smaller one that rewards ATTENTION. Returns yardage-channel mods in the same shape
+// everything else in the sim uses, so it composes through addMods like any other modifier.
+//
+// Run:  our OL+RB      vs their DL+LB   → yards on the ground
+// Pass: our QB+WR+TE   vs their CB+S    → completions and yards through the air
+// The pass rush (their DL) shows up as sacks either way — you cannot scheme around a real one.
+var GRP_W=0.055;   // per point of group SHAPE advantage.
+// Groups must measure SHAPE, not LEVEL. `edge` (teams[poss].off - teams[def].def) already prices
+// how much better one team is than the other; if this layer also read absolute group ratings it
+// would charge for the same talent twice. Measured, that doubled the talent curve — an 8-point
+// gap went from +11.8 to +25.2 margin and a 95% win rate.
+// So each group is expressed as a DEVIATION from its own unit's average, and the matchup compares
+// deviations. Two evenly-rated teams with different shapes get a real edge; two teams with the
+// same shape get nothing no matter how far apart their ratings are. Level is edge's job.
+function _dev(g, keys, weights){
+  var tot=0,w=0; keys.forEach(function(p){ tot+=g[p]*weights[p]; w+=weights[p]; });
+  var mean=tot/w, out={};
+  keys.forEach(function(p){ out[p]=g[p]-mean; });
+  return out;
+}
+function groupMatchup(ourG, theirG){
+  if(!ourG || !theirG) return {runYds:0, comp:0, explosive:0, sack:0, shorten:0};
+  var o=_dev(ourG, OFF_GROUPS, POS_WEIGHT);        // our offense, relative to our own offense
+  var d=_dev(theirG, DEF_GROUPS, DEF_POS_WEIGHT);  // their defense, relative to their own defense
+  var ourRun   = (o.OL*1.5 + o.RB*1.0)/2.5;
+  var theirRun = (d.DL*1.5 + d.LB*1.0)/2.5;
+  var ourPass  = (o.QB*1.6 + o.WR*1.2 + o.TE*0.5)/3.3;
+  var theirPass= (d.CB*1.4 + d.S*1.0)/2.4;
+  var runEdge  = ourRun - theirRun;    // is our run STRENGTH aimed at their run WEAKNESS?
+  var passEdge = ourPass - theirPass;
+  var rushEdge = d.DL - o.OL;          // their front's emphasis vs our protection's
+  // NOTE: pass YARDAGE rides on `shorten` (subtracted from completion length, so negative
+  // lengthens). There is no passYds channel — addMods doesn't carry one, and a mod it doesn't
+  // carry is silently dropped rather than erroring.
+  return {
+    runYds:    clampN(runEdge*GRP_W,        -1.2, 1.2),
+    comp:      clampN(passEdge*0.0030,      -0.07, 0.07),
+    explosive: clampN(passEdge*0.0015,      -0.03, 0.03),
+    sack:      clampN(rushEdge*0.0022,      -0.05, 0.05),
+    shorten:   clampN(-passEdge*GRP_W*0.9,  -1.1, 1.1)
+  };
+}
+// The single most exploitable group on a defense, for the scouting card.
+function softestGroup(g){
+  if(!g) return null;
+  var d=[["DL",g.DL],["LB",g.LB],["CB",g.CB],["S",g.S]];
+  d.sort(function(a,b){ return a[1]-b[1]; });
+  return {pos:d[0][0], ovr:d[0][1], best:d[3][0], bestOvr:d[3][1]};
+}
+// ── SKILLS SHAPE THE PLAY ────────────────────────────────
+// traitSkillFrac already prices how GOOD your players are — it feeds `edge`, the level channel.
+// This is different: it's how your players' specific strengths change the SHAPE of what happens.
+// Two 85-rated quarterbacks move `edge` identically, but the one with Poise 94 shouldn't throw
+// the same number of interceptions as the one with Poise 71. Before this, they did — `int` and
+// `fumble` were flat constants with no player input whatsoever, so a Game Manager and a
+// gunslinger were mechanically the same man.
+//
+// EVERYTHING HERE IS RELATIVE TO THE PLAYER'S OWN OVERALL, for the same reason groupMatchup is:
+// absolute skill would double-count talent that `edge` already charges for, and the measured
+// consequence of that mistake (when I made it with position groups) was doubling the talent
+// curve. A 95-overall QB with Poise 95 is exactly average at protecting the ball FOR A 95 — his
+// eliteness is already in the rating. What this reads is the man who is unusually careful, or
+// unusually careless, FOR HIS LEVEL.
+//
+// Returns mods in the standard shape, so it composes through addMods like anything else.
+function _starterSkill(pos, skill){
+  var s=ST.save; if(!s||!s.roster) return 0;
+  var p=depthOrder(s.roster,pos)[0];
+  if(!p) return 0;
+  return skillOf(p,skill)-(p.ovr||70);        // deviation from his own level
+}
+// Averaged across the men who actually do the job (a receiving corps, not one man).
+function _groupSkillDev(pos, skill, n){
+  var s=ST.save; if(!s||!s.roster) return 0;
+  var g=depthOrder(s.roster,pos).slice(0, n||startersAt(pos));
+  if(!g.length) return 0;
+  var tot=0;
+  g.forEach(function(p){ tot += skillOf(p,skill)-(p.ovr||70); });
+  return tot/g.length;
+}
+// Weights chosen by MEASURING what each channel is worth in game margin, not by intuition.
+// Forcing a fixed mod on one channel and simming 4000 games each:
+//   comp +0.05   -> +3.75 pts    <- by far the biggest lever in the sim
+//   shorten -1.0 -> +2.80
+//   runYds +0.5  -> +2.14
+//   sack -0.03   -> +1.95
+//   int -0.01    -> +1.84
+//   runExpl +0.03-> +1.59
+//   explosive+.03-> +1.35
+//   fumble -.005 -> +0.52        <- nearly worthless
+// The first cut of this fed int and fumble at ~full strength and comp at a third, i.e. it put
+// the most skill signal into the least important channels. Now the allocation follows the
+// leverage: accuracy and hands drive completions (the thing that decides games), poise still
+// owns interceptions (it should — that's the Game Manager's whole identity), and ball security
+// stays small because fumbles genuinely don't swing much.
+var SK_COMP_QB=0.0022;  // per point of QB accuracy deviation — THE lever
+var SK_COMP_WR=0.0016;  // per point of receiver hands deviation
+var SK_INT=0.0016;      // per point of QB poise deviation. +/-8 poise ≈ +/-1.3% INT rate.
+var SK_FUM=0.0009;      // per point of RB ball-security deviation
+var SK_EXPL=0.0011;     // per point of receiver speed deviation
+var SK_SHORT=0.055;     // per point of QB arm deviation — a big arm throws it further downfield
+// Your offense's skill signature — applied to YOUR offensive snaps only.
+function offSkillMods(){
+  var poise=_starterSkill("QB","poise");
+  var acc  =_starterSkill("QB","acc");
+  var arm  =_starterSkill("QB","arm");
+  var care =_groupSkillDev("RB","care");
+  var hands=_groupSkillDev("WR","hands");
+  var speed=_groupSkillDev("WR","speed");
+  return {
+    // Completions are the game's biggest lever, and they're a QB-and-receivers stat. An
+    // accurate quarterback throwing to reliable hands is the most valuable thing an offense
+    // can have, and before this neither of them touched it.
+    comp:      clampN(acc*SK_COMP_QB + hands*SK_COMP_WR, -0.055, 0.055),
+    int:       clampN(-poise*SK_INT,  -0.014, 0.014),   // poise protects the ball
+    fumble:    clampN(-care*SK_FUM,   -0.008, 0.008),
+    explosive: clampN(speed*SK_EXPL,  -0.018, 0.018),   // speed turns catches into scores
+    shorten:   clampN(-arm*SK_SHORT,  -0.9, 0.9),       // arm strength = the ball travels
+    sack:0, runYds:0, runExpl:0
+  };
+}
+// Your defense's skill signature — applied to the OPPOSING offense, so the signs flip: your
+// ball-hawks raise THEIR interception rate, your pass rush raises THEIR sack rate.
+function defSkillMods(){
+  var ball =_groupSkillDev("S","ball");
+  var rush =_groupSkillDev("DL","rush");
+  var cover=_groupSkillDev("CB","press");
+  return {
+    int:       clampN(ball*SK_INT,    -0.014, 0.014),
+    sack:      clampN(rush*0.0020,    -0.020, 0.020),
+    comp:      clampN(-cover*0.0024,  -0.038, 0.038),   // press corners suppress completions
+    fumble:0, explosive:0, runYds:0, shorten:0, runExpl:0
+  };
+}
 // ── CPU ADJUSTMENT: the defense keys on your tendencies ──
 // A balanced web still gets solved if the opponent never reacts — you'd read the scouting
 // card once and camp the right counter all game. So the defense ADJUSTS: lean on one call and
@@ -5190,20 +5597,26 @@ function redrawKeepScroll(){
 // yl = yards from the OFFENSE's own goal line; yl>=100 is a touchdown.
 // =====================================================
 var XP_RATE=0.95, TWO_RATE=0.45;
-// TUNING: at 30 the rating scale was so compressed that talent barely mattered. An 89 defense
-// — a wall, ~10 pts above the FBS mean offense of 78.8 — conceded 15.3 pts and 322 yds to a
-// 75 offense, and the whole 75->92 offensive range moved scoring only 15.3 -> 24.0. That's a
-// 17-point talent chasm worth under 9 points of scoreboard, so every game collapsed toward
-// .500 and no roster ever felt built. At 18 the same 89 D holds a 75 offense to ~10.6 and
-// still gives up ~27 to a 92 offense: the spread widens from 10.9 to 16.7, good defenses
-// stifle bad offenses, and elite offenses still move the ball.
+// TUNING: this scales rating DIFFERENCES only, so an even matchup is untouched at any value —
+// it controls how much separation a talent gap buys, not the baseline.
 //
-// This scales DIFFERENCES only, so an even matchup is untouched (89-vs-89 sits at ~24 pts at
-// every value) — it changes how much separation a rating gap buys, not the baseline.
-// Lower = talent matters more. Raise it back toward 30 to make coaching (fit + reads + calls)
-// loom larger relative to the roster; drop it toward 14 to make recruiting king.
-var EDGE_DIV=18;
+// It has now been set twice, and the second time is a consequence of the first. It began at 30,
+// which was far too compressed: an 89 defense conceded 15.3 pts to a 75 offense and the whole
+// 75->92 offensive range moved scoring under 9 points, so every game collapsed toward .500 and
+// no roster ever felt built. Dropping it to 18 fixed that. But the dPass half-normal fix (see
+// below) then removed ~4.8 yds from every completion, lowering the scoring baseline league-wide
+// — and a smaller baseline means the SAME divided edge buys proportionally more separation. At
+// 18 on the new baseline, an 8-point talent gap was worth +16.7 and an 89% win rate. Back to 32
+// restores the intended curve on the corrected yardage model: gap 0 ~ -1.6, gap 4 ~63% wins,
+// gap 8 ~ +11.5 and 78% wins.
+//
+// Lower = talent matters more; raise it to make coaching (fit + reads + calls) loom larger.
+var EDGE_DIV=32;
 var PACE=1.00;     // >1 = fewer plays per drive (tune points-per-drive here)
+                   // Back to neutral. It was 0.78 to buy back scoring after the dPass fix, but
+                   // that was treating a symptom: the real problem was dClock burning half the
+                   // real game clock, so games ran 205 snaps instead of ~140. With dClock fixed
+                   // this is a genuine tempo dial again rather than a fudge factor.
 
 // Box-Muller: yardage is normal-ish with a fat right tail.
 function gauss(){ var u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random();
@@ -5219,7 +5632,7 @@ var BLK_RUN_YDS=0.15;   // yards per carry, per point of run-block tilt. Kept be
 function dRun(edge, dm, rblk){
   dm=dm||defMods("standard"); rblk=rblk||0;
   var e=edge/EDGE_DIV;
-  var y=(4.5+e*2.0+dm.runYds+rblk*BLK_RUN_YDS)+gauss()*4.7;   // soft fronts concede the run; a real talent edge shows up here
+  var y=(5.5+e*2.0+dm.runYds+rblk*BLK_RUN_YDS)+gauss()*4.7;   // soft fronts concede the run; a real talent edge shows up here
   // `runExpl` shapes how often a run breaks — Spread springs QB keepers and space; Ground &
   // Pound trades the home-run for a steady, high-floor grind.
   if(Math.random()<clampN(0.058+e*0.02+rblk*0.004+(dm.runExpl||0),0.02,0.16)) y+=Math.abs(gauss())*16;
@@ -5239,7 +5652,30 @@ function dPass(edge, obvious, dm, aggro, pblk){
   var intP =clampN(0.026-e*0.010+(obvious?0.012:0)+dm.int+aggro*0.008,0.006,0.070);
   if(Math.random()<intP)   return {yards:0, turnover:true,  kind:"int",  incomplete:true};
   if(Math.random()>=compP) return {yards:0, turnover:false, kind:"pass", incomplete:true};
-  var y=(obvious?5.4:6.8)-(dm.shorten||0)+e*1.9+aggro*2.4+Math.abs(gauss())*(obvious?5.2:6.0);
+  // YARDS AFTER THE CATCH IS SIGNED. This was Math.abs(gauss())*6.0 — a half-normal, which is
+  // always positive and averages +4.8. That made a completion 6.8+4.8 = 11.6 yards on average
+  // and, worse, meant literally 0% of completions gained under 5 yards; real football is ~35-40%.
+  // There was no such thing as a short catch. Compare dRun, which uses a SIGNED gauss()*4.7 and
+  // so varies both ways around 4.5.
+  //
+  // The consequence was systemic, not cosmetic: passing ran +1.41 ypp over running before any
+  // counter was applied — 4.4x the value of the LARGEST counter in OFF_COUNTER. That made the
+  // entire call-vs-formation web unable to matter (passing beat running against all five
+  // defensive formations, including the two the table says should stuff it), and it's the real
+  // engine behind the pass ratchet: throwing was simply always right.
+  // The floor below (`if(y<1) y=rnd(1,3)`) already handles the negative tail — a caught ball
+  // never loses ground.
+  // Tuned so the DISTRIBUTION is right, not just the mean. Base 10.4 with sd 9.0 gives ~7.0
+  // yards per ATTEMPT (real ~7.0) and a realistic short-catch rate.
+  //
+  // An earlier pass at this set the base to 7.6 on the reasoning that per-play EV should be
+  // LEVEL with the run, since passing carries more than double the turnover rate and stops the
+  // clock. That was wrong: real football runs ~7.0 per pass attempt against ~4.5 per carry.
+  // Passing IS more efficient per play — the clock is what pays for it, and once dClock stopped
+  // burning half the real time, that cost is priced properly and the yardage can sit where it
+  // belongs. At 7.6 the offense couldn't finish drives: 1.66 TDs a game against a real 3.2.
+  var y=(obvious?9.0:10.4)-(dm.shorten||0)+e*1.9+aggro*2.4+gauss()*(obvious?8.2:9.0);
+  // The explosive term stays absolute: a broken tackle is a bonus, never a penalty.
   if(Math.random()<clampN(0.05+dm.explosive+aggro*0.03,0.005,0.20)) y+=Math.abs(gauss())*20;
   y=Math.round(y);
   if(y<1) y=rnd(1,3);   // a caught ball never loses ground; that's a sack, not a completion
@@ -5287,16 +5723,26 @@ function autoOff(G, pref){
   var margin=G.S[0]-G.S[1], late=(G.clock<600);
   if(late && margin>0  && pref!=="pass") return "run";    // protect a lead
   if(late && margin<-8 && pref!=="run")  return "pass";   // two scores down
-  // Shade to the call that counters THEIR defense — the same read cpuOffCall makes against
+  // Shade toward the call that counters THEIR defense — the same read cpuOffCall makes against
   // you. Without this the CPU's counter-reads were worth ~1.7 pts a game that you could never
-  // reciprocate: measured, the margin at equal ratings tracked cpuIQ almost linearly
-  // (-0.37 at iq 0 -> -2.14 at iq 0.67). Gated by YOUR prestige, so it's the same coach the
-  // CPU gets, and only from a neutral lean — an explicit run/pass call is always honored.
+  // reciprocate.
+  //
+  // BUT: this is a HINT, not a commitment. The first version returned "pass" outright, which
+  // sets tacticLean 50 -> 18, i.e. 82% pass — on a neutral first down. Measured, that put 41% of
+  // tied 1st-and-10 snaps into an all-in passing posture and dragged the offense to 61% pass
+  // against a real ~47%. A coordinator who notices the front is soft against the pass throws
+  // MORE; he doesn't abandon the run. "Air It Out" (lean -32) is the button you press when
+  // you're down 14, not a first-down read.
+  //
+  // So the tactic stays "balanced" — which keeps aggro, keying, identityCost and the counter
+  // bonus all reading a balanced call, correctly — and the read is expressed as _shade, a small
+  // lean nudge the snap loop adds on top. A hint moves the dial; it doesn't throw the switch.
+  G._shade=0;
   if((!pref || pref==="balanced") && Math.random() < userIQ()*0.6){
     var cc=cpuBestCounter(OFF_COUNTER, ["run","balanced","pass"], G.teams[1].defId);
     var sc=schemeById("off", offScheme().id), c=(sc&&sc.comfort)||{run:0.7,pass:0.7};
     var comf = cc==="run"?c.run:(cc==="pass"?c.pass:(c.run+c.pass)/2);
-    if(comf>=0.62) return cc;   // only if your system can actually run it
+    if(comf>=0.62 && cc!=="balanced"){ G._shade=(cc==="pass"?-13:+13); return "balanced"; }
   }
   return pref||"balanced";   // otherwise: exactly what you asked for; callPlay does the rest
 }
@@ -5382,8 +5828,16 @@ function tacticLean(baseLean, off){
 function defMods(def){
   // `shorten` clips the length of completed passes — the defining trait of a
   // prevent look. It concedes the catch but not the yardage behind it.
-  if(def==="blitz")   return {sack:+0.040, comp:-0.034, explosive:+0.042, runYds:+0.90, int:+0.005, shorten:-0.2};
-  if(def==="prevent") return {sack:-0.020, comp:+0.040, explosive:-0.075, runYds:+0.60, int:-0.002, shorten:2.6};
+  //
+  // runYds here is the DEFENSIVE FORMATION'S structural cost against the run, and it must not
+  // re-price what OFF_COUNTER already prices. Blitz was paying twice: OFF_COUNTER.run gives
+  // +1.6 vs blitz AND this line handed the run another +0.90 yds/carry. Measured, that made
+  // running worth 6.39 ypp vs a blitz while passing — which the table rates as the BEST counter
+  // to blitz at +2.0 — managed only 5.08. So cpuBestCounter confidently called the play the sim
+  // punished, for both sidelines. The vacated-gap gift is the counter table's job; what belongs
+  // here is only what the formation does that the table can't express (pressure, takeaways).
+  if(def==="blitz")   return {sack:+0.040, comp:-0.034, explosive:+0.042, runYds:+0.30, int:+0.005, shorten:-0.2};
+  if(def==="prevent") return {sack:-0.020, comp:+0.040, explosive:-0.075, runYds:+0.45, int:-0.002, shorten:2.6};
   return {sack:0, comp:0, explosive:0, runYds:0, int:0, shorten:0};
 }
 // Tempo has a defensive price. Hurry-up puts your defense back on the field with
@@ -5405,11 +5859,27 @@ function tacticFourthBias(tempo){ return tempo==="hurry"?0.22:(tempo==="burn"?-0
 // what your personnel is built to do on the call you make.)
 
 
+// How much game clock a snap consumes, including the huddle and play clock that follow it.
+//
+// CALIBRATED FROM THE TARGET, not from broadcast times. A real game is 3600 seconds and ~140
+// snaps, so the weighted average burn has to be ~26s. That is much less than the ~40s you'd
+// clock between two running plays on TV, because the real clock stops constantly — every
+// incompletion, every first down, out of bounds, timeouts, the two-minute warning. Those
+// stoppages are not modelled individually here, so they have to be priced into the averages.
+//
+// This has been wrong in both directions. It started at rnd(24,36) for a run — about half of
+// real — which produced 205 snaps a game and inflated everything counted per attempt (~19 INTs
+// a season off ~612 pass attempts). I then "fixed" it to broadcast-accurate 36-44s, which
+// overshot the other way: 128 snaps, and the run game withered to 25 carries against a real 37.
+//
+// Solving from the target: with a ~55% pass share and a ~37% incompletion rate, the weighted
+// average has to land near 26s. Measured, rnd(31,39) run / rnd(27,35) pass / rnd(5,8) incomplete
+// produces exactly 140 total snaps a game.
 function dClock(res, tempo){
   var t=PACE*((TEMPO_TACTICS[tempo]||TEMPO_TACTICS.normal).pace);
   if(res.incomplete) return Math.max(3, Math.round(rnd(5,8)*t));
-  if(res.kind==="run") return Math.max(6, Math.round(rnd(24,36)*t));
-  return Math.max(5, Math.round(rnd(18,32)*t));
+  if(res.kind==="run") return Math.max(6, Math.round(rnd(31,39)*t));
+  return Math.max(5, Math.round(rnd(27,35)*t));
 }
 function fgDist(yl){ return (100-yl)+17; }
 function fgProb(d){ return d<=29?0.96:d<=39?0.88:d<=46?0.76:d<=52?0.60:d<=57?0.42:0.22; }
@@ -5454,13 +5924,16 @@ function blankSide(){ return {plays:0,rushYds:0,passYds:0,comp:0,att:0,to:0,ints
 // A resumable game. `G` holds everything the loop used to keep in locals, so the
 // sim can stop at a quarter break, let the user change tactics, and pick up
 // exactly where it left off. teams: [{off,def,lean}] — index 0 is the user.
-function newGameState(teamA, teamB){
+function newGameState(teamA, teamB, groups){
   var poss=Math.random()<0.5?0:1;
   return {
     S:[0,0], teams:[teamA,teamB], plays:[], stats:[blankSide(),blankSide()],
     poss:poss, half2:1-poss, half:0,
     clock:1800, yl:25, down:1, dist:10,
     done:false, guard:0,
+    // Position groups for [you, them]. Optional: a league CPU-vs-CPU sim doesn't pass them and
+    // the snap loop just skips the matchup layer, which keeps those sims fast and unchanged.
+    groups:groups||null,
     userGame:false,   // set true only for games the user actually coaches
     userHist:{off:[], def:[]},   // your recent committal calls, so the CPU can key on tendencies
     tactics:{off:"balanced", tempo:"normal", def:"standard"}
@@ -5493,10 +5966,30 @@ function simSnap(G, stopQ){
   // whose tactics apply: the ball-carrier's offense, the other side's defense.
   // The DEFENDER'S OWN tempo choice fatigues him — hurry-up means his offense
   // kept giving the ball back, so he never got off the field.
-  var oT=tacticsOf(G,poss), dT=tacticsOf(G,def);
+  // autoOff sets G._shade as a side channel (see there). Capture it immediately: tacticsOf runs
+  // again for the defense on the next line and would reset it.
+  G._shade=0;
+  var oT=tacticsOf(G,poss);
+  var offShade=G._shade||0;
+  var dT=tacticsOf(G,def);
   var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
+  // GROUP MATCHUP — the offense's skill/line groups against the defense's front and secondary.
+  // This is a fact about the two rosters, not a coaching read, so it applies to BOTH teams on
+  // every snap including skipped games. It's what makes a lopsided roster exploitable: their
+  // 71 secondary is a real, findable weakness rather than an averaged-away detail.
+  if(G.groups && G.groups[poss] && G.groups[def]){
+    dm = addMods(dm, groupMatchup(G.groups[poss], G.groups[def]));
+  }
+  // SKILL SIGNATURE. Only your roster has real players to read (CPU teams are derived scalars),
+  // so this applies to your side of the ball: your offense's ball security and hands when you
+  // have it, your defense's rush and ball-hawks when they do. Both are deviations from each
+  // player's own overall, so nothing here double-counts the talent already in `edge`.
+  if(G.userGame){
+    if(poss===0) dm = addMods(dm, offSkillMods());   // your offense on the field
+    else         dm = addMods(dm, defSkillMods());   // your defense on the field
+  }
   var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
-  var lean=tacticLean(teams[poss].lean, oT.off);
+  var lean=clampN(tacticLean(teams[poss].lean, oT.off) + offShade, 5, 95);
   // Three things ride on the call you make, and they can pull against each other:
   //   traits   — do the PLAYERS who run this call fit it (offTraitEdge/defTraitEdge)
   //   identity — is your SYSTEM built for it, or are you off-script (identityCost)
@@ -5695,8 +6188,113 @@ function nameHash(name, salt){
   for(var i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))&0xffff;
   return h;
 }
-function oppOffScheme(name){ return OFF_SCHEMES[nameHash(name,3)%OFF_SCHEMES.length]; }
-function oppDefScheme(name){ return DEF_SCHEMES[nameHash(name,11)%DEF_SCHEMES.length]; }
+// ── POSITION GROUPS ──────────────────────────────────────
+// A CPU team is stored as {off, def, ovr, p} — four numbers. That's enough to sim a score but
+// not enough to have an IDENTITY: every opponent was an undifferentiated blob, its scheme picked
+// by hashing its NAME (oppOffScheme = nameHash % 5) with no relationship to its personnel, and
+// its "scheme fit" a flat prestige bonus that was identical whether the system suited the roster
+// or not. You couldn't scout a weakness because there were no weaknesses to find.
+//
+// These give every team eight group ratings — QB/RB/WR/TE/OL on offense, DL/LB/CB/S on defense —
+// derived from its off/def and prestige. Three properties matter:
+//
+//   1. THEY RECONCILE. The weighted average of the offensive groups, using the SAME POS_WEIGHT
+//      the real offenseRating() uses, returns the team's off rating (and likewise def). Groups
+//      are a decomposition of the rating, not a second opinion about it — so nothing downstream
+//      that already reads off/def goes out of sync.
+//   2. THEY'RE DETERMINISTIC. Keyed off nameHash, so a team has the same strengths every time
+//      you look, across sessions and reloads, with no storage. Scouting means something only if
+//      the thing you scouted stays scouted.
+//   3. THEY'RE LOPSIDED. Real rosters aren't flat: a team is 82 overall because its line is 90
+//      and its secondary is 71, and THAT is the exploitable fact. Spread scales with prestige —
+//      a blue blood is strong everywhere (little variance), a bottom program is jagged (lots).
+//      That's also why upsets happen: a p1 team with one elite group can take a game.
+var OFF_GROUPS=["QB","RB","WR","TE","OL"];
+var DEF_GROUPS=["DL","LB","CB","S"];
+// Deterministic signed spread in [-1,1] for a team+position, stable forever.
+function _groupNoise(name, pos, salt){
+  var h=nameHash(name+"|"+pos, salt||17);
+  return ((h%1000)/500)-1;    // -1..+1
+}
+// Decompose a unit rating into per-position groups whose POS_WEIGHT-weighted mean is the rating.
+function _decompose(name, unitRating, weights, salt, spread){
+  var keys=Object.keys(weights), raw={}, wsum=0, acc=0;
+  keys.forEach(function(pos){
+    var d=_groupNoise(name,pos,salt)*spread;
+    raw[pos]=unitRating+d;
+    wsum+=weights[pos]; acc+=raw[pos]*weights[pos];
+  });
+  // Re-center so the weighted mean lands exactly on unitRating — the noise must redistribute
+  // talent, never create or destroy it, or groups would drift away from the team's real rating.
+  var mean=acc/wsum, corr=unitRating-mean, out={};
+  keys.forEach(function(pos){ out[pos]=clampN(Math.round(raw[pos]+corr), 40, 99); });
+  return out;
+}
+// How jagged a roster is, by prestige. A blue blood recruits every position; a bottom program
+// lands one gem and starts walk-ons next to him.
+function _groupSpread(prestige){ return clampN(9.5 - (prestige||3)*1.1, 4.0, 9.0); }
+// The eight group ratings for any league team. Cached per team per season on the league object
+// (cheap, and keeps a single game's scouting card stable while the season's ratings shift).
+function teamGroups(name){
+  var L=ST.save && ST.save.league;
+  var t=(L && L.teams && L.teams[name]) || null;
+  if(!t) return null;
+  if(t._grp && t._grpKey===(t.off+"/"+t.def)) return t._grp;
+  var sp=_groupSpread(t.p);
+  var g=_decompose(name, t.off, POS_WEIGHT, 17, sp);
+  var d=_decompose(name, t.def, DEF_POS_WEIGHT, 91, sp);
+  Object.keys(d).forEach(function(k){ g[k]=d[k]; });
+  t._grp=g; t._grpKey=(t.off+"/"+t.def);
+  return g;
+}
+// YOUR groups come from your actual roster — no derivation needed, the players are right there.
+// Same shape, so every consumer below works for both sides.
+function myGroups(){
+  var r=ST.save.roster, g={};
+  OFF_GROUPS.concat(DEF_GROUPS).forEach(function(pos){ g[pos]=Math.round(posDepthOvr(r,pos)); });
+  return g;
+}
+// Groups for either side of a matchup: yours from the roster, theirs derived.
+function groupsFor(name){
+  return (name===ST.save.school) ? myGroups() : teamGroups(name);
+}
+// Which scheme a CPU program runs. This used to be OFF_SCHEMES[nameHash(name)%5] — the team's
+// LETTERS picked its system, so a program with a 94 QB and a 71 line might be handed Ground &
+// Pound and a roster full of maulers might sling it. Now a program runs what its personnel is
+// built for: score every scheme against its groups and take the best. Deterministic (the groups
+// are), so it's still stable across sessions, but now it's a fact ABOUT the team.
+function _schemeScoreFor(sc, g, side){
+  // Score on SHAPE, for the same reason groupMatchup does: absolute ratings would just rank
+  // schemes by whichever happens to name the most positions, and every team would converge on
+  // one answer. (It did: 196 of 261 teams ran Spread and Air Raid went extinct.) What matters
+  // is whether a scheme leans on the positions THIS team is relatively good at.
+  var keys=(side==="off")?OFF_GROUPS:DEF_GROUPS;
+  var weights=(side==="off")?POS_WEIGHT:DEF_POS_WEIGHT;
+  var dev=_dev(g, keys, weights);
+  var wants=Object.keys(sc.wants||{}).filter(function(p){ return dev[p]!=null; });
+  var tot=0; wants.forEach(function(p){ tot+=dev[p]; });
+  var demandFit = wants.length ? tot/wants.length : 0;   // +ve = system leans on our strengths
+  // ...and does the system's run/pass (or blitz/cover) tilt match where the talent actually is?
+  var ideal = (side==="off")
+    ? clampN(50 + ((dev.OL*1.1 + dev.RB*1.3)/2.4 - (dev.QB*1.4 + dev.WR*1.1)/2.5)*2.2, 0, 100)
+    : clampN(50 + ((dev.DL*1.3 + dev.LB)/2.3 - (dev.CB*1.2 + dev.S)/2.2)*2.2, 0, 100);
+  var tend = Math.max(0, 1 - Math.abs(sc.lean-ideal)/55);
+  return demandFit*0.35 + tend*1.0;
+}
+function oppOffScheme(name){
+  var g=groupsFor(name);
+  if(!g) return OFF_SCHEMES[nameHash(name,3)%OFF_SCHEMES.length];   // unknown team: old behavior
+  var best=OFF_SCHEMES[0], bs=-1;
+  OFF_SCHEMES.forEach(function(sc){ var s=_schemeScoreFor(sc,g,"off"); if(s>bs){bs=s;best=sc;} });
+  return best;
+}
+function oppDefScheme(name){
+  var g=groupsFor(name);
+  if(!g) return DEF_SCHEMES[nameHash(name,11)%DEF_SCHEMES.length];
+  var best=DEF_SCHEMES[0], bs=-1;
+  DEF_SCHEMES.forEach(function(sc){ var s=_schemeScoreFor(sc,g,"def"); if(s>bs){bs=s;best=sc;} });
+  return best;
+}
 function oppLean(name){
   return clampN(oppOffScheme(name).lean + (nameHash(name,5)%7) - 3, 5, 95);
 }
@@ -7687,7 +8285,7 @@ function playerCardSheet(){
   h+='<div class="info-hd"><b>'+x(p.n)+'</b><button class="info-x" id="pcard-close">✕</button></div>';
   h+='<div class="pc-top"><span class="pl-pos" style="background:'+posColor(p.pos)+'">'+p.pos+'</span>'+
      '<span class="pc-ovr">'+p.ovr+'</span>'+
-     '<span class="pc-sub">'+yrLabel(p)+' · '+x(p.arch||"")+'<br>'+
+     '<span class="pc-sub">'+yrLabel(p)+' · '+x(archLabel(p))+'<br>'+
        '<b>'+(TN[tier]||tier)+'</b>'+(p.pot?' · '+ceilingBand(p):'')+'</span></div>';
   var chips='';
   if(p.revealed) chips+=devChip(p.dev);
@@ -7705,6 +8303,27 @@ function playerCardSheet(){
   if(dem>0 && p.yr!=="SR"){
     h+='<div class="pc-cell"><span>NIL</span><b>'+fmtMoney(fund)+' of '+fmtMoney(dem)+
        ' · <span style="color:'+(risk>=60?'var(--red2)':'var(--muted)')+'">'+risk+'% portal risk</span></b></div>';
+  }
+  // A lineman's two jobs are different jobs, and his archetype only tells you which way he
+  // leans — not how good he actually is at either. Show both numbers so the card answers the
+  // question the roster screen raises: is this a mauler I can pass-protect with, or a turnstile?
+  // SKILLS. Every position has them now, not just the line. The point of showing them is that
+  // the OVR is a single number hiding four — two 88 backs can be completely different players,
+  // and the card should say which one you have. Each skill is coloured against HIS OWN overall,
+  // so the numbers answer "what is he good at", not "how good is he" (the big number does that).
+  var sk=skillsOf(p);
+  var skKeys=Object.keys(sk);
+  if(skKeys.length){
+    var bits=skKeys.map(function(k){
+      return '<span style="color:'+skillTone(sk[k],p.ovr)+';font-weight:800">'+
+             (SKILL_LABEL[k]||k)+' '+sk[k]+'</span>';
+    });
+    // Two per row reads better than a wrapped run-on at phone width.
+    var rows=[];
+    for(var i=0;i<bits.length;i+=2) rows.push(bits.slice(i,i+2).join('&nbsp;&nbsp;·&nbsp;&nbsp;'));
+    // The header already names what he reads as, so don't repeat it here — the numbers ARE the
+    // reason, and saying it twice just costs a line on a phone screen.
+    h+='<div class="pc-cell"><span>Skills</span><b>'+rows.join('<br>')+'</b></div>';
   }
   var growth=p.ovr-(p.startOvr!=null?p.startOvr:p.ovr);
   h+='<div class="pc-cell"><span>Growth under you</span><b>'+(growth>0?'+':'')+growth+' OVR</b></div>';
@@ -8238,7 +8857,7 @@ function playConfChampGame(){
   var opp = C.top2[0].name===s.school ? C.top2[1] : C.top2[0];
   var game={opp:opp.name, oc:s.conf, op:opp.p, home:(Math.random()<0.5)};
   var setup=gameSetup(game);
-  ST.G=newGameState(setup.us, setup.them);
+  ST.G=newGameState(setup.us, setup.them, setup.groups);
   ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
@@ -9044,7 +9663,7 @@ function playPostGame(){
   else { var o=myNextOpponent(); oppName=P.bracket.bySeed[o.seed].name; oppP=P.bracket.bySeed[o.seed].p; home=(P.round==="r1"&&P.mySeed<o.seed); rName=roundLabel(P.round); }
   var game={opp:oppName, oc:"", op:oppP, home:home};
   var setup=gameSetup(game);
-  ST.G=newGameState(setup.us, setup.them);
+  ST.G=newGameState(setup.us, setup.them, setup.groups);
   ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
@@ -10662,7 +11281,7 @@ function advanceWeek(){
 function playWeek(){
   var s=ST.save, g=s.schedule[s.week];
   var setup=gameSetup(g);
-  ST.G=newGameState(setup.us, setup.them);
+  ST.G=newGameState(setup.us, setup.them, setup.groups);
   ST.G.userGame=true;
   var st=s.tactics||{};
   ST.G.tactics={off:st.off||"balanced", tempo:st.tempo||"normal", def:st.def||"standard"};
@@ -10809,6 +11428,9 @@ function gameSetup(game){
           iq:cpuIQ((ST.save && ST.save.prestige) || 3)},
     them:{off:oppOff+cFit, def:oppDef+cFit, lean:oppLean(game.opp),
           blk:cpuBlock(game.opp), offId:theirOff.id, defId:theirDef.id, iq:cpuIQ(game.op)},
+    // Both sides' position groups, so every snap can pit our line/skill against their front and
+    // secondary rather than against an averaged team rating. Index matches teams[]: 0 = you.
+    groups:[groupsFor(ST.save.school), groupsFor(game.opp)],
     edge:usedFit>=3, off:myUnit, rivalry:rivalry
   };
 }
