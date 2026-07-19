@@ -372,6 +372,18 @@ a{color:inherit;text-decoration:none}
 .ls-empty{font-size:10px;font-weight:700;color:var(--muted);text-align:center;padding:18px 8px}
 .tactics{background:#fff;border:2px solid var(--border);border-radius:0 0 11px 11px;box-shadow:3px 3px 0 var(--border);padding:9px;margin:0 2px}
 .tac-row{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.tac-bal{margin-bottom:9px}
+.tac-bal-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+.tac-bal-lbl{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.tac-bal-val{font-size:11px;font-weight:900}
+.tac-bal-val .run{color:#c2410c}
+.tac-bal-val .pass{color:#1d4ed8}
+.tac-bal input[type=range]{width:100%;height:26px;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer;margin:0}
+.tac-bal input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:6px;border:2px solid var(--border);background:linear-gradient(90deg,#f97316,#3b82f6)}
+.tac-bal input[type=range]::-moz-range-track{height:8px;border-radius:6px;border:2px solid var(--border);background:linear-gradient(90deg,#f97316,#3b82f6)}
+.tac-bal input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;background:#fff;border:2.5px solid var(--border);box-shadow:2px 2px 0 var(--border);margin-top:-8px}
+.tac-bal input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:2.5px solid var(--border);box-shadow:2px 2px 0 var(--border)}
+.tac-bal-ends{display:flex;justify-content:space-between;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:1px}
 .tac-lbl{flex-shrink:0;width:52px;font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .tac-pick{flex:1;display:flex;gap:0;border:2px solid var(--border);border-radius:8px;overflow:hidden}
 .tac-btn{flex:1;font-size:8.5px;font-weight:900;padding:6px 2px;background:#fff;border:none;cursor:pointer;color:var(--muted);white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:3px}
@@ -790,6 +802,12 @@ a{color:inherit;text-decoration:none}
 .gl-row{font-size:10px;font-weight:700;color:var(--text);padding:5px 2px;border-bottom:1px solid var(--border2);line-height:1.4}
 /* ── player stat detail ── */
 .ps-hero{display:flex;align-items:center;gap:9px;background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:10px;margin:0 2px 9px}
+.ps-skills{background:#fff;border:2px solid var(--border);border-radius:11px;box-shadow:3px 3px 0 var(--border);padding:9px 11px;margin:0 2px 9px}
+.ps-skills-h{font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.ps-skill-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 14px}
+.ps-skill{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:800}
+.ps-skill span{color:var(--muted)}
+.ps-skill b{font-size:12px;font-weight:900}
 .ps-pos{flex-shrink:0;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;color:#fff;font-size:11px;font-weight:900}
 .ps-id{flex:1;min-width:0}
 .ps-name{font-size:14px;font-weight:900;line-height:1.2;display:flex;align-items:center;flex-wrap:wrap;gap:4px}
@@ -3981,7 +3999,16 @@ var DEF_COUNTER={   // your defensive call  →  vs THEIR offensive formation   
 // Run:  our OL+RB      vs their DL+LB   → yards on the ground
 // Pass: our QB+WR+TE   vs their CB+S    → completions and yards through the air
 // The pass rush (their DL) shows up as sacks either way — you cannot scheme around a real one.
-var GRP_W=0.055;   // per point of group SHAPE advantage.
+// MEASURED, not guessed. runEdge on real matchups has sd ~4.1 and reaches ±13. At the original
+// 0.055 that made the whole group layer worth sd 0.23 yds/carry, and the ±1.2 clamp needed an
+// edge of ±22 — so the clamp NEVER bound and the layer was near-silent on real rosters. The
+// scouting report reads this same number, so it was honest about DIRECTION (verified monotonic)
+// while overselling MAGNITUDE: it said "STRONG" about an effect worth a fifth of a yard.
+//
+// At 0.09 the spread between attacking a soft front (DL 60) and a stout one (DL 96) is
+// ~1.4 yds/carry — a difference you can feel, and one that makes a scouting read worth acting
+// on, without letting roster shape overrun the talent gap it sits alongside.
+var GRP_W=0.09;    // per point of group SHAPE advantage.
 // Groups must measure SHAPE, not LEVEL. `edge` (teams[poss].off - teams[def].def) already prices
 // how much better one team is than the other; if this layer also read absolute group ratings it
 // would charge for the same talent twice. Measured, that doubled the talent curve — an 8-point
@@ -4442,6 +4469,118 @@ function schemePickerCard(side, list, current, fit){
   h+='</div>';
   return h;
 }
+// ── THE MISMATCH REPORT ──────────────────────────────────
+// The group system knows, for every game, which of our units out-matches which of theirs. That
+// is the single most actionable thing in the app and until now it was invisible: the scouting
+// block named their two schemes and stopped. A coach doesn't walk in knowing only "they run a
+// 4-3" — he knows their corners can't run and his slot receiver is going to eat.
+//
+// Every number here comes from the same groups the sim uses, so the report cannot drift from
+// what happens on the field. A mismatch has TWO parts and the report needs both:
+//   LEVEL — our unit's raw rating minus theirs. This is "are we simply better here." A 74 team
+//           against a much weaker one is better everywhere, and the report has to SAY so.
+//   SHAPE — each group against its own unit's mean, our advantage minus theirs. This is "where
+//           are they soft relative to themselves" — the spot to attack even against a peer.
+// An earlier version read SHAPE only. That's correct for finding the soft spot, but it threw
+// level away entirely, so a strong team facing a weak one — every unit better, none standing
+// out — read "even" across the board. Which is exactly backwards: that team has an edge
+// everywhere. Now level carries most of the weight and shape tilts it.
+function mismatches(oppName){
+  var ourG=groupsFor(ST.save.school), theirG=groupsFor(oppName);
+  if(!ourG || !theirG) return null;
+  function dev(g, keys, w){
+    var tot=0, sw=0;
+    keys.forEach(function(p){ tot+=g[p]*w[p]; sw+=w[p]; });
+    var mean=tot/sw, o={};
+    keys.forEach(function(p){ o[p]=g[p]-mean; });
+    return o;
+  }
+  // Weighted unit rating for a specific battle — the LEVEL half.
+  function lvl(g, spec){
+    var tot=0, sw=0;
+    Object.keys(spec).forEach(function(p){ tot+=g[p]*spec[p]; sw+=spec[p]; });
+    return tot/sw;
+  }
+  var o=dev(ourG, OFF_GROUPS, POS_WEIGHT),   od=dev(ourG, DEF_GROUPS, DEF_POS_WEIGHT);
+  var t=dev(theirG, OFF_GROUPS, POS_WEIGHT), td=dev(theirG, DEF_GROUPS, DEF_POS_WEIGHT);
+  // Each battle: LEVEL gap (our unit minus theirs) plus a fraction of the SHAPE tilt. Level is
+  // the dominant term — being better matters more than being differently-shaped — but shape can
+  // still swing an otherwise even matchup, and against a peer it's the whole story.
+  var SHAPE=0.55;
+  function edge(ourLvlSpec, theirLvlSpec, ourShape, theirShape){
+    return (lvl(ourG,ourLvlSpec) - lvl(theirG,theirLvlSpec)) + SHAPE*(ourShape - theirShape);
+  }
+  var m=[];
+  m.push({key:"run",
+          edge: edge({OL:1.5,RB:1}, {DL:1.5,LB:1}, (o.OL*1.5+o.RB)/2.5, (td.DL*1.5+td.LB)/2.5),
+          us:"our run game", them:"their front",
+          win:"Run it. Their front is the soft spot.",
+          lose:"Don't test their front — throw it."});
+  m.push({key:"pass",
+          edge: edge({QB:1.6,WR:1.2,TE:0.5}, {CB:1.4,S:1}, (o.QB*1.6+o.WR*1.2+o.TE*0.5)/3.3, (td.CB*1.4+td.S)/2.4),
+          us:"our passing game", them:"their secondary",
+          win:"Throw it. Their secondary can't hang.",
+          lose:"Their coverage is the strength — stay on the ground."});
+  m.push({key:"prot",
+          edge: edge({OL:1}, {DL:1}, o.OL, td.DL),
+          us:"our protection", them:"their rush",
+          win:"Your line handles their rush — you'll have time.",
+          lose:"Their rush beats your line. Get the ball out."});
+  // ...and the same three from the other side of the ball, so a DC has something to read.
+  m.push({key:"drun",
+          edge: edge({DL:1.5,LB:1}, {OL:1.5,RB:1}, (od.DL*1.5+od.LB)/2.5, (t.OL*1.5+t.RB)/2.5),
+          us:"our front", them:"their run game",
+          win:"Your front should stuff their run.",
+          lose:"They'll run on you. Load the box."});
+  m.push({key:"dpass",
+          edge: edge({CB:1.4,S:1}, {QB:1.6,WR:1.2,TE:0.5}, (od.CB*1.4+od.S)/2.4, (t.QB*1.6+t.WR*1.2+t.TE*0.5)/3.3),
+          us:"our coverage", them:"their passing game",
+          win:"Your coverage matches up well.",
+          lose:"They'll throw on you. Pressure the quarterback."});
+  m.sort(function(a,b){ return Math.abs(b.edge)-Math.abs(a.edge); });
+  return m;
+}
+// How loud an edge is. The thresholds are in rating points now that level is folded in — a
+// couple of points is noise, ~5+ is a real gap you can lean on.
+function mmTier(e){
+  var a=Math.abs(e);
+  if(a>=8) return 2;      // a decisive edge
+  if(a>=3) return 1;      // worth knowing
+  return 0;               // even
+}
+function scoutingReport(oppName){
+  var m=mismatches(oppName);
+  if(!m) return '';
+  var off=m.filter(function(x){ return x.key==="run"||x.key==="pass"||x.key==="prot"; });
+  var def=m.filter(function(x){ return x.key==="drun"||x.key==="dpass"; });
+  var s=ST.save, h='';
+  function bar(e){
+    var t=mmTier(e);
+    if(!t) return '<span style="color:var(--muted);font-weight:800">even</span>';
+    var good=(e>0), c=good?'var(--green)':'var(--red2)';
+    var mark=(t===2)?(good?'▲▲':'▼▼'):(good?'▲':'▼');
+    return '<span style="color:'+c+';font-weight:900">'+mark+'</span>';
+  }
+  function rows(list){
+    var out='';
+    list.forEach(function(x){
+      out+='<div class="sr-scout-row"><span>'+x.us+' <span style="color:var(--muted)">vs</span> '+x.them+'</span>'+bar(x.edge)+'</div>';
+    });
+    return out;
+  }
+  if(s.role!=="DC"){ h+=rows(off); }
+  if(s.role!=="OC"){ h+=rows(def); }
+  // The headline: the loudest mismatch on the unit you actually coach, phrased as an order.
+  var mine=(s.role==="DC")?def:off;
+  var top=mine[0];
+  if(top && mmTier(top.edge)){
+    h+='<div class="sr-scout-note" style="color:'+(top.edge>0?'var(--green)':'var(--red2)')+
+       ';font-weight:900">'+x(top.edge>0?top.win:top.lose)+'</div>';
+  } else {
+    h+='<div class="sr-scout-note">No clear edge either way — this one comes down to execution.</div>';
+  }
+  return h;
+}
 function schemeReadout(oppName){
   var s=ST.save;
   var h='<div class="scheme-readout">';
@@ -4452,14 +4591,15 @@ function schemeReadout(oppName){
     h+='<div class="sr-row"><span class="sr-lbl">Defense · '+x(defScheme().name)+'</span>'+fitPill(defSchemeFit())+'</div>';
   }
   if(s.role!=="DC") h+=blockRow();
-  // ── The scouting report. This is the whole read: they run a real system, and your
-  // three offensive calls and three defensive calls are not equally good against it.
+  // ── The scouting report. This is the whole read: they run a real system, their PERSONNEL has
+  // a shape, and your calls are not equally good against either.
   if(oppName && oppName!=="TBD"){
     var oo=oppOffScheme(oppName), od=oppDefScheme(oppName);
     h+='<div class="sr-scout"><div class="sr-scout-h">📋 Scouting '+x(oppName)+'</div>'+
        '<div class="sr-scout-row"><span>Their offense</span><b>'+x(oo.name)+'</b></div>'+
        '<div class="sr-scout-row"><span>Their defense</span><b>'+x(od.name)+'</b></div>'+
-       '<div class="sr-scout-note">'+x(od.desc)+' Pick your calls at kickoff — the right counter is worth more than a rating point.</div></div>';
+       scoutingReport(oppName)+
+       '</div>';
   }
   h+='<div class="sr-hint">Tap <b>Adjust Gameplan Scheme</b> below to tune</div></div>';
   return h;
@@ -5684,15 +5824,29 @@ function dPass(edge, obvious, dm, aggro, pblk){
 // ── TACTICS ──────────────────────────────────────────────
 // Toggled any time during a live game; they take effect on the very next snap.
 // Each one buys something and costs something — no free wins.
+// TACTICS ARE LENSES, NOT PRESETS. The player sets their own run/pass balance on the slider —
+// that's their percentage, a real number they own. A tactic is then a LENS laid over it: it
+// shifts the balance and changes HOW the offense plays at that balance, rather than yanking the
+// percentage to a fixed value. "Air It Out" at a 60% pass balance is aggressive downfield
+// passing; the same lens at a 40% balance is a run-first team that takes its shots. The lens
+// modulates; the slider decides.
+//
+//   leanShift : nudge to the player's balance (+ = more run). Deliberately smaller than the old
+//               presets (which hard-set −32/+30) — the slider is the main dial now.
+//   aggro     : downfield aggression. Feeds deeper throws AND more risk (comp down, INT up),
+//               the same knob the sim already reads from an all-pass posture.
+//   pace      : tempo multiplier, folded together with the tempo lens.
 var OFF_TACTICS={
-  run:     {label:"Run the Ball", icon:"🏃", lean:+30, desc:"Ground game. Burns clock, but predictable on 3rd & long."},
-  balanced:{label:"Balanced",     icon:"⚖️", lean:0,   desc:"Take what the defense gives you."},
-  pass:    {label:"Air It Out",   icon:"🎯", lean:-32, desc:"Chunk plays and quick scores — and more interceptions."}
+  run:     {label:"Run the Ball", icon:"🏃", leanShift:+14, aggro:-0.35, desc:"Lean on the ground game and shorten the game."},
+  balanced:{label:"Balanced",     icon:"⚖️", leanShift:0,   aggro:0,     desc:"Play it straight — take what the defense gives you."},
+  pass:    {label:"Air It Out",   icon:"🎯", leanShift:-14, aggro:+1.0,  desc:"Push the ball downfield. Chunk plays and quick scores — and more risk."}
 };
+// Tempo is its own lens now, independent of the run/pass call — you can run hurry-up out of a
+// run-heavy set, or milk the clock while throwing. pace: >1 = fewer plays.
 var TEMPO_TACTICS={
   burn:    {label:"Burn Clock",   icon:"🐢", pace:1.34, desc:"Milk the play clock. Fewer possessions for everyone."},
   normal:  {label:"Normal",       icon:"⏱️", pace:1.00, desc:"Standard tempo."},
-  hurry:   {label:"Hurry Up",     icon:"⚡", pace:0.62, desc:"Snap fast. More plays, but your defense stays on the field."}
+  hurry:   {label:"Hurry Up",     icon:"⚡", pace:0.62, desc:"Snap fast. More plays — but your defense stays on the field."}
 };
 var DEF_TACTICS={
   blitz:   {label:"Blitz",        icon:"💥", desc:"Pressure the QB. More sacks, but big plays behind you."},
@@ -5819,7 +5973,7 @@ function tacticsOf(G, side){
 // Offensive tactics bend the run/pass lean. Defensive tactics belong to the team
 // NOT holding the ball, so they're looked up from the defender's side.
 function tacticLean(baseLean, off){
-  return clampN(baseLean + (OFF_TACTICS[off]||OFF_TACTICS.balanced).lean, 2, 98);
+  return clampN(baseLean + (OFF_TACTICS[off]||OFF_TACTICS.balanced).leanShift, 2, 98);
 }
 // How a defensive call reshapes the offense's outcome distribution.
 // Blitz trades coverage for pressure; prevent trades the short game for the deep
@@ -5966,11 +6120,11 @@ function simSnap(G, stopQ){
   // whose tactics apply: the ball-carrier's offense, the other side's defense.
   // The DEFENDER'S OWN tempo choice fatigues him — hurry-up means his offense
   // kept giving the ball back, so he never got off the field.
-  // autoOff sets G._shade as a side channel (see there). Capture it immediately: tacticsOf runs
-  // again for the defense on the next line and would reset it.
-  G._shade=0;
+  // autoOff / cpuOffCall set a shade as a side channel (see there). Capture it immediately:
+  // tacticsOf runs again for the defense on the next line and would reset it.
+  G._shade=0; G._cpuShade=0;
   var oT=tacticsOf(G,poss);
-  var offShade=G._shade||0;
+  var offShade=(G._shade||0)+(G._cpuShade||0);
   var dT=tacticsOf(G,def);
   var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
   // GROUP MATCHUP — the offense's skill/line groups against the defense's front and secondary.
@@ -5988,7 +6142,7 @@ function simSnap(G, stopQ){
     if(poss===0) dm = addMods(dm, offSkillMods());   // your offense on the field
     else         dm = addMods(dm, defSkillMods());   // your defense on the field
   }
-  var aggro=(oT.off==="pass")?1:(oT.off==="run"?-0.35:0);
+  var aggro=(OFF_TACTICS[oT.off]||OFF_TACTICS.balanced).aggro||0;
   var lean=clampN(tacticLean(teams[poss].lean, oT.off) + offShade, 5, 95);
   // Three things ride on the call you make, and they can pull against each other:
   //   traits   — do the PLAYERS who run this call fit it (offTraitEdge/defTraitEdge)
@@ -6233,25 +6387,101 @@ function _decompose(name, unitRating, weights, salt, spread){
 // How jagged a roster is, by prestige. A blue blood recruits every position; a bottom program
 // lands one gem and starts walk-ons next to him.
 function _groupSpread(prestige){ return clampN(9.5 - (prestige||3)*1.1, 4.0, 9.0); }
-// The eight group ratings for any league team. Cached per team per season on the league object
-// (cheap, and keeps a single game's scouting card stable while the season's ratings shift).
+// The eight group ratings for any league team. Cached per team per season on the league object.
+//
+// Two sources, in order of honesty:
+//   1. t.stars — every team in your subdivision already carries ONE REAL PLAYER per position
+//      (genStars), with an ovr and now an archetype. That man is the group's headliner, so his
+//      JOB rating is read the same way yours is: skillOf(star, "run") for the line's run
+//      blocking, skillOf(star, "stuff") for the front's run defence. This is what makes "our run
+//      blocking vs their run stuffing" a real comparison rather than two overalls passing in the
+//      night — and it means a CPU team with a Run Stuffer at DL genuinely defends the run better
+//      than one with a Pass Rusher, at identical team ratings.
+//   2. Derived decomposition — for teams outside your subdivision, which have no stars. Falls
+//      back to the old behaviour so nothing breaks.
+//
+// The star is one man and a group is several, so his job rating is blended toward the unit's
+// level rather than used raw: he sets the group's CHARACTER, the team rating sets its FLOOR.
 function teamGroups(name){
   var L=ST.save && ST.save.league;
   var t=(L && L.teams && L.teams[name]) || null;
   if(!t) return null;
-  if(t._grp && t._grpKey===(t.off+"/"+t.def)) return t._grp;
+  var key=(t.off+"/"+t.def+"/"+((t.stars&&t.stars.length)?"s":"n"));
+  if(t._grp && t._grpKey===key) return t._grp;
   var sp=_groupSpread(t.p);
   var g=_decompose(name, t.off, POS_WEIGHT, 17, sp);
   var d=_decompose(name, t.def, DEF_POS_WEIGHT, 91, sp);
   Object.keys(d).forEach(function(k){ g[k]=d[k]; });
-  t._grp=g; t._grpKey=(t.off+"/"+t.def);
+  // Overlay the real star's job rating where we have one.
+  if(t.stars && t.stars.length){
+    var JOB={QB:"acc", RB:"power", WR:"hands", TE:"block", OL:"run",
+             DL:"stuff", LB:"thump", CB:"press", S:"box"};
+    t.stars.forEach(function(st){
+      var job=JOB[st.pos]; if(!job || g[st.pos]==null) return;
+      var v=skillOf(st, job);
+      g[st.pos]=clampN(Math.round(g[st.pos]*0.45 + v*0.55), 40, 99);
+    });
+  }
+  t._grp=g; t._grpKey=key;
   return g;
 }
 // YOUR groups come from your actual roster — no derivation needed, the players are right there.
-// Same shape, so every consumer below works for both sides.
+// Same shape as teamGroups, so every consumer below works for both sides.
+//
+// A group's rating is JOB-SPECIFIC, not a position average, because the matchup that reads it
+// asks a specific question: our run blocking against their run stuffing, our receivers' hands
+// against their coverage. posDepthOvr would answer a different question — "how good is this
+// position group in general" — and that's already priced into the team's off/def rating via
+// offenseRating(). Feeding overalls here would compare talent to talent a second time and say
+// nothing about the matchup. Measured before this fix: two 85-rated lines, one all Run Blockers
+// and one all Pass Protectors, reported the identical OL group of 83.
+//
+// `_grpSkill` averages the starters' rating at one job, weighted toward the weak link on the
+// jobs where a weak link actually hurts (protection, coverage) — same reasoning as olBlock.
+function _grpSkill(pos, skill, weakLink){
+  var r=ST.save.roster, st=depthOrder(r,pos).slice(0, startersAt(pos));
+  if(!st.length) return null;
+  var v=st.map(function(p){ return skillOf(p,skill); });
+  var mean=v.reduce(function(a,b){return a+b;},0)/v.length;
+  if(!weakLink) return mean;
+  return mean*0.80 + Math.min.apply(null,v)*0.20;
+}
 function myGroups(){
   var r=ST.save.roster, g={};
-  OFF_GROUPS.concat(DEF_GROUPS).forEach(function(pos){ g[pos]=Math.round(posDepthOvr(r,pos)); });
+  function pick(pos, skill, weakLink){
+    var v=_grpSkill(pos, skill, weakLink);
+    return v!=null ? Math.round(v) : null;
+  }
+  // Offense: the jobs the run and pass matchups actually ask about.
+  g.QB = pick("QB","acc");
+  g.RB = pick("RB","power");
+  g.WR = pick("WR","hands");
+  g.TE = pick("TE","block");
+  g.OL = pick("OL","run");
+  // Defense: run stuffing up front, coverage on the back end. Coverage is a weak-link job —
+  // one corner who can't cover gets attacked every snap — so it's weighted toward the worst.
+  g.DL = pick("DL","stuff");
+  g.LB = pick("LB","thump");
+  g.CB = pick("CB","press", true);
+  g.S  = pick("S","box");
+  // THE UNMANNED UNIT. A coordinator only has players on his own side of the ball, so an OC's
+  // DL/LB/CB/S are empty and posDepthOvr returns a flat 58 for all four. That happens to cancel
+  // inside groupMatchup (identical values deviate to zero), so it doesn't corrupt the sim — but
+  // it's a lie anywhere it's displayed, and it throws away the fact that your counterpart's unit
+  // has a real character. Decompose it the same way a CPU team's is, off the rating myRatings()
+  // already substitutes for that side.
+  var need=[];
+  ["QB","RB","WR","TE","OL"].forEach(function(p){ if(g[p]==null) need.push(p); });
+  if(need.length){
+    var o=_decompose(ST.save.school, myRatings().off, POS_WEIGHT, 17, _groupSpread(ST.save.prestige));
+    need.forEach(function(p){ g[p]=o[p]; });
+  }
+  need=[];
+  ["DL","LB","CB","S"].forEach(function(p){ if(g[p]==null) need.push(p); });
+  if(need.length){
+    var d=_decompose(ST.save.school, myRatings().def, DEF_POS_WEIGHT, 91, _groupSpread(ST.save.prestige));
+    need.forEach(function(p){ g[p]=d[p]; });
+  }
   return g;
 }
 // Groups for either side of a matchup: yours from the roster, theirs derived.
@@ -6335,10 +6565,16 @@ function cpuOffCall(G){
   if(late && margin>0)  return "run";                  // protect the lead, drain clock
   if(late && margin<-8) return "pass";                 // two scores down, air it out
   // a smart CPU will shade to the call that counters you — but only if its system can run it.
+  // Like the user's autoOff, this is a SHADE, not a commitment: it returns "balanced" so the
+  // aggro and lean stay near neutral, and expresses the read as G._cpuShade, a small lean nudge
+  // the snap loop folds in. Returning the full call here (e.g. "pass") used to over-commit and,
+  // now that the user shades gently instead, left the CPU with a systematically bigger swing —
+  // enough to tilt an even matchup by a point.
+  G._cpuShade=0;
   if(Math.random()<iq*0.6){
     var cc=cpuBestCounter(OFF_COUNTER, ["run","balanced","pass"], userDefId);
     var comf = cc==="run"?c.run:(cc==="pass"?c.pass:(c.run+c.pass)/2);
-    if(comf>=0.62) return cc;
+    if(comf>=0.62 && cc!=="balanced"){ G._cpuShade=(cc==="pass"?-13:+13); return "balanced"; }
   }
   // otherwise play to identity: run-first, pass-first, or genuinely balanced
   if(c.run > c.pass+0.12) return "run";
@@ -7188,6 +7424,11 @@ function starOvrFor(t, pos){
 function genStars(t){
   return ALL_POS.map(function(pos){
     return {n:genName(), pos:pos, yr:pick(["FR","SO","JR","SR"]), ovr:starOvrFor(t,pos),
+            // A star needs an archetype for the same reason your players do: without one,
+            // skillOf() reads him as off-archetype at every job and he grades as a man with no
+            // strengths. Deterministic per team+position so a program's identity is stable —
+            // the same school fields the same KIND of players season after season.
+            arch:pick(POS_ARCHETYPES[pos]||["Balanced"]),
             s:{}, c:{}, form:0.84+Math.random()*0.32};
   });
 }
@@ -7198,7 +7439,17 @@ function ensureStars(){
   Object.keys(L.teams).forEach(function(n){
     var t=L.teams[n];
     if(t.div!==myDiv || n===s.school) return;
-    if(!t.stars || !t.stars.length) t.stars=genStars(t);
+    if(!t.stars || !t.stars.length){ t.stars=genStars(t); return; }
+    // MIGRATION: stars generated before archetypes existed have no `arch`, and skillOf() would
+    // read them as off-archetype at every job — a man with no strengths anywhere. Backfill
+    // deterministically off the team name and position, so an existing save gets a stable
+    // identity rather than a fresh random one every load.
+    t.stars.forEach(function(st, i){
+      if(!st.arch){
+        var opts=POS_ARCHETYPES[st.pos]||["Balanced"];
+        st.arch=opts[nameHash(n+"|"+st.pos, 71)%opts.length];
+      }
+    });
   });
 }
 // A star's season, in the same units the engine produces for your own players.
@@ -11218,9 +11469,21 @@ function playerStatDetail(id){
   h+='<div class="ps-hero">'+
        '<div class="ps-pos" style="background:'+posColor(p.pos)+'">'+p.pos+'</div>'+
        '<div class="ps-id"><div class="ps-name">'+x(p.n)+devBadge(p)+'</div>'+
-         '<div class="ps-sub">'+yrLabel(p)+' · '+x(p.arch||"")+(delta?' · career '+(delta>0?'+':'')+delta:'')+'</div></div>'+
+         '<div class="ps-sub">'+yrLabel(p)+' · '+x(archLabel(p))+(delta?' · career '+(delta>0?'+':'')+delta:'')+'</div></div>'+
        '<div class="ps-ovr"><b>'+p.ovr+'</b><span>OVR</span></div>'+
      '</div>';
+
+  // ── skills ── the ratings behind the OVR, each coloured against the player's own overall so
+  // the numbers say what he's good AT, not how good he is (the big number already says that).
+  var sk=skillsOf(p), skKeys=Object.keys(sk);
+  if(skKeys.length){
+    h+='<div class="ps-skills"><div class="ps-skills-h">Skills</div><div class="ps-skill-grid">';
+    skKeys.forEach(function(k){
+      h+='<div class="ps-skill"><span>'+(SKILL_LABEL[k]||k)+'</span>'+
+         '<b style="color:'+skillTone(sk[k],p.ovr)+'">'+sk[k]+'</b></div>';
+    });
+    h+='</div></div>';
+  }
 
   // ── season / career toggle ──
   if(!sameLine){
@@ -11734,7 +11997,21 @@ function tacticsPanel(){
     h+='<div class="tac-opp">Facing <b>'+x(theirOff.name)+'</b> offense · <b>'+x(theirDef.name)+'</b> defense</div>';
   }
   if(cOff){
-    h+=row("Offense", OFF_TACTICS, ["run","balanced","pass"], t.off, "data-tacoff");
+    // THE BALANCE SLIDER — the player's own run/pass percentage. lean is 2..98 where high = run;
+    // the split the coach thinks in is the inverse (pass share = 100 - lean). Defaults to the
+    // scheme's natural lean until the player moves it.
+    var baseLean = (ST.save.gameplan && ST.save.gameplan.offBalance!=null)
+                     ? ST.save.gameplan.offBalance : offScheme().lean;
+    var passPct = Math.round(100 - baseLean), runPct = 100 - passPct;
+    h+='<div class="tac-bal">'+
+       '<div class="tac-bal-head">'+
+         '<span class="tac-bal-lbl">Run / Pass Balance</span>'+
+         '<span class="tac-bal-val"><span class="run">'+runPct+'% run</span> · <span class="pass">'+passPct+'% pass</span></span>'+
+       '</div>'+
+       '<input type="range" min="2" max="98" value="'+(100-baseLean)+'" data-tacbalance>'+
+       '<div class="tac-bal-ends"><span>🏃 All Run</span><span>All Pass 🎯</span></div>'+
+     '</div>';
+    h+=row("Emphasis", OFF_TACTICS, ["run","balanced","pass"], t.off, "data-tacoff");
     h+=row("Tempo",   TEMPO_TACTICS, ["burn","normal","hurry"], t.tempo, "data-tactempo");
   }
   if(cDef){
@@ -11771,6 +12048,17 @@ function setTactic(kind, val){
   var el=document.getElementById("live-tactics");
   if(el){ el.innerHTML=tacticsPanel(); bindTactics(); }
 }
+// The player's run/pass balance from the slider. passPct is what the slider reports; the engine
+// stores lean (high = run), so they're inverses. Live if a game's running, and remembered on the
+// gameplan for the next one either way.
+function setBalance(passPct){
+  if(!coachesOff()) return;
+  var lean=clampN(Math.round(100-passPct), 2, 98);
+  if(!ST.save.gameplan) ST.save.gameplan={offBalance:lean, defBalance:50};
+  ST.save.gameplan.offBalance=lean;
+  if(ST.G && ST.G.teams && ST.G.teams[0]) ST.G.teams[0].lean=lean;   // this game, right now
+  persist();
+}
 // Binds only the tactics DOM, which gets rebuilt when a call changes.
 function bindTactics(){
   var tt=document.getElementById("tac-toggle");
@@ -11783,6 +12071,16 @@ function bindTactics(){
   document.querySelectorAll("[data-tacoff]").forEach(function(b){b.onclick=function(){setTactic("off",b.getAttribute("data-tacoff"));};});
   document.querySelectorAll("[data-tactempo]").forEach(function(b){b.onclick=function(){setTactic("tempo",b.getAttribute("data-tactempo"));};});
   document.querySelectorAll("[data-tacdef]").forEach(function(b){b.onclick=function(){setTactic("def",b.getAttribute("data-tacdef"));};});
+  // The balance slider updates its live read on every drag, and commits on release. Rebinding
+  // the whole panel mid-drag would kill the drag, so only the label updates during input.
+  document.querySelectorAll("[data-tacbalance]").forEach(function(sl){
+    sl.oninput=function(){
+      var pass=parseInt(sl.value,10), run=100-pass;
+      var host=sl.parentNode.querySelector(".tac-bal-val");
+      if(host) host.innerHTML='<span class="run">'+run+'% run</span> · <span class="pass">'+pass+'% pass</span>';
+    };
+    sl.onchange=function(){ setBalance(parseInt(sl.value,10)); };
+  });
 }
 // "Sim to Final" is in liveScreen's static markup — bound once, never rebuilt.
 function bindLiveControls(){
