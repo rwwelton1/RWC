@@ -1398,6 +1398,88 @@ function teamDivision(conf){ return isFCSConf(conf) ? "FCS" : "FBS"; }
 // Both subdivisions have an independents bucket; neither plays a conference slate.
 function isIndependentConf(c){ return c==="Independent" || c==="FCS Independent"; }
 var ALL_TEAMS = FBS_TEAMS.concat(FCS_TEAMS);
+// Remember every team's starting conference so a save can be re-seeded cleanly. ALL_TEAMS is a
+// module-level array shared by every save, but realignment is per-dynasty — so we must be able to
+// put the map back to 2026 before replaying a different save's moves.
+var _BASE_CONF={};
+ALL_TEAMS.forEach(function(t){ _BASE_CONF[t.n]=t.c; });
+
+// ── Conference realignment timelines ─────────────────────
+// Scripted futures, not random shuffling. Each dynasty rolls ONE timeline at creation and lives
+// with it, so different saves see different versions of the sport. A timeline is a list of years,
+// each with a set of moves; `dissolve` scatters a league entirely.
+//
+// Each move: {to:"SEC", teams:["Clemson","Florida State"]}
+// Each year: {year:2029, headline:"...", moves:[...], dissolve:["Pac-12"], tier:{"American":2}}
+//   tier — optional CONF_TIER overrides, for when a league's recruiting pull genuinely shifts.
+var REALIGNMENT_TIMELINES=[
+  {
+    id:"status_quo",
+    name:"Steady State",
+    blurb:"The map holds. No major moves this era.",
+    years:[]
+  }
+  // ...more timelines drop in here
+];
+function realignTimeline(){
+  var s=ST.save; if(!s) return null;
+  var id=s._realignId;
+  for(var i=0;i<REALIGNMENT_TIMELINES.length;i++){
+    if(REALIGNMENT_TIMELINES[i].id===id) return REALIGNMENT_TIMELINES[i];
+  }
+  return REALIGNMENT_TIMELINES[0];
+}
+// Put every team back to its 2026 home, then replay this save's timeline up to `throughYear`.
+// Replaying from scratch (rather than applying moves incrementally) means loading a save mid-
+// dynasty always lands on exactly the right map, no matter how it was saved.
+function applyRealignmentThrough(throughYear){
+  ALL_TEAMS.forEach(function(t){ t.c=_BASE_CONF[t.n]; });
+  var tl=realignTimeline(); if(!tl || !tl.years.length) return;
+  var s=ST.save;
+  s._realignDone=s._realignDone||{};
+  tl.years.forEach(function(y){
+    if(y.year>throughYear) return;
+    (y.moves||[]).forEach(function(mv){
+      (mv.teams||[]).forEach(function(nm){
+        var t=ALL_TEAMS.filter(function(x){return x.n===nm;})[0];
+        if(t) t.c=mv.to;
+      });
+    });
+    // A dissolved league's leftovers land wherever the timeline says, or the Independent bucket
+    // if it didn't say — never stranded in a conference that no longer exists.
+    (y.dissolve||[]).forEach(function(cn){
+      ALL_TEAMS.forEach(function(t){
+        if(t.c===cn) t.c=(y.fallback||"Independent");
+      });
+    });
+    if(y.tier){ Object.keys(y.tier).forEach(function(k){ CONF_TIER[k]=y.tier[k]; }); }
+  });
+}
+// Fire this season's realignment news (called at the offseason once the year is known).
+function runRealignmentFor(year){
+  var s=ST.save; if(!s) return;
+  var tl=realignTimeline(); if(!tl || !tl.years.length) return;
+  s._realignDone=s._realignDone||{};
+  tl.years.forEach(function(y){
+    if(y.year!==year || s._realignDone[y.year]) return;
+    s._realignDone[y.year]=1;
+    applyRealignmentThrough(year);
+    // If YOUR school moved, follow it — you coach the program, not the league.
+    var mine=ALL_TEAMS.filter(function(x){return x.n===s.school;})[0];
+    if(mine && mine.c!==s.conf){
+      var was=s.conf; s.conf=mine.c;
+      toast("🗞️ "+s.school+" is leaving the "+was+" for the "+mine.c+".");
+    }
+    if(y.headline) toast("🗞️ "+y.headline);
+    // The league snapshot carries its own copy of each team's conference — keep it in step.
+    if(s.league && s.league.teams){
+      ALL_TEAMS.forEach(function(t){
+        if(s.league.teams[t.n]) s.league.teams[t.n].c=t.c;
+      });
+      s.league.confSched=null; s.league.confRemain=null;  // schedules must be rebuilt
+    }
+  });
+}
 </script>
 <script>
 // =====================================================
@@ -1800,10 +1882,25 @@ function simLeagueWeek(excludeName){
     if(rem.length>0) return;               // still owes conference games → wait, don't burn the week
     var others=names.filter(function(m){ return !busy[m] && m!==n && (L.confRemain[m]||[]).length===0; });
     if(!others.length)return;
-    var oppName=others[Math.floor(Math.random()*others.length)];
+    // Teams prefer to fill non-conference dates close to home — travel is cheap and a regional
+    // game sells tickets. This is what makes clusters form organically across the map instead of
+    // the schedule being noise, and it's the raw material the breakaway system reads.
+    var near=others.filter(function(m){ return proximity(n,m)>0; });
+    var pool=(near.length && Math.random()<0.72) ? near : others;
+    // Prefer an opponent you already have history with. Real non-conference schedules are built on
+    // recurring series, not a fresh draw every year — and without this, bonds never compound past
+    // the annual decay (measured: max bond 3.2 after 20 seasons, only 5 pairs in the whole country
+    // clearing a cluster threshold, so no breakaway could ever form).
+    var oppName;
+    if(pool.length){
+      var withHist=pool.filter(function(m){ return bondOf(n,m)>0.4; });
+      var pick=(withHist.length && Math.random()<0.65) ? withHist : pool;
+      oppName=pick[Math.floor(Math.random()*pick.length)];
+    } else return;
     var r=simLeagueGame(n,oppName,false);
     var loser=(r.w===n)?oppName:n;
     L.teams[r.w].w++; L.teams[loser].l++;   // overall only, not a conference game
+    addBond(n, oppName);                    // a regional series builds a relationship
     busy[n]=1; busy[oppName]=1;
   });
 
@@ -1814,6 +1911,12 @@ function recordUserLeagueResult(won, isConfGame){
   var t=leagueTeam(ST.save.school); if(!t)return;
   if(won)t.w++; else t.l++;
   if(isConfGame){ if(won)t.cw++; else t.cl++; }
+}
+// Your own non-conference dates build regional relationships exactly like everyone else's — which
+// is what makes scheduling a nearby rival year after year a genuine long-game strategy.
+function recordUserBond(oppName, isConfGame){
+  if(isConfGame || !oppName) return;
+  addBond(ST.save.school, oppName);
 }
 // End-of-season rating drift: teams that beat their rating-expected record improve; others decline.
 // End-of-season league update: categorize each team by how last season went vs what their
@@ -2620,6 +2723,10 @@ function newSave(team, role){
   var startSkill=archStartSkill(s.archetype);
   if(startSkill) s.abilities.push(startSkill);
   s.expectWins=expectWinsFor(team.p, team.c);
+  // Each dynasty rolls its own future for the sport's map, so no two saves realign the same way.
+  s._realignId=REALIGNMENT_TIMELINES[Math.floor(Math.random()*REALIGNMENT_TIMELINES.length)].id;
+  s._realignDone={};
+  ALL_TEAMS.forEach(function(t){ t.c=_BASE_CONF[t.n]; });   // fresh map for a fresh dynasty
   s.league=initLeague();
   s.gameplan={offBalance:53, defBalance:50};
   s.offScheme="prostyle"; s.defScheme="base43";
@@ -2912,6 +3019,14 @@ function loadData(){
       if(ST.save.coachXP==null) ST.save.coachXP=0; // migrate pre-tree saves
       if(!ST.save.abilities) ST.save.abilities=[];
       if(!ST.save.facilities) ST.save.facilities={}; // migrate pre-facilities saves
+      if(!ST.save._realignId){
+        // Pre-realignment saves: give them a timeline so their world keeps evolving too.
+        ST.save._realignId=REALIGNMENT_TIMELINES[Math.floor(Math.random()*REALIGNMENT_TIMELINES.length)].id;
+        ST.save._realignDone=ST.save._realignDone||{};
+      }
+      // ALL_TEAMS is shared across saves, so rebuild THIS dynasty's map every time one loads.
+      applyRealignmentThrough(2026+((ST.save.seasonsPlayed||1)-1));
+      applyConfTiers();   // CONF_TIER is shared across saves — restore THIS dynasty's standings
       if(!ST.save.champHistory){
         // Pre-history saves never recorded champions. Reconstruct the USER's title seasons from
         // the career record so an established coach isn't shown a blank league book. We can only
@@ -3299,7 +3414,107 @@ var CONF_TIER={"SEC":3,"Big Ten":3,"Big 12":2,"ACC":2,"Pac-12":1,"American":1,"I
   // with the perennial national powers a shade more attractive.
   "MVFC":0,"Big Sky":0,"CAA":-1,"SoCon":-1,"Southland":-1,"OVC":-1,"Patriot League":-1,
   "Ivy League":-1,"MEAC":-1,"SWAC":-1,"NEC":-1,"Pioneer":-1,"UAC":-1,"FCS Independent":-1};
-// ── Program appeal ───────────────────────────────────────
+// ── Conference prestige, earned on the field ─────────────
+// CONF_TIER drives recruiting appeal, and it used to be a fixed table — the SEC was a 3 forever
+// and the MAC a 0 forever, no matter what happened in twenty seasons of football. Now a league's
+// standing is EARNED: playoff bids, deep runs and national titles build it, and a league that
+// stops producing them slides.
+//
+// Everything is measured PER MEMBER, not in raw totals. A 20-team superconference will always
+// put more teams in a 12-team bracket than a 6-team league; scoring raw bids would hand the
+// reputation race to whoever is biggest and make it impossible for a small league to ever rise.
+// Bids-per-member asks the fairer question: how good is the average program in here?
+var CONF_BASE_TIER=null;   // snapshot of the shipped table, so a save can re-seed cleanly
+function confPrestigeInit(){
+  if(!CONF_BASE_TIER){ CONF_BASE_TIER={}; Object.keys(CONF_TIER).forEach(function(k){ CONF_BASE_TIER[k]=CONF_TIER[k]; }); }
+}
+// This season's playoff/championship haul for every conference, normalized by size.
+function confSeasonScores(){
+  var s=ST.save, L=s.league; if(!L) return {};
+  var ranked=rankedTeams();                       // already sorted best-first, my division only
+  var field = (myDivision()==="FCS") ? 24 : 12;
+  var members={}, bids={}, deep={};
+  Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if((t.div||"FBS")!==myDivision()) return;
+    var c=t.c; if(!c || isIndependentConf(c)) return;
+    members[c]=(members[c]||0)+1;
+  });
+  ranked.forEach(function(r,i){
+    var c=r.conf; if(!c || isIndependentConf(c)) return;
+    if(i<field){ bids[c]=(bids[c]||0)+1; }
+    if(i<4)    { deep[c]=(deep[c]||0)+1; }        // top-4 seeds ≈ a real title threat
+  });
+  var natl = s._wonNatlThisYear ? s.conf : null;
+  if(!natl && s._natlChampName){
+    var ct=L.teams[s._natlChampName];
+    if(ct) natl=ct.c;
+  }
+  var out={};
+  Object.keys(members).forEach(function(c){
+    var m=Math.max(1,members[c]);
+    var bidRate=(bids[c]||0)/m;                    // share of the league that made the field
+    var deepRate=(deep[c]||0)/m;
+    var sc = bidRate*10 + deepRate*8;
+    if(natl===c) sc += 6;                          // a national title is the loudest signal
+    out[c]={score:sc, members:m, bids:bids[c]||0, deep:deep[c]||0, natl:(natl===c)};
+  });
+  return out;
+}
+// Roll this season's results into each conference's standing. Momentum decays, so a league needs
+// a sustained run to move a tier — one great year isn't a reputation.
+function updateConfPrestige(){
+  confPrestigeInit();
+  var s=ST.save; if(!s.league) return;
+  s.confMomentum=s.confMomentum||{};
+  s.confTier=s.confTier||{};
+  var sc=confSeasonScores();
+  Object.keys(sc).forEach(function(c){
+    var cur = (s.confTier[c]!=null) ? s.confTier[c] : (CONF_TIER[c]!=null?CONF_TIER[c]:0);
+    // What a league of this standing is expected to produce, calibrated against what the leagues
+    // ACTUALLY score. Measured over the shipped map: SEC/Big Ten ≈ 3.0, ACC ≈ 1.6, Big 12 ≈ 1.2,
+    // American ≈ 0.1, and every G5 league ≈ 0 (they essentially never crack a 12-team field).
+    // The first cut of this used 1.6+tier*1.5, which put a tier-3 league's bar at 6.1 — double
+    // what the best conference in the sport produces — so every league on the board decayed and
+    // the whole table compressed to 2/1/1/1/0. The bar has to sit at what the tier really means.
+    var EXPECT=[0.02, 0.35, 1.35, 2.75];
+    var expect = EXPECT[clampN(cur,0,3)];
+    var over = sc[c].score - expect;
+    // Scores sit in a narrow band (a great league ≈ 3.0, a poor one ≈ 0), so the over/under is
+    // usually a fraction of a point. Amplify it before banking so a genuine run actually moves
+    // the needle, but keep the decay so one hot year is never enough.
+    s.confMomentum[c] = (s.confMomentum[c]||0)*0.75 + over*2.6;
+    var mv=0;
+    if(s.confMomentum[c]>=5 && cur<3){ cur++; mv=1; s.confMomentum[c]=0; }
+    else if(s.confMomentum[c]<=-5 && cur>0){ cur--; mv=-1; s.confMomentum[c]=0; }
+    s.confMomentum[c]=clampN(s.confMomentum[c],-8,8);
+    s.confTier[c]=cur;
+    CONF_TIER[c]=cur;
+    if(mv && c===s.conf){
+      toast(mv>0 ? ("📈 The "+c+" is now a tier-"+cur+" league.")
+                 : ("📉 The "+c+" has slipped to tier "+cur+"."));
+    }
+  });
+  // Stash this season's picture so the offseason league meeting has something concrete to report
+  // rather than just a live tier number with no story behind it.
+  s._confReport={
+    year: 2026+((s.seasonsPlayed||1)-1),
+    rows: Object.keys(sc).map(function(c){
+      return {c:c, score:sc[c].score, bids:sc[c].bids, deep:sc[c].deep,
+              natl:sc[c].natl, members:sc[c].members, tier:(s.confTier[c]||0),
+              mom:(s.confMomentum[c]||0)};
+    }).sort(function(a,b){ return (b.tier-a.tier) || (b.score-a.score); })
+  };
+  // Keep the live table in step with anything stored (covers leagues that didn't play this year).
+  Object.keys(s.confTier).forEach(function(c){ CONF_TIER[c]=s.confTier[c]; });
+}
+// Re-seed CONF_TIER for the loaded save (the table is module-level and shared across dynasties).
+function applyConfTiers(){
+  confPrestigeInit();
+  Object.keys(CONF_BASE_TIER).forEach(function(k){ CONF_TIER[k]=CONF_BASE_TIER[k]; });
+  var s=ST.save; if(!s || !s.confTier) return;
+  Object.keys(s.confTier).forEach(function(c){ CONF_TIER[c]=s.confTier[c]; });
+}
 // What a recruit thinks of your program, independent of who he is. Four inputs:
 //   prestige  — the program's standing (scaled within its subdivision)
 //   momentum  — recent success: how you've done against expectations lately
@@ -9403,6 +9618,17 @@ function schoolBlock(){
   h+='<div class="rec-schoolhd"><span>\uD83C\uDFDF\uFE0F '+x(s.school)+'</span><span class="rec-lvl">'+x(s.conf)+'</span></div>';
   h+='<div class="riv-row"><span class="riv-opp">Prestige</span>'+
      '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+stars(pres)+'</span></div>';
+  // Where the program is trending. Prestige moves on sustained results, so show the progress
+  // toward the next move rather than leaving it a black box.
+  var mom=s._presMomentum||0;
+  var upNeed=(pres>=4)?11:(pres>=3)?8:6;
+  var trend, tcol;
+  if(mom>=upNeed*0.55){ trend='Rising \u2014 '+Math.max(0,Math.round(upNeed-mom))+' more good season'+((upNeed-mom)>3?'s':'')+' to '+(pres+1)+' stars'; tcol='#1a7f37'; }
+  else if(mom<=-5){ trend='Slipping \u2014 the program is losing ground'; tcol='var(--red2)'; }
+  else if(mom>0){ trend='Building \u2014 keep winning above expectations'; tcol='var(--gold-dark)'; }
+  else { trend='Steady \u2014 meeting what the board expects'; tcol='var(--muted)'; }
+  if(pres>=5 && mom>=0){ trend='Blue blood \u2014 nowhere left to climb'; tcol='var(--gold-dark)'; }
+  h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;color:'+tcol+';font-weight:800">'+trend+'</span></div>';
   if(ovr){
     h+='<div class="riv-row"><span class="riv-opp">Team rating</span>'+
        '<span class="riv-rec" style="width:auto">'+off+' OFF \u00b7 '+def+' DEF \u00b7 <b>'+ovr+' OVR</b></span></div>';
@@ -9967,6 +10193,101 @@ function bestConfChampion(conf){
   return best;
 }
 // Record this season's national + conference champions into the league history.
+// ── PRESTIGE: a program's standing, earned over years ────
+// Prestige was fixed at whatever the school started as, so a decade of dominance at a 2-star
+// program still recruited like a 2-star program. Now it MOVES — but slowly, and only on
+// sustained results, because prestige is reputation, not a hot streak.
+//
+// Each season scores against what the board expects at the CURRENT prestige, so climbing gets
+// harder as you rise: 9 wins is a triumph at a 2-star school and a disappointment at a 5-star
+// one. Points accumulate on a hidden momentum meter; cross the threshold and the program moves
+// a full star (and the meter resets, so you can't ratchet up two years running).
+//
+// Titles are the accelerant — a national championship is worth more than any regular season.
+// Sustained failure drags a program down the same way, though more gently: blue bloods stay
+// blue bloods through a couple of bad years.
+function prestigeSeasonScore(){
+  var s=ST.save;
+  var expect=expectWinsFor(s.prestige||3, s.conf);
+  var over=(s.wins||0)-expect;          // beat the bar, or miss it
+  var pts=over*0.55;
+  if(s._wonConfThisYear) pts+=1.6;
+  if(s._wonNatlThisYear) pts+=4.0;
+  // A losing season stings a bit extra — boosters and recruits both notice.
+  if((s.wins||0) < (s.losses||0)) pts-=1.0;
+  return pts;
+}
+function updatePrestige(){
+  var s=ST.save;
+  if(s.prestige==null) return;
+  // Momentum is per-SCHOOL: taking a new job starts you fresh on that program's trajectory.
+  if(s._presSchool!==s.school){ s._presSchool=s.school; s._presMomentum=0; }
+  s._presMomentum=(s._presMomentum||0)+prestigeSeasonScore();
+  var moved=0;
+  // Climbing is deliberately expensive, and the last step to blue-blood status is the hardest.
+  var upNeed = (s.prestige>=4) ? 11 : (s.prestige>=3) ? 8 : 6;
+  var downNeed = -9;   // more forgiving than the climb
+  if(s._presMomentum>=upNeed && s.prestige<5){
+    s.prestige++; s._presMomentum=0; moved=1;
+  } else if(s._presMomentum<=downNeed && s.prestige>1){
+    s.prestige--; s._presMomentum=0; moved=-1;
+  }
+  // Don't let the meter run away in either direction while parked at a cap.
+  s._presMomentum=clampN(s._presMomentum, -14, 14);
+  if(moved>0){
+    toast("⭐ "+s.school+" is now a "+s.prestige+"-star program — the country noticed.");
+    // A rising program's money and expectations rise with it.
+    s.nilTotal=nilBudgetFor(); s.nilLeft=Math.min(s.nilLeft||0, s.nilTotal);
+  } else if(moved<0){
+    toast("📉 "+s.school+" slipped to "+s.prestige+" stars.");
+    s.nilTotal=nilBudgetFor(); s.nilLeft=Math.min(s.nilLeft||0, s.nilTotal);
+  }
+  return moved;
+}
+// The rest of the country's programs rise and fall too. Without this, t.p is frozen at each
+// school's 2025 identity forever: a team that goes 2-10 for a decade still recruits and drifts
+// like a blue blood, and a Cinderella that wins three titles never becomes one. Only the user's
+// program had a living reputation.
+//
+// This is deliberately SLOWER and more damped than the player's own prestige movement, because
+// t.p is the anchor for teamBaseline, the drift cap/floor, and portal pull — the equilibrium the
+// whole league leans on. Prestige here tracks a long-run average of how a program actually
+// performs relative to its division, so it takes many seasons of genuine over- or
+// under-achievement to move a school, and it can only travel one step at a time.
+function driftLeaguePrestige(){
+  var L=ST.save.league; if(!L||!L.teams) return;
+  // Rank each program against ITS OWN DIVISION this season. Judging against a fixed rating
+  // baseline made prestige a one-way ratchet: league ratings inflate over time, so nearly every
+  // team beat its static bar and 146 of 261 programs rose while zero fell. Grading on the curve
+  // is zero-sum by construction — for someone to be overachieving, someone else must be
+  // underachieving — which is also just what reputation actually is.
+  var byDiv={FBS:[], FCS:[]};
+  Object.keys(L.teams).forEach(function(n){
+    var t=L.teams[n];
+    if(!(t.w+t.l)) return;
+    var d=((t.div==="FCS")||(t.c && teamDivision(t.c)==="FCS")) ? "FCS" : "FBS";
+    byDiv[d].push({n:n, t:t, pct:t.w/(t.w+t.l)});
+  });
+  Object.keys(byDiv).forEach(function(d){
+    var list=byDiv[d]; if(list.length<8) return;
+    // Where a team of each prestige "should" finish, as a percentile of its division.
+    list.sort(function(a,b){ return b.pct-a.pct; });
+    list.forEach(function(e,i){
+      var t=e.t;
+      if(e.n===ST.save.school) return;   // your program is handled by updatePrestige()
+      var pctile = 1-(i/(list.length-1));            // 1 = best in division, 0 = worst
+      var p=(t.p!=null?t.p:3);
+      var expect = [0,0.18,0.36,0.54,0.72,0.88][p];  // what that prestige should average
+      var over = pctile-expect;
+      if(Math.abs(over)<0.16){ t._pm=(t._pm||0)*0.6; return; }
+      t._pm=(t._pm||0)*0.75 + over*10;
+      // Deliberately expensive — a CPU program changing tier is a multi-season story.
+      if(t._pm>=13 && t.p<5){ t.p++; t._pm=0; }
+      else if(t._pm<=-13 && t.p>1){ t.p--; t._pm=0; }
+      t._pm=clampN(t._pm,-15,15);
+    });
+  });
+}
 function recordChampions(){
   var s=ST.save; if(!s.league) return;
   s.champHistory=s.champHistory||[];
@@ -10165,6 +10486,310 @@ function confStandingsTable(){
 // A team's "resume strength" — wins matter, but so does program/conference quality.
 // Power-conference wins are worth more than Group-of-Five wins (strength of schedule).
 var POWER_CONF={"SEC":1,"Big Ten":1,"Big 12":1,"ACC":1};
+// ── Geography ────────────────────────────────────────────
+// Where every FBS program actually is. Realignment's regional layer needs to know who's a
+// neighbour: playing a school two states over builds something real, playing one across the
+// country doesn't.
+var TEAM_STATE={"Air Force":"CO","Akron":"OH","Alabama":"AL","App State":"NC","Arizona":"AZ","Arizona State":"AZ","Arkansas":"AR","Arkansas State":"AR","Army":"NY","Auburn":"AL","Ball State":"IN","Baylor":"TX","Boise State":"ID","Boston College":"MA","Bowling Green":"OH","Buffalo":"NY","BYU":"UT","California":"CA","Central Michigan":"MI","Charlotte":"NC","Cincinnati":"OH","Clemson":"SC","Coastal Carolina":"SC","Colorado":"CO","Colorado State":"CO","Duke":"NC","East Carolina":"NC","Eastern Michigan":"MI","Florida":"FL","Florida Atlantic":"FL","FIU":"FL","Florida State":"FL","Fresno State":"CA","Georgia":"GA","Georgia Southern":"GA","Georgia State":"GA","Georgia Tech":"GA","Hawaii":"HI","Houston":"TX","Illinois":"IL","Indiana":"IN","Iowa":"IA","Iowa State":"IA","Jacksonville State":"AL","James Madison":"VA","Kansas":"KS","Kansas State":"KS","Kennesaw State":"GA","Kent State":"OH","Kentucky":"KY","Liberty":"VA","Louisiana":"LA","Louisiana Tech":"LA","Louisville":"KY","LSU":"LA","Marshall":"WV","Maryland":"MD","Memphis":"TN","Miami":"FL","Miami (OH)":"OH","Michigan":"MI","Michigan State":"MI","Middle Tennessee":"TN","Minnesota":"MN","Mississippi State":"MS","Missouri":"MO","Missouri State":"MO","Navy":"MD","NC State":"NC","Nebraska":"NE","Nevada":"NV","New Mexico":"NM","New Mexico State":"NM","North Carolina":"NC","North Texas":"TX","Northern Illinois":"IL","Northwestern":"IL","Notre Dame":"IN","Ohio":"OH","Ohio State":"OH","Oklahoma":"OK","Oklahoma State":"OK","Old Dominion":"VA","Ole Miss":"MS","Oregon":"OR","Oregon State":"OR","Penn State":"PA","Pittsburgh":"PA","Purdue":"IN","Rice":"TX","Rutgers":"NJ","Sam Houston":"TX","San Diego State":"CA","San Jose State":"CA","SMU":"TX","South Alabama":"AL","South Carolina":"SC","South Florida":"FL","Southern Miss":"MS","Stanford":"CA","Syracuse":"NY","TCU":"TX","Temple":"PA","Tennessee":"TN","Texas":"TX","Texas A&M":"TX","Texas State":"TX","Texas Tech":"TX","Toledo":"OH","Troy":"AL","Tulane":"LA","Tulsa":"OK","UAB":"AL","UCF":"FL","UCLA":"CA","UConn":"CT","UMass":"MA","UNLV":"NV","USC":"CA","Utah":"UT","Utah State":"UT","UTEP":"TX","UTSA":"TX","Vanderbilt":"TN","Virginia":"VA","Virginia Tech":"VA","Wake Forest":"NC","Washington":"WA","Washington State":"WA","West Virginia":"WV","Western Kentucky":"KY","Western Michigan":"MI","Wisconsin":"WI","Wyoming":"WY","North Dakota State":"ND","Louisiana-Monroe":"LA","Delaware":"DE"};
+// Which states border which. Used as a cheap proximity test — same state is closest, an adjacent
+// state is still "regional", anything further is not.
+var STATE_ADJ={
+ AL:["FL","GA","MS","TN"], AR:["LA","MO","MS","OK","TN","TX"], AZ:["CA","NM","NV","UT","CO"],
+ CA:["AZ","NV","OR"], CO:["AZ","KS","NE","NM","OK","UT","WY"], CT:["MA","NY","RI"],
+ DE:["MD","NJ","PA"], FL:["AL","GA"], GA:["AL","FL","NC","SC","TN"], IA:["IL","MN","MO","NE","SD","WI"],
+ ID:["MT","NV","OR","UT","WA","WY"], IL:["IA","IN","KY","MO","WI"], IN:["IL","KY","MI","OH"],
+ KS:["CO","MO","NE","OK"], KY:["IL","IN","MO","OH","TN","VA","WV"], LA:["AR","MS","TX"],
+ MA:["CT","NH","NY","RI","VT"], MD:["DE","PA","VA","WV"], MI:["IN","OH","WI"],
+ MN:["IA","ND","SD","WI"], MO:["AR","IA","IL","KS","KY","NE","OK","TN"], MS:["AL","AR","LA","TN"],
+ NC:["GA","SC","TN","VA"], ND:["MN","SD","MT"], NE:["CO","IA","KS","MO","SD","WY"],
+ NJ:["DE","NY","PA"], NM:["AZ","CO","OK","TX","UT"], NV:["AZ","CA","ID","OR","UT"],
+ NY:["CT","MA","NJ","PA","VT"], OH:["IN","KY","MI","PA","WV"], OK:["AR","CO","KS","MO","NM","TX"],
+ OR:["CA","ID","NV","WA"], PA:["DE","MD","NJ","NY","OH","WV"], RI:["CT","MA"],
+ SC:["GA","NC"], SD:["IA","MN","ND","NE","WY","MT"], TN:["AL","AR","GA","KY","MO","MS","NC","VA"],
+ TX:["AR","LA","NM","OK"], UT:["AZ","CO","ID","NM","NV","WY"], VA:["KY","MD","NC","TN","WV"],
+ WA:["ID","OR"], WI:["IA","IL","MI","MN"], WV:["KY","MD","OH","PA","VA"],
+ WY:["CO","ID","MT","NE","SD","UT"], HI:[], MT:["ID","ND","SD","WY"]
+};
+// 1.0 same state, 0.7 neighbouring state, 0 otherwise. Deliberately blunt — it produces the right
+// clusters everywhere in the country without needing coordinates for 260 schools.
+function proximity(a,b){
+  var sa=TEAM_STATE[a], sb=TEAM_STATE[b];
+  if(!sa||!sb) return 0;
+  if(sa===sb) return 1;
+  var adj=STATE_ADJ[sa]||[];
+  return adj.indexOf(sb)>=0 ? 0.7 : 0;
+}
+// ── Regional bonds ───────────────────────────────────────
+// Playing a nearby school year after year builds a real relationship — and it's the QUALITY of
+// that neighbour that gives the relationship any leverage. Scheduling App State every season
+// builds familiarity but no power; an annual series with a good South Carolina builds something
+// that could actually pull a program out of the SEC, because the league you'd found together
+// would have real programs in it.
+//
+// Bonds live on the save (s.bonds["A|B"]) and decay if you stop playing, so a cluster has to be
+// maintained, not just assembled once.
+function bondKey(a,b){ return (a<b) ? (a+"|"+b) : (b+"|"+a); }
+function bondOf(a,b){ var s=ST.save; return (s.bonds&&s.bonds[bondKey(a,b)])||0; }
+// Record one game between two schools. Only regional, non-conference meetings count — a
+// conference game is already a relationship the league imposed on you.
+function addBond(a,b){
+  var s=ST.save, L=s.league; if(!L) return;
+  var prox=proximity(a,b); if(prox<=0) return;
+  var ta=L.teams[a], tb=L.teams[b]; if(!ta||!tb) return;
+  if(ta.c===tb.c) return;                       // same league already
+  // Quality of the opponent, from each side's point of view.
+  var pa=(a===s.school)?(s.prestige||3):(ta.p||3);
+  var pb=(b===s.school)?(s.prestige||3):(tb.p||3);
+  var quality=((pa+pb)/2)/3;                    // 1.0 at 3-star average, ~1.67 at 5-star
+  s.bonds=s.bonds||{};
+  var k=bondKey(a,b);
+  s.bonds[k]=(s.bonds[k]||0) + prox*quality;
+}
+// Bonds fade when a series lapses.
+function decayBonds(){
+  var s=ST.save; if(!s.bonds) return;
+  Object.keys(s.bonds).forEach(function(k){
+    s.bonds[k]*=0.85;
+    if(s.bonds[k]<0.25) delete s.bonds[k];
+  });
+}
+// Everyone this school has a meaningful bond with, strongest first.
+function bondsFor(name){
+  var s=ST.save; if(!s.bonds) return [];
+  var out=[];
+  Object.keys(s.bonds).forEach(function(k){
+    var parts=k.split("|");
+    if(parts[0]===name) out.push({n:parts[1], v:s.bonds[k]});
+    else if(parts[1]===name) out.push({n:parts[0], v:s.bonds[k]});
+  });
+  out.sort(function(a,b){ return b.v-a.v; });
+  return out;
+}
+// ── Breakaways ───────────────────────────────────────────
+// When a group of nearby schools has spent years playing each other, and the map is already
+// unstable, they can walk out together and found their own league. This is the counterweight to
+// consolidation: as superconferences strip the map, the schools left behind have a way to build
+// something rather than just decay.
+//
+// The bar is deliberately a perfect storm. All of these must hold:
+//   • enough schools with strong MUTUAL bonds (not just one hub with spokes)
+//   • the era is unstable (a raid has already happened — this is a reaction to chaos)
+//   • every founder individually passes its own defection test against the new league
+// That last one is what stops a fantasy league of blue bloods: Texas evaluates the startup like
+// any other offer, and a startup can never outbid a stable tier-3 conference.
+function clusterAround(seed, minBond){
+  var s=ST.save, L=s.league; if(!L||!L.teams[seed]) return [];
+  var group=[seed];
+  var cands=bondsFor(seed).filter(function(b){
+    return b.v>=minBond && L.teams[b.n] && (L.teams[b.n].div||"FBS")==="FBS" && proximity(seed,b.n)>0;
+  });
+  cands.forEach(function(b){
+    // A candidate needs a real tie to the seed and at least SOME connection to the group already —
+    // requiring a tie to 60% of the group (the first cut) was effectively impossible and capped
+    // every cluster in the country at 3 schools, so no breakaway could ever reach the 6 needed.
+    var linked=0;
+    group.forEach(function(g){ if(g===seed || bondOf(g,b.n)>=minBond*0.35) linked++; });
+    if(linked>=1) group.push(b.n);
+  });
+  return group;
+}
+// The value a proposed new league would offer, from a given school's point of view. A startup's
+// worth is what its founders are: a group of good programs is a real conference, a group of
+// nobodies is not.
+function startupValueFor(teamName, group){
+  var s=ST.save, L=s.league;
+  var ps=[];
+  group.forEach(function(n){
+    if(n===teamName) return;
+    var t=L.teams[n]; if(!t) return;
+    ps.push((n===s.school)?(s.prestige||3):(t.p||3));
+  });
+  if(!ps.length) return 0;
+  var avg=ps.reduce(function(a,b){return a+b;},0)/ps.length;
+  // A startup begins around tier 1 if its members are good; the founders' quality IS the pitch.
+  var impliedTier=clampN((avg-1.6)/1.15, 0, 2.6);
+  var v=impliedTier*4.2;
+  // Being a founder of your own league means you matter in it — worth something real.
+  var mine=(teamName===s.school)?(s.prestige||3):((L.teams[teamName]||{}).p||3);
+  v += (mine-avg)*0.55 + 1.2;
+  return v;
+}
+function wouldJoinStartup(teamName, group){
+  var L=ST.save.league;
+  var have=confValueFor(teamName, L.teams[teamName].c);
+  return (startupValueFor(teamName, group)-have) >= 1.5;
+}
+// Is the map unstable enough for a breakaway to be plausible?
+function eraUnstable(){
+  var s=ST.save;
+  var churn=0; Object.keys(s._confChurn||{}).forEach(function(k){ churn+=s._confChurn[k]; });
+  return churn>=3;
+}
+// Look for a CPU-driven breakaway. Returns the founded league, or null.
+function runBreakaways(){
+  var s=ST.save, L=s.league; if(!L) return null;
+  if(!eraUnstable()) return null;
+  if((s._breakaways||0)>=2) return null;          // cap the fragmentation
+  var seeds=Object.keys(L.teams).filter(function(n){
+    return (L.teams[n].div||"FBS")==="FBS" && bondsFor(n).length>=4;
+  });
+  for(var i=0;i<seeds.length;i++){
+    var group=clusterAround(seeds[i], 1.5);
+    if(group.length<6) continue;
+    var willing=group.filter(function(n){ return n!==s.school && wouldJoinStartup(n, group); });
+    if(willing.length<6) continue;
+    willing=willing.slice(0,10);
+    // Name it for the region its founders share.
+    var st=TEAM_STATE[willing[0]]||"";
+    var name=(REGION_NAMES[st]||"Coastal")+" Conference";
+    if(s.confTier&&s.confTier[name]!=null) name=name+" II";
+    var from={};
+    willing.forEach(function(n){
+      var t=L.teams[n]; from[t.c]=(from[t.c]||0)+1;
+      s._confChurn=s._confChurn||{}; s._confChurn[t.c]=(s._confChurn[t.c]||0)+1;
+      t.c=name;
+      var at=ALL_TEAMS.filter(function(x){return x.n===n;})[0];
+      if(at) at.c=name;
+    });
+    s.confTier=s.confTier||{};
+    // A startup earns its standing from scratch — it begins at the bottom and has to win its way up.
+    s.confTier[name]=1; CONF_TIER[name]=1;
+    s._breakaways=(s._breakaways||0)+1;
+    L.confSched=null; L.confRemain=null;
+    return {name:name, members:willing};
+  }
+  return null;
+}
+var REGION_NAMES={
+  NC:"Carolina", SC:"Carolina", GA:"Southern", FL:"Sunshine", AL:"Gulf", MS:"Gulf", LA:"Gulf",
+  TX:"Lone Star", OK:"Plains", KS:"Plains", NE:"Plains", MO:"Heartland", IA:"Heartland",
+  OH:"Great Lakes", MI:"Great Lakes", IN:"Great Lakes", IL:"Great Lakes", WI:"Great Lakes",
+  PA:"Keystone", NY:"Empire", NJ:"Atlantic", MD:"Atlantic", VA:"Atlantic", WV:"Appalachian",
+  KY:"Bluegrass", TN:"Volunteer", CA:"Pacific", OR:"Pacific", WA:"Pacific", NV:"Desert",
+  AZ:"Desert", NM:"Desert", UT:"Mountain", CO:"Mountain", ID:"Mountain", WY:"Mountain",
+  MN:"North Star", ND:"North Star", SD:"North Star", MA:"New England", CT:"New England", DE:"Atlantic"
+};
+// ── Realignment: who moves, and why ──────────────────────
+// A school's conference is worth something to it, and that worth is what a rival league has to
+// beat. The two inputs that matter are the league's STANDING (tier — money, exposure, recruiting
+// pull) and the school's PLACE in it (a blue blood in a tier-3 league has enormous sunk value; a
+// bottom-feeder in the same league has much less). Add stability: a conference that's losing
+// members is worth less than an intact one, because you're buying into its future, not its past.
+//
+// This is what stops the silly outcomes. Texas never leaves the SEC — a 5-star in a stable tier-3
+// league scores near the ceiling and nothing can outbid it. But South Carolina, a middling
+// program in that same league, has far less to lose, so a strong enough offer can move it.
+function confValueFor(teamName, confName){
+  var s=ST.save, L=s.league; if(!L) return 0;
+  var t=L.teams[teamName]; if(!t) return 0;
+  var tier=(s.confTier&&s.confTier[confName]!=null) ? s.confTier[confName] : (CONF_TIER[confName]||0);
+  var p=(teamName===s.school) ? (s.prestige||3) : (t.p||3);
+  // Tier dominates. Money and exposure are why programs move, and the gap between a tier-3 league
+  // and a tier-2 one is enormous — an early cut of this weighted tier at 2.4 and being a big fish
+  // at 0.8, which made Clemson score HIGHER in the ACC than in the Big Ten. That inverts the whole
+  // premise of realignment: nobody would ever leave, and only dregs like a MAC school moved.
+  var v = tier*4.2;
+  // Where you sit inside the league still matters, but as a modifier, not a rival to the money.
+  // A blue blood has more to lose by leaving (rivalries, guaranteed relevance) and a bottom-feeder
+  // in a big league has little holding it — this is what keeps Texas home while a middling SEC
+  // program is at least reachable.
+  var peers=[], mine=0;
+  Object.keys(L.teams).forEach(function(n){
+    var o=L.teams[n];
+    if(o.c!==confName) return;
+    var op=(n===s.school)?(s.prestige||3):(o.p||3);
+    peers.push(op); if(n===teamName) mine=op;
+  });
+  if(peers.length && mine){
+    var avg=peers.reduce(function(a,b){return a+b;},0)/peers.length;
+    v += (mine-avg)*0.55;
+  }
+  // A shrinking league is a worse bet than a stable one.
+  var churn=(s._confChurn&&s._confChurn[confName])||0;
+  v -= churn*0.7;
+  return v;
+}
+// What a school would be worth TO a conference — used to pick raid targets. Prestige first,
+// recent form as the tiebreaker, so a program on a run beats a stale one at the same star level.
+function raidAppeal(teamName){
+  var s=ST.save, L=s.league; var t=L.teams[teamName]; if(!t) return 0;
+  var p=(teamName===s.school)?(s.prestige||3):(t.p||3);
+  var form=(teamName===s.school) ? ((s._presMomentum||0)*0.12) : ((t._pm||0)*0.06);
+  return p*2 + form + (t.ovr||70)*0.03;
+}
+// Would this school accept an invitation from `toConf`? Compares what it has against what it's
+// being offered, with a real switching cost so only a clear upgrade moves anyone.
+function wouldAccept(teamName, toConf){
+  var have=confValueFor(teamName, ST.save.league.teams[teamName].c);
+  var offered=confValueFor(teamName, toConf);
+  // Leaving is disruptive: rivalries, travel, the unknown. The offer has to clear the bar by a
+  // margin, not just tie it.
+  return (offered-have) >= 1.5;
+}
+// Power conferences look to add the best available programs. Raids only happen when a league has
+// something to gain (it's at the top and can afford to expand) and there's a target worth taking.
+function runConferenceRaids(){
+  var s=ST.save, L=s.league; if(!L) return [];
+  s._confChurn=s._confChurn||{};
+  var moves=[];
+  // Only the strongest leagues raid, and only if they're not already bloated.
+  var raiders=Object.keys(POWER_CONF).filter(function(c){
+    var tier=(s.confTier&&s.confTier[c]!=null)?s.confTier[c]:(CONF_TIER[c]||0);
+    var size=0; Object.keys(L.teams).forEach(function(n){ if(L.teams[n].c===c) size++; });
+    return tier>=3 && size<20;
+  });
+  raiders.forEach(function(raider){
+    // Candidates: anyone outside this league, in a lesser league, who'd say yes.
+    var cands=[];
+    Object.keys(L.teams).forEach(function(n){
+      var t=L.teams[n];
+      if(t.c===raider || isIndependentConf(t.c)) return;
+      if((t.div||"FBS")!=="FBS") return;
+      var theirTier=(s.confTier&&s.confTier[t.c]!=null)?s.confTier[t.c]:(CONF_TIER[t.c]||0);
+      var myTier=(s.confTier&&s.confTier[raider]!=null)?s.confTier[raider]:(CONF_TIER[raider]||0);
+      if(theirTier>=myTier) return;                    // nobody moves sideways or down
+      if(!wouldAccept(n, raider)) return;
+      cands.push({n:n, appeal:raidAppeal(n)});
+    });
+    if(!cands.length) return;
+    cands.sort(function(a,b){ return b.appeal-a.appeal; });
+    // A raid takes 1-2 schools in a year — enough to matter, not enough to gut a league at once.
+    var take=cands.slice(0, 1+(Math.random()<0.4?1:0));
+    take.forEach(function(cd){
+      if(cd.n===s.school) return;                      // the user gets an INVITE, not a transfer
+      var t=L.teams[cd.n], from=t.c;
+      t.c=raider;
+      var at=ALL_TEAMS.filter(function(x){return x.n===cd.n;})[0];
+      if(at) at.c=raider;
+      s._confChurn[from]=(s._confChurn[from]||0)+1;
+      moves.push({team:cd.n, from:from, to:raider});
+    });
+  });
+  if(moves.length){ L.confSched=null; L.confRemain=null; }   // schedules must be rebuilt
+  return moves;
+}
+// Does any power conference want the USER's program this offseason? Returns the best offer, which
+// the league meeting then presents as a choice rather than moving them silently.
+function pendingInviteForUser(){
+  var s=ST.save, L=s.league; if(!L) return null;
+  if(!L.teams[s.school]) return null;
+  var best=null;
+  Object.keys(POWER_CONF).forEach(function(c){
+    if(c===s.conf) return;
+    var tier=(s.confTier&&s.confTier[c]!=null)?s.confTier[c]:(CONF_TIER[c]||0);
+    var myTier=(s.confTier&&s.confTier[s.conf]!=null)?s.confTier[s.conf]:(CONF_TIER[s.conf]||0);
+    if(tier<=myTier) return;
+    var size=0; Object.keys(L.teams).forEach(function(n){ if(L.teams[n].c===c) size++; });
+    if(size>=20) return;
+    // Are you good enough for them to want you? Compare against who they'd otherwise take.
+    var mine=raidAppeal(s.school);
+    if(mine < 7.0) return;                       // roughly: a 3-star on a run, or any 4-star+
+    var gain=confValueFor(s.school,c)-confValueFor(s.school,s.conf);
+    if(gain<1.0) return;
+    if(!best || gain>best.gain) best={conf:c, gain:gain, tier:tier};
+  });
+  return best;
+}
 function isPowerConf(conf){ return !!POWER_CONF[conf]; }
 // Committee-style résumé score (FBS) — emulates how the CFP selection committee weighs a
 // team: results first (wins, scaled by strength of schedule), losses hurt (a touch less in
@@ -11142,11 +11767,134 @@ function osTabs(){
   var stage=osStage();
   return [
     {k:"summary", t:"📋 Summary"},
+    {k:"league",  t:"🏛️ League"},
     {k:"roster",  t:"🔁 Ins &amp; Outs"},
     {k:"class",   t:"🖊️ Class"},
     {k:"depth",   t:"📊 Depth"},
     {k:"portal",  t:"🔄 Portal", locked:false}
   ];
+}
+// ── The annual league meeting ────────────────────────────
+// Once a year the sport's politics land on your desk. Right now this reports the landscape —
+// where every conference stands, how yours is trending, and who's rising. It's built as the frame
+// that realignment, defection and expansion votes will hang on, so the player sees the whole
+// system through one consistent lens instead of scattered toasts.
+function leagueMeetingTab(){
+  var s=ST.save;
+  var rep=s._confReport;
+  var h='';
+  h+='<div class="rec-tbl" style="margin-bottom:12px"><div class="rec-schoolhd">'+
+     '<span>\uD83C\uDFDB\uFE0F League Meeting</span><span class="rec-lvl">'+(rep?rep.year:(2026+((s.seasonsPlayed||1)-1)))+'</span></div>'+
+     '<div class="riv-row"><span class="riv-opp" style="font-size:10px;line-height:1.5">'+
+     'The commissioners meet every offseason. Conference standing is earned on the field \u2014 playoff bids, deep runs and titles, measured per member \u2014 and it drives how your league recruits.'+
+     '</span></div></div>';
+
+  if(!rep || !rep.rows || !rep.rows.length){
+    h+='<div class="rec-tbl"><div class="rec-empty">Nothing to report yet \u2014 finish a season and the league will take stock.</div></div>';
+    return h;
+  }
+
+  // ── your conference first ──
+  var mine=null;
+  rep.rows.forEach(function(r){ if(r.c===s.conf) mine=r; });
+  if(mine){
+    var trend = mine.mom>=2 ? {t:"Rising", c:"#1a7f37"} : mine.mom<=-2 ? {t:"Slipping", c:"var(--red2)"} : {t:"Holding", c:"var(--muted)"};
+    h+='<div class="sec-title">Your Conference</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    h+='<div class="rec-schoolhd"><span>'+x(mine.c)+'</span><span class="rec-lvl">Tier '+mine.tier+'</span></div>';
+    h+='<div class="riv-row"><span class="riv-opp">Playoff bids</span>'+
+       '<span class="riv-rec" style="width:auto"><b>'+mine.bids+'</b> of '+mine.members+' members</span></div>';
+    if(mine.deep){
+      h+='<div class="riv-row"><span class="riv-opp">Title threats (top 4)</span>'+
+         '<span class="riv-rec" style="width:auto"><b>'+mine.deep+'</b></span></div>';
+    }
+    if(mine.natl){
+      h+='<div class="riv-row"><span class="riv-opp" style="color:var(--gold-dark);font-weight:900">\uD83C\uDFC6 National champion came from this league</span></div>';
+    }
+    h+='<div class="riv-row"><span class="riv-opp">Standing</span>'+
+       '<span class="riv-rec" style="width:auto;color:'+trend.c+';font-weight:900">'+trend.t+'</span></div>';
+    h+='</div>';
+  }
+
+  // ── an offer on the table ──
+  var inv=s._pendingInvite;
+  if(inv){
+    h+='<div class="sec-title">An Offer</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px;border-color:var(--gold-dark)">';
+    h+='<div class="rec-schoolhd" style="background:var(--gold-bg)"><span>\uD83D\uDCE9 The '+x(inv.conf)+' wants '+x(s.school)+'</span>'+
+       '<span class="rec-lvl">Tier '+inv.tier+'</span></div>';
+    h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;line-height:1.5">'+
+       'What you\u2019ve built here has their attention. A bigger league means better recruiting and more money \u2014 '+
+       'but tougher schedules, and a board that will expect more of you.'+
+       '</span></div>';
+    h+='<div class="riv-row" style="gap:6px">'+
+       '<button class="tp-btn" data-invite="accept" style="flex:1">Accept \u2014 join the '+x(inv.conf)+'</button>'+
+       '<button class="tp-btn off" data-invite="decline" style="flex:1">Stay in the '+x(s.conf)+'</button>'+
+       '</div>';
+    h+='</div>';
+  }
+
+  // ── what moved this year ──
+  var mv=s._realignMoves||[];
+  if(mv.length){
+    h+='<div class="sec-title">Realignment</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    mv.forEach(function(m){
+      h+='<div class="riv-row"><span class="riv-opp">\uD83D\uDDDE\uFE0F <b>'+x(m.team)+'</b> leaves the '+x(m.from)+'</span>'+
+         '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">\u2192 '+x(m.to)+'</span></div>';
+    });
+    h+='</div>';
+  }
+
+  // ── a new league is born ──
+  var brk=s._breakawayNew;
+  if(brk){
+    h+='<div class="sec-title">A New League</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px;border-color:var(--gold-dark)">';
+    h+='<div class="rec-schoolhd" style="background:var(--gold-bg)"><span>\uD83C\uDD95 The '+x(brk.name)+'</span>'+
+       '<span class="rec-lvl">'+brk.members.length+' schools</span></div>';
+    h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;line-height:1.5">'+
+       x(brk.members.join(", "))+' have broken away to form their own conference.</span></div>';
+    h+='</div>';
+  }
+
+  // ── your regional ties ──
+  var ties=bondsFor(s.school).slice(0,6);
+  if(ties.length){
+    h+='<div class="sec-title">Regional Ties</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    ties.forEach(function(b){
+      var t=s.league&&s.league.teams[b.n];
+      var dots=Math.max(1,Math.min(5,Math.round(b.v/1.1)));
+      var pips=""; for(var i=0;i<5;i++) pips+= (i<dots?"\u25cf":"\u25cb");
+      var note = (t && t.c===s.conf) ? "in your league"
+               : (b.v>=3.0 ? "a real series now" : b.v>=1.8 ? "building" : "occasional");
+      h+='<div class="riv-row"><span class="riv-opp">'+x(b.n)+
+         ' <span style="color:var(--muted);font-size:9px">'+(t?x(t.c):"")+'</span></span>'+
+         '<span class="riv-rec" style="width:auto;color:var(--gold-dark);letter-spacing:1px">'+pips+
+         ' <span style="color:var(--muted);font-weight:700;font-size:9px;letter-spacing:0">'+note+'</span></span></div>';
+    });
+    h+='</div>';
+    h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
+       'Non-conference games against nearby schools build these. Strong ties with GOOD programs are what make a breakaway possible \u2014 playing a weak neighbour builds familiarity, not leverage.</div>';
+  }
+
+  // ── the national picture ──
+  h+='<div class="sec-title">The Landscape</div>';
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  rep.rows.forEach(function(r){
+    if(r.members<4) return;                       // skip vestigial leagues
+    var you=(r.c===s.conf);
+    var arrow = r.mom>=2 ? ' <span style="color:#1a7f37">\u25b2</span>' : r.mom<=-2 ? ' <span style="color:var(--red2)">\u25bc</span>' : '';
+    h+='<div class="riv-row"'+(you?' style="background:var(--gold-bg)"':'')+'>'+
+       '<span class="riv-opp">'+(you?'<b>':'')+x(r.c)+(you?'</b>':'')+arrow+'</span>'+
+       '<span class="riv-rec" style="width:auto">Tier '+r.tier+' \u00b7 '+r.bids+' bid'+(r.bids===1?'':'s')+
+       (r.natl?' \u00b7 \uD83C\uDFC6':'')+'</span></div>';
+  });
+  h+='</div>';
+  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
+     'Tier drives recruiting appeal. A league that stops producing playoff teams will slide \u2014 and a league that starts producing them can climb, no matter where it began.</div>';
+  return h;
 }
 function offseasonScreen(){
   var s=ST.save;
@@ -11171,6 +11919,7 @@ function offseasonScreen(){
   h+='</div>';
 
   if(tab==="summary")      h+=osSummaryTab();
+  else if(tab==="league")  h+=leagueMeetingTab();
   else if(tab==="roster")  h+=osRosterTab();
   else if(tab==="class")   h+=osClassTab();
   else if(tab==="depth")   h+=osDepthTab();
@@ -11473,6 +12222,29 @@ function bind(){
   // Each attention item jumps you to the screen that fixes it.
   // Any element with an explainer opens it on TAP. `title` only works on desktop hover, which
   // meant every explanation in this game was invisible on the device it's actually played on.
+  // Conference invitation: accepting moves your program (and takes your board expectations with
+  // it); declining keeps you where you are and the offer lapses.
+  document.querySelectorAll("[data-invite]").forEach(function(b){
+    b.onclick=function(){
+      var s=ST.save, inv=s._pendingInvite; if(!inv) return;
+      if(b.getAttribute("data-invite")==="accept"){
+        var was=s.conf;
+        s.conf=inv.conf;
+        if(s.league&&s.league.teams[s.school]) s.league.teams[s.school].c=inv.conf;
+        var at=ALL_TEAMS.filter(function(x){return x.n===s.school;})[0];
+        if(at) at.c=inv.conf;
+        s._confChurn=s._confChurn||{}; s._confChurn[was]=(s._confChurn[was]||0)+1;
+        if(s.league){ s.league.confSched=null; s.league.confRemain=null; }
+        s.expectWins=expectWinsFor(s.prestige||3, s.conf);
+        s.nilTotal=nilBudgetFor(); s.nilLeft=Math.min(s.nilLeft||0, s.nilTotal);
+        toast("🤝 "+s.school+" is joining the "+inv.conf+".");
+      } else {
+        toast("🛑 You told them no. "+s.school+" stays in the "+s.conf+".");
+      }
+      s._pendingInvite=null;
+      persist(); draw();
+    };
+  });
   document.querySelectorAll("[data-ostab]").forEach(function(b){
     b.onclick=function(){
       var k=b.getAttribute("data-ostab");
@@ -12667,6 +13439,7 @@ function finishGameSim(){
       }
     }
     recordUserLeagueResult(won, g.oc===s.conf);
+    recordUserBond(g.opp, g.oc===s.conf);
     recordGameStats(res, g.opp, r.pbp);
     markAppearances();   // regular season only — postseason games are exempt from the 4-game cap
     // NOTE: everything above is bookkeeping. finishGameSim() sets r._recorded BEFORE doing any
@@ -13279,6 +14052,7 @@ function advanceSeason(){
   //  see prepareOffseason. This only applies what you decided.)
   ageStars();          // the rest of the country graduates and reloads too
   recordChampions(); // log this year's national & conference champions to the league history
+  updatePrestige();  // sustained success (or failure) moves the program's standing
 
   // ── Coach XP: earn from wins, meeting expectations, and postseason success ──
   // Deliberately slow: a maxed ability tree is a career-long achievement, so a good season should
@@ -13373,8 +14147,22 @@ function advanceSeason(){
   });
   s.roster=kept;
   s._departed=departed;          // for the record; the portal window has already closed
-  // living league: teams' ratings drift based on how they performed vs their rating
+  // living league: teams' ratings drift based on how they performed vs their rating.
+  // Prestige moves FIRST — it reads this season's W/L, which driftLeagueRatings then wipes.
+  // Conference standing is computed from THIS season's playoff picture, so it must run before
+  // driftLeagueRatings() wipes every team's W/L.
+  updateConfPrestige();
+  // With standings settled, conferences act: the strongest leagues pick off the best programs
+  // they can persuade to move. Runs AFTER prestige so raids reflect this season's results.
+  ST.save._realignMoves=runConferenceRaids();
+  ST.save._breakawayNew=runBreakaways();   // regional clusters can walk out and found a league
+  decayBonds();                            // series that lapse fade away
+  ST.save._pendingInvite=pendingInviteForUser();
+  driftLeaguePrestige();
   driftLeagueRatings();
+  // Realignment lands in the offseason, so the new map is in place before next year's schedule
+  // is built. seasonsPlayed has already ticked, so this resolves to the SEASON ABOUT TO BEGIN.
+  runRealignmentFor(2026+((ST.save.seasonsPlayed||1)-1));
   simLeaguePortal(); // rivals work the portal too — the league's balance shifts
 
   // ── firing check: hot seat + missed expectations two+ years, or rock-bottom security ──
