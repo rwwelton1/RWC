@@ -408,6 +408,8 @@ a{color:inherit;text-decoration:none}
 .tac-spec-tempo input[type=range]::-moz-range-track{background:linear-gradient(90deg,#ef4444,#94a3b8,#0891b2)}
 .tac-spec-def input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(90deg,#dc2626,#94a3b8,#059669)}
 .tac-spec-def input[type=range]::-moz-range-track{background:linear-gradient(90deg,#dc2626,#94a3b8,#059669)}
+.tac-spec-cov input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(90deg,#b45309,#94a3b8,#0369a1)}
+.tac-spec-cov input[type=range]::-moz-range-track{background:linear-gradient(90deg,#b45309,#94a3b8,#0369a1)}
 .tac-spec-aggro input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(90deg,#059669,#94a3b8,#7c3aed)}
 .tac-spec-aggro input[type=range]::-moz-range-track{background:linear-gradient(90deg,#059669,#94a3b8,#7c3aed)}
 .tac-spec-ends{display:flex;justify-content:space-between;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:1px}
@@ -1980,18 +1982,18 @@ var COACH_TREE={
     {id:"dev5", name:"Dynasty Pipeline",cost:10,desc:"A huge extra offseason jump for every player."}
   ]},
   offense:{ name:"Offense", icon:"⚡", color:"#d69a3a", skills:[
-    {id:"off1", name:"Play Caller",   cost:4, desc:"+2 to your offense on game day."},
-    {id:"off2", name:"Scheme Guru",   cost:8, desc:"Bigger payoff when your offensive scheme fits."},
-    {id:"off3", name:"Air Raid",      cost:14, desc:"+3 more offense — explosive scoring."},
-    {id:"off4", name:"Mastermind",    cost:22, desc:"+3 more offense on game day."},
-    {id:"off5", name:"Peak Offense",  cost:32,desc:"Maxes out your offensive scheme-fit payoff."}
+    {id:"off1", name:"Play Caller",   cost:2, desc:"+2 to your offense on game day."},
+    {id:"off2", name:"Scheme Guru",   cost:4, desc:"Bigger payoff when your offensive scheme fits."},
+    {id:"off3", name:"Air Raid",      cost:6, desc:"+3 more offense — explosive scoring."},
+    {id:"off4", name:"Mastermind",    cost:8, desc:"+3 more offense on game day."},
+    {id:"off5", name:"Peak Offense",  cost:10,desc:"Maxes out your offensive scheme-fit payoff."}
   ]},
   defense:{ name:"Defense", icon:"🛡️", color:"#c14a4a", skills:[
-    {id:"def1", name:"Coordinator",   cost:4, desc:"+2 to your defense on game day."},
-    {id:"def2", name:"Disguise",      cost:8, desc:"Bigger payoff when your defensive scheme fits."},
-    {id:"def3", name:"Lockdown",      cost:14, desc:"+3 more defense — bend but don't break."},
-    {id:"def4", name:"Mastermind",    cost:22, desc:"+3 more defense on game day."},
-    {id:"def5", name:"Peak Defense",  cost:32,desc:"Maxes out your defensive scheme-fit payoff."}
+    {id:"def1", name:"Coordinator",   cost:2, desc:"+2 to your defense on game day."},
+    {id:"def2", name:"Disguise",      cost:4, desc:"Bigger payoff when your defensive scheme fits."},
+    {id:"def3", name:"Lockdown",      cost:6, desc:"+3 more defense — bend but don't break."},
+    {id:"def4", name:"Mastermind",    cost:8, desc:"+3 more defense on game day."},
+    {id:"def5", name:"Peak Defense",  cost:10,desc:"Maxes out your defensive scheme-fit payoff."}
   ]},
   program:{ name:"Program", icon:"🏛️", color:"#4a7dc1", skills:[
     {id:"pro1", name:"Culture",       cost:2, desc:"Job security erodes more slowly."},
@@ -6605,6 +6607,73 @@ function tempoDialIcon(v){
   if(v<80)  return "🏈";
   return "⚡";
 }
+// ── COVERAGE: the defense's second axis ──────────────────
+// Aggression (blitz..prevent) says how hard you rush and how deep you sit. It says nothing about
+// HOW you cover, which in real football is the other half of the call — and the half your
+// personnel decides. A press-man corner and a zone corner are different players (the game already
+// models them as separate archetypes and skills); this lets a DC actually play to whichever he
+// has, instead of both being cosmetic.
+//
+// 0 = press man, 50 = balanced/match, 100 = zone.
+//   MAN  tightens the completion window (harder to complete) but gives up chunk plays when it
+//        breaks — you're isolated with no help behind.
+//   ZONE concedes the underneath throw but keeps everything in front, so explosives die and
+//        the ball gets tipped more often.
+// The magnitude is scaled by PERSONNEL FIT: run man with zone corners and you get a fraction of
+// the benefit plus the full downside, which is exactly the real-life penalty for miscasting a
+// secondary.
+var _COV_ANCHOR={
+  man:  {comp:-0.030, explosive:+0.030, int:+0.001, shorten:-0.4},
+  match:{comp:0,      explosive:0,       int:0,      shorten:0},
+  zone: {comp:+0.032, explosive:-0.038, int:+0.004, shorten:+1.5}
+};
+function _covModsAt(v){
+  v=clampN(v,0,100);
+  if(v<=50) return _blendMods(_COV_ANCHOR.man, _COV_ANCHOR.match, v/50);
+  return _blendMods(_COV_ANCHOR.match, _COV_ANCHOR.zone, (v-50)/50);
+}
+// How well your starting corners suit the coverage you're calling, 0..1 (0.5 = neutral).
+// Reads the press/zone skills the roster already carries, so a secondary built on press-man
+// corners genuinely rewards man coverage.
+function coverageFit(v){
+  var s=ST.save; if(!s || !s.roster) return 0.5;
+  var cbs=depthOrder(s.roster,"CB").slice(0, startersAt("CB"));
+  if(!cbs.length) return 0.5;
+  var press=0, zone=0;
+  cbs.forEach(function(p){ press+=skillOf(p,"press"); zone+=skillOf(p,"zone"); });
+  press/=cbs.length; zone/=cbs.length;
+  // Which way is the secondary pointed, as a -1..+1 tilt (+ = better in zone).
+  var tilt=clampN((zone-press)/12, -1, 1);
+  // Which way is the CALL pointed, -1 (man) .. +1 (zone).
+  var call=(clampN(v,0,100)-50)/50;
+  // Fit is high when the call matches the tilt. A neutral call or a neutral roster sits at 0.5.
+  return clampN(0.5 + (tilt*call)*0.5, 0, 1);
+}
+// The coverage modifiers actually applied: full upside only when the personnel fits, but the
+// downside always lands. Miscast your corners and you eat the risk without the reward.
+function coverMods(v){
+  if(v==null) return {comp:0, explosive:0, int:0, shorten:0};
+  var base=_covModsAt(v), fit=coverageFit(v);
+  var gain=0.45+fit*0.85;   // 0.45x at worst fit, ~1.3x at best
+  var o={};
+  Object.keys(base).forEach(function(k){
+    var val=base[k];
+    // "good for the defense" scales with fit; "bad for the defense" always lands in full.
+    var helpful = (k==="comp") ? (val<0) : (k==="explosive") ? (val<0) : (val>0);
+    o[k]= helpful ? val*gain : val;
+  });
+  return o;
+}
+function coverLabel(v){
+  if(v==null) return "Match";
+  if(v<15)  return "Press Man";
+  if(v<40)  return "Man";
+  if(v<=60) return "Match";
+  if(v<85)  return "Zone";
+  return "Deep Zone";
+}
+function coverIcon(v){ return (v!=null && v<40) ? "🤛" : (v!=null && v>60) ? "🕸️" : "⚖️"; }
+
 var DEF_TACTICS={
   blitz:   {label:"Blitz",        icon:"💥", desc:"Pressure the QB. More sacks, but big plays behind you."},
   standard:{label:"Standard",     icon:"🛡️", desc:"Sound, balanced coverage."},
@@ -6951,6 +7020,12 @@ function simSnap(G, stopQ){
   // keying, trait edge — wants the nearest named look.
   var defCall=defCallOf(dT.def);
   var dm=mergeMods(defMods(dT.def), tempoFatigue(dT.tempo));
+  // The coverage call is the defense's second axis (man..zone), and it only applies to the USER's
+  // defense — the CPU expresses its identity through its scheme instead. Scaled by how well the
+  // secondary's personnel fits the call (see coverMods).
+  if(def===0 && G.userGame && ST.save && ST.save.gameplan && ST.save.gameplan.cover!=null){
+    dm=mergeMods(dm, coverMods(ST.save.gameplan.cover));
+  }
   // GROUP MATCHUP — the offense's skill/line groups against the defense's front and secondary.
   // This is a fact about the two rosters, not a coaching read, so it applies to BOTH teams on
   // every snap including skipped games. It's what makes a lopsided roster exploitable: their
@@ -9240,7 +9315,7 @@ function preseasonScreen(){
      preTabBtn("overview","Setup")+
      preTabBtn("recruit","Recruit")+
      preTabBtn("schedule","Sched")+
-     preTabBtn("scheme","Scheme")+
+     preTabBtn("school","School")+
      preTabBtn("roster","Roster")+
      '</div>';
   h+='<div class="tab-body">';
@@ -9264,7 +9339,7 @@ function preseasonScreen(){
     var schemeFit=coachOff?offSchemeFit():defSchemeFit();
     var fitWord=schemeFit>=4?"Great fit":(schemeFit>=2.5?"Good fit":(schemeFit>=1?"OK fit":"Poor fit"));
     h+='<div class="setup-row" data-pretab="recruit"><span class="su-ico">🎯</span><span class="su-main"><b>Recruiting Board</b><span class="su-sub">'+openN+' prospects · '+commitN+' committed · '+fmtMoney(s.nilLeft)+' NIL left</span></span><span class="su-go">›</span></div>';
-    h+='<div class="setup-row" data-pretab="scheme"><span class="su-ico">🧭</span><span class="su-main"><b>Scheme &amp; Fit</b><span class="su-sub">'+x(schemeName)+' · '+fitWord+(s.role==="HC"?" (offense)":"")+'</span></span><span class="su-go">›</span></div>';
+    h+='<div class="setup-row" data-pretab="school"><span class="su-ico">🏟️</span><span class="su-main"><b>Your Program</b><span class="su-sub">'+stars(s.prestige||3)+' · '+fmtMoney(s.nilTotal||0)+' NIL · '+coachXP()+' XP to spend</span></span><span class="su-go">›</span></div>';
     h+='<div class="setup-row" data-pretab="roster"><span class="su-ico">🛡️</span><span class="su-main"><b>Roster &amp; NIL</b><span class="su-sub">Needs: '+x(needStr)+(atRisk?' · '+atRisk+' at portal risk':'')+'</span></span><span class="su-go">›</span></div>';
     // Independents have no conference slate, so the whole schedule is theirs to set —
     // listing all 12 games here would overflow the row, so summarize instead.
@@ -9302,15 +9377,103 @@ function preseasonScreen(){
       });
       h+='</div>';
     }
-  } else if(tab==="scheme"){
-    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">Set your team\u2019s scheme identity to match your roster\u2019s strengths. You can adjust this any time during the season too.</div>';
-    h+=gameplanPanel();
+  } else if(tab==="school"){
+    h+=schoolBlock();
   } else if(tab==="roster"){
     h+=retentionPanel();
     h+='<div class="flow-list">'+rosterTable()+'</div>';
   }
   h+='</div>';
   return h+'</div>';
+}
+// ── School: the program's profile in one place ───────────
+// Prestige, the board's standing, NIL, facilities and your staff. Facilities in particular had
+// been defined but never surfaced anywhere — this is where you actually see and buy them.
+function schoolBlock(){
+  var s=ST.save;
+  var t=leagueTeam(s.school);
+  var h='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
+        'Everything about the program itself \u2014 what you inherited, what you\u2019ve built, and who\u2019s on staff.</div>';
+
+  // ── identity / ratings ──
+  var pres=s.prestige||3;
+  var expW=expectWinsFor(pres, s.conf);
+  var off=(t&&t.off)||0, def=(t&&t.def)||0, ovr=(t&&t.ovr)||0;
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  h+='<div class="rec-schoolhd"><span>\uD83C\uDFDF\uFE0F '+x(s.school)+'</span><span class="rec-lvl">'+x(s.conf)+'</span></div>';
+  h+='<div class="riv-row"><span class="riv-opp">Prestige</span>'+
+     '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+stars(pres)+'</span></div>';
+  if(ovr){
+    h+='<div class="riv-row"><span class="riv-opp">Team rating</span>'+
+       '<span class="riv-rec" style="width:auto">'+off+' OFF \u00b7 '+def+' DEF \u00b7 <b>'+ovr+' OVR</b></span></div>';
+  }
+  h+='<div class="riv-row"><span class="riv-opp">Board expects</span>'+
+     '<span class="riv-rec" style="width:auto">'+expW+' wins a season</span></div>';
+  var sec=(s.jobSecurity!=null?s.jobSecurity:50);
+  var secCol = sec>=70?'#1a7f37' : sec>=40?'var(--gold-dark)' : 'var(--red2)';
+  h+='<div class="riv-row"><span class="riv-opp">Job security</span>'+
+     '<span class="riv-rec" style="width:auto;color:'+secCol+';font-weight:900">'+Math.round(sec)+'/100</span></div>';
+  h+='</div>';
+
+  // ── money ──
+  h+='<div class="sec-title">NIL &amp; Budget</div>';
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  h+='<div class="riv-row"><span class="riv-opp">NIL this season</span>'+
+     '<span class="riv-rec" style="width:auto"><b>'+fmtMoney(s.nilLeft||0)+'</b> left of '+fmtMoney(s.nilTotal||0)+'</span></div>';
+  h+='<div class="riv-row"><span class="riv-opp">Staff budget</span>'+
+     '<span class="riv-rec" style="width:auto"><b>'+fmtMoney(staffLeft())+'</b> left of '+fmtMoney(s.staffBudget||0)+'</span></div>';
+  h+='<div class="riv-row"><span class="riv-opp">Coach XP</span>'+
+     '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+coachXP()+' XP</span></div>';
+  h+='</div>';
+
+  // ── facilities (buy with Coach XP) ──
+  h+='<div class="sec-title">Facilities</div>';
+  h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">'+
+     'Permanent upgrades to the program, bought with Coach XP. They stay with the school.</div>';
+  FACILITIES.forEach(function(f){
+    var lvl=facLvl(f.id), cost=facCost(f.id), can=(coachXP()>=cost);
+    h+='<div class="rec-tbl" style="margin-bottom:8px">';
+    h+='<div class="rec-schoolhd"><span>'+f.icon+' '+x(f.name)+'</span>'+
+       '<span class="rec-lvl">'+(lvl?('Lv '+lvl):'\u2014')+'</span></div>';
+    h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px">'+x(f.desc)+'</span></div>';
+    if(lvl){
+      h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;color:var(--gold-dark);font-weight:800">'+
+         x(f.effect(lvl))+'</span></div>';
+    }
+    h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;color:var(--muted)">'+
+       (lvl?'Upgrade to Lv '+(lvl+1):'Build it')+'</span>'+
+       '<button class="tp-btn'+(can?'':' off')+'" data-facility="'+f.id+'"'+(can?'':' disabled')+'>'+cost+' XP</button></div>';
+    h+='</div>';
+  });
+
+  // ── staff ──
+  h+='<div class="sec-title">Coaching Staff</div>';
+  var anyStaff=false;
+  s.staff=s.staff||{};
+  STAFF_ROLES.forEach(function(r){ if(s.staff[r.k]) anyStaff=true; });
+  if(s.role!=="HC"){
+    h+='<div class="rec-tbl" style="margin-bottom:12px"><div class="rec-empty">'+
+       'You\u2019re a coordinator \u2014 hiring staff is the head coach\u2019s call.</div></div>';
+  } else if(!anyStaff){
+    h+='<div class="rec-tbl" style="margin-bottom:12px"><div class="rec-empty">'+
+       'No assistants hired yet. Open \uD83D\uDC54 Staff to build your bench.</div></div>';
+  } else {
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    STAFF_ROLES.forEach(function(r){
+      var a=s.staff[r.k];
+      if(!a){
+        h+='<div class="riv-row"><span class="riv-opp">'+r.ico+' '+r.k+'</span>'+
+           '<span class="riv-rec" style="width:auto;color:var(--muted)">vacant</span></div>';
+      } else {
+        var tier=staffTier(a.grade);
+        h+='<div class="riv-row"><span class="riv-opp">'+r.ico+' '+x(a.n)+
+           ' <span class="t25-conf" style="color:'+tier.c+'">'+tier.t+'</span></span>'+
+           '<span class="riv-rec" style="width:auto;color:var(--gold-dark)">'+x(staffPerkText(a))+'</span></div>';
+      }
+    });
+    h+='</div>';
+  }
+  return h;
 }
 function preTabBtn(id,label){
   var active=(ST.preTab||"overview")===id;
@@ -11399,7 +11562,7 @@ function bind(){
     }
   });
   // Pre-game gameplan sliders (run/pass, tempo, defense) share the live panel's bindings.
-  if(document.querySelector("[data-tacbalance],[data-tactempo-slider],[data-tacdef-slider],[data-tacaggro-slider]")) bindTactics();
+  if(document.querySelector("[data-tacbalance],[data-tactempo-slider],[data-tacdef-slider],[data-tacaggro-slider],[data-taccover-slider]")) bindTactics();
   // The scouting/game-plan/scheme card: TAP the tabs to switch panes. Deliberately not a swipe —
   // a horizontal swipe on the card would fight the horizontal drag on the run/pass, tempo, and
   // defense sliders, so dragging a slider could accidentally flip the pane. Tabs only.
@@ -12872,6 +13035,20 @@ function tacticSliders(t, cOff, cDef){
        '<input type="range" min="0" max="100" value="'+Math.round(dv)+'" data-tacdef-slider>'+
        '<div class="tac-spec-ends"><span>💥 Blitz</span><span>Prevent 🚧</span></div>'+
      '</div>';
+    // Coverage — the second defensive axis. The fit note tells you whether your corners
+    // actually suit the call, which is what decides how much of the upside you get.
+    var cv = (ST.save.gameplan && ST.save.gameplan.cover!=null) ? ST.save.gameplan.cover : 50;
+    var fit = coverageFit(cv);
+    var fitTxt = fit>=0.66 ? '<b style="color:#1a7f37">corners fit this</b>'
+               : fit<=0.34 ? '<b style="color:var(--red2)">wrong corners for it</b>'
+               : 'neutral personnel';
+    h+='<div class="tac-spec tac-spec-cov">'+
+       '<div class="tac-spec-head"><span class="tac-spec-lbl">Coverage</span>'+
+         '<span class="tac-spec-val">'+coverIcon(cv)+' '+x(coverLabel(cv))+'</span></div>'+
+       '<input type="range" min="0" max="100" value="'+Math.round(cv)+'" data-taccover-slider>'+
+       '<div class="tac-spec-ends"><span>🤛 Press Man</span><span>Zone 🕸️</span></div>'+
+       '<div style="font-size:9px;font-weight:800;color:var(--muted);text-align:center;margin-top:3px">'+fitTxt+'</div>'+
+     '</div>';
   }
   return h;
 }
@@ -12972,6 +13149,14 @@ function setAggro(v){
   ST.save.gameplan.aggro=v;
   persist();
 }
+// The coverage dial, 0..100 (press man .. zone). A defensive call, so it's gated on coachesDef.
+function setCover(v){
+  if(!coachesDef()) return;
+  v=clampN(Math.round(v),0,100);
+  if(!ST.save.gameplan) ST.save.gameplan={offBalance:50, defBalance:50};
+  ST.save.gameplan.cover=v;
+  persist();
+}
 // Binds only the tactics DOM, which gets rebuilt when a call changes.
 function bindTactics(){
   var tt=document.getElementById("tac-toggle");
@@ -12999,6 +13184,23 @@ function bindTactics(){
       if(host) host.innerHTML=defChipIcon(v)+' '+defDialLabel(v);
     };
     sl.onchange=function(){ setTactic("def",parseInt(sl.value,10)); };
+  });
+  // Coverage slider: 0..100 (press man .. zone). Updates both the label and the personnel-fit
+  // note live, since the fit is what tells you whether the call suits your corners.
+  document.querySelectorAll("[data-taccover-slider]").forEach(function(sl){
+    sl.oninput=function(){
+      var v=parseInt(sl.value,10);
+      var host=sl.parentNode.querySelector(".tac-spec-val");
+      if(host) host.innerHTML=coverIcon(v)+' '+coverLabel(v);
+      var note=sl.parentNode.querySelector(".tac-spec-cov > div:last-child") || sl.parentNode.lastElementChild;
+      if(note && note!==host){
+        var f=coverageFit(v);
+        note.innerHTML = f>=0.66 ? '<b style="color:#1a7f37">corners fit this</b>'
+                       : f<=0.34 ? '<b style="color:var(--red2)">wrong corners for it</b>'
+                       : 'neutral personnel';
+      }
+    };
+    sl.onchange=function(){ setCover(parseInt(sl.value,10)); };
   });
   // Downfield Attack slider: continuous 0..100 (high-% .. big plays). Live label, commit on release.
   document.querySelectorAll("[data-tacaggro-slider]").forEach(function(sl){
