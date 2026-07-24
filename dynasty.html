@@ -1365,6 +1365,45 @@ function isRival(a,b){ var r=RIVALS[a]; return !!r && r.indexOf(b)>=0; }
 //
 // Deals are struck at the league meeting and honoured NEXT season, so scheduling becomes a thing
 // you plan a year ahead. A signed deal locks that opponent onto your slate.
+// ── The scheduling market ────────────────────────────────
+// Buy games, priced the way they actually work. Reported football guarantees run roughly
+// $100k–$2.7M, and the money flows on a specific logic that the first version of this had
+// backwards:
+//   • You pay WORSE programs, not better ones. A marquee opponent won't take a cheque to come be
+//     a home date — they want a return trip or nothing. The first cut charged $4.2M for Florida
+//     State and $2.3M for UAB, which is exactly inverted.
+//   • The price goes UP the harder the trip is and the poorer the visitor. A cross-country flight
+//     for a program that needs the money costs more than a bus ride for one that doesn't.
+//   • Nobody schedules a guarantee against a genuine peer. Peers do home-and-homes.
+// Fees here are in the game's NIL-style millions, so $1.4 reads as $1.4M.
+// A guarantee is an ATHLETICS DEPARTMENT transaction — it comes out of (or lands in) the
+// department's budget, not the football program's recruiting money. Only a slice of it filters
+// through to what a coach can actually spend. Treating the full cheque as NIL made buying a game
+// compete directly with signing a receiver, which no real AD budget works like.
+//
+// The share is set at 35% rather than a stricter ~10%: at a tenth, a whole season's guarantee
+// income came to well under 5% of even a small program's budget, which is realistic but far too
+// small to ever change a decision. This keeps the money the department's while leaving the
+// coach's cut worth actually weighing.
+var GUARANTEE_TO_PROGRAM = 0.35;
+function guaranteeSlice(fee){ return Math.round((fee||0)*GUARANTEE_TO_PROGRAM*100)/100; }
+function guaranteeFee(fromName, toName){
+  var s=ST.save, L=s.league;
+  var vis=L.teams[toName]; if(!vis) return 0.5;
+  var visP=(toName===s.school)?(s.prestige||3):(vis.p||3);
+  var visTier=(s.confTier&&s.confTier[vis.c]!=null)?s.confTier[vis.c]:(CONF_TIER[vis.c]||0);
+  // Base: the weaker and poorer the visitor, the bigger the cheque needed to get them on a plane.
+  // A 1-star G5 program is the classic buy-game opponent and commands the most.
+  var fee = 1.05 - (visP-1)*0.14 - visTier*0.16;
+  // Travel. Same state is a bus ride; a genuine cross-country trip costs real money. This spread
+  // is what stretches the board across the reported $100k–$2.7M band instead of bunching it all
+  // near the top.
+  var prox=proximity(fromName,toName);
+  if(prox>=1)      fee -= 0.62;          // in-state neighbour, cheap
+  else if(prox>0)  fee -= 0.34;          // next state over
+  else             fee += 0.85;          // a real trip
+  return Math.max(0.1, Math.round(fee*20)/20);   // floor $100k, rounded to the nearest $50k
+}
 function schedMarketOffers(){
   var s=ST.save, L=s.league; if(!L) return [];
   if(s._schedOffers && s._schedOffersYear===(s.seasonsPlayed||1)) return s._schedOffers;
@@ -1379,44 +1418,52 @@ function schedMarketOffers(){
     if(t.c===s.conf) return;                     // league games aren't for sale
     var theirTier=(s.confTier&&s.confTier[t.c]!=null)?s.confTier[t.c]:(CONF_TIER[t.c]||0);
     var prox=proximity(s.school,n);
-    var gap=myTier-theirTier;
+    var tierGap=myTier-theirTier;
+    var pGap=myP-(t.p||3);
     var entry=null;
-    if(gap>=1){
-      // You're the bigger program: pay them to come to your place.
-      var fee=1.2 + (t.p||3)*0.45 + theirTier*0.6;
-      entry={opp:n, kind:"buy", home:true, fee:Math.round(fee*10)/10,
+    // The buyer has to be clearly the bigger operation. Gate on the PROGRAM, not just the
+    // conference: a tier slip briefly made Florida State (4-star, ACC) appear as a $100k buy-game
+    // opponent for Alabama, which is absurd — nobody buys a blue blood. A guarantee opponent is a
+    // materially weaker program, and never a 4- or 5-star one.
+    var visTierFor=theirTier;
+    if((tierGap>=1 && pGap>=2 && (t.p||3)<=3) || (tierGap>=2 && (t.p||3)<=2)){
+      entry={opp:n, kind:"buy", home:true, fee:guaranteeFee(s.school,n),
              label:"Guarantee game \u2014 they visit you"};
-    } else if(gap<=-1){
-      // They're bigger: take their money for a road trip.
-      var pay=1.0 + (t.p||3)*0.5 + theirTier*0.7;
-      entry={opp:n, kind:"sell", home:false, fee:Math.round(pay*10)/10,
+    } else if((tierGap<=-1 && pGap<=-2 && myP<=3) || (tierGap<=-2 && myP<=2)){
+      entry={opp:n, kind:"sell", home:false, fee:guaranteeFee(n,s.school),
              label:"Money game \u2014 you travel, they pay"};
-    } else if(prox>0){
-      // Peers nearby: a home-and-home, no money either way.
+    } else if(Math.abs(tierGap)<=1 && Math.abs(pGap)<=1){
+      // Genuine peers: a home-and-home, no money either way.
       entry={opp:n, kind:"series", home:true, fee:0,
              label:"Home-and-home series"};
     }
     if(entry){
       entry.prox=prox; entry.p=(t.p||3); entry.conf=t.c;
-      // Rank what's worth showing: nearby and interesting first.
       entry._score = prox*3 + (entry.kind==="series"?2:0) + (t.p||3)*0.4 + Math.random()*2;
       cands.push(entry);
     }
   });
   cands.sort(function(a,b){ return b._score-a._score; });
-  // Show a MIX, not just the four best-scoring. Proximity dominates the score, so a G5 school was
-  // shown four nearby home-and-homes while 91 money-game offers from power programs sat unseen —
-  // the single most interesting thing on its board. Take the best of each kind first, then fill.
+  // Show a MIX, and show enough of it to be a real market. Proximity dominates the score, so a G5
+  // school was shown four nearby home-and-homes while 91 money-game offers from power programs sat
+  // unseen — the single most interesting thing on its board. Take a spread of each kind first,
+  // then fill out the rest by score.
   var picked=[], seen={};
   ["sell","buy","series"].forEach(function(kind){
-    for(var i=0;i<cands.length;i++){
-      if(cands[i].kind===kind && !seen[cands[i].opp]){ picked.push(cands[i]); seen[cands[i].opp]=1; break; }
+    var got=0;
+    for(var i=0;i<cands.length && got<3;i++){
+      if(cands[i].kind===kind && !seen[cands[i].opp]){ picked.push(cands[i]); seen[cands[i].opp]=1; got++; }
     }
   });
-  for(var i=0;i<cands.length && picked.length<4;i++){
+  for(var i=0;i<cands.length && picked.length<10;i++){
     if(!seen[cands[i].opp]){ picked.push(cands[i]); seen[cands[i].opp]=1; }
   }
-  s._schedOffers=picked.slice(0,4);
+  // Cheapest guarantees first within each group reads more like a real board to shop.
+  picked.sort(function(a,b){
+    var ord={buy:0, series:1, sell:2};
+    return (ord[a.kind]-ord[b.kind]) || (a.fee-b.fee);
+  });
+  s._schedOffers=picked.slice(0,10);
   s._schedOffersYear=(s.seasonsPlayed||1);
   return s._schedOffers;
 }
@@ -1426,14 +1473,16 @@ function signSchedDeal(idx){
   var s=ST.save;
   var offers=schedMarketOffers();
   var o=offers[idx]; if(!o) return;
+  // The headline number is the CONTRACT. What moves on your books is the program's share of it.
+  var slice=guaranteeSlice(o.fee);
   if(o.kind==="buy"){
-    if((s.nilLeft||0) < o.fee){ toast("💸 Not enough NIL left to pay that guarantee."); return; }
-    s.nilLeft=Math.round(((s.nilLeft||0)-o.fee)*10)/10;
-    toast("🤝 "+o.opp+" will visit you next season ("+fmtMoney(o.fee)+").");
+    if((s.nilLeft||0) < slice){ toast("💸 The program can't cover its share of that guarantee."); return; }
+    s.nilLeft=Math.round(((s.nilLeft||0)-slice)*100)/100;
+    toast("🤝 "+o.opp+" will visit you next season ("+fmtMoney(o.fee)+" deal · "+fmtMoney(slice)+" from your budget).");
   } else if(o.kind==="sell"){
-    s.nilLeft=Math.round(((s.nilLeft||0)+o.fee)*10)/10;
-    s.nilTotal=Math.round(((s.nilTotal||0)+o.fee)*10)/10;
-    toast("💰 You'll travel to "+o.opp+" next season for "+fmtMoney(o.fee)+".");
+    s.nilLeft=Math.round(((s.nilLeft||0)+slice)*100)/100;
+    s.nilTotal=Math.round(((s.nilTotal||0)+slice)*100)/100;
+    toast("💰 You'll travel to "+o.opp+" for "+fmtMoney(o.fee)+" — "+fmtMoney(slice)+" reaches the program.");
   } else {
     toast("🤝 Home-and-home agreed with "+o.opp+".");
   }
@@ -12232,25 +12281,16 @@ function osTabs(){
 // The meeting as its own moment in the offseason, before roster work begins. Realignment politics
 // and depth-chart management are different kinds of thinking; mixing them into one tab bar made
 // the meeting feel like an afterthought.
-// Is there anything to actually discuss? The meeting convenes for a decision, real news, or a
-// shift in your own league's standing — not to show you an unchanged table.
-function meetingWorthHolding(){
-  var s=ST.save;
-  if(s._pendingInvite) return true;                       // a decision on the table
-  if(s._breakawayNew) return true;                        // a league was founded
-  if((s._realignMoves||[]).length) return true;           // schools moved
-  if(!s._meetingEverHeld) return true;                    // the first one, to introduce it
-  // The scheduling market is a real decision most years, so it's worth convening for.
-  if(schedMarketOffers().length) return true;
-  var mom=(s.confMomentum&&s.confMomentum[s.conf])||0;
-  if(Math.abs(mom)>=3) return true;                       // your conference is genuinely moving
-  return false;
-}
+// Meetings now cover staff, scheduling and league politics — and the first two are real business
+// EVERY offseason, not just in a realignment year. So this convenes annually. (It was conditional
+// when the screen only reported the league landscape, which genuinely was nothing to see in a
+// quiet year; now there's always a decision waiting.)
+function meetingWorthHolding(){ return true; }
 function leagueMeetingScreen(){
   var s=ST.save;
   var year=(s._confReport&&s._confReport.year) || (2026+((s.seasonsPlayed||1)-1));
   var h='<div class="wrap">';
-  h+='<div class="season-hd"><div class="shd-l"><b>\uD83C\uDFDB\uFE0F League Meeting</b> \u00b7 '+year+'</div>'+
+  h+='<div class="season-hd"><div class="shd-l"><b>\uD83D\uDCCB Meetings</b> \u00b7 '+year+'</div>'+
      '<div class="shd-r">'+x(s.school)+' \u00b7 '+x(s.role)+'</div></div>';
   h+=leagueMeetingTab();
   // Any pending decision has to be settled before moving on.
@@ -12268,15 +12308,121 @@ function leagueMeetingTab(){
   var rep=s._confReport;
   var h='';
   h+='<div class="rec-tbl" style="margin-bottom:12px"><div class="rec-schoolhd">'+
-     '<span>\uD83C\uDFDB\uFE0F League Meeting</span><span class="rec-lvl">'+(rep?rep.year:(2026+((s.seasonsPlayed||1)-1)))+'</span></div>'+
+     '<span>\uD83D\uDCCB Offseason Meetings</span><span class="rec-lvl">'+(rep?rep.year:(2026+((s.seasonsPlayed||1)-1)))+'</span></div>'+
      '<div class="riv-row"><span class="riv-opp" style="font-size:10px;line-height:1.5">'+
-     'The commissioners meet every offseason. Conference standing is earned on the field \u2014 playoff bids, deep runs and titles, measured per member \u2014 and it drives how your league recruits.'+
+     'Your staff, next season\u2019s schedule, and the sport\u2019s politics \u2014 the business that gets done between seasons.'+
      '</span></div></div>';
 
-  if(!rep || !rep.rows || !rep.rows.length){
-    h+='<div class="rec-tbl"><div class="rec-empty">Nothing to report yet \u2014 finish a season and the league will take stock.</div></div>';
-    return h;
+  // ── STAFF (head coach only) ──
+  if(s.role==="HC"){
+    h+=meetingStaffBlock();
   }
+
+  // ── SCHEDULING MARKET ──
+  h+=meetingSchedBlock();
+
+  // Everything below reports on the season just played, so it only appears once there's been one.
+  // (This used to be an early RETURN, which meant a save with no completed season showed nothing
+  // at all — including the staff and scheduling business, which don't depend on it.)
+  if(rep && rep.rows && rep.rows.length){
+    h+=meetingLeagueBlock(rep);
+  }
+  return h;
+}
+// Hiring and firing, surfaced at the meeting instead of being buried behind the ribbon button.
+function meetingStaffBlock(){
+  var s=ST.save;
+  s.staff=s.staff||{};
+  var h='<div class="sec-title">Your Staff</div>';
+  var offers=(s._staffOffers||[]).filter(function(o){return !o.done;});
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  h+='<div class="riv-row"><span class="riv-opp">Staff budget</span>'+
+     '<span class="riv-rec" style="width:auto"><b>'+fmtMoney(staffLeft())+'</b> left of '+fmtMoney(s.staffBudget||0)+'</span></div>';
+  STAFF_ROLES.forEach(function(r){
+    var a=s.staff[r.k];
+    if(!a){
+      h+='<div class="riv-row"><span class="riv-opp">'+r.ico+' '+r.k+'</span>'+
+         '<span class="riv-rec" style="width:auto;color:var(--muted)">vacant</span></div>';
+    } else {
+      var tier=staffTier(a.grade);
+      h+='<div class="riv-row"><span class="riv-opp">'+r.ico+' '+x(a.n)+
+         ' <span class="t25-conf" style="color:'+tier.c+'">'+tier.t+'</span>'+
+         '<br><span style="font-size:9px;font-weight:700;color:var(--gold-dark)">'+x(staffPerkText(a))+'</span></span>'+
+         '<span class="riv-rec" style="width:auto">'+fmtMoney(a.salary||0)+
+         ' <button class="tp-btn off" data-mfire="'+x(r.k)+'">Let go</button></span></div>';
+    }
+  });
+  h+='</div>';
+  if(offers.length){
+    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px">'+
+       offers.length+' assistant'+(offers.length>1?'s':'')+' available \u2014 open \uD83D\uDC54 Staff to negotiate.</div>';
+  }
+  h+='<div class="riv-row" style="margin-bottom:12px"><button class="tp-btn" data-mstaff="1" style="flex:1">\uD83D\uDC54 Open the staff room</button></div>';
+  return h;
+}
+function meetingSchedBlock(){
+  var s=ST.save;
+  var offers=schedMarketOffers();
+  var h='';
+  // Standing policy — what kind of slate you want built.
+  var pol=s.schedPolicy||"balanced";
+  var POLS=[
+    {k:"regional", ico:"\uD83E\uDD1D", t:"Play the neighbours",
+     d:"Fill open dates with nearby schools. Builds regional ties fastest."},
+    {k:"balanced", ico:"\u2696\uFE0F", t:"No preference",
+     d:"Take whatever games come."},
+    {k:"marquee",  ico:"\uD83C\uDFDF\uFE0F", t:"Chase marquee games",
+     d:"Prioritise big names over neighbours. Better r\u00e9sum\u00e9, weaker regional ties."}
+  ];
+  h+='<div class="sec-title">Scheduling Policy</div>';
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  POLS.forEach(function(p){
+    var on=(pol===p.k);
+    h+='<div class="riv-row" data-schedpol="'+p.k+'" style="cursor:pointer'+(on?';background:var(--gold-bg)':'')+'">'+
+       '<span class="riv-opp">'+p.ico+' '+(on?'<b>':'')+x(p.t)+(on?'</b>':'')+
+       '<br><span style="font-size:9px;font-weight:700;color:var(--muted);line-height:1.4">'+x(p.d)+'</span></span>'+
+       '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+(on?"\u2713":"")+'</span></div>';
+  });
+  h+='</div>';
+  if(offers.length){
+    h+='<div class="sec-title">Scheduling Market</div>';
+    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">'+
+       'Non-conference dates for next season. Bigger programs pay a guarantee for a home game; smaller ones sell the trip. '+
+       'The deal is struck by the athletic department \u2014 about '+Math.round(GUARANTEE_TO_PROGRAM*100)+'% of it reaches your budget. '+
+       'You have <b>'+fmtMoney(s.nilLeft||0)+'</b>.</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    offers.forEach(function(o,i){
+      var slice=guaranteeSlice(o.fee);
+      var money = o.kind==="buy" ? ('<span style="color:var(--red2);font-weight:900">\u2212'+fmtMoney(slice)+'</span>')
+                : o.kind==="sell"? ('<span style="color:#1a7f37;font-weight:900">+'+fmtMoney(slice)+'</span>')
+                : '<span style="color:var(--muted);font-weight:800">no fee</span>';
+      var contract = o.fee ? ('<br><span style="font-size:8.5px;font-weight:700;color:var(--dim)">'+fmtMoney(o.fee)+' contract</span>') : '';
+      var afford=(o.kind!=="buy") || ((s.nilLeft||0)>=slice);
+      h+='<div class="riv-row"><span class="riv-opp">'+
+         (o.home?'\uD83C\uDFE0':'\u2708\uFE0F')+' <b>'+x(o.opp)+'</b> '+
+         '<span style="font-size:9px;color:var(--muted)">'+x(o.conf)+' \u00b7 '+stars(o.p)+'</span>'+
+         '<br><span style="font-size:9px;font-weight:700;color:var(--muted)">'+x(o.label)+'</span></span>'+
+         '<span class="riv-rec" style="width:auto;display:flex;align-items:center;gap:6px;text-align:right">'+
+         '<span>'+money+contract+'</span>'+
+         '<button class="tp-btn'+(afford?'':' off')+'" data-scheddeal="'+i+'"'+(afford?'':' disabled')+'>Sign</button>'+
+         '</span></div>';
+    });
+    h+='</div>';
+  }
+  var pending=(s.schedDeals||[]).filter(function(d){ return d.year>(s.seasonsPlayed||1); });
+  if(pending.length){
+    h+='<div class="rec-tbl" style="margin-bottom:12px">'+
+       '<div class="rec-schoolhd"><span>Signed for next season</span><span class="rec-lvl">'+pending.length+'</span></div>';
+    pending.forEach(function(d){
+      h+='<div class="riv-row"><span class="riv-opp">'+(d.home?'\uD83C\uDFE0 vs ':'\u2708\uFE0F at ')+x(d.opp)+'</span></div>';
+    });
+    h+='</div>';
+  }
+  return h;
+}
+function meetingLeagueBlock(rep){
+  var s=ST.save;
+  var h='';
 
   // ── your conference first ──
   var mine=null;
@@ -12363,29 +12509,6 @@ function leagueMeetingTab(){
        'Non-conference games against nearby schools build these. Strong ties with GOOD programs are what make a breakaway possible \u2014 playing a weak neighbour builds familiarity, not leverage.</div>';
   }
 
-  // ── your standing scheduling policy ──
-  // A decision you can make from the very first meeting. Non-conference scheduling is the input to
-  // the whole regional system, so letting you set an intent here gives the early meetings real
-  // stakes instead of being a landscape readout you click past for a decade.
-  var pol=s.schedPolicy||"balanced";
-  var POLS=[
-    {k:"regional", ico:"\uD83E\uDD1D", t:"Play the neighbours",
-     d:"Fill open dates with nearby schools. Builds regional ties fastest \u2014 the raw material for a breakaway."},
-    {k:"balanced", ico:"\u2696\uFE0F", t:"No preference",
-     d:"Take whatever games come. Ties build slowly, if at all."},
-    {k:"marquee",  ico:"\uD83C\uDFDF\uFE0F", t:"Chase marquee games",
-     d:"Prioritise big names over neighbours. Better r\u00e9sum\u00e9 and exposure, weaker regional ties."}
-  ];
-  h+='<div class="sec-title">Scheduling Policy</div>';
-  h+='<div class="rec-tbl" style="margin-bottom:12px">';
-  POLS.forEach(function(p){
-    var on=(pol===p.k);
-    h+='<div class="riv-row'+(on?'" style="background:var(--gold-bg)':'')+'" data-schedpol="'+p.k+'" style="cursor:pointer'+(on?';background:var(--gold-bg)':'')+'">'+
-       '<span class="riv-opp">'+p.ico+' '+(on?'<b>':'')+x(p.t)+(on?'</b>':'')+
-       '<br><span style="font-size:9px;font-weight:700;color:var(--muted);line-height:1.4">'+x(p.d)+'</span></span>'+
-       '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+(on?"\u2713":"")+'</span></div>';
-  });
-  h+='</div>';
 
   // ── your rivalries, as they actually stand ──
   var rivs=rivalriesFor(s.school).slice(0,6);
@@ -12408,29 +12531,6 @@ function leagueMeetingTab(){
        'Rivalries are made, not declared \u2014 close games between good teams build them fastest, and a series that lapses cools off. Ones you\u2019ve built yourself are marked BUILT.</div>';
   }
 
-  // ── the scheduling market ──
-  var offers=schedMarketOffers();
-  if(offers.length){
-    h+='<div class="sec-title">Scheduling Market</div>';
-    h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">'+
-       'Non-conference dates for next season. Bigger programs pay a guarantee for a home game; smaller ones sell the trip. '+
-       'You have <b>'+fmtMoney(s.nilLeft||0)+'</b> in NIL.</div>';
-    h+='<div class="rec-tbl" style="margin-bottom:12px">';
-    offers.forEach(function(o,i){
-      var money = o.kind==="buy" ? ('<span style="color:var(--red2);font-weight:900">\u2212'+fmtMoney(o.fee)+'</span>')
-                : o.kind==="sell"? ('<span style="color:#1a7f37;font-weight:900">+'+fmtMoney(o.fee)+'</span>')
-                : '<span style="color:var(--muted);font-weight:800">no fee</span>';
-      var afford=(o.kind!=="buy") || ((s.nilLeft||0)>=o.fee);
-      h+='<div class="riv-row"><span class="riv-opp">'+
-         (o.home?'\uD83C\uDFE0':'\u2708\uFE0F')+' <b>'+x(o.opp)+'</b> '+
-         '<span style="font-size:9px;color:var(--muted)">'+x(o.conf)+' \u00b7 '+stars(o.p)+'</span>'+
-         '<br><span style="font-size:9px;font-weight:700;color:var(--muted)">'+x(o.label)+'</span></span>'+
-         '<span class="riv-rec" style="width:auto;display:flex;align-items:center;gap:6px">'+money+
-         '<button class="tp-btn'+(afford?'':' off')+'" data-scheddeal="'+i+'"'+(afford?'':' disabled')+'>Sign</button>'+
-         '</span></div>';
-    });
-    h+='</div>';
-  }
 
   // ── the national picture ──
   h+='<div class="sec-title">The Landscape</div>';
@@ -13007,6 +13107,16 @@ function bind(){
     ST.post=null; ST.save._postDone=true; ST.screen="offseason"; persist(); draw();
   };
   // offseason
+  // Staff business done at the meeting.
+  document.querySelectorAll("[data-mfire]").forEach(function(b){
+    b.onclick=function(){
+      var role=b.getAttribute("data-mfire");
+      if(confirm("Let go of your "+role+"?")) fireAssistant(role);
+    };
+  });
+  document.querySelectorAll("[data-mstaff]").forEach(function(b){
+    b.onclick=function(){ ST.menuFrom="leaguemeeting"; ST.screen="staff"; draw(); };
+  });
   // Scheduling market — buy or sell a non-conference date for next season.
   document.querySelectorAll("[data-scheddeal]").forEach(function(b){
     b.onclick=function(){ signSchedDeal(parseInt(b.getAttribute("data-scheddeal"),10)); };
