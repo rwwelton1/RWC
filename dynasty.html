@@ -547,8 +547,13 @@ a{color:inherit;text-decoration:none}
 .rec-po{flex:1;min-width:0;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rec-ring{color:var(--gold-dark)}
 .riv-row{display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1.5px solid var(--border2);font-size:11px}
-.riv-opp{flex:1;font-weight:800}
-.riv-rec{font-weight:900;width:52px;text-align:right}
+/* These rows are reused across the Trophy Room, the School tab and the League Meeting, and had no
+   font-size of their own. Any inline markup inside them (a <b>, a nested <span> with its own size)
+   could therefore set the effective size for the whole row, so the same list rendered at two
+   different sizes — USC small, Notre Dame large. Inherit the row's 11px explicitly. */
+.riv-opp{flex:1;font-weight:800;font-size:11px;line-height:1.35}
+.riv-rec{font-weight:900;width:52px;text-align:right;font-size:11px}
+.riv-opp b,.riv-rec b{font-size:inherit}
 .riv-stk{width:56px;text-align:right;font-weight:800;font-size:10px}
 .riv-w{color:#1a7f37}.riv-l{color:#b42318}
 .rec-empty{padding:14px 11px;font-size:11px;font-weight:700;color:var(--muted);text-align:center}
@@ -887,6 +892,14 @@ a{color:inherit;text-decoration:none}
 .tp-btn{flex-shrink:0;font-size:10px;font-weight:900;background:var(--gold-bg);color:var(--gold-dark);border:2px solid var(--gold-dark);border-radius:8px;box-shadow:2px 2px 0 var(--border);padding:6px 10px;cursor:pointer;white-space:nowrap}
 .tp-btn:active{transform:translate(2px,2px);box-shadow:none}
 .tp-btn.broke{opacity:.5}
+/* `off` is a SECONDARY action — still clickable (Let go, Stay in the conference), just not the
+   primary choice. */
+.tp-btn.off{background:#fff;color:var(--muted);border-color:var(--border2)}
+/* A genuinely unusable button. Previously the market's Sign buttons were given `off` and a
+   `disabled` attribute, but no rule matched either — so a button that did nothing still looked
+   live and invited tapping. */
+.tp-btn.dead,.tp-btn:disabled{background:#efefef;color:#aaa;border-color:#ccc;box-shadow:2px 2px 0 #ddd;cursor:not-allowed;opacity:.7}
+.tp-btn.dead:active,.tp-btn:disabled:active{transform:none;box-shadow:2px 2px 0 #ddd}
 .tp-signed{flex-shrink:0;font-size:10px;font-weight:900;color:var(--green)}
 .tp-lost{flex-shrink:0;font-size:9px;font-weight:800;color:var(--muted)}
 /* NIL slider bottom-sheet */
@@ -3944,6 +3957,7 @@ function confSeasonScores(){
 function updateConfPrestige(){
   confPrestigeInit();
   var s=ST.save; if(!s.league) return;
+  var L=s.league;                       // membership quality is read straight off the league
   s.confMomentum=s.confMomentum||{};
   s.confTier=s.confTier||{};
   var sc=confSeasonScores();
@@ -3958,21 +3972,54 @@ function updateConfPrestige(){
     var EXPECT=[0.02, 0.35, 1.35, 2.75];
     var expect = EXPECT[clampN(cur,0,3)];
     var over = sc[c].score - expect;
-    // Scores sit in a narrow band (a great league ≈ 3.0, a poor one ≈ 0), so the over/under is
-    // usually a fraction of a point. Amplify it before banking so a genuine run actually moves
-    // the needle, but keep the decay so one hot year is never enough.
-    s.confMomentum[c] = (s.confMomentum[c]||0)*0.75 + over*2.6;
+    // ── WHAT ACTUALLY DEFINES A CONFERENCE ───────────────
+    // Standing used to track playoff bids alone, which made it a referendum on one season. Real
+    // conference identity is mostly WHO IS IN IT: the ACC didn't fade because of a bad playoff
+    // cycle, it faded by losing programs and the media money that followed them. So membership
+    // quality carries most of the weight and results are the swing factor on top.
+    var mQ=0, mN=0;
+    Object.keys(L.teams).forEach(function(n){
+      var t=L.teams[n];
+      if(t.c!==c || (t.div||"FBS")!==myDivision()) return;
+      mQ += (n===s.school) ? (s.prestige||3) : (t.p||3);
+      mN++;
+    });
+    var memberAvg = mN ? mQ/mN : 3;
+    // What average member quality a league of this tier should have. Measured off the shipped
+    // map rather than guessed: tier 0 ≈ 1.22 (MAC/C-USA/Sun Belt), tier 1 ≈ 1.76 (American,
+    // Pac-12), tier 2 ≈ 2.88 (ACC, Big 12), tier 3 ≈ 3.54 (SEC 3.75, Big Ten 3.33).
+    var MEMBER_PAR=[1.22, 1.76, 2.88, 3.54];
+    var memberOver = memberAvg - MEMBER_PAR[clampN(cur,0,3)];
+    // The 0.90 decay is what provides stability now — evidence has to accumulate over many
+    // seasons before anything moves. An additional hysteresis discount on negative signals was
+    // layered on top of that and proved fatal: it pushed the steady state of a decline below the
+    // threshold, so a conference could be stripped of its five best programs and never formally
+    // slip. Decline is allowed to land at full weight.
+    over = memberOver*2.6 + over*0.6;
+    // ── TIMESCALE ────────────────────────────────────────
+    // A conference's identity should take the better part of a decade to change. The decay was
+    // 0.78 with a ±5 threshold, which washed a season out in about three years and let a tier
+    // turn over far too readily. A slower decay means evidence accumulates across many seasons
+    // rather than the recent past dominating.
+    // Thresholds sit just inside what sustained pressure can actually reach. With a 0.90 decay a
+    // constant per-season signal converges on 10x itself, so losing five good programs (which
+    // moves a 16-team league's average from 2.88 to 2.55, about -0.65/season after hysteresis)
+    // tops out near -6.5. A -7 bar meant that league could be gutted and never formally slip,
+    // which is the whole thing this was meant to model.
+    s.confMomentum[c] = (s.confMomentum[c]||0)*0.90 + over;
     var mv=0;
-    if(s.confMomentum[c]>=5 && cur<3){ cur++; mv=1; s.confMomentum[c]=0; }
-    else if(s.confMomentum[c]<=-5 && cur>0){ cur--; mv=-1; s.confMomentum[c]=0; }
-    s.confMomentum[c]=clampN(s.confMomentum[c],-8,8);
+    if(s.confMomentum[c]>=5.5 && cur<3){ cur++; mv=1; s.confMomentum[c]=0; }
+    else if(s.confMomentum[c]<=-5.5 && cur>0){ cur--; mv=-1; s.confMomentum[c]=0; }
+    s.confMomentum[c]=clampN(s.confMomentum[c],-12,12);
     // A league's standing can move, but not arbitrarily far. Over 14 seasons the ACC drifted to
     // tier 3 while the SEC fell to 2, at which point Georgia, LSU and Alabama all rationally
     // walked out of the SEC — the defection model working correctly on nonsense inputs. Brand
     // and money are sticky in a way one decade of results doesn't overturn, so a conference is
-    // held within one step of where it started.
+    // held near where it started. Two steps, not one: a single step made a genuinely dominant
+    // Group of Five league unable to ever become relevant, which is the arc the whole system is
+    // supposed to allow.
     var anchor=(CONF_BASE_TIER && CONF_BASE_TIER[c]!=null) ? CONF_BASE_TIER[c] : cur;
-    cur=clampN(cur, Math.max(0,anchor-1), Math.min(3,anchor+1));
+    cur=clampN(cur, Math.max(0,anchor-2), Math.min(3,anchor+2));
     s.confTier[c]=cur;
     CONF_TIER[c]=cur;
     if(mv && c===s.conf){
@@ -10232,7 +10279,7 @@ function schoolBlock(){
     }
     h+='<div class="riv-row"><span class="riv-opp" style="font-size:10px;color:var(--muted)">'+
        (lvl?'Upgrade to Lv '+(lvl+1):'Build it')+'</span>'+
-       '<button class="tp-btn'+(can?'':' off')+'" data-facility="'+f.id+'"'+(can?'':' disabled')+'>'+cost+' XP</button></div>';
+       '<button class="tp-btn'+(can?'':' dead')+'" data-facility="'+f.id+'"'+(can?'':' disabled')+'>'+cost+' XP</button></div>';
     h+='</div>';
   });
 
@@ -11230,16 +11277,29 @@ function runBreakaways(){
     var name=(REGION_NAMES[st]||"Coastal")+" Conference";
     if(s.confTier&&s.confTier[name]!=null) name=name+" II";
     var from={};
+    var founderTiers=[];
     willing.forEach(function(n){
       var t=L.teams[n]; from[t.c]=(from[t.c]||0)+1;
+      // Capture where each founder is coming FROM before we move them.
+      var ft=(s.confTier&&s.confTier[t.c]!=null)?s.confTier[t.c]:(CONF_TIER[t.c]||0);
+      founderTiers.push(ft);
       s._confChurn=s._confChurn||{}; s._confChurn[t.c]=(s._confChurn[t.c]||0)+1;
       t.c=name;
       var at=ALL_TEAMS.filter(function(x){return x.n===n;})[0];
       if(at) at.c=name;
     });
     s.confTier=s.confTier||{};
-    // A startup earns its standing from scratch — it begins at the bottom and has to win its way up.
-    s.confTier[name]=1; CONF_TIER[name]=1;
+    // A new league is worth roughly what its founders were worth. Starting every breakaway at a
+    // flat tier 1 was wrong in both directions: a walkout by six tier-0 MAC schools arrived
+    // instantly more prestigious than the league they left, while a defection of genuinely good
+    // programs was pointlessly demoted. Take the mean of where they came from, rounded down —
+    // a startup carries a little less weight than the sum of its parts, and has to earn the rest.
+    var meanTier = founderTiers.length
+      ? founderTiers.reduce(function(a,b){return a+b;},0)/founderTiers.length : 0;
+    var newTier = clampN(Math.floor(meanTier), 0, 3);
+    s.confTier[name]=newTier; CONF_TIER[name]=newTier;
+    // Anchor it so the general tier machinery treats this as its baseline going forward.
+    if(CONF_BASE_TIER) CONF_BASE_TIER[name]=newTier;
     s._breakaways=(s._breakaways||0)+1;
     L.confSched=null; L.confRemain=null;
     return {name:name, members:willing};
@@ -12526,7 +12586,7 @@ function meetingSchedBlock(){
          '<br><span style="font-size:9px;font-weight:700;color:var(--muted)">'+x(o.label)+'</span></span>'+
          '<span class="riv-rec" style="width:auto;display:flex;align-items:center;gap:6px;text-align:right">'+
          '<span>'+money+contract+'</span>'+
-         '<button class="tp-btn'+(ok?'':' off')+'" data-scheddeal="'+i+'"'+(ok?'':' disabled')+'>Sign</button>'+
+         '<button class="tp-btn'+(ok?'':' dead')+'" data-scheddeal="'+i+'"'+(ok?'':' disabled')+'>Sign</button>'+
          '</span></div>';
     });
     h+='</div>';
@@ -12646,7 +12706,7 @@ function meetingLeagueBlock(rep){
       var inherited=isRival(s.school, r.n);
       var rec=(typeof rivalryRecord==="function") ? rivalryRecord(s.school, r.n) : null;
       var recTxt=(rec&&(rec.w+rec.l)) ? (rec.w+"\u2013"+rec.l) : "";
-      h+='<div class="riv-row"><span class="riv-opp">\u2694\uFE0F '+x(r.n)+
+      h+='<div class="riv-row"><span class="riv-opp"><span style="font-size:11px">\u2694\uFE0F</span> '+x(r.n)+
          (inherited?'':' <span style="font-size:8.5px;color:var(--gold-dark);font-weight:900">BUILT</span>')+
          '</span>'+
          '<span class="riv-rec" style="width:auto"><span style="color:'+tier.c+';font-weight:900">'+tier.t+'</span>'+
@@ -12664,11 +12724,13 @@ function meetingLeagueBlock(rep){
   rep.rows.forEach(function(r){
     if(r.members<4) return;                       // skip vestigial leagues
     var you=(r.c===s.conf);
-    var arrow = r.mom>=2 ? ' <span style="color:#1a7f37">\u25b2</span>' : r.mom<=-2 ? ' <span style="color:var(--red2)">\u25bc</span>' : '';
+    // Only flag a league as moving when it's genuinely on the way somewhere. The old ±2 threshold
+    // caught ordinary year-to-year noise, so the SEC showed a ▲ for being slightly above par.
+    var arrow = r.mom>=4 ? ' <span style="font-size:9px;color:#1a7f37">\u25b2</span>' : r.mom<=-4 ? ' <span style="font-size:9px;color:var(--red2)">\u25bc</span>' : '';
     h+='<div class="riv-row"'+(you?' style="background:var(--gold-bg)"':'')+'>'+
        '<span class="riv-opp">'+(you?'<b>':'')+x(r.c)+(you?'</b>':'')+arrow+'</span>'+
        '<span class="riv-rec" style="width:auto">Tier '+r.tier+' \u00b7 '+r.bids+' bid'+(r.bids===1?'':'s')+
-       (r.natl?' \u00b7 \uD83C\uDFC6':'')+'</span></div>';
+       (r.natl?' <span style="font-size:10px">\uD83C\uDFC6</span>':'')+'</span></div>';
   });
   h+='</div>';
   h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
