@@ -1665,7 +1665,17 @@ try{
 
 function x(s){var t=String(s||"");return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/'/g,"&#39;");}
 var _tt;function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2200);}
-function ukey(n){return String(n||"guest").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\./g,"");}
+// Firebase Realtime Database FORBIDS . # $ [ ] and / in a key, and throws on the ref() call if
+// any are present — which fails every save for that session with no obvious cause. The user name
+// comes straight off the ?user= URL param, so it must be scrubbed completely, not just of dots.
+// Anything not a safe character becomes an underscore.
+function ukey(n){
+  var s=String(n||"guest").toLowerCase()
+    .replace(/\s+/g,"_")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")   // strip accents
+    .replace(/[^a-z0-9_-]/g,"");                        // drop everything else, incl . # $ [ ] /
+  return s || "guest";                                  // never return an empty key
+}
 function stars(p){var s="";for(var i=0;i<5;i++)s+=i<p?"★":"☆";return s;}
 function rnd(a,b){return a+Math.floor(Math.random()*(b-a+1));}
 function pick(arr){return arr[Math.floor(Math.random()*arr.length)];}
@@ -3309,7 +3319,24 @@ function persist(cb){
   var seq=++_saveSeq;
   ST._saveState={ok:null, at:Date.now(), pending:true};   // in flight
   try{
-    var p=DB.ref(BASE()).set(ST.save);
+    // Firebase RTDB rejects the ENTIRE write if the payload contains undefined, NaN or Infinity
+    // anywhere. One stray value fails every save from then on, so scrub before sending rather
+    // than letting the SDK throw. JSON round-tripping drops undefined and turns NaN into null,
+    // both of which RTDB accepts.
+    var payload;
+    try{
+      payload=JSON.parse(JSON.stringify(ST.save, function(k,v){
+        if(typeof v==="number" && !isFinite(v)) return null;   // NaN / Infinity
+        return v;
+      }));
+    }catch(ser){
+      // A circular reference would land here — unwritable no matter what.
+      ST._saveState={ok:false, at:Date.now(), err:"save data could not be serialized: "+((ser&&ser.message)||"")};
+      if(cb) cb(false);
+      try{ toast("⚠️ Save failed — data error, tell Ryan."); }catch(_){}
+      return;
+    }
+    var p=DB.ref(BASE()).set(payload);
     if(p && typeof p.then==="function"){
       p.then(function(){
         // Only the LATEST write may claim success — an older, slower write landing after a
@@ -3317,9 +3344,14 @@ function persist(cb){
         if(seq===_saveSeq) ST._saveState={ok:true, at:Date.now()};
         if(cb) cb(true);
       }).catch(function(e){
-        if(seq===_saveSeq) ST._saveState={ok:false, at:Date.now(), err:(e&&e.message)||"write failed"};
+        var msg=(e&&e.message)||"write failed";
+        if(seq===_saveSeq) ST._saveState={ok:false, at:Date.now(), err:msg};
         if(cb) cb(false);
-        try{ toast("⚠️ Save failed — your progress may not be stored."); }catch(_){}
+        // Say WHY. "Save failed" alone gives nothing to act on — permission denied, offline and
+        // payload-too-big all need different fixes, and the message is the only clue available
+        // on a phone.
+        try{ toast("⚠️ Save failed — "+x(String(msg).slice(0,90))); }catch(_){}
+        try{ console.error("Dynasty save failed:", e, "path:", BASE(), "bytes:", JSON.stringify(ST.save).length); }catch(_){}
       });
     } else {
       // Older SDK with no Promise return: assume it went out.
@@ -3327,9 +3359,11 @@ function persist(cb){
       if(cb) cb(true);
     }
   }catch(e){
-    ST._saveState={ok:false, at:Date.now(), err:(e&&e.message)||"write threw"};
+    var em=(e&&e.message)||"write threw";
+    ST._saveState={ok:false, at:Date.now(), err:em};
     if(cb) cb(false);
-    try{ toast("⚠️ Save failed — your progress may not be stored."); }catch(_){}
+    try{ toast("⚠️ Save failed — "+x(String(em).slice(0,90))); }catch(_){}
+    try{ console.error("Dynasty save threw:", e, "path:", BASE()); }catch(_){}
   }
 }
 
