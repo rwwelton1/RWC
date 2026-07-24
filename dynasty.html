@@ -1406,7 +1406,11 @@ function guaranteeFee(fromName, toName){
 }
 function schedMarketOffers(){
   var s=ST.save, L=s.league; if(!L) return [];
-  if(s._schedOffers && s._schedOffersYear===(s.seasonsPlayed||1)) return s._schedOffers;
+  // The board is generated ONCE per offseason and cached on the save. Note the check is on the
+  // year marker, not on the array being non-empty: signing removes offers, and if the array ever
+  // emptied a truthiness check would silently regenerate a fresh board — a free re-roll every
+  // time you cleared it.
+  if(s._schedOffersYear===(s.seasonsPlayed||1) && s._schedOffers) return s._schedOffers;
   var me=L.teams[s.school]; if(!me) return [];
   var myTier=(s.confTier&&s.confTier[s.conf]!=null)?s.confTier[s.conf]:(CONF_TIER[s.conf]||0);
   var myP=s.prestige||3;
@@ -1469,10 +1473,43 @@ function schedMarketOffers(){
 }
 // Sign a deal. Buying spends NIL; selling earns it. Either way the game is locked onto next
 // season's non-conference slate.
+// How many non-conference dates next season actually has. A deal that can't fit is a deal that
+// can't be signed — without this you could agree to twenty games for a three-slot schedule (and
+// refresh the meeting to get a fresh board and sign twenty more).
+function nonConfSlotsNextYear(){
+  var s=ST.save;
+  if(isIndependentConf(s.conf)) return (myDivision()==="FCS") ? 11 : 12;
+  var total=(myDivision()==="FCS") ? 11 : 12;
+  var L=s.league, confSize=0;
+  if(L && L.teams){
+    Object.keys(L.teams).forEach(function(n){
+      if(n!==s.school && L.teams[n].c===s.conf && (L.teams[n].div||"FBS")===myDivision()) confSize++;
+    });
+  }
+  var confGoal=Math.max(0, Math.min(total-3, confSize));
+  var slots=total-confGoal;
+  if(myDivision()==="FCS") slots-=1;              // the money game already owns one
+  return Math.max(0, slots);
+}
+function dealsSignedForNextYear(){
+  var s=ST.save, yr=(s.seasonsPlayed||1)+1;
+  return (s.schedDeals||[]).filter(function(d){ return d.year===yr; }).length;
+}
 function signSchedDeal(idx){
   var s=ST.save;
   var offers=schedMarketOffers();
   var o=offers[idx]; if(!o) return;
+  var cap=nonConfSlotsNextYear();
+  if(dealsSignedForNextYear()>=cap){
+    toast("📅 Next season's non-conference slate is full ("+cap+" date"+(cap===1?"":"s")+").");
+    return;
+  }
+  // Don't book the same opponent twice.
+  var yr=(s.seasonsPlayed||1)+1;
+  if((s.schedDeals||[]).some(function(d){ return d.year===yr && d.opp===o.opp; })){
+    toast("📅 You've already booked "+o.opp+" for next season.");
+    return;
+  }
   // The headline number is the CONTRACT. What moves on your books is the program's share of it.
   var slice=guaranteeSlice(o.fee);
   if(o.kind==="buy"){
@@ -3409,6 +3446,25 @@ function loadData(){
         }
       })();
       seedInheritedRivalries();   // no-op once seeded; backfills saves made before the index
+      // Saves made before the scheduling market was capped could hold far more signed deals than
+      // there are dates to play them (20 agreements for a 3-slot slate). Trim to what actually
+      // fits, keeping the earliest agreements.
+      (function(){
+        var s=ST.save;
+        if(!s.schedDeals || !s.schedDeals.length) return;
+        var byYear={};
+        s.schedDeals.forEach(function(d){ (byYear[d.year]=byYear[d.year]||[]).push(d); });
+        var cap=nonConfSlotsNextYear();
+        var kept=[];
+        Object.keys(byYear).forEach(function(y){
+          var seen={}, room=cap;
+          byYear[y].forEach(function(d){
+            if(room<=0 || seen[d.opp]) return;      // no room, or already booked
+            seen[d.opp]=1; room--; kept.push(d);
+          });
+        });
+        s.schedDeals=kept;
+      })();
       if(!ST.save.champHistory){
         // Pre-history saves never recorded champions. Reconstruct the USER's title seasons from
         // the career record so an established coach isn't shown a blank league book. We can only
@@ -3910,6 +3966,13 @@ function updateConfPrestige(){
     if(s.confMomentum[c]>=5 && cur<3){ cur++; mv=1; s.confMomentum[c]=0; }
     else if(s.confMomentum[c]<=-5 && cur>0){ cur--; mv=-1; s.confMomentum[c]=0; }
     s.confMomentum[c]=clampN(s.confMomentum[c],-8,8);
+    // A league's standing can move, but not arbitrarily far. Over 14 seasons the ACC drifted to
+    // tier 3 while the SEC fell to 2, at which point Georgia, LSU and Alabama all rationally
+    // walked out of the SEC — the defection model working correctly on nonsense inputs. Brand
+    // and money are sticky in a way one decade of results doesn't overturn, so a conference is
+    // held within one step of where it started.
+    var anchor=(CONF_BASE_TIER && CONF_BASE_TIER[c]!=null) ? CONF_BASE_TIER[c] : cur;
+    cur=clampN(cur, Math.max(0,anchor-1), Math.min(3,anchor+1));
     s.confTier[c]=cur;
     CONF_TIER[c]=cur;
     if(mv && c===s.conf){
@@ -11230,6 +11293,12 @@ function confValueFor(teamName, confName){
   // A shrinking league is a worse bet than a stable one.
   var churn=(s._confChurn&&s._confChurn[confName])||0;
   v -= churn*0.7;
+  // BRAND INERTIA. A blue blood's identity is bound up with its conference — Ohio State is a Big
+  // Ten school, and a one-tier wobble in the standings doesn't change that. Without this, a
+  // temporary dip sent Ohio State, Michigan and LSU out the door, which reads as nonsense however
+  // sound the underlying arithmetic. The bigger the program, the more its own house is worth.
+  var homeConf=(teamName===s.school) ? s.conf : ((L.teams[teamName]||{}).c);
+  if(confName===homeConf && p>=4) v += (p-3)*1.5;
   return v;
 }
 // What a school would be worth TO a conference — used to pick raid targets. Prestige first,
@@ -11255,6 +11324,21 @@ function runConferenceRaids(){
   var s=ST.save, L=s.league; if(!L) return [];
   s._confChurn=s._confChurn||{};
   var moves=[];
+  // ── WHEN REALIGNMENT HAPPENS ──────────────────────────
+  // The map was allowed to move from season one, so a dynasty could see Kansas State leave the
+  // Big 12 and the SEC come calling for TCU by 2029 — three years in. That isn't how this works:
+  // the conferences that exist at kickoff are locked into media deals and grants of rights, and
+  // a wave only breaks when those expire. Then it breaks all at once and goes quiet again.
+  var yr=(s.seasonsPlayed||1);
+  if(yr < 6) return moves;                       // the current deals hold; nobody is moving
+  // Waves, not a trickle. Once the map is unsettled it stays unsettled for a couple of years,
+  // then locks down again while new deals are signed.
+  if(s._waveUntil==null) s._waveUntil=0;
+  if(yr > s._waveUntil){
+    // Not currently in a wave — does one start? Roughly one every 5-7 seasons after the freeze.
+    if(Math.random() < 0.22){ s._waveUntil = yr + rnd(1,2); }
+    else return moves;
+  }
   // Only the strongest leagues raid, and only if they're not already bloated.
   var raiders=Object.keys(POWER_CONF).filter(function(c){
     var tier=(s.confTier&&s.confTier[c]!=null)?s.confTier[c]:(CONF_TIER[c]||0);
@@ -11296,6 +11380,19 @@ function runConferenceRaids(){
 function pendingInviteForUser(){
   var s=ST.save, L=s.league; if(!L) return null;
   if(!L.teams[s.school]) return null;
+  // An invitation is a realignment event, so it obeys the same calendar: nothing moves while the
+  // opening media deals hold, and offers only come during an active wave. Getting courted by the
+  // SEC in your third season made the whole system feel arbitrary.
+  var yr=(s.seasonsPlayed||1);
+  if(yr < 6) return null;
+  if(!s._waveUntil || yr > s._waveUntil) return null;
+  // Even inside a wave, being courted is a genuine event, not an annual formality. Roll once per
+  // season and remember it, so it can't re-roll on every redraw of the meeting screen.
+  if(s._inviteRollYear!==yr){
+    s._inviteRollYear=yr;
+    s._inviteRollOk=(Math.random()<0.35);
+  }
+  if(!s._inviteRollOk) return null;
   var best=null;
   Object.keys(POWER_CONF).forEach(function(c){
     if(c===s.conf) return;
@@ -12408,11 +12505,12 @@ function meetingSchedBlock(){
   });
   h+='</div>';
   if(offers.length){
+    var cap=nonConfSlotsNextYear(), booked=dealsSignedForNextYear(), room=Math.max(0,cap-booked);
     h+='<div class="sec-title">Scheduling Market</div>';
     h+='<div style="font-size:10px;font-weight:700;color:var(--muted);margin:0 2px 8px;line-height:1.5">'+
        'Non-conference dates for next season. Bigger programs pay a guarantee for a home game; smaller ones sell the trip. '+
        'The deal is struck by the athletic department \u2014 about '+Math.round(GUARANTEE_TO_PROGRAM*100)+'% of it reaches your budget. '+
-       'You have <b>'+fmtMoney(s.nilLeft||0)+'</b>.</div>';
+       'You have <b>'+fmtMoney(s.nilLeft||0)+'</b> and <b>'+room+'</b> open date'+(room===1?'':'s')+'.</div>';
     h+='<div class="rec-tbl" style="margin-bottom:12px">';
     offers.forEach(function(o,i){
       var slice=guaranteeSlice(o.fee);
@@ -12421,16 +12519,21 @@ function meetingSchedBlock(){
                 : '<span style="color:var(--muted);font-weight:800">no fee</span>';
       var contract = o.fee ? ('<br><span style="font-size:8.5px;font-weight:700;color:var(--dim)">'+fmtMoney(o.fee)+' contract</span>') : '';
       var afford=(o.kind!=="buy") || ((s.nilLeft||0)>=slice);
+      var ok=afford && room>0;
       h+='<div class="riv-row"><span class="riv-opp">'+
          (o.home?'\uD83C\uDFE0':'\u2708\uFE0F')+' <b>'+x(o.opp)+'</b> '+
          '<span style="font-size:9px;color:var(--muted)">'+x(o.conf)+' \u00b7 '+stars(o.p)+'</span>'+
          '<br><span style="font-size:9px;font-weight:700;color:var(--muted)">'+x(o.label)+'</span></span>'+
          '<span class="riv-rec" style="width:auto;display:flex;align-items:center;gap:6px;text-align:right">'+
          '<span>'+money+contract+'</span>'+
-         '<button class="tp-btn'+(afford?'':' off')+'" data-scheddeal="'+i+'"'+(afford?'':' disabled')+'>Sign</button>'+
+         '<button class="tp-btn'+(ok?'':' off')+'" data-scheddeal="'+i+'"'+(ok?'':' disabled')+'>Sign</button>'+
          '</span></div>';
     });
     h+='</div>';
+    if(room<=0){
+      h+='<div style="font-size:10px;font-weight:800;color:var(--gold-dark);margin:0 2px 10px">'+
+         '\uD83D\uDCC5 Next season\u2019s non-conference slate is full.</div>';
+    }
   }
   var pending=(s.schedDeals||[]).filter(function(d){ return d.year>(s.seasonsPlayed||1); });
   if(pending.length){
