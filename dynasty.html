@@ -10120,8 +10120,9 @@ function schoolBlock(){
   h+='</div>';
 
   // ── money ──
-  h+='<div class="sec-title">NIL &amp; Budget</div>';
   h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  h+='<div class="rec-schoolhd"><span>\uD83D\uDCB0 NIL &amp; Budget</span>'+
+     '<span class="rec-lvl">'+fmtMoney(s.nilLeft||0)+' free</span></div>';
   h+='<div class="riv-row"><span class="riv-opp">NIL this season</span>'+
      '<span class="riv-rec" style="width:auto"><b>'+fmtMoney(s.nilLeft||0)+'</b> left of '+fmtMoney(s.nilTotal||0)+'</span></div>';
   h+='<div class="riv-row"><span class="riv-opp">Staff budget</span>'+
@@ -10129,6 +10130,28 @@ function schoolBlock(){
   h+='<div class="riv-row"><span class="riv-opp">Coach XP</span>'+
      '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+coachXP()+' XP</span></div>';
   h+='</div>';
+
+  // ── rivals ──
+  // The rivalry index lives on the League Meeting, but a program's biggest games belong on its
+  // own profile too — it's part of who the school IS, not just this year's business.
+  (function(){
+    var rivs=rivalriesFor(s.school).slice(0,5);
+    if(!rivs.length) return;
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    h+='<div class="rec-schoolhd"><span>\u2694\uFE0F Top Rivals</span><span class="rec-lvl">'+rivs.length+'</span></div>';
+    rivs.forEach(function(r){
+      var tier=rivalryTier(r.v);
+      var rec=(typeof rivalryRecord==="function") ? rivalryRecord(s.school, r.n) : null;
+      var recTxt=(rec&&(rec.w+rec.l)) ? (rec.w+"\u2013"+rec.l+" all-time") : "";
+      var built=!isRival(s.school, r.n);
+      h+='<div class="riv-row"><span class="riv-opp">'+x(r.n)+
+         (built?' <span style="font-size:8px;color:var(--gold-dark);font-weight:900">BUILT</span>':'')+
+         (recTxt?'<br><span style="font-size:9px;font-weight:700;color:var(--muted)">'+recTxt+'</span>':'')+
+         '</span>'+
+         '<span class="riv-rec" style="width:auto;color:'+tier.c+';font-weight:900">'+tier.t+'</span></div>';
+    });
+    h+='</div>';
+  })();
 
   // ── facilities (buy with Coach XP) ──
   h+='<div class="sec-title">Facilities</div>';
@@ -12988,14 +13011,25 @@ function bind(){
     if(ST.editGame==null)return;
     var name=b.getAttribute("data-pickopp");
     var t=ALL_TEAMS.filter(function(x){return x.n===name;})[0];   // FBS or FCS
-    if(t){ var g=ST.save.schedule[ST.editGame]; g.opp=t.n; g.oc=t.c; g.op=t.p;
-           // never re-lock a slot; an independent's games are all non-conference by definition
-           g.conf = isIndependentConf(ST.save.conf) ? false : (t.c===ST.save.conf);
-           delete g.moneyGame;
-           // the rivalry flag follows the OPPONENT, so recompute it (you can schedule a
-           // rival yourself — or drop one, and take the heat for ducking them)
-           if(isRival(ST.save.school, t.n)) g.rivalry=true; else delete g.rivalry;
-           persist(); draw(); }
+    if(!t) return;
+    var g=ST.save.schedule[ST.editGame];
+    // A NON-CONFERENCE SLOT STAYS NON-CONFERENCE. Only non-conf games are editable, but the old
+    // code recomputed `conf` from the chosen opponent — so picking a team from your own league
+    // silently converted the slot into a conference game. That both invented an extra league
+    // game and freed a non-con slot elsewhere, letting the schedule drift past three.
+    // Conference membership is the league's business, not something you set by picking a name.
+    var wasConf=!!g.conf;
+    if(!wasConf && !isIndependentConf(ST.save.conf) && t.c===ST.save.conf){
+      toast("🚫 That's a conference opponent — the league sets those games.");
+      return;
+    }
+    g.opp=t.n; g.oc=t.c; g.op=t.p;
+    g.conf = wasConf;                       // the slot's nature never changes
+    delete g.moneyGame;
+    // the rivalry flag follows the OPPONENT, so recompute it (you can schedule a
+    // rival yourself — or drop one, and take the heat for ducking them)
+    if(isRival(ST.save.school, t.n)) g.rivalry=true; else delete g.rivalry;
+    persist(); draw();
   };});
   var ed=q("#edit-done"); if(ed)ed.onclick=function(){ ST.editGame=null; draw(); };
   document.querySelectorAll("[data-scheme]").forEach(function(b){b.onclick=function(){ var parts=b.getAttribute("data-scheme").split(":"); setScheme(parts[0],parts[1]); };});
@@ -13220,6 +13254,20 @@ function genPortalPool(){
   var s=ST.save, pool=[], poslist=rolePositions(), L=s.league;
   var myDiv=myDivision(), myP=s.prestige||3;
   if(!L || !L.teams) return pool;
+  // ── WHO SHOPS WHERE ───────────────────────────────────
+  // The portal a program actually sees depends on what it can offer. Measured before this: a
+  // $36M Alabama and a $4M Western Kentucky saw statistically identical markets — same average
+  // (70 OVR), same best available (~85), same number of 80+ players. Every entrant was drawn
+  // without reference to who was shopping, so money and stature bought nothing.
+  //
+  // Two things now pull talent toward a big program:
+  //   PULL   — stature. A blue blood is where a transferring star wants to land, so the odds a
+  //            given star even appears in your market scale with your prestige.
+  //   MONEY  — a budget well above the norm for your level widens it further. This is what makes
+  //            NIL spending on the portal feel like it's for something.
+  var nilNorm = NIL_BASE[myP] || 8;
+  var money   = clampN((s.nilTotal||nilNorm)/nilNorm, 0.5, 2.2);   // 1.0 = par for your level
+  var pull    = 0.55 + (myP-1)*0.30 + (money-1)*0.45;              // p1 ~0.5, p5 ~1.8 at par
 
   // ── Who is actually IN a transfer portal? ──────────────
   // Not a wall of All-Americans. The overwhelming majority are BACKUPS chasing playing time —
@@ -13243,6 +13291,11 @@ function genPortalPool(){
       if(stp.wasTarget) w += 1.6;                 // the one who got away
       // ...and he won't drop two tiers to come to you unless there's a real reason.
       if(gap>0) w *= Math.max(0.12, 1 - gap*0.42);
+      // A bigger, richer program is simply where a moving star wants to go. This is the term that
+      // makes an elite budget buy an elite market rather than the same one everybody sees.
+      w *= pull;
+      // The very best players only surface for programs that can actually land them.
+      if(stp.ovr>=86 && myP<4) w *= 0.35;
       if(w>0.05) STARS.push({team:tn, t:t, idx:idx, st:stp, w:w});
     });
 
@@ -13251,7 +13304,9 @@ function genPortalPool(){
     var n=rnd(1,2);
     for(var i=0;i<n;i++){
       var pos=pick(poslist);
-      var base=starOvrFor(t,pos) - rnd(6,17);      // he's not the star — he's behind the star
+      // A blue blood's "depth" target is a Power-conference backup; a small school's is a body.
+      var dropoff = rnd(6,17) - Math.round((pull-1)*4);
+      var base=starOvrFor(t,pos) - Math.max(3, dropoff);
       var ovr=clampN(Math.round(base), 48, 88);
       var w2=1.6;
       w2 += Math.max(0, 3-(t.p||3))*0.5;
@@ -13269,10 +13324,18 @@ function genPortalPool(){
     for(var j=0;j<list.length;j++){ acc+=list[j].w; if(roll<=acc){ hit=j; break; } }
     return list.splice(hit,1)[0];
   };
-  var total=rnd(10,15);
+  // A bigger program's market is both DEEPER and richer in starters. A blue blood fields calls;
+  // a small school picks through what's left.
+  //
+  // Base size raised from 10-15 to 16-21: a program that loses a dozen players and wants to
+  // rebuild through the portal — increasingly how the sport actually works — was shopping a
+  // market too thin to backfill from, especially a head coach filling BOTH sides of the ball.
+  // A coordinator only shops his own unit, so he sees a slice of this; the HC sees all of it.
+  var total=rnd(16,21) + Math.round((pull-1)*4);
+  total=clampN(total, 14, 30);
+  var starShare = clampN(0.30 + (pull-1)*0.22, 0.18, 0.62);
   for(var k=0;k<total;k++){
-    // ~30% of a real portal is starter-quality; the rest is depth.
-    var wantStar = (Math.random() < 0.30) && STARS.length;
+    var wantStar = (Math.random() < starShare) && STARS.length;
     var c = wantStar ? take(STARS) : (take(DEPTH) || take(STARS));
     if(!c) break;
     var e = c.depth ? makeDepthTransfer(c) : makeStarTransfer(c);
