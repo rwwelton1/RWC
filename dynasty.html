@@ -1365,7 +1365,16 @@ function isRival(a,b){ var r=RIVALS[a]; return !!r && r.indexOf(b)>=0; }
 //
 // Every meeting between two programs feeds an index (s.rivIdx). The index decays, so a series
 // that lapses fades; it grows fastest when the games are close and both teams are good.
-function rivKey(a,b){ return (a<b) ? (a+"##"+b) : (b+"##"+a); }
+// Firebase RTDB forbids . # $ [ ] / in a KEY — and these keys are object properties in the save,
+// so the separator itself must be legal. The first version used "##", which made every single
+// write fail with "invalid key (Boston College##Syracuse)". "~" is safe and can't appear in a
+// school name. School names themselves are also scrubbed, since "Miami (FL)"-style punctuation
+// is fine but a stray period (St. John's) would break the same way.
+function _rivSafe(n){ return String(n||"").replace(/[.#$\[\]\/]/g,""); }
+function rivKey(a,b){
+  var A=_rivSafe(a), B=_rivSafe(b);
+  return (A<B) ? (A+"~"+B) : (B+"~"+A);
+}
 function rivIndexOf(a,b){ var s=ST.save; return (s.rivIdx&&s.rivIdx[rivKey(a,b)])||0; }
 // Record one meeting. `winner` is the school that won, which lets the index track the SERIES
 // SPLIT — the thing that actually makes a rivalry. Twelve straight wins is a beatdown, not a
@@ -1443,7 +1452,7 @@ function decayRivalries(){
     // inherited classics are kept too: Alabama–Auburn shouldn't vanish from the record just
     // because the schedule didn't pair them for a few years (an earlier cut pruned it to Cold
     // after 15 unplayed seasons). Two ordinary CPU teams need a real series to be worth storing.
-    var p=k.split("##");
+    var p=k.split("~");
     var involvesMe = (p[0]===mine || p[1]===mine);
     var inherited = isRival(p[0], p[1]);
     // A classic that simply isn't on the schedule cools, but never below "Real" — the history is
@@ -1463,7 +1472,7 @@ function decayRivalries(){
   if(keys.length>900){
     var mineK=[], others=[];
     keys.forEach(function(k){
-      if((k.indexOf(mine+"##")===0)||(k.indexOf("##"+mine)>0)) mineK.push(k); else others.push(k);
+      if((k.indexOf(_rivSafe(mine)+"~")===0)||(k.indexOf("~"+_rivSafe(mine))>0)) mineK.push(k); else others.push(k);
     });
     others.sort(function(a,b){ return s.rivIdx[b]-s.rivIdx[a]; });
     var keep={}; 
@@ -1510,7 +1519,7 @@ function rivalriesFor(name){
   var s=ST.save; if(!s.rivIdx) return [];
   var out=[];
   Object.keys(s.rivIdx).forEach(function(k){
-    var p=k.split("##");
+    var p=k.split("~");
     if(p[0]===name) out.push({n:p[1], v:s.rivIdx[k]});
     else if(p[1]===name) out.push({n:p[0], v:s.rivIdx[k]});
   });
@@ -1648,7 +1657,16 @@ function runRealignmentFor(year){
 // SCORECERY CFB DYNASTY — playable core (OC path)
 // Loop: pick school+role -> recruit offense -> weekly gameplan+sim -> offseason
 // =====================================================
-var URL_USER=(function(){var m=location.search.match(/[?&]user=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
+var URL_USER=(function(){
+  var m=location.search.match(/[?&]user=([^&]+)/);
+  var fromUrl = m ? decodeURIComponent(m[1]) : null;
+  if(fromUrl) return fromUrl;
+  // The hub links here as dynasty.html?user=<name>, but that name can be empty — it falls back to
+  // "" when the player is signed in without a display name, which lands everyone on the shared
+  // "guest" save. Read the same localStorage key the hub itself uses so identity survives.
+  try{ var ls=localStorage.getItem("pp_user"); if(ls) return ls; }catch(e){}
+  return null;
+})();
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 
 var DB=null, DB_ERR=null;
@@ -3213,6 +3231,33 @@ function loadData(){
       // ALL_TEAMS is shared across saves, so rebuild THIS dynasty's map every time one loads.
       applyRealignmentThrough(2026+((ST.save.seasonsPlayed||1)-1));
       applyConfTiers();   // CONF_TIER is shared across saves — restore THIS dynasty's standings
+      // Saves written before the key fix carry rivalry entries keyed "A##B", which Firebase
+      // rejects outright — meaning those dynasties could no longer save at all. Rewrite them to
+      // the safe separator so the next write goes through.
+      (function(){
+        var s=ST.save;
+        if(s.rivIdx){
+          var ri={}; Object.keys(s.rivIdx).forEach(function(k){
+            var p=k.indexOf("##")>=0 ? k.split("##") : k.split("~");
+            ri[rivKey(p[0],p[1]||"")]=s.rivIdx[k];
+          });
+          s.rivIdx=ri;
+        }
+        if(s.rivSplit){
+          var rs={}; Object.keys(s.rivSplit).forEach(function(k){
+            var p=k.indexOf("##")>=0 ? k.split("##") : k.split("~");
+            rs[rivKey(p[0],p[1]||"")]=s.rivSplit[k];
+          });
+          s.rivSplit=rs;
+        }
+        if(s.bonds){
+          var bd={}; Object.keys(s.bonds).forEach(function(k){
+            var p=k.split("|");
+            bd[bondKey(p[0],p[1]||"")]=s.bonds[k];
+          });
+          s.bonds=bd;
+        }
+      })();
       seedInheritedRivalries();   // no-op once seeded; backfills saves made before the index
       if(!ST.save.champHistory){
         // Pre-history saves never recorded champions. Reconstruct the USER's title seasons from
@@ -3329,6 +3374,22 @@ function persist(cb){
         if(typeof v==="number" && !isFinite(v)) return null;   // NaN / Infinity
         return v;
       }));
+      // Firebase also rejects the write if any KEY contains . # $ [ ] / — and a key here can be
+      // generated from a school name (the rivalry index and bond maps are keyed by matchup), so
+      // one bad name poisons every save from then on. This is exactly what happened with the
+      // "##" separator: "Boston College##Syracuse" failed every write. Belt-and-braces: drop any
+      // illegal key at the door rather than letting the SDK reject the whole payload.
+      payload=(function scrubKeys(o,d){
+        if(d>12 || !o || typeof o!=="object") return o;
+        if(Array.isArray(o)) return o.map(function(v){ return scrubKeys(v,d+1); });
+        var out={};
+        Object.keys(o).forEach(function(k){
+          var safe=k.replace(/[.#$\[\]\/]/g,"");
+          if(!safe) return;                        // key was nothing but illegal characters
+          out[safe]=scrubKeys(o[k],d+1);
+        });
+        return out;
+      })(payload,0);
     }catch(ser){
       // A circular reference would land here — unwritable no matter what.
       ST._saveState={ok:false, at:Date.now(), err:"save data could not be serialized: "+((ser&&ser.message)||"")};
@@ -10153,11 +10214,24 @@ function attentionStrip(){
 // loud pill when a write failed or there's no database at all.
 function saveBadge(){
   var st=ST._saveState;
-  if(!DB) return '<span class="pill" style="background:#fdd;border-color:#c33;color:#900" '+
-                 'title="'+x(DB_ERR||"no database")+'">⚠️ NOT SAVING</span> ';
-  if(st && st.ok===false) return '<span class="pill" style="background:#fdd;border-color:#c33;color:#900" '+
-                 'title="'+x(st.err||"write failed")+'">⚠️ SAVE FAILED</span> ';
+  // `title` is a desktop-hover affordance and invisible on a phone, which is where this game is
+  // actually played — so the badge is tappable and reports the real diagnosis.
+  if(!DB) return '<span class="pill" id="save-badge" style="background:#fdd;border-color:#c33;color:#900;cursor:pointer">⚠️ NOT SAVING</span> ';
+  if(st && st.ok===false) return '<span class="pill" id="save-badge" style="background:#fdd;border-color:#c33;color:#900;cursor:pointer">⚠️ SAVE FAILED</span> ';
   return '';
+}
+// What's actually going on with saving, in plain words.
+function saveDiagnosis(){
+  var st=ST._saveState||{};
+  var lines=[];
+  lines.push("Saving as: "+(ST.user||"(none)"));
+  lines.push("Path: "+BASE());
+  lines.push("Database: "+(DB?"connected":("UNAVAILABLE — "+(DB_ERR||"SDK failed to load"))));
+  if(st.err) lines.push("Last error: "+st.err);
+  else if(st.ok===true) lines.push("Last save: OK");
+  else if(st.pending) lines.push("Last save: still in flight");
+  try{ lines.push("Save size: "+(JSON.stringify(ST.save||{}).length/1024).toFixed(1)+" KB"); }catch(e){}
+  return lines.join("\n");
 }
 function seasonScreen(){
   var s=ST.save, g=s.schedule[s.week];
@@ -10740,7 +10814,13 @@ function proximity(a,b){
 //
 // Bonds live on the save (s.bonds["A|B"]) and decay if you stop playing, so a cluster has to be
 // maintained, not just assembled once.
-function bondKey(a,b){ return (a<b) ? (a+"|"+b) : (b+"|"+a); }
+// Same rule as rivKey: this string becomes an object PROPERTY in the save, so it must not
+// contain any character Firebase forbids in a key. "|" is legal, but a school name carrying a
+// period would still poison the write, so scrub the names.
+function bondKey(a,b){
+  var A=_rivSafe(a), B=_rivSafe(b);
+  return (A<B) ? (A+"|"+B) : (B+"|"+A);
+}
 function bondOf(a,b){ var s=ST.save; return (s.bonds&&s.bonds[bondKey(a,b)])||0; }
 // Record one game between two schools. Only regional, non-conference meetings count — a
 // conference game is already a relationship the league imposed on you.
@@ -10764,7 +10844,7 @@ function decayBonds(){
   var mine=s.school;
   Object.keys(s.bonds).forEach(function(k){
     s.bonds[k]*=0.85;
-    var involvesMe=(k.indexOf(mine+"|")===0)||(k.indexOf("|"+mine)>0);
+    var involvesMe=(k.indexOf(_rivSafe(mine)+"|")===0)||(k.indexOf("|"+_rivSafe(mine))>0);
     if(s.bonds[k] < (involvesMe?0.25:1.1)) delete s.bonds[k];
   });
 }
@@ -12759,6 +12839,14 @@ function bind(){
     s._meetingEverHeld=1;
     ST.screen="offseason"; ST.osTab=null;
     persist(); draw();
+  };
+  // Tapping the save badge reports what's actually wrong, and offers a retry.
+  var sb=q("#save-badge"); if(sb)sb.onclick=function(){
+    var msg=saveDiagnosis();
+    if(confirm(msg+"\n\nTry saving again now?")) persist(function(ok){
+      toast(ok?"✓ Saved":"⚠️ Still failing — see the badge again");
+      draw();
+    });
   };
   var adv=q("#advance-season"); if(adv)adv.onclick=advanceSeason;
   document.querySelectorAll("[data-cut]").forEach(function(b){b.onclick=function(){ cutPlayer(b.getAttribute("data-cut")); };});
