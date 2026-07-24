@@ -1916,7 +1916,18 @@ function recordUserLeagueResult(won, isConfGame){
 // is what makes scheduling a nearby rival year after year a genuine long-game strategy.
 function recordUserBond(oppName, isConfGame){
   if(isConfGame || !oppName) return;
+  // Your standing scheduling policy decides how much a regional date is worth to you. Chasing
+  // marquee games isn't wrong — it's a better résumé — but it doesn't build the local
+  // relationships a breakaway is made of.
+  var pol=(ST.save.schedPolicy||"balanced");
+  var mult = pol==="regional" ? 1.6 : pol==="marquee" ? 0.45 : 1;
+  var before=bondOf(ST.save.school, oppName);
   addBond(ST.save.school, oppName);
+  var gained=bondOf(ST.save.school, oppName)-before;
+  if(gained>0 && mult!==1){
+    var s=ST.save, k=bondKey(s.school,oppName);
+    s.bonds[k]=before+gained*mult;
+  }
 }
 // End-of-season rating drift: teams that beat their rating-expected record improve; others decline.
 // End-of-season league update: categorize each team by how last season went vs what their
@@ -11782,6 +11793,18 @@ function osTabs(){
 // The meeting as its own moment in the offseason, before roster work begins. Realignment politics
 // and depth-chart management are different kinds of thinking; mixing them into one tab bar made
 // the meeting feel like an afterthought.
+// Is there anything to actually discuss? The meeting convenes for a decision, real news, or a
+// shift in your own league's standing — not to show you an unchanged table.
+function meetingWorthHolding(){
+  var s=ST.save;
+  if(s._pendingInvite) return true;                       // a decision on the table
+  if(s._breakawayNew) return true;                        // a league was founded
+  if((s._realignMoves||[]).length) return true;           // schools moved
+  if(!s._meetingEverHeld) return true;                    // the first one, to introduce it
+  var mom=(s.confMomentum&&s.confMomentum[s.conf])||0;
+  if(Math.abs(mom)>=3) return true;                       // your conference is genuinely moving
+  return false;
+}
 function leagueMeetingScreen(){
   var s=ST.save;
   var year=(s._confReport&&s._confReport.year) || (2026+((s.seasonsPlayed||1)-1));
@@ -11899,6 +11922,30 @@ function leagueMeetingTab(){
        'Non-conference games against nearby schools build these. Strong ties with GOOD programs are what make a breakaway possible \u2014 playing a weak neighbour builds familiarity, not leverage.</div>';
   }
 
+  // ── your standing scheduling policy ──
+  // A decision you can make from the very first meeting. Non-conference scheduling is the input to
+  // the whole regional system, so letting you set an intent here gives the early meetings real
+  // stakes instead of being a landscape readout you click past for a decade.
+  var pol=s.schedPolicy||"balanced";
+  var POLS=[
+    {k:"regional", ico:"\uD83E\uDD1D", t:"Play the neighbours",
+     d:"Fill open dates with nearby schools. Builds regional ties fastest \u2014 the raw material for a breakaway."},
+    {k:"balanced", ico:"\u2696\uFE0F", t:"No preference",
+     d:"Take whatever games come. Ties build slowly, if at all."},
+    {k:"marquee",  ico:"\uD83C\uDFDF\uFE0F", t:"Chase marquee games",
+     d:"Prioritise big names over neighbours. Better r\u00e9sum\u00e9 and exposure, weaker regional ties."}
+  ];
+  h+='<div class="sec-title">Scheduling Policy</div>';
+  h+='<div class="rec-tbl" style="margin-bottom:12px">';
+  POLS.forEach(function(p){
+    var on=(pol===p.k);
+    h+='<div class="riv-row'+(on?'" style="background:var(--gold-bg)':'')+'" data-schedpol="'+p.k+'" style="cursor:pointer'+(on?';background:var(--gold-bg)':'')+'">'+
+       '<span class="riv-opp">'+p.ico+' '+(on?'<b>':'')+x(p.t)+(on?'</b>':'')+
+       '<br><span style="font-size:9px;font-weight:700;color:var(--muted);line-height:1.4">'+x(p.d)+'</span></span>'+
+       '<span class="riv-rec" style="width:auto;color:var(--gold-dark);font-weight:900">'+(on?"\u2713":"")+'</span></div>';
+  });
+  h+='</div>';
+
   // ── the national picture ──
   h+='<div class="sec-title">The Landscape</div>';
   h+='<div class="rec-tbl" style="margin-bottom:12px">';
@@ -11919,11 +11966,13 @@ function leagueMeetingTab(){
 function offseasonScreen(){
   var s=ST.save;
   prepareOffseason();            // decide who's leaving; open the portal
-  // The league meeting happens FIRST, once per offseason — the sport's politics settle before you
-  // turn to your own roster. Intercepting here (rather than at each call site) catches every path
-  // into the offseason, including loading a save that was left mid-break.
+  // The league meeting happens FIRST, once per offseason — but only when it's WORTH convening.
+  // Every year regardless made the early dynasty a decade of clicking past a landscape table, so
+  // it's called when there's a decision to make, news to report, or the map is in motion. A quiet
+  // era simply doesn't hold one.
   var yr=2026+((s.seasonsPlayed||1)-1);
-  if(s._meetingSeen!==yr){ ST.screen="leaguemeeting"; return leagueMeetingScreen(); }
+  if(s._meetingSeen!==yr && meetingWorthHolding()){ ST.screen="leaguemeeting"; return leagueMeetingScreen(); }
+  s._meetingSeen=yr;   // nothing to discuss this year; don't ask again
   var stage=osStage();
   // Default to the tab that matters right now — but if you deliberately tap the locked Portal tab,
   // let it show you WHY it's locked rather than silently bouncing you back to Summary.
@@ -12458,10 +12507,18 @@ function bind(){
     ST.post=null; ST.save._postDone=true; ST.screen="offseason"; persist(); draw();
   };
   // offseason
+  // Scheduling policy — a standing directive set in the league meeting.
+  document.querySelectorAll("[data-schedpol]").forEach(function(b){
+    b.onclick=function(){
+      ST.save.schedPolicy=b.getAttribute("data-schedpol");
+      persist(); draw();
+    };
+  });
   // League meeting → offseason
   var lm=q("#leave-meeting"); if(lm)lm.onclick=function(){
     var s=ST.save;
     s._meetingSeen=2026+((s.seasonsPlayed||1)-1);
+    s._meetingEverHeld=1;
     ST.screen="offseason"; ST.osTab=null;
     persist(); draw();
   };
