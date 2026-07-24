@@ -1357,6 +1357,121 @@ var RIVALS={
 
 function rivalsOf(name){ return RIVALS[name] || []; }
 function isRival(a,b){ var r=RIVALS[a]; return !!r && r.indexOf(b)>=0; }
+// ── Rivalry index ────────────────────────────────────────
+// RIVALS above is the sport's inherited map — the games that were rivalries in 2026. But rivalries
+// are made, not declared: they're built by playing often, playing close, and playing when it
+// matters. A dynasty that runs twenty years should be able to birth a rivalry that didn't exist
+// and watch an inherited one go cold after realignment splits the schools up.
+//
+// Every meeting between two programs feeds an index (s.rivIdx). The index decays, so a series
+// that lapses fades; it grows fastest when the games are close and both teams are good.
+function rivKey(a,b){ return (a<b) ? (a+"##"+b) : (b+"##"+a); }
+function rivIndexOf(a,b){ var s=ST.save; return (s.rivIdx&&s.rivIdx[rivKey(a,b)])||0; }
+// Record one meeting. `winner` is the school that won, which lets the index track the SERIES
+// SPLIT — the thing that actually makes a rivalry. Twelve straight wins is a beatdown, not a
+// feud; the index now reflects that no matter how close the individual games were.
+function feedRivalry(a, b, margin, stakes, winner){
+  var s=ST.save, L=s.league; if(!a||!b) return;
+  s.rivIdx=s.rivIdx||{};
+  s.rivSplit=s.rivSplit||{};
+  var k=rivKey(a,b);
+  // Track the split from the alphabetically-first school's point of view (matching rivKey), so
+  // both sides read the same series.
+  var first=(a<b)?a:b;
+  if(winner){
+    var sp=s.rivSplit[k]||{w:0,l:0};
+    if(winner===first) sp.w++; else sp.l++;
+    s.rivSplit[k]=sp;
+  }
+  var gain=1.0;
+  // A one-score game is what people remember; a blowout builds far less.
+  if(margin!=null){
+    if(margin<=3)      gain+=1.5;
+    else if(margin<=8) gain+=1.0;
+    else if(margin<=17)gain+=0.35;
+    else               gain-=0.15;
+  }
+  // Two good programs make a bigger rivalry than two bad ones.
+  function pOf(n){ if(n===s.school) return s.prestige||3; var t=L&&L.teams[n]; return (t&&t.p)||3; }
+  gain *= 0.55 + ((pOf(a)+pOf(b))/2)/5;         // ~0.75 at 2-star avg, ~1.55 at 5-star
+  // Neighbours feel it more.
+  var prox=proximity(a,b);
+  if(prox>=1)      gain*=1.35;
+  else if(prox>0)  gain*=1.15;
+  // Inherited rivalries start with a head of steam.
+  if(isRival(a,b)) gain*=1.25;
+  if(stakes) gain+=stakes;
+  // ── COMPETITIVENESS ──
+  // The series has to be contested. One side dominating isn't a rivalry however often they play,
+  // so a lopsided ledger throttles what each new meeting is worth — and once it's truly one-sided
+  // the games actively cool it off. A split series gets the full value.
+  var sp2=s.rivSplit[k];
+  if(sp2 && (sp2.w+sp2.l)>=4){
+    var n=sp2.w+sp2.l;
+    var share=Math.max(sp2.w,sp2.l)/n;          // 0.5 = dead even, 1.0 = total domination
+    if(share>=0.85)      gain*=-0.35;           // a beatdown; the "rivalry" fades
+    else if(share>=0.72) gain*=0.25;
+    else if(share>=0.62) gain*=0.7;
+    // below .62 is genuinely competitive — full value
+  }
+  s.rivIdx[k]=Math.max(0,(s.rivIdx[k]||0)+gain);
+}
+// Rivalries cool when you stop playing. Slower decay than scheduling bonds — a rivalry lingers in
+// the memory long after the series lapses.
+function decayRivalries(){
+  var s=ST.save; if(!s.rivIdx) return;
+  Object.keys(s.rivIdx).forEach(function(k){
+    s.rivIdx[k]*=0.93;
+    if(s.rivIdx[k]<0.4) delete s.rivIdx[k];
+  });
+}
+// The sport's inherited rivalries didn't start yesterday — the Iron Bowl arrives with ninety years
+// behind it. Without seeding, Alabama–Auburn began at 0 ("Cold"), identical to two schools that
+// have never met, and a rivalry you built over a decade would outrank it outright. Seed them at a
+// level that reflects the history they already carry, so a new rivalry has to genuinely earn its
+// way past one of the sport's classics.
+function seedInheritedRivalries(sv){
+  var s=sv||ST.save; if(!s || s._rivSeeded) return;
+  s.rivIdx=s.rivIdx||{};
+  var L=s.league;
+  function pOf(n){ if(n===s.school) return s.prestige||3; var t=L&&L.teams[n]; return (t&&t.p)||3; }
+  Object.keys(RIVALS).forEach(function(a){
+    (RIVALS[a]||[]).forEach(function(b){
+      var k=rivKey(a,b);
+      if(s.rivIdx[k]) return;
+      // A classic between two blue bloods reads hotter than one between two small programs, and
+      // in-state meetings are the fiercest of all.
+      var base=7.5;
+      base += ((pOf(a)+pOf(b))/2 - 3)*1.6;      // -3.2 at 1-star avg, +3.2 at 5-star
+      if(proximity(a,b)>=1) base+=2.2;          // same state
+      else if(proximity(a,b)>0) base+=1.0;
+      s.rivIdx[k]=clampN(base, 5.2, 15.5);      // "Real" at worst, "Blood Feud" at best
+    });
+  });
+  s._rivSeeded=1;
+}
+// A word for how hot a rivalry is.
+function rivalryTier(v){
+  if(v>=14) return {t:"Blood Feud", c:"var(--red2)"};
+  if(v>=9)  return {t:"Bitter",     c:"#c2410c"};
+  if(v>=5)  return {t:"Real",       c:"var(--gold-dark)"};
+  if(v>=2)  return {t:"Brewing",    c:"var(--muted)"};
+  return {t:"Cold", c:"var(--dim)"};
+}
+// Everyone this school has an active rivalry with, hottest first.
+function rivalriesFor(name){
+  var s=ST.save; if(!s.rivIdx) return [];
+  var out=[];
+  Object.keys(s.rivIdx).forEach(function(k){
+    var p=k.split("##");
+    if(p[0]===name) out.push({n:p[1], v:s.rivIdx[k]});
+    else if(p[1]===name) out.push({n:p[0], v:s.rivIdx[k]});
+  });
+  out.sort(function(a,b){ return b.v-a.v; });
+  return out;
+}
+// The live rivalry test the game should use: an inherited rival OR one you've built.
+function isLiveRival(a,b){ return isRival(a,b) || rivIndexOf(a,b)>=5; }
 // All-time series records are kept PER SCHOOL \u2014 Furman\u2013Wofford and Alabama\u2013Auburn are different
 // series, so leaving a job doesn't drag its rivalry history along with you.
 function rivalryKey(school,opp){ return school+"@@"+opp; }
@@ -1868,6 +1983,7 @@ function simLeagueWeek(excludeName){
     var loser=(r.w===n)?oppName:n;
     L.teams[r.w].w++; L.teams[loser].l++;
     L.teams[r.w].cw++; L.teams[loser].cl++;
+    feedRivalry(n, oppName, null, 0.4, r.w);  // conference meetings build rivalries
     var si1=L.confRemain[n].indexOf(oppName); if(si1>=0)L.confRemain[n].splice(si1,1);
     var si2=L.confRemain[oppName].indexOf(n); if(si2>=0)L.confRemain[oppName].splice(si2,1);
     busy[n]=1; busy[oppName]=1;
@@ -1901,6 +2017,7 @@ function simLeagueWeek(excludeName){
     var loser=(r.w===n)?oppName:n;
     L.teams[r.w].w++; L.teams[loser].l++;   // overall only, not a conference game
     addBond(n, oppName);                    // a regional series builds a relationship
+    feedRivalry(n, oppName, null, 0, r.w);  // and the rest of the country builds rivalries too
     busy[n]=1; busy[oppName]=1;
   });
 
@@ -2739,6 +2856,7 @@ function newSave(team, role){
   s._realignDone={};
   ALL_TEAMS.forEach(function(t){ t.c=_BASE_CONF[t.n]; });   // fresh map for a fresh dynasty
   s.league=initLeague();
+  seedInheritedRivalries(s);   // the sport's classics arrive with their history intact
   s.gameplan={offBalance:53, defBalance:50};
   s.offScheme="prostyle"; s.defScheme="base43";
   s._lastWins=0; s.nilTotal=NIL_BASE[team.p]||8; s.nilLeft=s.nilTotal;
@@ -3038,6 +3156,7 @@ function loadData(){
       // ALL_TEAMS is shared across saves, so rebuild THIS dynasty's map every time one loads.
       applyRealignmentThrough(2026+((ST.save.seasonsPlayed||1)-1));
       applyConfTiers();   // CONF_TIER is shared across saves — restore THIS dynasty's standings
+      seedInheritedRivalries();   // no-op once seeded; backfills saves made before the index
       if(!ST.save.champHistory){
         // Pre-history saves never recorded champions. Reconstruct the USER's title seasons from
         // the career record so an established coach isn't shown a blank league book. We can only
@@ -11946,6 +12065,27 @@ function leagueMeetingTab(){
   });
   h+='</div>';
 
+  // ── your rivalries, as they actually stand ──
+  var rivs=rivalriesFor(s.school).slice(0,6);
+  if(rivs.length){
+    h+='<div class="sec-title">Rivalries</div>';
+    h+='<div class="rec-tbl" style="margin-bottom:12px">';
+    rivs.forEach(function(r){
+      var tier=rivalryTier(r.v);
+      var inherited=isRival(s.school, r.n);
+      var rec=(typeof rivalryRecord==="function") ? rivalryRecord(s.school, r.n) : null;
+      var recTxt=(rec&&(rec.w+rec.l)) ? (rec.w+"\u2013"+rec.l) : "";
+      h+='<div class="riv-row"><span class="riv-opp">\u2694\uFE0F '+x(r.n)+
+         (inherited?'':' <span style="font-size:8.5px;color:var(--gold-dark);font-weight:900">BUILT</span>')+
+         '</span>'+
+         '<span class="riv-rec" style="width:auto"><span style="color:'+tier.c+';font-weight:900">'+tier.t+'</span>'+
+         (recTxt?' <span style="color:var(--muted);font-weight:700;font-size:9px">'+recTxt+'</span>':'')+'</span></div>';
+    });
+    h+='</div>';
+    h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin:0 2px 10px;line-height:1.5">'+
+       'Rivalries are made, not declared \u2014 close games between good teams build them fastest, and a series that lapses cools off. Ones you\u2019ve built yourself are marked BUILT.</div>';
+  }
+
   // ── the national picture ──
   h+='<div class="sec-title">The Landscape</div>';
   h+='<div class="rec-tbl" style="margin-bottom:12px">';
@@ -13513,7 +13653,7 @@ function finishGameSim(){
     // ── Rivalry result: nothing moves the fanbase like this. ──
     // Beating your rival buys you goodwill; losing to them burns it. The series record
     // carries across seasons, so a rivalry builds its own history over a dynasty.
-    if(isRival(s.school, g.opp)){
+    if(isLiveRival(s.school, g.opp)){
       noteRivalryResult(s.school, g.opp, won);
       var rr=rivalryRecord(s.school, g.opp);
       if(won){
@@ -13528,6 +13668,14 @@ function finishGameSim(){
     }
     recordUserLeagueResult(won, g.oc===s.conf);
     recordUserBond(g.opp, g.oc===s.conf);
+    // Every meeting feeds the rivalry index — close games between good teams build the most.
+    (function(){
+      var margin=Math.abs((res.us||0)-(res.them||0));
+      var stakes=0;
+      if(g.oc===s.conf) stakes+=0.4;                       // conference games carry weight
+      if(s.week>=10) stakes+=0.3;                          // late-season meetings matter more
+      feedRivalry(s.school, g.opp, margin, stakes, won ? s.school : g.opp);
+    })();
     recordGameStats(res, g.opp, r.pbp);
     markAppearances();   // regular season only — postseason games are exempt from the 4-game cap
     // NOTE: everything above is bookkeeping. finishGameSim() sets r._recorded BEFORE doing any
@@ -14245,6 +14393,7 @@ function advanceSeason(){
   ST.save._realignMoves=runConferenceRaids();
   ST.save._breakawayNew=runBreakaways();   // regional clusters can walk out and found a league
   decayBonds();                            // series that lapse fade away
+  decayRivalries();                        // and rivalries cool if you stop playing
   ST.save._pendingInvite=pendingInviteForUser();
   driftLeaguePrestige();
   driftLeagueRatings();
