@@ -1372,6 +1372,15 @@ function rivIndexOf(a,b){ var s=ST.save; return (s.rivIdx&&s.rivIdx[rivKey(a,b)]
 // feud; the index now reflects that no matter how close the individual games were.
 function feedRivalry(a, b, margin, stakes, winner){
   var s=ST.save, L=s.league; if(!a||!b) return;
+  // Don't create an entry for a matchup that can never be a rivalry. Two distant CPU schools
+  // meeting once is not a story, and recording it anyway is what pushed the index past 5,000
+  // entries. Anything involving YOUR program is always tracked; for everyone else, require a
+  // reason: they're neighbours, or it's already an inherited rivalry.
+  var involvesMe=(a===s.school||b===s.school);
+  if(!involvesMe && !isRival(a,b) && proximity(a,b)<=0){
+    var k0=rivKey(a,b);
+    if(!(s.rivIdx&&s.rivIdx[k0])) return;
+  }
   s.rivIdx=s.rivIdx||{};
   s.rivSplit=s.rivSplit||{};
   var k=rivKey(a,b);
@@ -1418,12 +1427,50 @@ function feedRivalry(a, b, margin, stakes, winner){
 }
 // Rivalries cool when you stop playing. Slower decay than scheduling bonds — a rivalry lingers in
 // the memory long after the series lapses.
+//
+// This also PRUNES aggressively, and that matters: every meeting anywhere in the country creates
+// an entry, and the country plays thousands of games a year. Left unchecked the index reached
+// ~5,000 entries and 425 KB after ten seasons — on its own enough to fail the save write. Only
+// matchups that are actually a rivalry (or on their way to being one) are worth persisting;
+// everything else is noise that can be rebuilt by simply playing again.
 function decayRivalries(){
   var s=ST.save; if(!s.rivIdx) return;
+  s.rivSplit=s.rivSplit||{};
+  var mine=s.school;
   Object.keys(s.rivIdx).forEach(function(k){
     s.rivIdx[k]*=0.93;
-    if(s.rivIdx[k]<0.4) delete s.rivIdx[k];
+    // Anything involving YOUR program is kept at a low bar — that's your history. The sport's
+    // inherited classics are kept too: Alabama–Auburn shouldn't vanish from the record just
+    // because the schedule didn't pair them for a few years (an earlier cut pruned it to Cold
+    // after 15 unplayed seasons). Two ordinary CPU teams need a real series to be worth storing.
+    var p=k.split("##");
+    var involvesMe = (p[0]===mine || p[1]===mine);
+    var inherited = isRival(p[0], p[1]);
+    // A classic that simply isn't on the schedule cools, but never below "Real" — the history is
+    // still there, waiting for the series to resume. If it IS being played and one side is
+    // running away with it, that's different: a beatdown is allowed to kill even a classic.
+    if(inherited && s.rivIdx[k]<5.2){
+      var sp=s.rivSplit[k];
+      var lopsided = sp && (sp.w+sp.l)>=4 && (Math.max(sp.w,sp.l)/(sp.w+sp.l))>=0.72;
+      if(!lopsided) s.rivIdx[k]=5.2;
+    }
+    var floor = (involvesMe||inherited) ? 0.4 : 3.0;
+    if(s.rivIdx[k]<floor){ delete s.rivIdx[k]; delete s.rivSplit[k]; }
   });
+  // Hard cap as a backstop, so an unusual league can never blow the save up. Keep your own
+  // rivalries plus the hottest in the country.
+  var keys=Object.keys(s.rivIdx);
+  if(keys.length>900){
+    var mineK=[], others=[];
+    keys.forEach(function(k){
+      if((k.indexOf(mine+"##")===0)||(k.indexOf("##"+mine)>0)) mineK.push(k); else others.push(k);
+    });
+    others.sort(function(a,b){ return s.rivIdx[b]-s.rivIdx[a]; });
+    var keep={}; 
+    mineK.forEach(function(k){ keep[k]=1; });
+    others.slice(0, Math.max(0, 900-mineK.length)).forEach(function(k){ keep[k]=1; });
+    keys.forEach(function(k){ if(!keep[k]){ delete s.rivIdx[k]; delete s.rivSplit[k]; } });
+  }
 }
 // The sport's inherited rivalries didn't start yesterday — the Iron Bowl arrives with ninety years
 // behind it. Without seeding, Alabama–Auburn began at 0 ("Cold"), identical to two schools that
@@ -8237,7 +8284,7 @@ function renderTop(){
       if(k==="_save"){ persist(); toast("✓ Game saved"); return; }
       if(k==="_restart"){ restartDynasty(); return; }
       // toggle: tapping the screen you're already on takes you back where you came from
-      if(ST.screen===k){ ST.screen=ST.menuFrom||"offseason"; }
+      if(ST.screen===k){ ST.screen=ST.menuFrom||menuReturnScreen(); }
       else { if(ST.screen!=="coachtree" && ST.screen!=="staff" && ST.screen!=="history"){ ST.menuFrom=ST.screen; ST.treeFrom=ST.screen; }
              ST.screen=k; }
       draw();
@@ -10676,12 +10723,15 @@ function addBond(a,b){
   var k=bondKey(a,b);
   s.bonds[k]=(s.bonds[k]||0) + prox*quality;
 }
-// Bonds fade when a series lapses.
+// Bonds fade when a series lapses. Pruned on the same principle as the rivalry index — a faint
+// tie between two CPU schools isn't worth carrying in the save.
 function decayBonds(){
   var s=ST.save; if(!s.bonds) return;
+  var mine=s.school;
   Object.keys(s.bonds).forEach(function(k){
     s.bonds[k]*=0.85;
-    if(s.bonds[k]<0.25) delete s.bonds[k];
+    var involvesMe=(k.indexOf(mine+"|")===0)||(k.indexOf("|"+mine)>0);
+    if(s.bonds[k] < (involvesMe?0.25:1.1)) delete s.bonds[k];
   });
 }
 // Everyone this school has a meaningful bond with, strongest first.
@@ -12415,6 +12465,20 @@ function cutPlayer(id){
 // =====================================================
 // ACTIONS / BIND
 // =====================================================
+// Where a menu screen (tree/staff/trophy) should return you when it has no memory of where you
+// came from. This used to be a hardcoded "offseason", which meant any lost breadcrumb dropped you
+// into the offseason MID-SEASON — running prepareOffseason() and potentially opening the league
+// meeting for a season that hasn't finished. Derive it from the save instead.
+function menuReturnScreen(){
+  var s=ST.save;
+  if(!s) return "setup";
+  if(ST.post) return "season";
+  if(ST.confchamp) return "season";
+  if(s._postDone && !s.schedule) return "offseason";
+  // Mid-season if there are games left to play; otherwise the offseason is genuinely right.
+  if(s.schedule && s.week!=null && s.week < s.schedule.length) return "season";
+  return "offseason";
+}
 function bind(){
   var q=function(s){return document.querySelector(s);};
   // setup
@@ -12595,15 +12659,15 @@ function bind(){
   };});
   document.querySelectorAll("[data-pretab]").forEach(function(b){b.onclick=function(){ST.preTab=b.getAttribute("data-pretab");ST.editGame=null;draw();};});
   var ot=q("#open-tree"); if(ot)ot.onclick=function(){ ST.treeFrom=ST.screen; ST.screen="coachtree"; draw(); };
-  var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.treeFrom||ST.menuFrom||"offseason"; draw(); };
-  var hb=q("#hist-back"); if(hb)hb.onclick=function(){ ST.screen=ST.menuFrom||"offseason"; draw(); };
+  var tb=q("#tree-back"); if(tb)tb.onclick=function(){ ST.screen=ST.treeFrom||ST.menuFrom||menuReturnScreen(); draw(); };
+  var hb=q("#hist-back"); if(hb)hb.onclick=function(){ ST.screen=ST.menuFrom||menuReturnScreen(); draw(); };
   document.querySelectorAll("[data-hirestaff]").forEach(function(b){
     b.onclick=function(){ hireAssistant(b.getAttribute("data-hirestaff")); };
   });
   document.querySelectorAll("[data-firestaff]").forEach(function(b){
     b.onclick=function(){ fireAssistant(b.getAttribute("data-firestaff")); };
   });
-  var sfb=q("#staff-back"); if(sfb)sfb.onclick=function(){ ST.screen=ST.menuFrom||"offseason"; draw(); };
+  var sfb=q("#staff-back"); if(sfb)sfb.onclick=function(){ ST.screen=ST.menuFrom||menuReturnScreen(); draw(); };
   document.querySelectorAll("[data-raisestaff]").forEach(function(b){
     b.onclick=function(){ raiseAssistant(b.getAttribute("data-raisestaff")); };
   });
