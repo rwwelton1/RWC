@@ -5958,13 +5958,17 @@ function loadAdminUsers(q) {
       h+='</div>';
       h+='<div id="merge-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Merge this account into another user. Groups &amp; picks transfer over, this account is deleted.</div>';
-      // Target picker: every other named account (can't merge into yourself or into a
-      // nameless orphan record). Built from the same `users` list the table renders from.
-      var _mergeOpts='<option value="">Select user to merge into…</option>';
+      // Target picker: only Google accounts — every merge lands on a registered Google
+      // user. The option VALUE is the real Firebase _key (not the username), because
+      // Google accounts are keyed by a sanitized display name (e.g. "ryanwelton"), which
+      // is NOT what userKey("Ryan Welton") produces ("ryan_welton"). Passing the true key
+      // avoids a "user not found" on merge.
+      var _mergeOpts='<option value="">Select Google user to merge into…</option>';
       users.forEach(function(t){
         if(t._key===u._key) return;          // not into itself
         if(!t.username) return;              // skip orphans / missing-username records
-        _mergeOpts+='<option value="'+x(t.username)+'">'+x(t.username)+'</option>';
+        if(!t.googleUid) return;             // targets must be Google accounts
+        _mergeOpts+='<option value="'+x(t._key)+'" data-uname="'+x(t.username)+'">'+x(t.username)+'</option>';
       });
       h+='<div style="display:flex;gap:4px"><select class="form-input" style="font-size:11px;padding:4px 8px;height:auto;flex:1" id="merge-input-'+safeKey+'">'+_mergeOpts+'</select><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
       h+='</div>';
@@ -6017,10 +6021,12 @@ function loadAdminUsers(q) {
         var guestName = this.getAttribute("data-confirm-merge");
         var key = this.getAttribute("data-user-key");
         var input = document.getElementById("merge-input-"+key);
-        var targetName = input ? input.value.trim() : "";
-        if(!targetName){ toast("Select a user to merge into"); return; }
+        var targetKey = input ? input.value.trim() : "";   // option value is the real Firebase _key
+        if(!targetKey){ toast("Select a user to merge into"); return; }
+        var _opt = input && input.options[input.selectedIndex];
+        var targetName = (_opt && _opt.getAttribute("data-uname")) || targetKey;
         if(!await scConfirm("Guest groups will be added to "+targetName+". Guest account deleted.\n\nThis cannot be undone.", {title:"Merge \""+guestName+"\" into \""+targetName+"\"?", okLabel:"Merge", danger:true})) return;
-        mergeGuestIntoUser(guestName, key, targetName);
+        mergeGuestIntoUser(guestName, key, targetName, targetKey);
       });
     });
     list.querySelectorAll("[data-history-user]").forEach(function(btn){
@@ -6218,9 +6224,12 @@ function renameUser(oldName, fbKey, newName) {
   });
 }
 
-function mergeGuestIntoUser(guestName, guestFbKey, targetUsername) {
+function mergeGuestIntoUser(guestName, guestFbKey, targetUsername, targetKeyOverride) {
   if(!DB) return;
-  var targetKey = userKey(targetUsername);
+  // Prefer the caller-supplied real Firebase key. Deriving it from the username breaks
+  // for Google accounts, whose key is a sanitized display name ("ryanwelton") rather
+  // than userKey("Ryan Welton") ("ryan_welton").
+  var targetKey = targetKeyOverride || userKey(targetUsername);
   if(!targetKey){ toast("Invalid username"); return; }
   var namesToMatch = [guestName, guestFbKey, userKey(guestName)].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
 
