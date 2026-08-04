@@ -1003,6 +1003,46 @@ function randCode() {
 }
 function ukey(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
 
+// ══════════════════════════════════════════════════════════════════════════════
+// IDENTITY LAYER — the Google uid is the ONE identifier. Users are stored at
+// users/{uid}. Group players[], pick keys, scores, trophies all key by uid. Username
+// is a pure display label, resolved via USER_DIR (a {uid:{username,emoji}} map loaded
+// once). Renaming changes only users/{uid}/username and nothing else.
+// ══════════════════════════════════════════════════════════════════════════════
+var USER_DIR = {};   // { uid: { username, emoji } }  — display lookup, loaded once
+
+// Current user's uid (the identity). Prefer the live Firebase session.
+function ME(){
+  try{ if(AUTH && AUTH.currentUser && AUTH.currentUser.uid) return AUTH.currentUser.uid; }catch(e){}
+  return (SC.currentUser && SC.currentUser.uid) || null;
+}
+// Display name for a uid (falls back to the uid tail if unknown so nothing renders blank).
+function nameOf(uid){
+  if(!uid) return "";
+  var e = USER_DIR[uid];
+  if(e && e.username) return e.username;
+  // A players entry might still be a raw name during a transition — return as-is if so.
+  if(typeof uid==="string" && uid.indexOf(" ")>=0) return uid;
+  return "(unknown)";
+}
+function emojiOf(uid){
+  var e = USER_DIR[uid];
+  return (e && e.emoji) || "🎯";
+}
+// Load the whole user directory once (small: one entry per user). Cheap and cached.
+function loadUserDir(cb){
+  if(!DB){ cb && cb(); return; }
+  DB.ref("users").once("value", function(sn){
+    var all = sn.val()||{};
+    USER_DIR = {};
+    Object.keys(all).forEach(function(uid){
+      var u = all[uid]||{};
+      USER_DIR[uid] = { username: u.username||"", emoji: u.emoji||"🎯" };
+    });
+    cb && cb();
+  }).catch(function(){ cb && cb(); });
+}
+
 function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(id); }).filter(Boolean); }
 
 // Effective status for a pool WITHIN a group.
@@ -1233,27 +1273,19 @@ function authGoogleSignIn(cb) {
   var provider = new firebase.auth.GoogleAuthProvider();
   AUTH.signInWithPopup(provider).then(function(result) {
     var gUser = result.user;
+    var uid = gUser.uid;
     var displayName = gUser.displayName || gUser.email.split("@")[0];
-    // Sanitize to a valid key
-    var key = displayName.toLowerCase().replace(/[^a-z0-9_]/g,"") || "user" + Date.now();
-    // Try to load existing user record by google uid first
-    DB.ref("users").orderByChild("googleUid").equalTo(gUser.uid).once("value", function(sn) {
-      var existing = null;
-      sn.forEach(function(child){ existing = child.val(); existing._key = child.key; });
-      if(existing) {
-        // Already registered — load their profile
-        cb(null, { username: existing.username, groups: existing.groups||[], emoji: existing.emoji||"🎯", uid: gUser.uid, _key: existing._key });
+    // The user record lives at users/{uid}. uid IS the identity — no name-derived key,
+    // no separate googleUid field (the key is the uid).
+    DB.ref("users/"+uid).once("value", function(sn){
+      var existing = sn.val();
+      if(existing){
+        cb(null, { username: existing.username||displayName, groups: existing.groups||[], emoji: existing.emoji||"🎯", uid: uid, _key: uid });
       } else {
-        // Check if key is taken
-        DB.ref("users/"+key).once("value", function(sn2){
-          var taken = sn2.val();
-          var finalKey = taken ? key + Math.floor(100+Math.random()*900) : key;
-          var username = taken ? displayName + Math.floor(100+Math.random()*900) : displayName;
-          var data = { username: username, groups: [], emoji: "🎯", googleUid: gUser.uid, googleEmail: gUser.email, createdAt: Date.now() };
-          DB.ref("users/"+finalKey).set(data, function(err){
-            if(err){ cb("Failed to create account"); return; }
-            cb(null, { username: username, groups: [], emoji: "🎯", uid: gUser.uid, _key: finalKey });
-          });
+        var data = { username: displayName, groups: [], emoji: "🎯", googleEmail: gUser.email, createdAt: Date.now() };
+        DB.ref("users/"+uid).set(data, function(err){
+          if(err){ cb("Failed to create account"); return; }
+          cb(null, { username: displayName, groups: [], emoji: "🎯", uid: uid, _key: uid });
         });
       }
     });
@@ -1262,14 +1294,13 @@ function authGoogleSignIn(cb) {
   });
 }
 
-function addGroupToUser(username, groupId) {
-  var key = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  if(!DB) return;
-  DB.ref("users/"+key+"/groups").once("value", function(sn){
+function addGroupToUser(uid, groupId) {
+  if(!DB || !uid) return;
+  DB.ref("users/"+uid+"/groups").once("value", function(sn){
     var groups = sn.val() || [];
     if(groups.indexOf(groupId) < 0) {
       groups.push(groupId);
-      DB.ref("users/"+key+"/groups").set(groups);
+      DB.ref("users/"+uid+"/groups").set(groups);
       if(SC.currentUser) SC.currentUser.groups = groups;
     }
   });
@@ -1321,23 +1352,22 @@ function createGroup(name, adminPw, pools, cb) {
     id: id,
     name: name,
     adminPw: adminPw,
-    createdBy: SC.currentUser ? SC.currentUser.username : null,
-    // Identity-based ownership for Firebase rules. ownerUid is the creator's Google uid;
-    // adminUids is the writable allowlist (starts as just the owner, extensible later).
+    // ownerUid/adminUids are the identity-based admin allowlist (Firebase rules).
     ownerUid: _uid,
     adminUids: [_uid],
-    adminUsers: SC.currentUser ? [SC.currentUser.username] : [],
-    players: SC.currentUser ? [SC.currentUser.username] : [],
+    createdByUid: _uid,
+    createdByName: SC.currentUser ? SC.currentUser.username : null,  // display only
+    players: [_uid],                                                  // uids, not names
     pools: pools,
     data: { statuses:{}, results:{} }
   };
   if(DB) {
     DB.ref("groups/"+id).set(group, function(err){
       if(err) { cb(null, "Failed to save. Check connection."); return; }
-      // Activity event: group created
+      var _cn = group.createdByName || "Someone";
       writeActivityEvent(id, {
-        type:"group_created", actor: group.createdBy||"Someone",
-        text:"<strong>"+x(group.createdBy||"Someone")+"</strong> created the group",
+        type:"group_created", actor: _cn,
+        text:"<strong>"+x(_cn)+"</strong> created the group",
         icon:"🪄"
       });
       // Auto-set pgatour to "open" and write selected type for new groups
@@ -1367,11 +1397,9 @@ function isGroupAdmin(group) {
       else if(au[uid]) return true;
     }
   }
-  // Legacy fallback: username / createdBy (for anything not yet carrying uids).
-  if(!SC.currentUser) return false;
-  var u = SC.currentUser.username;
-  var adminUsers = group.adminUsers || [];
-  return adminUsers.indexOf(u) >= 0 || group.createdBy === u;
+  // createdByUid fallback (owner who predates adminUids for any reason).
+  if(uid && group.createdByUid && group.createdByUid === uid) return true;
+  return false;
 }
 
 function checkGroupAdmin(group) {
@@ -1558,13 +1586,14 @@ function draw() {
     SC._pendingJoin = null;
     loadGroup(_pj.id, function(group, err){
       if(err||!group){ SC.screen="profile"; draw(); return; }
-      var alreadyMember = (group.players||[]).indexOf(SC.currentUser.username)>=0;
+      var _myUid = ME();
+      var alreadyMember = (group.players||[]).indexOf(_myUid)>=0;
       SC.joinTarget = {
         group: group,
         prefillPw: _pj.pw||"",
         onSuccess: function(){
-          var un = SC.currentUser.username;
-          if(!alreadyMember){
+          var un = ME();
+          if(!alreadyMember && un){
             var np=(group.players||[]).slice(); if(np.indexOf(un)<0)np.push(un);
             group.players=np; if(DB)DB.ref("groups/"+group.id+"/players").set(np);
             addGroupToUser(un, group.id);
@@ -1681,22 +1710,25 @@ function showProfileModal() {
     var newName = (document.getElementById("pm-username-input").value||"").trim();
     var errEl = document.getElementById("pm-err");
     if(!newName || newName.length < 2){ errEl.textContent = "Must be at least 2 characters"; return; }
-    var newKey = newName.toLowerCase().replace(/[^a-z0-9_]/g,"");
-    if(newKey !== newName.toLowerCase()){ errEl.textContent = "Letters, numbers and underscores only"; return; }
+    // Username is now a pure display label (not a key), so spaces/punctuation are fine.
     errEl.textContent = "";
     var btn = document.getElementById("pm-save");
+    var uid = ME();
+    if(!uid){ errEl.textContent = "Please sign in again."; return; }
     if(btn){ btn.disabled=true; btn.textContent="Saving…"; }
-    authSignup(newName, function(err, user){
+    // Rename is now a single-field write — nothing else references the name.
+    DB.ref("users/"+uid+"/username").set(newName, function(err){
       if(err){
-        errEl.textContent = err;
+        errEl.textContent = "Failed to save — check connection";
         if(btn){ btn.disabled=false; btn.textContent="Save Username"; }
-      } else {
-        SC.currentUser = user;
-        saveSession(user.username, user.emoji);
-        el.remove();
-        draw();
-        toast("Username updated", "ok");
+        return;
       }
+      SC.currentUser.username = newName;
+      if(USER_DIR[uid]) USER_DIR[uid].username = newName; else USER_DIR[uid]={username:newName,emoji:(SC.currentUser.emoji||"🎯")};
+      saveSession(newName, SC.currentUser.emoji);
+      el.remove();
+      draw();
+      toast("Username updated", "ok");
     });
   });
 
@@ -2038,7 +2070,7 @@ function renderProfile() {
       var standings = calcStandings(g, data);
       var myRank = -1, myRankNum = 0, myTied = false;
       for(var ri=0;ri<standings.length;ri++){
-        if(standings[ri].name===u.username){
+        if(standings[ri].uid===ME()){
           myRank=ri;
           myRankNum = standings[ri].rank||(ri+1);   // competition rank (ties share)
           myTied = !!standings[ri].tied;
@@ -2072,12 +2104,11 @@ function renderProfile() {
         var lowerBetterG = activePool && activePool.scoringDirection === "lower-better";
         if(Object.keys(poolScoresG).length > 0){
           var rankedG = (g.players||[]).slice().sort(function(a,b){
-            var ak=ukey(a), bk=ukey(b);
-            var av=Number(poolScoresG[ak])||0, bv=Number(poolScoresG[bk])||0;
+            var av=Number(poolScoresG[a])||0, bv=Number(poolScoresG[b])||0;   // a,b are uids
             return lowerBetterG ? av-bv : bv-av;
           });
-          var myPoolRankG = rankedG.indexOf(u.username);
-          var myPoolPtsG = poolScoresG[ukey(u.username)] !== undefined ? poolScoresG[ukey(u.username)] : null;
+          var myPoolRankG = rankedG.indexOf(ME());
+          var myPoolPtsG = poolScoresG[ME()] !== undefined ? poolScoresG[ME()] : null;
           if(myPoolRankG >= 0) {
             var rc = myPoolRankG===0?'#fbbf24':myPoolRankG===1?'#94a3b8':myPoolRankG===2?'#b45309':'#475569';
             liveRankHtml = '<div style="font-size:10px;color:#475569">'+activePool.icon+' <span style="color:'+rc+';font-weight:700">#'+(myPoolRankG+1)+'</span> of '+(g.players||[]).length+(myPoolPtsG!==null?' &middot; <span style="color:#94a3b8">'+myPoolPtsG+' pts</span>':'')+'</div>';
@@ -2103,8 +2134,8 @@ function renderProfile() {
 
       // Is the current user an admin of this group?
       var _gcIsAdmin = SC.isMaster ||
-        (u && g.createdBy && g.createdBy === u.username) ||
-        (u && g.adminUsers && g.adminUsers.indexOf(u.username) >= 0);
+        (u && g.ownerUid && g.ownerUid === ME()) ||
+        (u && g.adminUids && (Array.isArray(g.adminUids)?g.adminUids.indexOf(ME())>=0:!!g.adminUids[ME()]));
 
       gh += '<div class="gcard" data-gid="'+x(g.id)+'"'+(activeUrl?' data-pool-url="'+x(activeUrl)+'"':'')+'>'; 
 
@@ -2242,7 +2273,7 @@ function renderProfile() {
         // Vertical compact list — top 4 + user always shown
         var _isGolf = pools.some(function(pool){ return pool.sport==="Golf"; });
         var _golfPoolId = _isGolf ? (pools.find(function(pool){ return pool.sport==="Golf"; })||{}).id : null;
-        var myStandingIdx = standings.findIndex(function(p){ return p.name===u.username; });
+        var myStandingIdx = standings.findIndex(function(p){ return p.uid===ME(); });
         var _showIdxs = [];
         for(var _si=0;_si<Math.min(4,standings.length);_si++) _showIdxs.push(_si);
         if(myStandingIdx>3 && myStandingIdx>=0) _showIdxs.push(myStandingIdx);
@@ -2251,9 +2282,8 @@ function renderProfile() {
         var _prevShowIdx = -1;
         _showIdxs.forEach(function(i){
           var p = standings[i]; if(!p) return;
-          var isMe = p.name===u.username;
-          var _pUkey = ukey(p.name);
-          var _missingPicks = _hasLockedPool && !_submittedPlayers[_pUkey];
+          var isMe = p.uid===ME();
+          var _missingPicks = _hasLockedPool && !_submittedPlayers[p.uid];
           var _rowBg = isMe?'var(--blue-bg)':'transparent';
           var _nameColor = _missingPicks?'var(--red2)':isMe?'var(--blue)':'var(--text)';
           var _rk = p.rank||(i+1);
@@ -2266,8 +2296,8 @@ function renderProfile() {
           gh+='<div style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
           if(isMe) gh+='<span style="font-size:6px;font-weight:800;background:var(--gold);border:1px solid var(--border);border-radius:3px;padding:1px 3px;color:var(--text);flex-shrink:0">YOU</span>';
           var _scoreHtml="";
-          if(_isGolf&&_golfPoolId&&p.golfScores&&p.golfScores[_golfPoolId]&&p.golfScores[_golfPoolId][p.name]){
-            var _gs=p.golfScores[_golfPoolId][p.name];
+          if(_isGolf&&_golfPoolId&&p.golfScores&&p.golfScores[_golfPoolId]&&p.golfScores[_golfPoolId][p.uid]){
+            var _gs=p.golfScores[_golfPoolId][p.uid];
             if(_gs.cut) _scoreHtml='<span style="font-size:9px;font-weight:800;color:var(--muted)">CUT</span>';
             else if(_gs.score!==undefined){var _sc=_gs.score;var _scStr=_sc===0?"E":_sc>0?"+"+_sc:""+_sc;var _scCol=_sc<0?"var(--green)":_sc>0?"var(--red2)":"var(--muted)";_scoreHtml='<span style="font-size:11px;font-weight:900;color:'+_scCol+'">'+_scStr+'</span>';}
           } else {
@@ -2956,8 +2986,7 @@ function computeAndWritePoolResults(groups, ukey) {
       var players = (g.players||[]);
       var playerScores = {};
       players.forEach(function(p){
-        var pk = p.toLowerCase().replace(/[^a-z0-9_]/g,"");
-        var s = scores[pk];
+        var s = scores[p];   // p is a uid; scores keyed by uid
         playerScores[p] = (s !== undefined && s !== null) ? Number(s) : null;
       });
 
@@ -2966,8 +2995,8 @@ function computeAndWritePoolResults(groups, ukey) {
           return isGolf ? playerScores[a]-playerScores[b] : playerScores[b]-playerScores[a];
         });
 
-      var myRank = ranked.indexOf(SC.currentUser.username) + 1;
-      var myScoreNum = playerScores[SC.currentUser.username];
+      var myRank = ranked.indexOf(ME()) + 1;
+      var myScoreNum = playerScores[ME()];
       if(myScoreNum === null || myRank === 0) return;
 
       // Score of 1st and 2nd place
@@ -4422,31 +4451,30 @@ function joinGroup(code) {
   loadGroup(code, function(group, err){
     if(err) { SC.error=err; draw(); return; }
 
-    var alreadyMember = SC.currentUser && (group.players||[]).indexOf(SC.currentUser.username) >= 0;
+    var _myUid = ME();
+    var alreadyMember = _myUid && (group.players||[]).indexOf(_myUid) >= 0;
 
     function enterGroup() {
-      // Add to players if new
-      if(!alreadyMember && SC.currentUser) {
+      // Add to players if new (players are uids)
+      if(!alreadyMember && _myUid) {
         var newPlayers = (group.players||[]).slice();
-        if(newPlayers.indexOf(SC.currentUser.username) < 0) {
-          newPlayers.push(SC.currentUser.username);
+        if(newPlayers.indexOf(_myUid) < 0) {
+          newPlayers.push(_myUid);
           group.players = newPlayers;
           if(DB) DB.ref("groups/"+group.id+"/players").set(newPlayers);
         }
-        addGroupToUser(SC.currentUser.username, group.id);
-        // Stats: first-join timestamp for Drafted badge
-        var _joinUkey = SC.currentUser.username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-        DB.ref("users/"+_joinUkey+"/stats/groupsJoined").once("value", function(sn){
+        addGroupToUser(_myUid, group.id);
+        // Stats keyed by uid.
+        DB.ref("users/"+_myUid+"/stats/groupsJoined").once("value", function(sn){
           var gj = (sn.val()||0) + 1;
-          DB.ref("users/"+_joinUkey+"/stats/groupsJoined").set(gj);
-          DB.ref("users/"+_joinUkey+"/stats/groupJoinTimes/"+group.id).set(Date.now());
+          DB.ref("users/"+_myUid+"/stats/groupsJoined").set(gj);
+          DB.ref("users/"+_myUid+"/stats/groupJoinTimes/"+group.id).set(Date.now());
         });
-        // Invite tracking — credit the group creator (first player) for Going Viral
+        // Credit the group creator (first player, a uid) for Going Viral.
         var _creator = (group.players||[])[0];
-        if(_creator && _creator !== SC.currentUser.username){
-          var _creatorUkey = _creator.toLowerCase().replace(/[^a-z0-9_]/g,"");
-          DB.ref("users/"+_creatorUkey+"/stats/inviteAccepted").once("value", function(sn){
-            DB.ref("users/"+_creatorUkey+"/stats/inviteAccepted").set((sn.val()||0)+1);
+        if(_creator && _creator !== _myUid){
+          DB.ref("users/"+_creator+"/stats/inviteAccepted").once("value", function(sn){
+            DB.ref("users/"+_creator+"/stats/inviteAccepted").set((sn.val()||0)+1);
           });
         }
       }
@@ -4460,12 +4488,11 @@ function joinGroup(code) {
       if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
       subscribeGroupPlayers(group.id);
 
-      // Navigate directly to the active pool if one exists
+      // Navigate directly to the active pool if one exists. Pass the uid as user.
       var activePools = (group.pools||[]).map(function(pid){ return POOL_LIBRARY.find(function(p){return p.id===pid;}); }).filter(Boolean);
-      var username = SC.currentUser ? SC.currentUser.username : "";
       var activePool = activePools.find(function(p){ return (group.statuses||{})[p.id]==="open"||(group.statuses||{})[p.id]==="live"; });
-      if(activePool && username && poolFileReady(activePool.id)) {
-        window.location.href = activePool.url+"?group="+encodeURIComponent(group.id)+"&user="+encodeURIComponent(username);
+      if(activePool && _myUid && poolFileReady(activePool.id)) {
+        window.location.href = activePool.url+"?group="+encodeURIComponent(group.id)+"&user="+encodeURIComponent(_myUid);
       } else {
         SC.screen = "hub";
         SC.error = "";
@@ -4633,7 +4660,7 @@ function loadPlayerEmojis(players, cb) {
   });
   Promise.all(promises).then(cb).catch(cb);
 }
-function playerEmoji(username){ return _emojiCache[username] || "🎯"; }
+function playerEmoji(uid){ return emojiOf(uid) || _emojiCache[uid] || "🎯"; }
 
 // ── HUB ───────────────────────────────────────────────────────────────────────
 function renderHub() {
@@ -4671,7 +4698,7 @@ function renderHub() {
     h += '<div class="admin-panel-title"><span>&#127942; Results &mdash; '+x(g.name)+'</span></div>';
     h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Set finish order for this group. Competition states are in the Admin Panel.</div>';
     var none='<option value="">--</option>';
-    var opts=(g.players||[]).map(function(p){return'<option value="'+x(p)+'">'+x(p)+'</option>';}).join("");
+    var opts=(g.players||[]).map(function(p){return'<option value="'+x(p)+'">'+x(nameOf(p))+'</option>';}).join("");
     pools.forEach(function(pool){
       var r=(data.results||{})[pool.id]||{};
       h += '<div class="result-row"><div class="result-pool-name">'+pool.icon+' '+x(pool.name.split(" ")[0])+'</div><div class="result-selects">';
@@ -4687,11 +4714,12 @@ function renderHub() {
     h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">&#9889; Group Admins</div>';
     h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Grant or revoke admin access for any member.</div>';
     (g.players||[]).forEach(function(player){
-      var isCreatorPlayer = player === g.createdBy;
-      var hasAdmin = (g.adminUsers||[]).indexOf(player) >= 0 || isCreatorPlayer;
-      var pEm = playerEmoji(player);
+      var isCreatorPlayer = player === g.ownerUid || player === g.createdByUid;
+      var _au = g.adminUids||[];
+      var hasAdmin = (Array.isArray(_au)?_au.indexOf(player)>=0:!!_au[player]) || isCreatorPlayer;
+      var pEm = emojiOf(player);
       h += '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #07090f">';
-      h += '<div style="flex:1;font-size:12px;color:#e2e8f0">'+pEm+' '+x(player)+(isCreatorPlayer?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+'</div>';
+      h += '<div style="flex:1;font-size:12px;color:#e2e8f0">'+pEm+' '+x(nameOf(player))+(isCreatorPlayer?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+'</div>';
       if(hasAdmin) {
         h += '<button data-master-revoke-admin="'+x(player)+'" style="font-size:10px;padding:3px 9px;border-radius:6px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.18);color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">&#9889; Admin</button>';
       } else {
@@ -4736,14 +4764,14 @@ function renderHub() {
     h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
     h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">Members ('+( g.players||[]).length+')</div>';
     (g.players||[]).forEach(function(player){
-      var isMe = SC.currentUser && player === SC.currentUser.username;
-      var isCreatorPlayer = player === g.createdBy;
-      var hasAdmin = (g.adminUsers||[]).indexOf(player) >= 0 || isCreatorPlayer;
-      var pEm = playerEmoji(player);
+      var isMe = player === ME();
+      var _au = g.adminUids||[];
+      var hasAdmin = (Array.isArray(_au)?_au.indexOf(player)>=0:!!_au[player]) || player===g.ownerUid || player===g.createdByUid;
+      var pEm = emojiOf(player);
+      var pName = nameOf(player);
       h += '<div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid #07090f">';
-      h += '<div style="flex:1;font-size:13px;color:'+(isMe?"#a5b4fc":"#e2e8f0")+'">' + pEm + ' ' + x(player) + (isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'') + '</div>';
+      h += '<div style="flex:1;font-size:13px;color:'+(isMe?"#a5b4fc":"#e2e8f0")+'">' + pEm + ' ' + x(pName) + (isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'') + '</div>';
       if(!isMe) {
-        // Admin toggle button — yellow filled if admin, outline if not
         if(hasAdmin) {
           h += '<button data-revoke-admin="'+x(player)+'" style="font-size:10px;padding:3px 9px;border-radius:6px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.18);color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">&#9889;</button>';
         } else {
@@ -4766,13 +4794,13 @@ function renderHub() {
     var clickable=true; // all statuses navigate
     var dimmed=(status==="coming-soon");
     var result=(data.results||{})[pool.id];
-    var destUrl = pool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(SC.currentUser?SC.currentUser.username:"");
+    var destUrl = pool.url+"?group="+encodeURIComponent(g.id)+"&user="+encodeURIComponent(ME()||"");
     var _ready = poolFileReady(pool.id);
     h += '<div class="pool-card'+" clickable"+(dimmed?" dimmed":"")+(_ready?"":" dimmed")+'"';
     h += ' onclick="openPoolUrl(\''+pool.id+'\',\''+destUrl+'\')"';
     h += '><div class="pool-card-inner">';
     h += '<div class="pool-icon" style="background:'+pool.bg+'">'+pool.icon+'</div>';
-    var myName = SC.currentUser ? SC.currentUser.username : null;
+    var myName = ME();
     // Compute per-pool ranking from picks scores stored in data
     var poolPicksData = (data[pool.id]||{}).picks || {};
     var _pdKey = pool.id; if(pool.id==="cws"&&data["cws2026"]) _pdKey="cws2026";
@@ -4782,15 +4810,15 @@ function renderHub() {
     if(!poolScoresData || Object.keys(poolScoresData).length === 0) {
       // If no scores yet, initialize with zeros for all players
       poolScoresData = {};
-      (g.players||[]).forEach(function(p){ poolScoresData[ukey(p)] = 0; });
+      (g.players||[]).forEach(function(p){ poolScoresData[p] = 0; });
     }
     
     var _plOrd = function(n){ return ({1:'1st',2:'2nd',3:'3rd'})[n]||(n+'th'); };
     // Rank players by their stored score for this pool
     var poolScores = [];
     (g.players||[]).forEach(function(p){
-      var pts = (poolScoresData[ukey(p)] !== undefined) ? poolScoresData[ukey(p)] : null;
-      poolScores.push({name:p, pts:pts});
+      var pts = (poolScoresData[p] !== undefined) ? poolScoresData[p] : null;
+      poolScores.push({name:nameOf(p), uid:p, pts:pts});
     });
     poolScores.sort(function(a,b){
       if(a.pts===null && b.pts===null) return 0;
@@ -4800,7 +4828,7 @@ function renderHub() {
     });
     var myPoolRank = null, myPoolPts = null;
     for(var _pi=0;_pi<poolScores.length;_pi++){
-      if(poolScores[_pi].name===myName){
+      if(poolScores[_pi].uid===ME()){
         myPoolRank = _pi+1;
         myPoolPts = poolScores[_pi].pts;
         break;
@@ -4809,7 +4837,7 @@ function renderHub() {
     // Fall back to season finish if pool scores not available
     var myFinish = null;
     for(var _si=0;_si<standings.length;_si++){
-      if(standings[_si].name===myName){ myFinish=standings[_si].finishes[pool.id]||null; break; }
+      if(standings[_si].uid===ME()){ myFinish=standings[_si].finishes[pool.id]||null; break; }
     }
     h += '<div class="pool-info"><div class="pool-name">'+x(pool.name)+'</div>';
     h += '<div class="pool-meta">'+x(pool.desc)+'<span style="color:#334155"> &middot; '+x(pool.dates||"")+'</span></div>';
@@ -4843,14 +4871,14 @@ function renderHub() {
         h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myPoolPts+'</b>'+(grandMaxVal2!==null?' / '+grandMaxVal2:'')+'  pts</span>';
         h += '</div>';
       } else if(status==="open"||status==="locked") {
-        var poolPicks2 = poolPicksData[myName];
+        var poolPicks2 = poolPicksData[ME()];
         var hasPicks = poolPicks2 !== undefined && poolPicks2 !== null;
         var grandMaxVal = (data[pool.id]||{}).grandMax || null;
-        var myMaxScore = ((data[pool.id]||{}).maxScores||{})[myName] !== undefined ? ((data[pool.id]||{}).maxScores||{})[myName] : null;
+        var myMaxScore = ((data[pool.id]||{}).maxScores||{})[ME()] !== undefined ? ((data[pool.id]||{}).maxScores||{})[ME()] : null;
         h += '<div style="display:flex;align-items:center;gap:5px;margin-top:3px">';
         if(hasPicks && grandMaxVal !== null && myPoolPts === null) {
           // Has picks but no results yet — show score/max
-          var myRawScore = poolScoresData[ukey(myName)] !== undefined ? poolScoresData[ukey(myName)] : 0;
+          var myRawScore = poolScoresData[ME()] !== undefined ? poolScoresData[ME()] : 0;
           h += '<span style="font-size:9px;color:#94a3b8"><b style="color:#e2e8f0">'+myRawScore+'</b> / '+grandMaxVal+' pts</span>';
         } else if(!hasPicks) {
           h += '<span style="font-size:9px;color:#fbbf24">⚠ No picks yet</span>';
@@ -4882,8 +4910,8 @@ function renderHub() {
       h += '<div style="font-size:8px;color:#334155;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;font-weight:700">Leaderboard</div>';
       poolScores.forEach(function(p, i){
         if(p.pts === null && !hasAnyPts && i >= 3) return; // cap at 3 if no scores yet
-        var isMe = p.name === myName;
-        var pEm = playerEmoji(p.name);
+        var isMe = p.uid === ME();
+        var pEm = emojiOf(p.uid);
         var rankColors = ['#fbbf24','#94a3b8','#b45309'];
         var rc3 = rankColors[i] || '#334155';
         var maxPts = maxScoresLb[p.name] !== undefined ? maxScoresLb[p.name] : null;
@@ -4915,7 +4943,7 @@ function renderHub() {
       poolScores.forEach(function(p, i){
         if(prevRanksH[p.name] === undefined) return;
         var diff = prevRanksH[p.name] - (i+1);
-        if(Math.abs(diff) > Math.abs(bigDiff)){ bigDiff = diff; bigMover = p.name; }
+        if(Math.abs(diff) > Math.abs(bigDiff)){ bigDiff = diff; bigMover = p; }
       });
       if(bigMover && bigDiff !== 0) {
         var mvIcon = bigDiff > 0 ? '▲' : '▼';
@@ -4923,16 +4951,16 @@ function renderHub() {
         var mvSpots = Math.abs(bigDiff) === 1 ? '1 spot' : Math.abs(bigDiff)+' spots';
         h += '<div style="border-top:1px solid #0f1923;padding:6px 12px;display:flex;align-items:center;gap:6px">';
         h += '<span style="font-size:9px;color:'+mvCol+';font-weight:900">'+mvIcon+'</span>';
-        h += '<span style="font-size:10px;color:#475569;font-weight:700">'+playerEmoji(bigMover)+' <b style="color:#94a3b8">'+x(bigMover)+'</b> moved '+mvSpots+'</span>';
+        h += '<span style="font-size:10px;color:#475569;font-weight:700">'+emojiOf(bigMover.uid)+' <b style="color:#94a3b8">'+x(bigMover.name)+'</b> moved '+mvSpots+'</span>';
         h += '</div>';
       }
     }
 
     if(result&&(result.first||result.second||result.third)){
       h += '<div class="pool-winner"><div class="podium">';
-      if(result.first)  h+='<div class="podium-item p1">1st <b>'+x(result.first)+'</b></div>';
-      if(result.second) h+='<div class="podium-item p2">2nd <b>'+x(result.second)+'</b></div>';
-      if(result.third)  h+='<div class="podium-item p3">3rd <b>'+x(result.third)+'</b></div>';
+      if(result.first)  h+='<div class="podium-item p1">1st <b>'+x(nameOf(result.first))+'</b></div>';
+      if(result.second) h+='<div class="podium-item p2">2nd <b>'+x(nameOf(result.second))+'</b></div>';
+      if(result.third)  h+='<div class="podium-item p3">3rd <b>'+x(nameOf(result.third))+'</b></div>';
       h += '</div></div>';
     }
     h += '</div>';
@@ -4945,8 +4973,8 @@ function renderHub() {
   h += '<div class="section-label">Members</div>';
   h += '<div class="standings-card" style="margin-bottom:24px"><table class="groups-table"><thead><tr><th>Username</th></tr></thead><tbody>';
   (g.players||[]).forEach(function(p){
-    var isMe = SC.currentUser && p === SC.currentUser.username;
-    h += '<tr><td class="group-name-cell">'+playerEmoji(p)+' '+x(p)+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</td></tr>';
+    var isMe = p === ME();
+    h += '<tr><td class="group-name-cell">'+emojiOf(p)+' '+x(nameOf(p))+(isMe?' <span style="font-size:9px;color:#475569">(you)</span>':'')+'</td></tr>';
   });
   h += '</tbody></table></div>';
 
@@ -5085,15 +5113,16 @@ function renderHub() {
   // Master grant/revoke admin buttons
   document.querySelectorAll("[data-master-grant-admin]").forEach(function(btn){
     btn.addEventListener("click", function(){
-      var player = this.getAttribute("data-master-grant-admin");
+      var player = this.getAttribute("data-master-grant-admin");   // uid
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
-      var adminUsers = (SC.group.adminUsers || []).slice();
-      if(adminUsers.indexOf(player) < 0) adminUsers.push(player);
-      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+      var adminUids = (SC.group.adminUids || []);
+      adminUids = Array.isArray(adminUids)?adminUids.slice():Object.keys(adminUids);
+      if(adminUids.indexOf(player) < 0) adminUids.push(player);
+      DB.ref("groups/" + gid + "/adminUids").set(adminUids, function(err){
         if(err){ toast("Error granting admin"); return; }
-        SC.group.adminUsers = adminUsers;
-        toast(player + " is now a group admin ✓");
+        SC.group.adminUids = adminUids;
+        toast(nameOf(player) + " is now a group admin ✓");
         draw();
       });
     });
@@ -5101,16 +5130,18 @@ function renderHub() {
 
   document.querySelectorAll("[data-master-revoke-admin]").forEach(function(btn){
     btn.addEventListener("click", async function(){
-      var player = this.getAttribute("data-master-revoke-admin");
-      if(player === SC.group.createdBy){ toast("Can't revoke the group creator"); return; }
-      if(!await scConfirm("Revoke admin access for " + player + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
+      var player = this.getAttribute("data-master-revoke-admin");   // uid
+      if(player === SC.group.ownerUid || player === SC.group.createdByUid){ toast("Can't revoke the group creator"); return; }
+      if(!await scConfirm("Revoke admin access for " + nameOf(player) + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
-      var adminUsers = (SC.group.adminUsers || []).filter(function(u){ return u !== player; });
-      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+      var _au = SC.group.adminUids || [];
+      _au = Array.isArray(_au)?_au:Object.keys(_au);
+      var adminUids = _au.filter(function(u){ return u !== player; });
+      DB.ref("groups/" + gid + "/adminUids").set(adminUids, function(err){
         if(err){ toast("Error revoking admin"); return; }
-        SC.group.adminUsers = adminUsers;
-        toast(player + " admin access revoked");
+        SC.group.adminUids = adminUids;
+        toast(nameOf(player) + " admin access revoked");
         draw();
       });
     });
@@ -5119,15 +5150,16 @@ function renderHub() {
   // Grant/Revoke admin buttons
   document.querySelectorAll("[data-grant-admin]").forEach(function(btn){
     btn.addEventListener("click", function(){
-      var player = this.getAttribute("data-grant-admin");
+      var player = this.getAttribute("data-grant-admin");   // uid
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
-      var adminUsers = (SC.group.adminUsers || []).slice();
-      if(adminUsers.indexOf(player) < 0) adminUsers.push(player);
-      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+      var adminUids = (SC.group.adminUids || []).slice();
+      if(!Array.isArray(adminUids)) adminUids = Object.keys(adminUids);
+      if(adminUids.indexOf(player) < 0) adminUids.push(player);
+      DB.ref("groups/" + gid + "/adminUids").set(adminUids, function(err){
         if(err){ toast("Error granting admin"); return; }
-        SC.group.adminUsers = adminUsers;
-        toast(player + " is now an admin ✓");
+        SC.group.adminUids = adminUids;
+        toast(nameOf(player) + " is now an admin ✓");
         draw();
       });
     });
@@ -5135,15 +5167,17 @@ function renderHub() {
 
   document.querySelectorAll("[data-revoke-admin]").forEach(function(btn){
     btn.addEventListener("click", async function(){
-      var player = this.getAttribute("data-revoke-admin");
-      if(!await scConfirm("Revoke admin access for " + player + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
+      var player = this.getAttribute("data-revoke-admin");   // uid
+      if(!await scConfirm("Revoke admin access for " + nameOf(player) + "?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
-      var adminUsers = (SC.group.adminUsers || []).filter(function(u){ return u !== player; });
-      DB.ref("groups/" + gid + "/adminUsers").set(adminUsers, function(err){
+      var _au = SC.group.adminUids || [];
+      if(!Array.isArray(_au)) _au = Object.keys(_au);
+      var adminUids = _au.filter(function(u){ return u !== player; });
+      DB.ref("groups/" + gid + "/adminUids").set(adminUids, function(err){
         if(err){ toast("Error revoking admin"); return; }
-        SC.group.adminUsers = adminUsers;
-        toast(player + " admin access revoked");
+        SC.group.adminUids = adminUids;
+        toast(nameOf(player) + " admin access revoked");
         draw();
       });
     });
@@ -5152,8 +5186,8 @@ function renderHub() {
   // Remove player buttons
   document.querySelectorAll("[data-remove-player]").forEach(function(btn){
     btn.addEventListener("click", async function(){
-      var player = this.getAttribute("data-remove-player");
-      if(!await scConfirm("Remove " + player + " from this group?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
+      var player = this.getAttribute("data-remove-player");   // uid
+      if(!await scConfirm("Remove " + nameOf(player) + " from this group?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
       if(!DB) { toast("Firebase unavailable"); return; }
       var gid = SC.group.id;
       DB.ref("groups/" + gid).once("value", function(sn){
@@ -5162,14 +5196,13 @@ function renderHub() {
         var players = (gdata.players || []).filter(function(p){ return p !== player; });
         DB.ref("groups/" + gid + "/players").set(players, function(err){
           if(err){ toast("Error removing player"); return; }
-          // Also remove from the user's groups list in Firebase
-          var ukey = function(n){return n.toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}(player);
-          DB.ref("users/" + ukey + "/groups").once("value", function(usn){
+          // Clean the removed user's own groups list (keyed by uid).
+          DB.ref("users/" + player + "/groups").once("value", function(usn){
             var ugroups = (usn.val() || []).filter(function(gid2){ return gid2 !== gid; });
-            DB.ref("users/" + ukey + "/groups").set(ugroups);
+            DB.ref("users/" + player + "/groups").set(ugroups);
           });
           SC.group.players = players;
-          toast(player + " removed from group");
+          toast(nameOf(player) + " removed from group");
           draw();
         });
       });
@@ -5189,7 +5222,7 @@ function renderHub() {
     var tbody = document.getElementById("groups-tbody");
     if(!tbody) return;
     var q = (query||"").toLowerCase().trim();
-    var myName = SC.currentUser ? SC.currentUser.username : null;
+    var myName = ME();
     var filtered = groups.filter(function(g){
       // Hide groups the user is already in
       if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
@@ -5896,10 +5929,11 @@ function renderGroupAdminMembers(group, container) {
   if(!players.length){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:8px">No members in this group</div>'; return; }
   var h = '';
   players.forEach(function(player){
-    var isCreator = player === group.createdBy;
-    var hasAdmin = (group.adminUsers||[]).indexOf(player) >= 0 || isCreator;
+    var isCreator = player === group.ownerUid || player === group.createdByUid;
+    var _au = group.adminUids||[];
+    var hasAdmin = (Array.isArray(_au)?_au.indexOf(player)>=0:!!_au[player]) || isCreator;
     h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #0f1923">';
-    h += '<div style="flex:1;font-size:12px;color:#e2e8f0">🎯 '+x(player)+(isCreator?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+'</div>';
+    h += '<div style="flex:1;font-size:12px;color:#e2e8f0">'+emojiOf(player)+' '+x(nameOf(player))+(isCreator?' <span style="font-size:9px;color:#fbbf24">creator</span>':'')+'</div>';
     if(hasAdmin){
       h += '<button data-ga-revoke="'+x(player)+'" data-ga-gid="'+x(group.id)+'" style="font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid rgba(251,191,36,.5);background:rgba(251,191,36,.18);color:#fbbf24;cursor:pointer;font-family:inherit;font-weight:700">⚡ Admin</button>';
     } else {
@@ -5912,18 +5946,20 @@ function renderGroupAdminMembers(group, container) {
   });
   container.innerHTML = h;
 
+  function _auArr(g){ var a=g.adminUids||[]; return Array.isArray(a)?a.slice():Object.keys(a); }
+
   container.querySelectorAll("[data-ga-grant]").forEach(function(btn){
     btn.addEventListener("click", function(){
       var player = this.getAttribute("data-ga-grant");
       var gid = this.getAttribute("data-ga-gid");
       if(!DB) return;
-      DB.ref("groups/"+gid+"/adminUsers").once("value", function(sn){
-        var adminUsers = (sn.val()||[]).slice();
-        if(adminUsers.indexOf(player)<0) adminUsers.push(player);
-        DB.ref("groups/"+gid+"/adminUsers").set(adminUsers, function(err){
+      DB.ref("groups/"+gid+"/adminUids").once("value", function(sn){
+        var v=sn.val()||[]; var adminUids = Array.isArray(v)?v.slice():Object.keys(v);
+        if(adminUids.indexOf(player)<0) adminUids.push(player);
+        DB.ref("groups/"+gid+"/adminUids").set(adminUids, function(err){
           if(err){ toast("Error"); return; }
-          group.adminUsers = adminUsers;
-          toast(player+" is now admin of "+group.name+" ✓");
+          group.adminUids = adminUids;
+          toast(nameOf(player)+" is now admin of "+group.name+" ✓");
           renderGroupAdminMembers(group, container);
         });
       });
@@ -5934,15 +5970,16 @@ function renderGroupAdminMembers(group, container) {
     btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-ga-revoke");
       var gid = this.getAttribute("data-ga-gid");
-      if(player===group.createdBy){ toast("Can't revoke the group creator"); return; }
-      if(!await scConfirm("Revoke admin for "+player+" in "+group.name+"?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
+      if(player===group.ownerUid || player===group.createdByUid){ toast("Can't revoke the group creator"); return; }
+      if(!await scConfirm("Revoke admin for "+nameOf(player)+" in "+group.name+"?", {title:"Revoke Admin", okLabel:"Revoke", danger:true})) return;
       if(!DB) return;
-      DB.ref("groups/"+gid+"/adminUsers").once("value", function(sn){
-        var adminUsers = (sn.val()||[]).filter(function(u){ return u!==player; });
-        DB.ref("groups/"+gid+"/adminUsers").set(adminUsers, function(err){
+      DB.ref("groups/"+gid+"/adminUids").once("value", function(sn){
+        var v=sn.val()||[]; var arr=Array.isArray(v)?v:Object.keys(v);
+        var adminUids = arr.filter(function(u){ return u!==player; });
+        DB.ref("groups/"+gid+"/adminUids").set(adminUids, function(err){
           if(err){ toast("Error"); return; }
-          group.adminUsers = adminUsers;
-          toast(player+" admin access revoked");
+          group.adminUids = adminUids;
+          toast(nameOf(player)+" admin access revoked");
           renderGroupAdminMembers(group, container);
         });
       });
@@ -5953,22 +5990,23 @@ function renderGroupAdminMembers(group, container) {
     btn.addEventListener("click", async function(){
       var player = this.getAttribute("data-ga-remove");
       var gid = this.getAttribute("data-ga-gid");
-      if(player===group.createdBy){ toast("Can't remove the group creator"); return; }
-      if(!await scConfirm("Remove "+player+" from "+group.name+"?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
+      if(player===group.ownerUid || player===group.createdByUid){ toast("Can't remove the group creator"); return; }
+      if(!await scConfirm("Remove "+nameOf(player)+" from "+group.name+"?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
       if(!DB) return;
       DB.ref("groups/"+gid).once("value", function(sn){
         var g = sn.val()||{};
         var players = (g.players||[]).filter(function(p){ return p!==player; });
-        var adminUsers = (g.adminUsers||[]).filter(function(p){ return p!==player; });
+        var _v=g.adminUids||[]; var _arr=Array.isArray(_v)?_v:Object.keys(_v);
+        var adminUids = _arr.filter(function(p){ return p!==player; });
         var updates = {};
         updates["groups/"+gid+"/players"] = players;
-        updates["groups/"+gid+"/adminUsers"] = adminUsers;
+        updates["groups/"+gid+"/adminUids"] = adminUids;
         DB.ref().update(updates, function(err){
           if(err){ toast("Error"); return; }
           group.players = players;
-          group.adminUsers = adminUsers;
+          group.adminUids = adminUids;
           _groupsCache = null;
-          toast(player+" removed from "+group.name);
+          toast(nameOf(player)+" removed from "+group.name);
           renderGroupAdminMembers(group, container);
         });
       });
@@ -6388,55 +6426,14 @@ function deleteUser(username) {
 
 function renameUser(oldName, fbKey, newName) {
   if(!DB) return;
-  var newKey = userKey(newName);
-  if(!newKey){ toast("Invalid username"); return; }
-  // Read old user data then write under new key
-  DB.ref("users/"+fbKey).once("value", function(sn){
-    var userData = sn.val()||{};
-    userData.username = newName;
-    // Write new key
-    DB.ref("users/"+newKey).set(userData, function(err){
-      if(err){ toast("Rename failed"); return; }
-      // Delete old key if different
-      if(fbKey !== newKey) DB.ref("users/"+fbKey).remove();
-      // Update group player lists — try matching oldName, fbKey, and userKey(oldName)
-      var namesToMatch = [oldName, fbKey, userKey(oldName)].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
-      DB.ref("groups").once("value", function(gsn){
-        var groups = gsn.val()||{};
-        var updates = {};
-        Object.values(groups).forEach(function(g){
-          if(!g || !g.players) return;
-          // Find first matching player entry
-          var idx = -1;
-          for(var ni=0; ni<namesToMatch.length; ni++){
-            idx = g.players.indexOf(namesToMatch[ni]);
-            if(idx >= 0) break;
-          }
-          if(idx >= 0){
-            var newPlayers = g.players.slice();
-            newPlayers[idx] = newName;
-            updates["groups/"+g.id+"/players"] = newPlayers;
-          }
-          // Update adminUsers if present
-          if(g.adminUsers){
-            var ai = -1;
-            for(var ni2=0; ni2<namesToMatch.length; ni2++){
-              ai = g.adminUsers.indexOf(namesToMatch[ni2]);
-              if(ai >= 0) break;
-            }
-            if(ai >= 0){
-              var newAdmins = g.adminUsers.slice();
-              newAdmins[ai] = newName;
-              updates["groups/"+g.id+"/adminUsers"] = newAdmins;
-            }
-          }
-        });
-        var finish = function(){ toast("Renamed to \"" + newName + "\" ✓"); loadAdminUsers((document.getElementById("user-search")||{}).value||""); };
-        if(Object.keys(updates).length > 0){
-          DB.ref().update(updates, finish);
-        } else { finish(); }
-      });
-    });
+  if(!newName || !newName.trim()){ toast("Invalid username"); return; }
+  newName = newName.trim();
+  // fbKey is the user's uid. Username is a display label — rename touches only this field.
+  DB.ref("users/"+fbKey+"/username").set(newName, function(err){
+    if(err){ toast("Rename failed"); return; }
+    if(USER_DIR[fbKey]) USER_DIR[fbKey].username = newName; else USER_DIR[fbKey]={username:newName,emoji:"🎯"};
+    toast("Renamed to \"" + newName + "\" ✓");
+    loadAdminUsers((document.getElementById("user-search")||{}).value||"");
   });
 }
 
@@ -6447,14 +6444,16 @@ function mergeGuestIntoUser(guestName, guestFbKey, targetUsername, targetKeyOver
   // than userKey("Ryan Welton") ("ryan_welton").
   var targetKey = targetKeyOverride || userKey(targetUsername);
   if(!targetKey){ toast("Invalid username"); return; }
-  var namesToMatch = [guestName, guestFbKey, userKey(guestName)].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
+
+  var guestUid = guestFbKey;      // both are uids now
+  var targetUid = targetKey;
 
   // Load both users and all groups
-  DB.ref("users/"+targetKey).once("value", function(tSnap){
+  DB.ref("users/"+targetUid).once("value", function(tSnap){
     var targetData = tSnap.val();
     if(!targetData){ toast("User \""+targetUsername+"\" not found"); return; }
 
-    DB.ref("users/"+guestFbKey).once("value", function(gSnap){
+    DB.ref("users/"+guestUid).once("value", function(gSnap){
       var guestData = gSnap.val()||{};
 
       DB.ref("groups").once("value", function(gsn){
@@ -6467,54 +6466,42 @@ function mergeGuestIntoUser(guestName, guestFbKey, targetUsername, targetKeyOver
         guestGroups.forEach(function(gid){
           if(targetGroups.indexOf(gid) < 0) targetGroups.push(gid);
         });
-        updates["users/"+targetKey+"/groups"] = targetGroups;
+        updates["users/"+targetUid+"/groups"] = targetGroups;
 
-        // In every group, replace guest name with target username in players + adminUsers
+        // In every group, replace guest uid with target uid in players + adminUids
         Object.values(groups).forEach(function(g){
           if(!g || !g.players) return;
-          var idx = -1;
-          for(var ni=0; ni<namesToMatch.length; ni++){
-            idx = g.players.indexOf(namesToMatch[ni]);
-            if(idx >= 0) break;
-          }
+          var idx = g.players.indexOf(guestUid);
           if(idx >= 0){
             var newPlayers = g.players.slice();
-            // Only replace if target not already in group
-            if(newPlayers.indexOf(targetUsername) < 0){
-              newPlayers[idx] = targetUsername;
-            } else {
-              // Target already in group — just remove guest entry
-              newPlayers.splice(idx, 1);
-            }
+            if(newPlayers.indexOf(targetUid) < 0){ newPlayers[idx] = targetUid; }
+            else { newPlayers.splice(idx, 1); }   // target already present — drop guest
             updates["groups/"+g.id+"/players"] = newPlayers;
           }
-          // adminUsers
-          if(g.adminUsers){
-            var ai = -1;
-            for(var ni2=0; ni2<namesToMatch.length; ni2++){
-              ai = g.adminUsers.indexOf(namesToMatch[ni2]);
-              if(ai >= 0) break;
-            }
-            if(ai >= 0 && g.adminUsers.indexOf(targetUsername) < 0){
-              var newAdmins = g.adminUsers.slice();
-              newAdmins[ai] = targetUsername;
-              updates["groups/"+g.id+"/adminUsers"] = newAdmins;
+          // adminUids (array or object)
+          if(g.adminUids){
+            var _au = Array.isArray(g.adminUids)?g.adminUids.slice():Object.keys(g.adminUids);
+            var ai = _au.indexOf(guestUid);
+            if(ai >= 0 && _au.indexOf(targetUid) < 0){
+              _au[ai] = targetUid;
+              updates["groups/"+g.id+"/adminUids"] = _au;
+            } else if(ai >= 0){
+              _au.splice(ai,1);
+              updates["groups/"+g.id+"/adminUids"] = _au;
             }
           }
-          // Transfer picks/scores under group data — rename guest key to target key
+          // Transfer picks/scores under group data — remap guest uid → target uid
           if(g.data) {
             (g.pools||[]).forEach(function(pid){
               var poolData = (g.data[pid]||{});
-              namesToMatch.forEach(function(nm){
-                if(poolData.picks && poolData.picks[nm] !== undefined && !poolData.picks[targetUsername]){
-                  updates["groups/"+g.id+"/data/"+pid+"/picks/"+targetUsername] = poolData.picks[nm];
-                  updates["groups/"+g.id+"/data/"+pid+"/picks/"+nm] = null;
+              if(poolData.picks && poolData.picks[guestUid] !== undefined && !poolData.picks[targetUid]){
+                updates["groups/"+g.id+"/data/"+pid+"/picks/"+targetUid] = poolData.picks[guestUid];
+                updates["groups/"+g.id+"/data/"+pid+"/picks/"+guestUid] = null;
                 }
-                if(poolData.scores && poolData.scores[nm] !== undefined && !poolData.scores[targetUsername]){
-                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+targetUsername] = poolData.scores[nm];
-                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+nm] = null;
+                if(poolData.scores && poolData.scores[guestUid] !== undefined && !poolData.scores[targetUid]){
+                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+targetUid] = poolData.scores[guestUid];
+                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+guestUid] = null;
                 }
-              });
             });
           }
         });
@@ -6738,12 +6725,12 @@ function saveResults() {
     var poolScores = SC.group.data[pool.id].scores;
     var result = SC.group.data.results[pool.id];
     if(result) {
-      // Reset all scores for this pool using normalized keys
-      (SC.group.players||[]).forEach(function(p){ poolScores[ukey(p)] = 0; });
-      // Assign points based on finish
-      if(result.first)  poolScores[ukey(result.first)]  = 4;
-      if(result.second) poolScores[ukey(result.second)] = 2;
-      if(result.third)  poolScores[ukey(result.third)]  = 1;
+      // Reset all scores for this pool (keyed by uid)
+      (SC.group.players||[]).forEach(function(p){ poolScores[p] = 0; });
+      // Assign points based on finish (result.first/second/third are uids)
+      if(result.first)  poolScores[result.first]  = 4;
+      if(result.second) poolScores[result.second] = 2;
+      if(result.third)  poolScores[result.third]  = 1;
     }
   });
   
@@ -6819,7 +6806,8 @@ function calcStandings(g, data) {
       var _hasAnyScore=Object.keys(_uGolferScores).length>0;
       golfScores[pool.id]={};
       players.forEach(function(p){
-        var pk=_uPicks[ukey(p)];
+        // p is a uid; usopen.html isn't uid-converted yet, so fall back to name key.
+        var pk=_uPicks[p] || _uPicks[ukey(nameOf(p))];
         if(!pk||!pk.picks) return;
         var total=0;
         pk.picks.forEach(function(gname){
@@ -6852,15 +6840,16 @@ function calcStandings(g, data) {
       var _hasAnyPg=Object.keys(_pgGolferScores).length>0||_pgPlayerScores;
       golfScores[pool.id]={};
       players.forEach(function(p){
-        var uk2=ukey(p);
+        // p is a uid; pgatour.html isn't uid-converted yet — fall back to name key.
+        var uk2=p, _legacyK=ukey(nameOf(p));
         // Use pre-synced total if available
-        if(_pgPlayerScores&&_pgPlayerScores[uk2]!==undefined){
-          var total=Number(_pgPlayerScores[uk2])||0;
+        if(_pgPlayerScores&&(_pgPlayerScores[uk2]!==undefined||_pgPlayerScores[_legacyK]!==undefined)){
+          var total=Number(_pgPlayerScores[uk2]!==undefined?_pgPlayerScores[uk2]:_pgPlayerScores[_legacyK])||0;
           golfScores[pool.id][p]={score:total,cut:false};
           scores[p]+=(100-total); // invert for leaderboard sorting
           return;
         }
-        var pk=_pgPicks[uk2];
+        var pk=_pgPicks[uk2]||_pgPicks[_legacyK];
         if(!pk||!pk.picks) return;
         var total=0;
         (pk.picks||[]).forEach(function(gname){
@@ -6915,13 +6904,12 @@ function calcStandings(g, data) {
     var hasLiveScores = Object.keys(poolScores).length > 0;
     if(hasLiveScores) {
       players.forEach(function(p){
-        var pts = poolScores[ukey(p)];
+        var pts = poolScores[p];   // p is a uid; playerscores keyed by uid
         if(pts !== undefined && pts !== null) scores[p] += Number(pts)||0;
       });
     } else {
-      // Fall back to globalSettings/results for finished pools
+      // Fall back to globalSettings/results for finished pools (result keys are uids)
       var r = (SC.globalResults||{})[pool.id];
-      // Try alternate key names (nhldraft may be stored as "nhl" or "nhl_draft")
       if(!r && pool.id==="nhldraft"){
         r = (SC.globalResults||{})["nhl"] || (SC.globalResults||{})["nhl_draft"];
       }
@@ -6936,7 +6924,7 @@ function calcStandings(g, data) {
     }
   });
   var result = players.slice().sort(function(a,b){return scores[b]-scores[a];})
-    .map(function(p){return{name:p,pts:scores[p],finishes:finishes[p],golfScores:golfScores};});
+    .map(function(p){return{name:nameOf(p),uid:p,pts:scores[p],finishes:finishes[p],golfScores:golfScores};});
 
   // Standard competition ranking ("1224"): equal points share a rank, and the next
   // player skips the rank(s) consumed by the tie. Two players tied on 8 pts behind a
@@ -7016,7 +7004,7 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   var tbody = document.getElementById(tbodyId);
   if(!tbody) return;
   var q = (query||"").toLowerCase().trim();
-  var myName = SC.currentUser ? SC.currentUser.username : null;
+  var myName = ME();
   var filtered = groups.filter(function(g){
     // Hide groups the current user is already a member of
     if(myName && (g.players||[]).indexOf(myName) >= 0) return false;
@@ -7240,13 +7228,14 @@ function autoSnapStatuses() {
       // Check password
       if(_joinPw && (_joinPw === group.adminPw || _joinPw === MASTER_PW)) {
         // Password matches — join silently and navigate to pool
-        var alreadyMember = SC.currentUser && (group.players||[]).indexOf(SC.currentUser.username) >= 0;
+        var _myUid = ME();
+        var alreadyMember = _myUid && (group.players||[]).indexOf(_myUid) >= 0;
         function _doEnter(){
-          if(!alreadyMember && SC.currentUser) {
+          if(!alreadyMember && _myUid) {
             var np = (group.players||[]).slice();
-            if(np.indexOf(SC.currentUser.username)<0){ np.push(SC.currentUser.username); group.players=np; }
+            if(np.indexOf(_myUid)<0){ np.push(_myUid); group.players=np; }
             if(DB) DB.ref("groups/"+group.id+"/players").set(group.players);
-            addGroupToUser(SC.currentUser.username, group.id);
+            addGroupToUser(_myUid, group.id);
           }
           SC.group = group;
           SC.group.data = group.data || {};
@@ -7255,7 +7244,7 @@ function autoSnapStatuses() {
           if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
           subscribeGroupPlayers(group.id);
           // Navigate to the active pool immediately
-          var username = SC.currentUser ? SC.currentUser.username : "";
+          var username = _myUid || "";
           var pools = groupPools(group);
           var statuses = SC.globalStatuses || {};
 
@@ -7281,7 +7270,7 @@ function autoSnapStatuses() {
       } else {
         // Password needed — show join-pw screen with password pre-filled
         SC.joinTarget = { group: group, onSuccess: function(){
-          var username = SC.currentUser ? SC.currentUser.username : "";
+          var username = ME() || "";
           var pools = groupPools(group);
           var statuses = SC.globalStatuses || {};
 
@@ -7311,6 +7300,9 @@ function autoSnapStatuses() {
       }
     });
   }
+
+  // Load the uid→{username,emoji} directory once so display lookups work everywhere.
+  loadUserDir(function(){ try{ draw(); }catch(e){} });
 
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
