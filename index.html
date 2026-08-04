@@ -694,6 +694,14 @@ function openPoolUrl(id, url){
 
 var MASTER_PW = "Sloop";
 
+// Identity-based master admin. Keep these UIDs in sync with database.rules.json and
+// cfbpool.html. The password path above is retained only as a legacy fallback.
+var MASTER_UIDS = { "MASTER_UID_1": true };
+function isMasterUid(){
+  var uid = (typeof currentUid==="function") ? currentUid() : null;
+  return !!(uid && MASTER_UIDS[uid]);
+}
+
 // ── BADGE DEFINITIONS ────────────────────────────────────────────────────────
 var RARITY = { common:"common", uncommon:"uncommon", rare:"rare", epic:"epic", legendary:"legendary", mythic:"mythic", oracle:"oracle" };
 var RARITY_COLOR = {
@@ -858,9 +866,30 @@ try {
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB = firebase.database();
   AUTH = firebase.auth();
+  // When the persisted Google session resolves, make sure SC.currentUser carries the uid
+  // so identity-based admin checks (isGroupAdmin / isMasterUid) work even on a restored
+  // session where currentUser was rebuilt from localStorage without a uid.
+  try{
+    AUTH.onAuthStateChanged(function(user){
+      if(!user) return;
+      if(SC.currentUser && SC.currentUser.uid !== user.uid){
+        SC.currentUser.uid = user.uid;
+        // Admin controls may now be visible where they weren't a moment ago.
+        if(SC.screen==="admin" || SC.screen==="hub" || SC.screen==="profile") { try{ draw(); }catch(e){} }
+      }
+    });
+  }catch(e){}
 } catch(e) {}
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
+async function attemptMasterLogin(){
+  // Identity first — an allowlisted Google uid gets master with no prompt.
+  if(isMasterUid()){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); return; }
+  var pw = await scPrompt("Master password", "", {password:true});
+  if(!pw) return;
+  if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
+  else toast("Wrong password","err");
+}
 function x(s){ var t=String(s||""); t=t.replace(/&/g,"&amp;"); t=t.replace(/</g,"&lt;"); t=t.replace(/>/g,"&gt;"); t=t.replace(/'/g,"&#39;"); return t; }
 // ── STYLED DIALOGS ────────────────────────────────────────────────────────────
 // Replaces native confirm()/prompt(), which render as OS chrome and look nothing
@@ -1276,6 +1305,20 @@ function createGroup(name, adminPw, pools, cb) {
 }
 
 function isGroupAdmin(group) {
+  if(!group) return false;
+  // Identity first: the group's ownerUid / adminUids (stamped at create) and master uid.
+  // This is the authoritative check and survives display-name changes.
+  var uid = (typeof currentUid==="function") ? currentUid() : null;
+  if(uid){
+    if(isMasterUid()) return true;
+    if(group.ownerUid && group.ownerUid === uid) return true;
+    var au = group.adminUids;
+    if(au){
+      if(Array.isArray(au)){ if(au.indexOf(uid) >= 0) return true; }
+      else if(au[uid]) return true;
+    }
+  }
+  // Legacy fallback: username / createdBy (for anything not yet carrying uids).
   if(!SC.currentUser) return false;
   var u = SC.currentUser.username;
   var adminUsers = group.adminUsers || [];
@@ -1445,10 +1488,7 @@ function render(h) {
 
   var tlogin = document.getElementById("btn-topbar-admin-login");
   if(tlogin) tlogin.addEventListener("click", async function(){
-    var pw = await scPrompt("Master password", "", {password:true});
-    if(!pw) return;
-    if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
-    else toast("Wrong password","err");
+    attemptMasterLogin();
   });
   var tadmin = document.getElementById("btn-topbar-admin");
   if(tadmin) tadmin.addEventListener("click", function(){ SC.screen="admin"; draw(); });
@@ -1699,10 +1739,7 @@ function renderAuth() {
 
   var tlogin = document.getElementById("btn-topbar-admin-login");
   if(tlogin) tlogin.addEventListener("click", async function(){
-    var pw = await scPrompt("Master password", "", {password:true});
-    if(!pw) return;
-    if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
-    else toast("Wrong password","err");
+    attemptMasterLogin();
   });
 
   var authClose = document.getElementById("btn-auth-close"); if(authClose) authClose.addEventListener("click", function(){ SC.screen="profile"; draw(); });
@@ -2106,21 +2143,36 @@ function renderProfile() {
         standings.forEach(function(p,i){ currentRankMapS[p.name]=p.rank||(i+1); });
         saveRankSnapshot(snapshotKeyS, currentRankMapS);
         gh += '<div style="padding:6px 10px 2px;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Standings</div>';
-        // Build a set of players who have submitted picks for any active pool
+        // Build a set of players who have submitted picks for any active pool.
+        // _hasLockedPool means "at least one pool's picks are locked" — only then does a
+        // player with no picks get flagged (red). An OPEN pool must not flag anyone: picks
+        // are still allowed, so a blank pick set is normal, not a miss.
         var _submittedPlayers = {};
         var _hasLockedPool = false;
         pools.forEach(function(pool){
           var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(st === "open") _hasLockedPool = true;
+          if(st === "locked" || st === "complete") _hasLockedPool = true;
           if(st !== "locked" && st !== "complete" && st !== "open") return;
           var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
-          var _picks = (g.data&&g.data[_dk]&&g.data[_dk].picks)||{};
-          Object.keys(_picks).forEach(function(uk){ _submittedPlayers[uk]=true; });
-          // Also check locked path (WC players who explicitly locked)
-          var _locked = (g.data&&g.data[_dk]&&g.data[_dk].locked)||{};
+          // CFB Pickem stores its data under groups/{gid}/data/cfbpool (not /cfb).
+          if(pool.id==="cfb"&&g.data&&g.data["cfbpool"]) _dk="cfbpool";
+          var _pd = (g.data&&g.data[_dk])||{};
+          // Picks may be stored flat ({ukey:...}) or nested by week/round
+          // ({weekId:{ukey:...}}, as the CFB pool does under its own data node). Walk one
+          // level deep so weekly pools register their submitters too.
+          var _picks = _pd.picks||{};
+          Object.keys(_picks).forEach(function(k){
+            var v = _picks[k];
+            if(v && typeof v === "object" && !Array.isArray(v)){
+              // Could be this player's pick object, or a week bucket of {ukey:...}
+              _submittedPlayers[k]=true;                       // flat case
+              Object.keys(v).forEach(function(uk2){ _submittedPlayers[uk2]=true; }); // nested case
+            } else {
+              _submittedPlayers[k]=true;
+            }
+          });
+          var _locked = _pd.locked||{};
           Object.keys(_locked).forEach(function(uk){ _submittedPlayers[uk]=true; });
-          // For WC: picks[ukey] has nested {groups,wildcards} — any content = submitted
-          // Already handled above since Object.keys(picks) returns ukeys with any picks
         });
 
         // Vertical compact list — top 4 + user always shown
@@ -4380,13 +4432,22 @@ function renderCreate() {
   h += '<div class="form-group"><label class="form-label">Group Name</label>';
   h += '<input class="form-input" id="f-name" placeholder="e.g. The Boys" maxlength="40" value="'+x(f.name)+'"></div>';
 
-  h += '<div class="form-group"><label class="form-label">Group Password</label>';
-  h += '<input class="form-input" id="f-pw" type="password" placeholder="Choose a password to protect your group" value="'+x(f.adminPw||"")+'">';
-  h += '<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">Share this with people you want in your group</div></div>';
+  h += '<div class="form-group"><label class="form-label">Join Password</label>';
+  h += '<input class="form-input" id="f-pw" type="password" placeholder="Set a password people enter to join" value="'+x(f.adminPw||"")+'">';
+  h += '<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">Members enter this to join. Your invite link fills it in automatically.</div></div>';
 
   h += '<div class="form-group"><label class="form-label">Competition</label>';
   h += '<div class="pools-toggle">';
-  POOL_LIBRARY.forEach(function(pool){
+  // Only pools that are currently OPEN can be chosen when creating a group — a coming-soon
+  // or completed pool shouldn't be selectable. Status comes from the same global source the
+  // rest of the hub uses.
+  var _openPools = POOL_LIBRARY.filter(function(pool){
+    return ((SC.globalStatuses||{})[pool.id]||"coming-soon") === "open";
+  });
+  if(_openPools.length === 0){
+    h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:14px 8px">No competitions are open right now. Check back when a pool opens.</div>';
+  }
+  _openPools.forEach(function(pool){
     var on = f.pools.indexOf(pool.id)>=0;
     h += '<div class="pool-toggle-row'+(on?" active":"")+'" data-pool="'+pool.id+'">';
     h += '<div class="pool-toggle-icon">'+pool.icon+'</div>';
@@ -4437,6 +4498,10 @@ function submitCreate() {
   var f = SC.createForm;
   f.name = document.getElementById("f-name").value.trim();
   f.adminPw = document.getElementById("f-pw").value.trim();
+  // Drop any selected pool that isn't currently open (e.g. it closed while the form was up).
+  f.pools = (f.pools||[]).filter(function(pid){
+    return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open";
+  });
   if(!f.name){ SC.error="Group name is required."; draw(); return; }
   if(!f.adminPw||f.adminPw.length<3){ SC.error="Password must be at least 3 characters."; draw(); return; }
   if(f.pools.length===0){ SC.error="Select at least one competition."; draw(); return; }
@@ -7144,7 +7209,7 @@ function autoSnapStatuses() {
         if(u) {
           var _newEmoji = u.emoji||"🎯";
           var _newBadges = bsn.val()||{};
-          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji };
+          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji, uid: u.googleUid || (SC.currentUser&&SC.currentUser.uid) || null, _key: key };
           SC._cachedBadges = _newBadges;
           try{
             localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[]));

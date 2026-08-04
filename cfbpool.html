@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -329,11 +330,27 @@ var ST={
   compareIsolated:false
 };
 
-var DB=null;
+var DB=null, AUTH=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB=firebase.database();
+  try{ AUTH=firebase.auth(); }catch(e){}
 }catch(e){}
+
+// Identity-based admin. The group's ownerUid + adminUids (stamped by the hub at create
+// time) are the source of truth — no admin password. MY_UID comes from the shared Google
+// session (same Firebase project as the hub, so the login persists across pages).
+var MY_UID=null;
+var GROUP_OWNER_UID=null;
+var GROUP_ADMIN_UIDS={};
+var MASTER_UIDS={ "MASTER_UID_1": true };   // keep in sync with database rules
+function isGroupAdminByUid(){
+  if(!MY_UID) return false;
+  if(MASTER_UIDS[MY_UID]) return true;
+  if(GROUP_OWNER_UID && MY_UID===GROUP_OWNER_UID) return true;
+  if(GROUP_ADMIN_UIDS[MY_UID]) return true;
+  return false;
+}
 
 function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&lt;");t=t.replace(/>/g,"&gt;");t=t.replace(/'/g,"&#39;");return t;}
 var _tt;
@@ -428,51 +445,6 @@ function seasonScore(user){
   return total;
 }
 
-// ── HUB SEASON-TOTAL SYNC ─────────────────────────────────
-// The hub (index.html) reads a flat {ukey: seasonTotal} map at
-// groups/{gid}/data/cfb/playerscores to build group standings and the trophy
-// podium — it can't see per-week picks. This pool page is the only place that
-// aggregates all weeks, so it must write that map whenever results/locks change.
-//
-// Notes:
-//  • BASE is groups/{gid}/data/cfbpool (or .../seasons/{yr}); the hub key is "cfb".
-//    Those are different nodes on purpose — we write the summary to /cfb.
-//  • seasonScore needs EVERY completed week's picks in memory, but the live
-//    listener only subscribes to the current week. So we load BASE/picks once
-//    per sync rather than trusting ST.picks.
-//  • Only the admin client writes, so viewers don't race identical writes (and
-//    would be denied by rules anyway). Debounced to coalesce burst updates.
-var _syncTimer=null;
-function syncSeasonTotalsToHub(){
-  if(!DB||!GROUP_ID) return;          // nothing to sync for the global/no-group pool
-  if(!ST.admin) return;              // single writer: only the admin client syncs
-  if(_syncTimer) clearTimeout(_syncTimer);
-  _syncTimer=setTimeout(function(){
-    DB.ref(BASE+"/picks").once("value",function(sn){
-      var allPicks=sn.val()||{};                 // {weekId: {ukey: {gid:{side,conf}}}}
-      // Preserve whatever is already loaded live, but let the full read win so a
-      // stale current-week snapshot can't undercount.
-      var mergedPicks={};
-      ST.weekIds.forEach(function(w){ mergedPicks[w]=(allPicks[w]||ST.picks[w]||{}); });
-      var totals={};
-      (PARTS||[]).forEach(function(p){
-        var uk=ukey(p), total=0;
-        ST.weekIds.forEach(function(w){
-          if(!weekIsComplete(w)) return;
-          var picks=(mergedPicks[w]||{})[uk]||{};
-          var results=ST.results[w]||{};
-          activeGames(w).forEach(function(gid){
-            var pk=picks[gid], r=results[gid];
-            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
-          });
-        });
-        totals[uk]=total;
-      });
-      DB.ref("groups/"+GROUP_ID+"/data/cfb/playerscores").set(totals);
-    });
-  },1200);
-}
-
 function loadData(){
   if(!DB){draw();return;}
   // Fetch group info, player emojis, and master pw in parallel with pool data
@@ -482,6 +454,14 @@ function loadData(){
         if(g&&g.players&&g.players.length) PARTS=g.players;
         GROUP_ADMIN_PW=(g&&(g.adminPw||g.groupAdminPw))||null;
         ST.groupPublic=!!(g&&g.public);
+        GROUP_OWNER_UID=(g&&g.ownerUid)||null;
+        GROUP_ADMIN_UIDS={};
+        var _au=(g&&g.adminUids)||{};
+        // adminUids may be an array (from create) or an object; normalize to a set of uids
+        if(Array.isArray(_au)) _au.forEach(function(uid){ if(uid) GROUP_ADMIN_UIDS[uid]=true; });
+        else Object.keys(_au).forEach(function(k){ var v=_au[k]; GROUP_ADMIN_UIDS[(v===true||v===undefined)?k:v]=true; });
+        // If identity says this user is the group admin, grant it automatically.
+        if(isGroupAdminByUid() && !PUBLIC_VIEW){ ST.admin=true; }
       }).catch(function(){})
     : Promise.resolve();
 
@@ -501,9 +481,9 @@ function loadData(){
     // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
@@ -2354,7 +2334,9 @@ function draw(){
     h+='<span class="tag">'+pem(ST.user)+x(ST.user)+'</span>';
     if(!URL_USER) h+='<button class="btn btn-ghost" id="b-switch">&#8646;</button>';
   }
-  if(!PUBLIC_VIEW) h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
+  // Admin gear shows only for the group's owner/admins (by uid) or master. Everyone else
+  // never sees it — no password, no discoverable entry point.
+  if(!PUBLIC_VIEW && isGroupAdminByUid()) h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
   h+='</div></div>';
 
   var tabs=[{id:"picks",lbl:"&#127944; Picks"},{id:"group",lbl:"&#128101; Group"},{id:"scores",lbl:"&#128308; Scores"},{id:"standings",lbl:"&#128202; Standings"}];
@@ -2715,11 +2697,11 @@ function bind(){
 
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="picks";draw();return;}
-    var pw=prompt("Admin password:"); if(pw===null)return;
-    if(pw===MASTER_PW||(GROUP_ADMIN_PW&&pw===GROUP_ADMIN_PW)){
+    // No password — admin is granted by Google identity (group owner/admin or master).
+    if(isGroupAdminByUid()){
       ST.admin=true;ST.page="admin";draw();toast("&#9889; Admin mode on");
     } else {
-      toast("Wrong password");
+      toast("Only the group admin can do that");
     }
   });
 
@@ -2875,7 +2857,20 @@ var _fieldDebounce={};
   });
 }
 
-loadData();
+// Resolve the signed-in Google identity before loading, so admin-by-uid is known when the
+// group record arrives and so DB writes carry an authenticated session (required by the
+// security rules). onAuthStateChanged fires once with the restored session (or null).
+(function bootWithAuth(){
+  if(!AUTH){ loadData(); return; }
+  var _started=false;
+  function _go(){ if(_started) return; _started=true; loadData(); }
+  AUTH.onAuthStateChanged(function(user){
+    MY_UID = user ? user.uid : null;
+    _go();
+  });
+  // Safety net: if auth is slow/unavailable, don't hang the page.
+  setTimeout(_go, 2500);
+})();
 
 // ── CFB Rankings ──────────────────────────────────────────
 var RANKINGS = {}; // normalized team name → {rank, source}
