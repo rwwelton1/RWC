@@ -428,6 +428,51 @@ function seasonScore(user){
   return total;
 }
 
+// ── HUB SEASON-TOTAL SYNC ─────────────────────────────────
+// The hub (index.html) reads a flat {ukey: seasonTotal} map at
+// groups/{gid}/data/cfb/playerscores to build group standings and the trophy
+// podium — it can't see per-week picks. This pool page is the only place that
+// aggregates all weeks, so it must write that map whenever results/locks change.
+//
+// Notes:
+//  • BASE is groups/{gid}/data/cfbpool (or .../seasons/{yr}); the hub key is "cfb".
+//    Those are different nodes on purpose — we write the summary to /cfb.
+//  • seasonScore needs EVERY completed week's picks in memory, but the live
+//    listener only subscribes to the current week. So we load BASE/picks once
+//    per sync rather than trusting ST.picks.
+//  • Only the admin client writes, so viewers don't race identical writes (and
+//    would be denied by rules anyway). Debounced to coalesce burst updates.
+var _syncTimer=null;
+function syncSeasonTotalsToHub(){
+  if(!DB||!GROUP_ID) return;          // nothing to sync for the global/no-group pool
+  if(!ST.admin) return;              // single writer: only the admin client syncs
+  if(_syncTimer) clearTimeout(_syncTimer);
+  _syncTimer=setTimeout(function(){
+    DB.ref(BASE+"/picks").once("value",function(sn){
+      var allPicks=sn.val()||{};                 // {weekId: {ukey: {gid:{side,conf}}}}
+      // Preserve whatever is already loaded live, but let the full read win so a
+      // stale current-week snapshot can't undercount.
+      var mergedPicks={};
+      ST.weekIds.forEach(function(w){ mergedPicks[w]=(allPicks[w]||ST.picks[w]||{}); });
+      var totals={};
+      (PARTS||[]).forEach(function(p){
+        var uk=ukey(p), total=0;
+        ST.weekIds.forEach(function(w){
+          if(!weekIsComplete(w)) return;
+          var picks=(mergedPicks[w]||{})[uk]||{};
+          var results=ST.results[w]||{};
+          activeGames(w).forEach(function(gid){
+            var pk=picks[gid], r=results[gid];
+            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
+          });
+        });
+        totals[uk]=total;
+      });
+      DB.ref("groups/"+GROUP_ID+"/data/cfb/playerscores").set(totals);
+    });
+  },1200);
+}
+
 function loadData(){
   if(!DB){draw();return;}
   // Fetch group info, player emojis, and master pw in parallel with pool data
@@ -456,9 +501,9 @@ function loadData(){
     // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();syncSeasonTotalsToHub();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
