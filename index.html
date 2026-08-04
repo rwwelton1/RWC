@@ -1164,7 +1164,7 @@ function authGoogleSignIn(cb) {
       sn.forEach(function(child){ existing = child.val(); existing._key = child.key; });
       if(existing) {
         // Already registered — load their profile
-        cb(null, { username: existing.username, groups: existing.groups||[], emoji: existing.emoji||"🎯" });
+        cb(null, { username: existing.username, groups: existing.groups||[], emoji: existing.emoji||"🎯", uid: gUser.uid, _key: existing._key });
       } else {
         // Check if key is taken
         DB.ref("users/"+key).once("value", function(sn2){
@@ -1174,7 +1174,7 @@ function authGoogleSignIn(cb) {
           var data = { username: username, groups: [], emoji: "🎯", googleUid: gUser.uid, googleEmail: gUser.email, createdAt: Date.now() };
           DB.ref("users/"+finalKey).set(data, function(err){
             if(err){ cb("Failed to create account"); return; }
-            cb(null, { username: username, groups: [], emoji: "🎯" });
+            cb(null, { username: username, groups: [], emoji: "🎯", uid: gUser.uid, _key: finalKey });
           });
         });
       }
@@ -1228,13 +1228,26 @@ function migrateGuestToUser(guestName, newUsername, cb) {
 }
 
 // ── FIREBASE GROUP OPS ────────────────────────────────────────────────────────
+function currentUid(){
+  // Authoritative source is the live Firebase session; fall back to the uid we cached
+  // on SC.currentUser at sign-in. Used to stamp group ownership for the security rules.
+  try{ if(AUTH && AUTH.currentUser && AUTH.currentUser.uid) return AUTH.currentUser.uid; }catch(e){}
+  return (SC.currentUser && SC.currentUser.uid) || null;
+}
+
 function createGroup(name, adminPw, pools, cb) {
   var id = randCode();
+  var _uid = currentUid();
+  if(!_uid){ cb(null, "Please sign in with Google before creating a group."); return; }
   var group = {
     id: id,
     name: name,
     adminPw: adminPw,
     createdBy: SC.currentUser ? SC.currentUser.username : null,
+    // Identity-based ownership for Firebase rules. ownerUid is the creator's Google uid;
+    // adminUids is the writable allowlist (starts as just the owner, extensible later).
+    ownerUid: _uid,
+    adminUids: [_uid],
     adminUsers: SC.currentUser ? [SC.currentUser.username] : [],
     players: SC.currentUser ? [SC.currentUser.username] : [],
     pools: pools,
