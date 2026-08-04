@@ -558,7 +558,7 @@ var POOL_LIBRARY = [
     hasCut:false,         hasSalary:false,       teamSport:true,
     maxPicks:10,          capAmount:null,        entryCount:null,
     live:false,           liveSource:"manual",   recurring:true,
-    weeklyReopenDay:2,    weeklyReopenHour:0,    // 2=Tuesday, 0=midnight ET — after lockDate week
+    kind:"season",        // many weeks → one cumulative total, one season champion
     tiebreaker:false,     year:2026
   },
   {
@@ -1013,6 +1013,55 @@ function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(i
 function poolStatusFor(g, poolId){
   var grpSt = (g && g.data && g.data.statuses && g.data.statuses[poolId]);
   return grpSt || (SC.globalStatuses||{})[poolId] || "coming-soon";
+}
+
+// ── poolState: the kind-aware, two-slot status the new card renders from ──────────
+// Returns { primary:{state,label,tone,subtext}, secondary:{label,tone}|null, kind }.
+//   • primary  = the real competition state (what has standings + a winner)
+//   • secondary= context line (e.g. the current week), or null for single-event pools
+// tone ∈ open|live|final|soon (drives color). This does NOT replace poolStatusFor — the
+// many legacy branches still use that single-status helper; poolState is layered on top.
+function _toneFor(state){
+  return state==="open"?"open":state==="locked"||state==="live"?"live":state==="complete"||state==="final"?"final":"soon";
+}
+function _labelFor(state){
+  return state==="open"?"Open":state==="locked"||state==="live"?"Live":state==="complete"||state==="final"?"Final":"Soon";
+}
+// Can a NEW group be created around this pool right now?
+//   • single  → its global status is "open"
+//   • season  → its season is "in-season" (CFB is joinable all season, not just wk 1)
+function poolJoinable(pool){
+  if(pool && pool.kind==="season"){
+    var ss = (SC._poolDates && SC._poolDates[pool.id] && SC._poolDates[pool.id].seasonStatus)
+             || (SC.globalStatuses||{})[pool.id] || "preseason";
+    return ss === "in-season";
+  }
+  return ((SC.globalStatuses||{})[pool.id]||"coming-soon") === "open";
+}
+
+function poolState(pool, g){
+  var kind = (pool && pool.kind) || "single";
+  if(kind==="season"){
+    // CFB: season is the competition; the week is context. Read the per-group seasonMeta
+    // the pool page publishes; fall back to the single status if it isn't there yet.
+    var meta = (g && g.data && g.data[pool.id] && g.data[pool.id].seasonMeta) || null;
+    var seasonStatus = (meta && meta.seasonStatus) || (SC.globalStatuses||{})[pool.id] || "coming-soon";
+    // Season primary: preseason→Soon, in-season→"In Season" (live tone), done→Final.
+    var sPrimaryState = seasonStatus==="in-season" ? "live" : seasonStatus==="done" ? "final" : "soon";
+    var sPrimaryLabel = seasonStatus==="in-season" ? "In Season" : seasonStatus==="done" ? "Season Over" : "Preseason";
+    var secondary = null;
+    if(meta && meta.currentWeek != null && sPrimaryState==="live"){
+      var wState = meta.weekState || "open";
+      var wLbl = (meta.weekLabel || ("Week "+meta.currentWeek));
+      var sub = "";
+      if(wState==="open" && meta.lockTs){ sub = " · locks in " + formatCountdown(meta.lockTs); }
+      secondary = { label: wLbl + " · " + _labelFor(wState) + sub, tone: _toneFor(wState) };
+    }
+    return { kind:kind, primary:{ state:sPrimaryState, label:sPrimaryLabel, tone:sPrimaryState, subtext:"" }, secondary:secondary };
+  }
+  // single (and, for now, everything else): one status, no secondary line.
+  var st = poolStatusFor(g, pool.id);
+  return { kind:"single", primary:{ state:st, label:_labelFor(st), tone:_toneFor(st), subtext:"" }, secondary:null };
 }
 // Golf pools score low-to-high regardless of the library's scoringDirection flag.
 function poolIsGolf(pool){ return !!(pool && (pool.sport==="Golf" || pool.id==="usopen" || pool.id==="pgatour" || pool.id==="masters")); }
@@ -2086,6 +2135,21 @@ function renderProfile() {
       if(pools.length > 0) {
         gh += '<div style="padding:5px 8px 6px;border-top:1px solid var(--border2);min-height:0">';
         pools.forEach(function(pool){
+          // ── kind:"season" (CFB): two lines — season primary + current-week secondary ──
+          if(pool.kind==="season"){
+            var _ps = poolState(pool, g);
+            if(_ps.primary.state==="soon") return;   // preseason: hide like coming-soon
+            var _pTone = _ps.primary.tone;
+            var _pBg = _pTone==="live"?'var(--green-bg)':_pTone==="final"?'var(--blue-bg)':'var(--cream)';
+            var _pCol = _pTone==="live"?'var(--green)':_pTone==="final"?'var(--blue)':'var(--dim)';
+            gh += '<span style="display:inline-block;font-size:8px;font-weight:800;padding:4px 8px;border-radius:7px;background:'+_pBg+';border:1.5px solid var(--border);color:'+_pCol+';white-space:normal;line-height:1.5;max-width:100%">'+pool.icon+' '+x(pool.shortName||pool.name)+' &middot; '+x(_ps.primary.label)+'</span>';
+            if(_ps.secondary){
+              var _sTone=_ps.secondary.tone;
+              var _sCol=_sTone==="open"?'var(--green)':_sTone==="live"?'var(--red2)':_sTone==="final"?'var(--blue)':'var(--dim)';
+              gh += '<div style="font-size:8px;font-weight:700;color:'+_sCol+';margin-top:3px;padding-left:2px;white-space:normal;line-height:1.4">'+x(_ps.secondary.label)+'</div>';
+            }
+            return;
+          }
           var st = effectiveStatus(g,pool.id);
           if(st==="coming-soon") return;
           var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
@@ -4438,12 +4502,9 @@ function renderCreate() {
 
   h += '<div class="form-group"><label class="form-label">Competition</label>';
   h += '<div class="pools-toggle">';
-  // Only pools that are currently OPEN can be chosen when creating a group — a coming-soon
-  // or completed pool shouldn't be selectable. Status comes from the same global source the
-  // rest of the hub uses.
-  var _openPools = POOL_LIBRARY.filter(function(pool){
-    return ((SC.globalStatuses||{})[pool.id]||"coming-soon") === "open";
-  });
+  // Only pools joinable right now can be chosen when creating a group. For single-event
+  // pools that means status "open"; for season pools (CFB) it means the season is active.
+  var _openPools = POOL_LIBRARY.filter(function(pool){ return poolJoinable(pool); });
   if(_openPools.length === 0){
     h += '<div style="font-size:11px;font-weight:700;color:var(--muted);text-align:center;padding:14px 8px">No competitions are open right now. Check back when a pool opens.</div>';
   }
@@ -4498,9 +4559,10 @@ function submitCreate() {
   var f = SC.createForm;
   f.name = document.getElementById("f-name").value.trim();
   f.adminPw = document.getElementById("f-pw").value.trim();
-  // Drop any selected pool that isn't currently open (e.g. it closed while the form was up).
+  // Drop any selected pool that isn't joinable now (closed / season not active).
   f.pools = (f.pools||[]).filter(function(pid){
-    return ((SC.globalStatuses||{})[pid]||"coming-soon") === "open";
+    var _p = POOL_LIBRARY.find(function(p){return p.id===pid;});
+    return _p ? poolJoinable(_p) : false;
   });
   if(!f.name){ SC.error="Group name is required."; draw(); return; }
   if(!f.adminPw||f.adminPw.length<3){ SC.error="Password must be at least 3 characters."; draw(); return; }
@@ -5236,6 +5298,41 @@ function renderAdmin() {
   }
 
   POOL_LIBRARY.forEach(function(pool, pi){
+    // ── kind:"season" pools get a WEEK CALENDAR + season-status editor, not single dates ──
+    if(pool.kind==="season"){
+      var _seasonStatus = (SC._cfbSeasonStatus!=null ? SC._cfbSeasonStatus : ((SC._poolDates&&SC._poolDates[pool.id]&&SC._poolDates[pool.id].seasonStatus)||"preseason"));
+      var _weeks = (SC._cfbWeeks!=null ? SC._cfbWeeks : ((SC._poolDates&&SC._poolDates[pool.id]&&SC._poolDates[pool.id].weeks)||{}));
+      h += '<div style="padding:10px 12px;border-bottom:1px solid var(--border2)">';
+      h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+      h += '<span style="font-size:14px">'+pool.icon+'</span>';
+      h += '<span style="font-size:11px;font-weight:900;flex:1">'+x(pool.shortName||pool.name)+'</span>';
+      // Season status segmented control (global)
+      h += '<div style="display:flex;border:1.5px solid var(--border);border-radius:7px;overflow:hidden">';
+      [["preseason","Preseason","#e2e8f0","#64748b"],["in-season","In Season","var(--green)","#fff"],["done","Done","var(--blue)","#fff"]].forEach(function(p){
+        var active=_seasonStatus===p[0];
+        h += '<button class="cfb-season-btn" data-ss="'+p[0]+'" style="padding:4px 8px;font-size:8px;font-weight:800;border:none;cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap;background:'+(active?p[2]:"#fff")+';color:'+(active?p[3]:"#94a3b8")+'">'+p[1]+'</button>';
+      });
+      h += '</div></div>';
+      h += '<div style="font-size:9px;color:#475569;margin-bottom:8px">Set each week&#39;s scoring window. The current week is whichever window contains today. Groups still lock at their own earliest kickoff.</div>';
+      // Week rows — up to 20 weeks; show existing + one blank to add
+      var _weekNums = Object.keys(_weeks).map(Number).sort(function(a,b){return a-b;});
+      var _maxWeek = _weekNums.length ? _weekNums[_weekNums.length-1] : 0;
+      h += '<div id="cfb-weeks-wrap" style="display:flex;flex-direction:column;gap:4px">';
+      for(var _wk=1; _wk<=Math.min(_maxWeek+1,20); _wk++){
+        var _w=_weeks[_wk]||{};
+        h += '<div style="display:flex;align-items:center;gap:5px">';
+        h += '<span style="font-size:9px;font-weight:800;color:var(--muted);width:44px;flex-shrink:0">Wk '+_wk+'</span>';
+        h += '<input type="datetime-local" class="cfb-wk-start" data-wk="'+_wk+'" value="'+x(_w.start||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="start">';
+        h += '<span style="font-size:9px;color:var(--muted)">&rarr;</span>';
+        h += '<input type="datetime-local" class="cfb-wk-end" data-wk="'+_wk+'" value="'+x(_w.end||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="end">';
+        h += '</div>';
+      }
+      h += '</div>';
+      h += '<button class="btn btn-gold btn-sm" id="btn-save-cfb-weeks" style="padding:6px 14px;font-size:10px;margin-top:8px">Save Season Calendar</button>';
+      h += '<span id="cfb-weeks-msg" style="font-size:9px;color:#6ee7b7;margin-left:8px"></span>';
+      h += '</div>';
+      return;
+    }
     var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
     var _pd = (SC._poolDates && SC._poolDates[pool.id]) || {};
     var openVal = _pd.openDate || "";
@@ -5425,6 +5522,47 @@ function renderAdmin() {
           if(hintEl) hintEl.innerHTML = '<span style="font-size:8px;font-weight:700;color:var(--muted)">'+s+'</span>';
         } else { if(hintEl) hintEl.innerHTML = ""; }
       });
+    });
+  });
+
+  // ── CFB season calendar admin handlers ──
+  document.querySelectorAll(".cfb-season-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      SC._cfbSeasonStatus = this.getAttribute("data-ss");
+      // Preserve any unsaved week edits in the DOM before re-render.
+      _captureCfbWeekEdits();
+      draw();
+    });
+  });
+  function _captureCfbWeekEdits(){
+    var weeks = {};
+    document.querySelectorAll(".cfb-wk-start").forEach(function(inp){
+      var wk=inp.getAttribute("data-wk");
+      var endInp=document.querySelector('.cfb-wk-end[data-wk="'+wk+'"]');
+      var s=inp.value.trim(), e=endInp?endInp.value.trim():"";
+      if(s||e){ weeks[wk]={ start:s, end:e, label:"Week "+wk }; }
+    });
+    SC._cfbWeeks = weeks;
+  }
+  var saveCfbWeeksBtn = document.getElementById("btn-save-cfb-weeks");
+  if(saveCfbWeeksBtn) saveCfbWeeksBtn.addEventListener("click", function(){
+    if(!DB) return;
+    _captureCfbWeekEdits();
+    var ss = SC._cfbSeasonStatus || "preseason";
+    var msg = document.getElementById("cfb-weeks-msg");
+    Promise.all([
+      DB.ref("globalSettings/poolDates/cfb/weeks").set(SC._cfbWeeks||{}),
+      DB.ref("globalSettings/poolDates/cfb/seasonStatus").set(ss)
+    ]).then(function(){
+      if(msg) msg.textContent = "Saved ✓";
+      // Keep local poolDates copy in sync so cards update immediately.
+      if(!SC._poolDates) SC._poolDates={};
+      if(!SC._poolDates.cfb) SC._poolDates.cfb={};
+      SC._poolDates.cfb.weeks = SC._cfbWeeks||{};
+      SC._poolDates.cfb.seasonStatus = ss;
+      setTimeout(function(){ if(msg) msg.textContent=""; }, 2000);
+    }).catch(function(err){
+      if(msg){ msg.style.color="#fca5a5"; msg.textContent = "Failed: "+err.message; }
     });
   });
 

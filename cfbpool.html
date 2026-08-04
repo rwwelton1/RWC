@@ -445,6 +445,125 @@ function seasonScore(user){
   return total;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// SEASON MODEL — CFB is a "season" kind: many weeks accumulate into one total, one
+// champion. The hub (index.html) can't see per-week picks/games, so this page is the
+// only place that can compute the season summary. We publish two things per group:
+//   • data/cfb/playerscores : {ukey: cumulativeSeasonTotal}  → hub standings + winner
+//   • data/cfb/seasonMeta   : {seasonStatus,currentWeek,weekLabel,lockTs,weekState,...}
+//     → hub two-line card ("In Season · Week 6 · Open · locks in 3h")
+//
+// Division of control (per product decision):
+//   • The WEEK CALENDAR is global/master: globalSettings/poolDates/cfb/weeks =
+//       { "6": {start, end, label}, ... }. All groups agree on which week is current
+//       (the week whose [start,end] window contains now). seasonStatus is a global flag.
+//   • The LOCK is per-group and implicit: a group's picks lock at the earliest kickoff
+//       among the games THAT GROUP added for the current week. Different games → diff lock.
+//   • FINAL: a group's week is final when the admin marks the week locked OR the global
+//       week-end has passed. (Not on all-games-scored.)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var CFB_CALENDAR = {};        // globalSettings/poolDates/cfb/weeks  {weekNo:{start,end,label}}
+var CFB_SEASON_STATUS = "";   // globalSettings/poolDates/cfb/seasonStatus  (in-season|done|preseason)
+
+// Which week is "current" per the GLOBAL calendar: the week whose [start,end] window
+// contains now. Falls back to the page's kickoff-based currentWeekId() if no calendar set.
+function calendarCurrentWeek(){
+  var now=Date.now();
+  var keys=Object.keys(CFB_CALENDAR||{});
+  if(!keys.length) return currentWeekId();
+  // Match a week whose window contains now.
+  for(var i=0;i<keys.length;i++){
+    var w=CFB_CALENDAR[keys[i]]||{};
+    var s=w.start?new Date(w.start).getTime():null;
+    var e=w.end?new Date(w.end).getTime():null;
+    if(s!==null && e!==null && now>=s && now<=e) return _calWeekToId(keys[i]);
+  }
+  // Before the first window → first week; after the last → last week.
+  var nums=keys.map(Number).sort(function(a,b){return a-b;});
+  var firstW=CFB_CALENDAR[nums[0]], lastW=CFB_CALENDAR[nums[nums.length-1]];
+  if(firstW&&firstW.start&&now<new Date(firstW.start).getTime()) return _calWeekToId(nums[0]);
+  return _calWeekToId(nums[nums.length-1]);
+}
+// Map a calendar week number to the pool's internal weekId (they may differ in format).
+function _calWeekToId(weekNo){
+  // Try to find a weekId whose guessed number matches; else assume weekId IS the number.
+  for(var i=0;i<ST.weekIds.length;i++){
+    var wid=ST.weekIds[i];
+    if(String(guessWeekNumber(ST.weekLabels[wid]||wid))===String(weekNo)) return wid;
+  }
+  return String(weekNo);
+}
+function _calWeekMeta(weekId){
+  // Reverse: find the calendar entry for a given internal weekId.
+  var num=guessWeekNumber(ST.weekLabels[weekId]||weekId);
+  return (CFB_CALENDAR&&CFB_CALENDAR[num])||null;
+}
+
+// A group's lock moment for a week = earliest kickoff among the games it actually added.
+function groupLockTs(weekId){
+  var g=ST.games[weekId]||{}, min=null;
+  activeGames(weekId).forEach(function(gid){
+    var ts=g[gid]&&g[gid].kickoffTs;
+    if(ts&&(min===null||ts<min)) min=ts;
+  });
+  return min;
+}
+
+// Derive this group's current-week display state.
+function groupWeekState(weekId){
+  if(!weekId) return "open";
+  if(ST.locked[weekId]) return "final";                        // admin marked it
+  var cal=_calWeekMeta(weekId);
+  if(cal&&cal.end && Date.now()>new Date(cal.end).getTime()) return "final"; // global week ended
+  var lock=groupLockTs(weekId);
+  if(lock && Date.now()>=lock) return "live";                  // earliest kickoff passed
+  return "open";
+}
+
+// Publish the per-group season summary + cumulative totals to the hub. Admin-gated so
+// only one writer, debounced to coalesce bursts. Mirrors the pattern used elsewhere.
+var _seasonSyncTimer=null;
+function publishSeasonToHub(){
+  if(!DB||!GROUP_ID) return;
+  if(!(isGroupAdminByUid&&isGroupAdminByUid())) return;   // single trusted writer
+  if(_seasonSyncTimer) clearTimeout(_seasonSyncTimer);
+  _seasonSyncTimer=setTimeout(function(){
+    // 1) Cumulative season totals (re-added hub sync) — read all weeks' picks fresh so
+    //    past weeks aren't undercounted by the current-week-only live listener.
+    DB.ref(BASE+"/picks").once("value",function(sn){
+      var allPicks=sn.val()||{};
+      var totals={};
+      (PARTS||[]).forEach(function(p){
+        var uk=ukey(p), total=0;
+        ST.weekIds.forEach(function(w){
+          if(!weekIsComplete(w)) return;
+          var picks=(allPicks[w]||ST.picks[w]||{})[uk]||{};
+          var results=ST.results[w]||{};
+          activeGames(w).forEach(function(gid){
+            var pk=picks[gid], r=results[gid];
+            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
+          });
+        });
+        totals[uk]=total;
+      });
+      DB.ref("groups/"+GROUP_ID+"/data/cfb/playerscores").set(totals);
+
+      // 2) Season summary for the two-line card.
+      var curW=calendarCurrentWeek();
+      var meta={
+        seasonStatus: CFB_SEASON_STATUS || "in-season",
+        currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
+        weekLabel: curW ? (ST.weekLabels[curW]||("Week "+curW)) : "",
+        lockTs: curW ? (groupLockTs(curW)||null) : null,
+        weekState: groupWeekState(curW),
+        updatedAt: Date.now()
+      };
+      DB.ref("groups/"+GROUP_ID+"/data/cfb/seasonMeta").set(meta);
+    });
+  },1200);
+}
+
 function loadData(){
   if(!DB){draw();return;}
   // Fetch group info, player emojis, and master pw in parallel with pool data
@@ -477,13 +596,20 @@ function loadData(){
     DB.ref("globalSettings/statuses/cfb").on("value",function(sn){
       window._cfbGlobalStatus=sn.val()||"coming-soon";
     });
+    // Global CFB season calendar (master-set): drives current week + season status.
+    DB.ref("globalSettings/poolDates/cfb/weeks").on("value",function(sn){
+      CFB_CALENDAR=sn.val()||{}; scheduleDraw(); publishSeasonToHub();
+    });
+    DB.ref("globalSettings/poolDates/cfb/seasonStatus").on("value",function(sn){
+      CFB_SEASON_STATUS=sn.val()||""; publishSeasonToHub();
+    });
 
     // Start pool data listeners immediately — don't wait for emojis
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();publishSeasonToHub();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();publishSeasonToHub();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();publishSeasonToHub();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
