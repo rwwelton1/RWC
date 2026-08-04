@@ -356,7 +356,29 @@ function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&l
 var _tt;
 function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.classList.add("show");clearTimeout(_tt);_tt=setTimeout(function(){el.classList.remove("show");},2500);}
 function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[.'&]/g,"");}
-function pem(n){return _EM[n]?"<span style='margin-right:3px'>"+_EM[n]+"</span>":"";}
+
+// ── IDENTITY LAYER (mirrors index.html) ──────────────────────────────────────
+// PARTS holds uids; ST.user is a uid; pick keys are uids. Display via USER_DIR.
+var USER_DIR = {};   // { uid: { username, emoji } }
+function nameOf(uid){
+  if(!uid) return "";
+  var e=USER_DIR[uid];
+  if(e&&e.username) return e.username;
+  if(typeof uid==="string" && uid.indexOf(" ")>=0) return uid;  // legacy tolerance
+  return "(unknown)";
+}
+function emojiOf(uid){ var e=USER_DIR[uid]; return (e&&e.emoji)||_EM[uid]||""; }
+function loadUserDir(cb){
+  if(!DB){ cb&&cb(); return; }
+  DB.ref("users").once("value",function(sn){
+    var all=sn.val()||{};
+    USER_DIR={};
+    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯"}; });
+    cb&&cb();
+  }).catch(function(){ cb&&cb(); });
+}
+// pem now takes a uid; shows that user's emoji.
+function pem(uid){ var em=emojiOf(uid); return em?"<span style='margin-right:3px'>"+em+"</span>":""; }
 
 function _pickCacheKey(weekId){ return "cfbpicks_"+(GROUP_ID||"global")+"_"+weekId; }
 function _savePickCache(weekId, uk, picks){
@@ -405,10 +427,10 @@ function spreadLabel(g,side){
 // ── Scoring ──────────────────────────────────────────────
 var _weekScoreCache={};
 function weekScore(weekId,user){
-  var picks=((ST.picks[weekId]||{})[ukey(user)])||{};
+  var picks=((ST.picks[weekId]||{})[user])||{};
   var results=ST.results[weekId]||{};
   // Cache key: stringify only the relevant parts
-  var ck=weekId+"_"+ukey(user)+"_"+JSON.stringify(picks)+"_"+JSON.stringify(results);
+  var ck=weekId+"_"+user+"_"+JSON.stringify(picks)+"_"+JSON.stringify(results);
   if(_weekScoreCache[ck]) return _weekScoreCache[ck];
   var total=0,correct=0,wrong=0,pending=0;
   GAME_IDS.forEach(function(gid){
@@ -535,17 +557,17 @@ function publishSeasonToHub(){
       var allPicks=sn.val()||{};
       var totals={};
       (PARTS||[]).forEach(function(p){
-        var uk=ukey(p), total=0;
+        var total=0;   // p is a uid
         ST.weekIds.forEach(function(w){
           if(!weekIsComplete(w)) return;
-          var picks=(allPicks[w]||ST.picks[w]||{})[uk]||{};
+          var picks=(allPicks[w]||ST.picks[w]||{})[p]||{};
           var results=ST.results[w]||{};
           activeGames(w).forEach(function(gid){
             var pk=picks[gid], r=results[gid];
             if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
           });
         });
-        totals[uk]=total;
+        totals[p]=total;
       });
       DB.ref("groups/"+GROUP_ID+"/data/cfb/playerscores").set(totals);
 
@@ -585,9 +607,12 @@ function loadData(){
     : Promise.resolve();
 
   groupPromise.then(function(){
-    // Now load emojis and pool data in parallel
+    // Load the display directory (uid → name/emoji) once.
+    return new Promise(function(res){ loadUserDir(res); });
+  }).then(function(){
+    // Now load emojis and pool data in parallel (PARTS are uids)
     var emojiPromises=PARTS.map(function(p){
-      return DB.ref("users/"+ukey(p)+"/emoji").once("value").then(function(sn){
+      return DB.ref("users/"+p+"/emoji").once("value").then(function(sn){
         if(sn.val()) _EM[p]=sn.val();
       }).catch(function(){});
     });
@@ -622,14 +647,13 @@ function loadData(){
           ST.picks[wId]=sn.val()||{};
           // If on group tab, flash a brief "player picked" indicator
           if(ST.page==="group"&&ST.user){
-            var uk=ukey(ST.user);
+            var uk=ST.user;
             Object.keys(ST.picks[wId]).forEach(function(puk){
               if(puk===uk) return; // ignore own picks
               var prevCount=Object.keys(prev[puk]||{}).filter(function(g){return (prev[puk]||{})[g]&&(prev[puk]||{})[g].side;}).length;
               var newCount=Object.keys(ST.picks[wId][puk]||{}).filter(function(g){return ST.picks[wId][puk][g]&&ST.picks[wId][puk][g].side;}).length;
               if(newCount>prevCount){
-                var pname=PARTS.find(function(p){return ukey(p)===puk;})||puk;
-                toast("&#9998; "+x(pname)+" just updated their picks");
+                toast("&#9998; "+x(nameOf(puk))+" just updated their picks");
               }
             });
           }
@@ -1105,7 +1129,7 @@ var _undoTimer=null, _undoPick=null;
 function setPickSide(weekId,gid,side){
   if(!ST.user){toast("Select your name first");return;}
   if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
-  var uk=ukey(ST.user);
+  var uk=ST.user;
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var cur=ST.picks[weekId][uk][gid]||{};
@@ -1159,7 +1183,7 @@ function setTiebreakerField(weekId,field,value){
 function setTiebreakerGuess(weekId,value){
   if(!ST.user){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
-  var uk=ukey(ST.user);
+  var uk=ST.user;
   if(!ST.picks[weekId]) ST.picks[weekId]={};
   if(!ST.picks[weekId][uk]) ST.picks[weekId][uk]={};
   ST.picks[weekId][uk].tb=value?Number(value):null;
@@ -1171,7 +1195,7 @@ function setTiebreakerGuess(weekId,value){
 function resetAllConf(weekId){
   if(!ST.user){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
-  var uk=ukey(ST.user);
+  var uk=ST.user;
   var active=activeGames(weekId);
   if(!ST.picks[weekId]||!ST.picks[weekId][uk]) return;
   active.forEach(function(gid){
@@ -1188,7 +1212,7 @@ function resetAllConf(weekId){
 function setConf(weekId,gid,confRaw){
   if(!ST.user){toast("Select your name first");return;}
   if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
-  var uk=ukey(ST.user);
+  var uk=ST.user;
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var picks=ST.picks[weekId][uk];
@@ -1203,7 +1227,7 @@ function setConf(weekId,gid,confRaw){
   }
   if(!picks[gid])picks[gid]={};
   if(conf)picks[gid].conf=conf; else delete picks[gid].conf;
-  _savePickCache(weekId, ukey(ST.user), picks);
+  _savePickCache(weekId, ST.user, picks);
   // Update chips in-place — no full redraw, no flash
   _updateConfChipsDom(weekId, picks);
   // Update progress bar pick/conf counts
@@ -1216,12 +1240,12 @@ function setConf(weekId,gid,confRaw){
 }
 
 function shareMyPicks(weekId){
-  var uk=ukey(ST.user);
+  var uk=ST.user;
   var picks=((ST.picks[weekId]||{})[uk])||{};
   var games=ST.games[weekId]||{};
   var active=activeGames(weekId);
   var label=ST.weekLabels[weekId]||weekId;
-  var lines=["📋 "+x(ST.user)+" – "+label+" Picks"];
+  var lines=["📋 "+x(nameOf(ST.user))+" – "+label+" Picks"];
   // Sort by conf desc
   var sorted=active.slice().sort(function(a,b){
     return (Number((picks[b]||{}).conf)||0)-(Number((picks[a]||{}).conf)||0);
@@ -1288,7 +1312,7 @@ function _updateConfChipsDom(weekId, picks){
 
 // Update the progress bar pick/conf counts without full redraw
 function _updateProgressBar(weekId){
-  var picks=((ST.picks[weekId]||{})[ukey(ST.user)])||{};
+  var picks=((ST.picks[weekId]||{})[ST.user])||{};
   var active=activeGames(weekId);
   var N=active.length;
   var made=0,confsMade=0,confs={},dupes=false;
@@ -1549,7 +1573,7 @@ function weekDropdown(curWeek, extraContent){
 function userSelectScreen(){
   var h='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
   PARTS.forEach(function(p){
-    h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+pem(p)+x(p)+'</div><div class="user-btn-sub">'+seasonScore(p)+' pts season total</div></button>';
+    h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+pem(p)+x(nameOf(p))+'</div><div class="user-btn-sub">'+seasonScore(p)+' pts season total</div></button>';
   });
   h+='</div></div>';
   return h;
@@ -1652,7 +1676,7 @@ function renderPicks(){
 
   var locked=!!ST.locked[weekId];
   var viewer=ST.user;
-  var viewerPicks=((ST.picks[weekId]||{})[ukey(viewer)])||{};
+  var viewerPicks=((ST.picks[weekId]||{})[viewer])||{};
   var canPick=!!(ST.user&&!locked);
   var active=activeGames(weekId);
   var N=active.length;
@@ -1753,7 +1777,7 @@ function renderPicks(){
   // Tiebreaker card
   var tb=ST.tiebreaker[weekId]||{};
   if(tb.away&&tb.home){
-    var tbPick=((ST.picks[weekId]||{})[ukey(ST.user)]||{}).tb||"";
+    var tbPick=((ST.picks[weekId]||{})[ST.user]||{}).tb||"";
     var tbLocked=!!ST.locked[weekId];
     h+='<div class="games-wrap" style="padding-top:0">';
     h+='<div class="game-card" style="border-color:var(--purple);box-shadow:4px 4px 0 var(--purple)">';
@@ -1780,7 +1804,7 @@ function renderPicks(){
 
   // All-picked celebration
   if(ST.user&&!locked&&N>0&&made===N&&confsMade===N&&!dupes){
-    var _celebKey="cfb_celeb_"+weekId+"_"+ukey(ST.user);
+    var _celebKey="cfb_celeb_"+weekId+"_"+ST.user;
     var _celebSeen=false;
     try{ _celebSeen=!!sessionStorage.getItem(_celebKey); }catch(e){}
     if(!_celebSeen){
@@ -1872,12 +1896,12 @@ function renderStandings(){
   rows.forEach(function(r,i){
     var rank=i+1;
     var isMe=ST.user&&r.name===ST.user;
-    var sortAttrs='data-total="'+r.total+'" data-possible="'+r.possible+'" data-name="'+x(ukey(r.name))+'" data-rank="'+rank+'"';
+    var sortAttrs='data-total="'+r.total+'" data-possible="'+r.possible+'" data-name="'+x(r.name)+'" data-rank="'+rank+'"';
     completedWeeks.forEach(function(w){
       sortAttrs+=' data-week-'+w+'="'+r.weekScores[w].total+'"';
     });
 
-    h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(ukey(r.name))+'">';
+    h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(r.name)+'">';
 
     var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
     h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+'</td>';
@@ -1885,7 +1909,7 @@ function renderStandings(){
     // Name + best/worst week callout
     var bestLabel=r.bestWk&&completedWeeks.length>1?'<span style="font-size:7px;color:var(--green);font-weight:700"> ▲'+r.bestPts+'</span>':'';
     var worstLabel=r.worstWk&&completedWeeks.length>1&&r.worstWk!==r.bestWk?'<span style="font-size:7px;color:var(--red2);font-weight:700"> ▼'+r.worstPts+'</span>':'';
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+x(r.name)+bestLabel+worstLabel+'</td>';
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+pem(r.name)+x(nameOf(r.name))+bestLabel+worstLabel+'</td>';
 
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
@@ -1922,7 +1946,7 @@ function renderStandings(){
 
     if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
-      var picks=((ST.picks[curWeekId]||{})[ukey(r.name)])||{};
+      var picks=((ST.picks[curWeekId]||{})[r.name])||{};
       var made=0;
       active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;});
       var allDone=active.length>0&&made===active.length;
@@ -2340,7 +2364,7 @@ function renderGroupPicks(){
 
   // Player rows
   players.forEach(function(player){
-    var uk=ukey(player);
+    var uk=player;   // uid
     var picks=((ST.picks[weekId]||{})[uk])||{};
     var ws=weekScore(weekId,player);
 
@@ -2353,14 +2377,14 @@ function renderGroupPicks(){
     });
 
     var isMe=ST.user&&player===ST.user;
-    var isSelected=ST.compareMode&&ST.compareSelected[ukey(player)];
+    var isSelected=ST.compareMode&&ST.compareSelected[player];
     var hasSelection=ST.compareMode&&Object.keys(ST.compareSelected).length>0;
     var isDimmed=ST.compareMode&&hasSelection&&!isSelected;
     var isHidden=ST.compareMode&&ST.compareIsolated&&hasSelection&&!isSelected;
     var rowCls=(ST.compareMode?"gp-row-selectable":"")+(isSelected?" gp-row-selected":isDimmed?" gp-row-dimmed":"")+(isHidden?" gp-row-hidden":"");
     var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'"';
     active.forEach(function(gid){ var p=picks[gid]||{}; confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"'; });
-    h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(ukey(player))+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
+    h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(player)+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
 
     // Compute streak — consecutive correct picks across all resolved games (most recent first)
     var streak=0;
@@ -2389,7 +2413,7 @@ function renderGroupPicks(){
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+x(player)+(onFire?' <span style="font-size:11px">&#128293;</span>':'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'>'+pem(player)+x(nameOf(player))+(onFire?' <span style="font-size:11px">&#128293;</span>':'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
@@ -2457,7 +2481,7 @@ function draw(){
   h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">College Football &middot; Confidence Pool'+(SEASON_YEAR?' &middot; '+SEASON_YEAR:'')+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
-    h+='<span class="tag">'+pem(ST.user)+x(ST.user)+'</span>';
+    h+='<span class="tag">'+pem(ST.user)+x(nameOf(ST.user))+'</span>';
     if(!URL_USER) h+='<button class="btn btn-ghost" id="b-switch">&#8646;</button>';
   }
   // Admin gear shows only for the group's owner/admins (by uid) or master. Everyone else
@@ -2474,7 +2498,7 @@ function draw(){
       var _hoursToKick=_firstKick?(_firstKick-Date.now())/(1000*60*60):null;
       if(_firstKick&&_hoursToKick!==null&&_hoursToKick<=4&&_hoursToKick>0){
         var _active=activeGames(_cw);
-        var _myPk=((ST.picks[_cw]||{})[ukey(ST.user)])||{};
+        var _myPk=((ST.picks[_cw]||{})[ST.user])||{};
         var _made=_active.filter(function(gid){return _myPk[gid]&&_myPk[gid].side;}).length;
         if(_made<_active.length){
           var _left=_active.length-_made;
@@ -2589,7 +2613,7 @@ function bind(){
         if(!aGid){ var aq=a.querySelector("[data-pick-gid]"); if(aq) aGid=aq.getAttribute("data-pick-gid"); }
         if(!bGid){ var bq=b.querySelector("[data-pick-gid]"); if(bq) bGid=bq.getAttribute("data-pick-gid"); }
         var weekId=ST.curWeek||currentWeekId();
-        var uk=ukey(ST.user);
+        var uk=ST.user;
         var ap=((ST.picks[weekId]||{})[uk]||{})[aGid]||{};
         var bp=((ST.picks[weekId]||{})[uk]||{})[bGid]||{};
         var aConf=Number(ap.conf)||0, bConf=Number(bp.conf)||0;
@@ -2841,7 +2865,7 @@ function bind(){
     var wk=this.getAttribute("data-conf-week");
     var gi=this.getAttribute("data-conf-gid");
     var val=this.getAttribute("data-conf-val");
-    var cur=(((ST.picks[wk]||{})[ukey(ST.user)]||{})[gi]||{}).conf;
+    var cur=(((ST.picks[wk]||{})[ST.user]||{})[gi]||{}).conf;
     setConf(wk,gi,Number(cur)===Number(val)?null:val);
   });
 
