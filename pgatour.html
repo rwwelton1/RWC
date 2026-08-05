@@ -465,6 +465,13 @@ var ST={
 // ── Live ESPN data ─────────────────────────────────
 var _liveData=null,_liveLoading=false,_liveLastFetch=0,_liveTimer=null;
 var liveScores={};
+// Series/event tracking for the per-event archive (kind:"series").
+var CUR_EVENT_NAME="", CUR_EVENT_STATE="open", CUR_EVENT_ENDED=false;
+var _pastEvents={};   // { slug: {name, endedAt, podium:[{uid,name,pts}]} }
+function _eventSlug(name){
+  var yr=(TOURNAMENT&&TOURNAMENT.year)||new Date().getFullYear();
+  return String(name||"event").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")+"-"+yr;
+}
 // Restore cached live scores instantly on load
 try{
   var _lsCache=localStorage.getItem("sc_livescores_"+(GROUP_ID||""));
@@ -729,6 +736,32 @@ function syncPlayerScoresToGroup(){
   }
   if(Object.keys(scores).length>0){
     DB.ref("groups/"+GROUP_ID+"/data/pgatour/playerscores").set(scores);
+  }
+
+  // ── Series: publish the current event card + auto-archive when it ends ──
+  // Only the admin writes hub-facing data (single trusted writer).
+  if(!(isGroupAdminByUid&&isGroupAdminByUid())) return;
+  if(!CUR_EVENT_NAME) return;
+
+  // Current-event summary for the hub series card.
+  DB.ref("groups/"+GROUP_ID+"/data/pgatour/currentEvent").set({
+    name: CUR_EVENT_NAME,
+    state: CUR_EVENT_STATE,
+    updatedAt: Date.now()
+  });
+
+  // Auto-archive: when ESPN reports the tournament completed, freeze the top-3 ONCE.
+  if(CUR_EVENT_ENDED){
+    var slug=_eventSlug(CUR_EVENT_NAME);
+    var ref=DB.ref("groups/"+GROUP_ID+"/data/pgatour/events/"+slug);
+    ref.once("value",function(sn){
+      if(sn.exists()) return;   // already archived — don't overwrite
+      // Rank players by total (golf = lower-better) and take top 3.
+      var ranked=Object.keys(scores).map(function(u){ return {uid:u, name:nameOf(u), pts:scores[u]}; })
+                       .sort(function(a,b){ return a.pts-b.pts; });
+      var podium=ranked.slice(0,3);
+      ref.set({ name:CUR_EVENT_NAME, endedAt:Date.now(), podium:podium });
+    });
   }
 }
 
@@ -1105,6 +1138,32 @@ function renderLeaderboard(){
     h+='</div>';
   }
   h+='</div></div>';
+
+  // ── Past Events archive (series history) ──
+  var _slugs=Object.keys(_pastEvents||{});
+  if(_slugs.length){
+    _slugs.sort(function(a,b){ return (_pastEvents[b].endedAt||0)-(_pastEvents[a].endedAt||0); });
+    h+='<div class="lb-wrap" style="padding-top:0">';
+    h+='<div class="section-label">Past Events</div>';
+    _slugs.forEach(function(sl){
+      var ev=_pastEvents[sl]||{}; var pod=ev.podium||[];
+      var medals=["🥇","🥈","🥉"];
+      h+='<div class="adm-card" style="margin-bottom:10px">';
+      h+='<div class="adm-title">'+x(ev.name||"Event")+'</div>';
+      if(!pod.length){
+        h+='<div style="font-size:10px;color:var(--muted);font-weight:700">No entrants.</div>';
+      } else {
+        pod.forEach(function(p,i){
+          h+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;font-weight:800">'
+            +'<span>'+(medals[i]||"")+'</span>'
+            +'<span style="flex:1">'+x(p.name||nameOf(p.uid))+'</span>'
+            +'<span style="color:var(--muted)">'+fmtScore(Number(p.pts)||0)+'</span></div>';
+        });
+      }
+      h+='</div>';
+    });
+    h+='</div>';
+  }
   return h;
 }
 
@@ -1219,6 +1278,14 @@ function parseLiveScores(data){
   // Fallback: just use first active event
   if(!comp&&events.length) comp=events[0];
   if(!comp){liveScores={};return;}
+
+  // ── Capture tournament-level state for the series card + auto-archive ──
+  // ESPN marks a finished tournament with status.type.completed=true (or state "post").
+  var _cs=(comp.status&&comp.status.type)||{};
+  CUR_EVENT_NAME  = comp.name || comp.shortName || TOURNAMENT.name || "";
+  CUR_EVENT_STATE = _cs.completed || _cs.state==="post" ? "final"
+                    : _cs.state==="in" ? "live" : "open";
+  CUR_EVENT_ENDED = !!(_cs.completed || _cs.state==="post");
 
   var comps=(comp.competitions&&comp.competitions[0])||comp;
   var competitors=comps.competitors||[];
@@ -2010,6 +2077,11 @@ function loadData(){
     DB.ref(BASE+"/meta/locked").on("value",function(sn){
       ST.locked=!!sn.val();
       draw();
+    });
+    // Series: past-event archive (top-3 per completed tournament).
+    DB.ref(BASE+"/events").on("value",function(sn){
+      _pastEvents=sn.val()||{};
+      if(ST.page==="leaderboard") draw();
     });
     DB.ref(BASE+"/picks").on("value",function(sn){
       ST.picks=sn.val()||{};setTimeout(syncPlayerScoresToGroup,800);

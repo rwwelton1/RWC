@@ -574,6 +574,7 @@ var POOL_LIBRARY = [
     hasCut:true,          hasSalary:true,        teamSport:false,
     maxPicks:6,           capAmount:50000,       entryCount:156,
     live:false,           liveSource:"espn",     recurring:true,
+    kind:"series",        // many independent tournaments, each its own winner (archived)
     tiebreaker:false,     year:2026
   },
   {
@@ -667,6 +668,9 @@ var POOL_LIBRARY = [
     tiebreaker:false,     year:2026
   }
 ];
+// Every pool has an explicit competition shape. Most are one-shot events ("single");
+// CFB is an accumulating "season"; PGA is a repeating "series" of independent events.
+POOL_LIBRARY.forEach(function(p){ if(!p.kind) p.kind = "single"; });
 
 // Helper: get pool definition by id
 function poolById(id){ for(var i=0;i<POOL_LIBRARY.length;i++) if(POOL_LIBRARY[i].id===id) return POOL_LIBRARY[i]; return null; }
@@ -1116,6 +1120,29 @@ function poolState(pool, g){
       secondary = { label: wLbl + " · " + _labelFor(wState) + sub, tone: _toneFor(wState) };
     }
     return { kind:kind, primary:{ state:sPrimaryState, label:sPrimaryLabel, tone:sPrimaryState, subtext:"" }, secondary:secondary };
+  }
+  if(kind==="series"){
+    // PGA: each tournament is its own contest. Primary = the current event's state + name.
+    // Secondary = the most recent archived event's winner. Both published by the pool page.
+    var pdata = (g && g.data && g.data[pool.id]) || {};
+    var cur = pdata.currentEvent || null;
+    var evState = (cur && cur.state) || poolStatusFor(g, pool.id);   // open|live|final fallback
+    var evName = (cur && cur.name) || "";
+    var primLabel = _labelFor(evState==="live"?"locked":evState==="final"?"complete":"open");
+    var primary = { state: evState, label: (evName ? (primLabel+" · "+evName) : primLabel), tone: _toneFor(evState==="live"?"locked":evState), subtext:"" };
+    // Most recent archived event → "Last: <winner> won <event>"
+    var secondary = null;
+    var events = pdata.events || {};
+    var slugs = Object.keys(events);
+    if(slugs.length){
+      slugs.sort(function(a,b){ return (events[b].endedAt||0)-(events[a].endedAt||0); });
+      var last = events[slugs[0]] || {};
+      var champ = (last.podium && last.podium[0]) || null;
+      if(champ){
+        secondary = { label: "🏆 "+ (champ.name || nameOf(champ.uid)) + " won " + (last.name||"last event"), tone:"final" };
+      }
+    }
+    return { kind:kind, primary:primary, secondary:secondary };
   }
   // single (and, for now, everything else): one status, no secondary line.
   var st = poolStatusFor(g, pool.id);
@@ -2057,10 +2084,12 @@ function renderProfile() {
       if(pools.length > 0) {
         gh += '<div style="padding:5px 8px 6px;border-top:1px solid var(--border2);min-height:0">';
         pools.forEach(function(pool){
-          // ── kind:"season" (CFB): two lines — season primary + current-week secondary ──
-          if(pool.kind==="season"){
+          // ── kind season/series: two-line card (primary + context secondary) ──
+          if(pool.kind==="season" || pool.kind==="series"){
             var _ps = poolState(pool, g);
-            if(_ps.primary.state==="soon") return;   // preseason: hide like coming-soon
+            // Season hides in preseason (like coming-soon). Series always shows (it cycles
+            // events, and even between events the last winner is worth showing).
+            if(pool.kind==="season" && _ps.primary.state==="soon") return;
             var _pTone = _ps.primary.tone;
             var _pBg = _pTone==="live"?'var(--green-bg)':_pTone==="final"?'var(--blue-bg)':'var(--cream)';
             var _pCol = _pTone==="live"?'var(--green)':_pTone==="final"?'var(--blue)':'var(--dim)';
