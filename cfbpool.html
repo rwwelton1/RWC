@@ -545,22 +545,50 @@ function groupWeekState(weekId){
 
 // Publish the per-group season summary + cumulative totals to the hub. Admin-gated so
 // only one writer, debounced to coalesce bursts. Mirrors the pattern used elsewhere.
+// Cache of a COMPLETED week's picks, keyed by weekId. A completed week's picks are frozen,
+// so we read them from the DB once and reuse — avoiding a full picks re-download on every
+// live results tick. invalidateWeekCache(w) clears one week when its games/results/locked
+// change (e.g. a week flips complete↔incomplete, or an admin edits a past week).
+var _weekPicksCache={};
+function invalidateWeekCache(w){ if(w==null) _weekPicksCache={}; else delete _weekPicksCache[w]; }
+function invalidateAllWeekCache(){ _weekPicksCache={}; }
+
 var _seasonSyncTimer=null;
-function publishSeasonToHub(){
+// metaOnly=true → only the seasonMeta line changed (calendar / season status); skip the
+// expensive score recompute entirely and write just the meta.
+function publishSeasonToHub(metaOnly){
   if(!DB||!GROUP_ID) return;
   if(!(isGroupAdminByUid&&isGroupAdminByUid())) return;   // single trusted writer
   if(_seasonSyncTimer) clearTimeout(_seasonSyncTimer);
   _seasonSyncTimer=setTimeout(function(){
-    // 1) Cumulative season totals (re-added hub sync) — read all weeks' picks fresh so
-    //    past weeks aren't undercounted by the current-week-only live listener.
-    DB.ref(BASE+"/picks").once("value",function(sn){
-      var allPicks=sn.val()||{};
+    // Build the seasonMeta line (cheap — always computed).
+    var curW=calendarCurrentWeek();
+    var meta={
+      seasonStatus: CFB_SEASON_STATUS || "in-season",
+      currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
+      weekLabel: curW ? (ST.weekLabels[curW]||("Week "+curW)) : "",
+      lockTs: curW ? (groupLockTs(curW)||null) : null,
+      weekState: groupWeekState(curW),
+      updatedAt: Date.now()
+    };
+
+    // Meta-only fast path: nothing that affects scores changed, so skip the pick read.
+    if(metaOnly){
+      DB.ref("groups/"+GROUP_ID+"/data/cfb/seasonMeta").set(meta);
+      return;
+    }
+
+    // Determine which completed weeks we still need picks for (cache miss).
+    var completed=ST.weekIds.filter(function(w){ return weekIsComplete(w); });
+    var missing=completed.filter(function(w){ return !_weekPicksCache[w]; });
+
+    function computeAndWrite(){
       var totals={};
       (PARTS||[]).forEach(function(p){
         var total=0;   // p is a uid
-        ST.weekIds.forEach(function(w){
-          if(!weekIsComplete(w)) return;
-          var picks=(allPicks[w]||ST.picks[w]||{})[p]||{};
+        completed.forEach(function(w){
+          var wp=_weekPicksCache[w]||{};      // frozen completed-week picks
+          var picks=wp[p]||{};
           var results=ST.results[w]||{};
           activeGames(w).forEach(function(gid){
             var pk=picks[gid], r=results[gid];
@@ -569,20 +597,23 @@ function publishSeasonToHub(){
         });
         totals[p]=total;
       });
-      DB.ref("groups/"+GROUP_ID+"/data/cfb/playerscores").set(totals);
+      // One atomic write: scores + meta land together, hub never sees a half-updated state.
+      var upd={};
+      upd["groups/"+GROUP_ID+"/data/cfb/playerscores"]=totals;
+      upd["groups/"+GROUP_ID+"/data/cfb/seasonMeta"]=meta;
+      DB.ref().update(upd);
+    }
 
-      // 2) Season summary for the two-line card.
-      var curW=calendarCurrentWeek();
-      var meta={
-        seasonStatus: CFB_SEASON_STATUS || "in-season",
-        currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
-        weekLabel: curW ? (ST.weekLabels[curW]||("Week "+curW)) : "",
-        lockTs: curW ? (groupLockTs(curW)||null) : null,
-        weekState: groupWeekState(curW),
-        updatedAt: Date.now()
-      };
-      DB.ref("groups/"+GROUP_ID+"/data/cfb/seasonMeta").set(meta);
-    });
+    if(missing.length===0){
+      computeAndWrite();
+    } else {
+      // Fetch only the missing completed weeks' picks once, then cache and compute.
+      Promise.all(missing.map(function(w){
+        return DB.ref(BASE+"/picks/"+w).once("value").then(function(sn){
+          _weekPicksCache[w]=sn.val()||{};
+        });
+      })).then(computeAndWrite).catch(computeAndWrite);
+    }
   },1200);
 }
 
@@ -622,19 +653,30 @@ function loadData(){
       window._cfbGlobalStatus=sn.val()||"coming-soon";
     });
     // Global CFB season calendar (master-set): drives current week + season status.
+    // These only affect the seasonMeta line, not scores → meta-only fast path.
     DB.ref("globalSettings/poolDates/cfb/weeks").on("value",function(sn){
-      CFB_CALENDAR=sn.val()||{}; scheduleDraw(); publishSeasonToHub();
+      CFB_CALENDAR=sn.val()||{}; scheduleDraw(); publishSeasonToHub(true);
     });
     DB.ref("globalSettings/poolDates/cfb/seasonStatus").on("value",function(sn){
-      CFB_SEASON_STATUS=sn.val()||""; publishSeasonToHub();
+      CFB_SEASON_STATUS=sn.val()||""; publishSeasonToHub(true);
     });
 
-    // Start pool data listeners immediately — don't wait for emojis
+    // Start pool data listeners immediately — don't wait for emojis. We only invalidate the
+    // completed-week cache when the SET of completed weeks actually changes (a week flips
+    // complete↔incomplete) or a completed week's games are edited — not on every results
+    // tick — so live scoring doesn't re-download frozen past weeks each update.
     DB.ref(BASE+"/locked").once("value",function(sn0){
       ST.locked=sn0.val()||{};
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};scheduleDraw();publishSeasonToHub();});
-      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};scheduleDraw();publishSeasonToHub();});
-      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};scheduleDraw();publishSeasonToHub();});
+      var _completedSig=function(){ return ST.weekIds.filter(function(w){return weekIsComplete(w);}).join(","); };
+      var _lastSig=_completedSig();
+      var _onData=function(){
+        var sig=_completedSig();
+        if(sig!==_lastSig){ invalidateAllWeekCache(); _lastSig=sig; }
+        scheduleDraw(); publishSeasonToHub();
+      };
+      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};invalidateAllWeekCache();_lastSig=_completedSig();_onData();});
+      DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};_onData();});
+      DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};_onData();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;

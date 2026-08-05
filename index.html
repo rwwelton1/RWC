@@ -698,7 +698,7 @@ var MASTER_PW = "Sloop";
 // cfbpool.html. The password path above is retained only as a legacy fallback.
 var MASTER_UIDS = { "SJr0tv9puDcNZLAcNy1ErOUGijg1": true };
 function isMasterUid(){
-  var uid = (typeof currentUid==="function") ? currentUid() : null;
+  var uid = ME();
   return !!(uid && MASTER_UIDS[uid]);
 }
 
@@ -1189,19 +1189,6 @@ function saveLastGroup(groupId){
 function loadLastGroup(){
   try{ return localStorage.getItem("pp_last_group"); }catch(e){ return null; }
 }
-function isFirstVisitToday(){
-  try{
-    var d = new Date();
-    var today = d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate();
-    var last = localStorage.getItem("pp_last_visit");
-    localStorage.setItem("pp_last_visit", today);
-    return last !== today;
-  }catch(e){ return false; }
-}
-function generateGuestName(){
-  var num = Math.floor(1000 + Math.random() * 9000);
-  return "Guest" + num;
-}
 function isGuest(){
   try{ return localStorage.getItem("pp_guest")==="1"; }catch(e){ return false; }
 }
@@ -1212,47 +1199,9 @@ function requireAuth(){
   if(isGuest()){ showGuestPrompt(); return true; }
   return false;
 }
-function saveGuest(name){
-  try{
-    localStorage.setItem("pp_user", name);
-    localStorage.setItem("pp_guest", "1");
-    localStorage.setItem("pp_guest_name", name);
-    localStorage.setItem("pp_emoji", "🎯");
-  }catch(e){}
-}
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
-function authSignup(username, cb) {
-  // Username is a pure DISPLAY field on the uid record. "Signup"/rename just writes the
-  // display name to users/{uid}/username — no name-derived keys, no record migration.
-  if(!SC.currentUser) { cb("Please sign in with Google."); return; }
-  if(!username || username.trim().length < 2) { cb("Username must be at least 2 characters"); return; }
-  username = username.trim();
-  var uid = ME();
-  if(!uid) { cb("Please sign in again."); return; }
-  if(!DB) { cb("No database connection"); return; }
-  DB.ref("users/"+uid+"/username").set(username, function(err){
-    if(err){ cb("Failed to save — check connection"); return; }
-    if(SC.currentUser) SC.currentUser.username = username;
-    if(USER_DIR[uid]) USER_DIR[uid].username = username; else USER_DIR[uid]={username:username, emoji:(SC.currentUser&&SC.currentUser.emoji)||"🎯"};
-    cb(null, { username: username, groups: (SC.currentUser&&SC.currentUser.groups)||[], emoji: (SC.currentUser&&SC.currentUser.emoji)||"🎯", uid: uid, _key: uid });
-  });
-}
 
-function authLogin(username, cb) {
-  // Username/password login is disabled — Google sign-in only.
-  cb("Please sign in with Google.");
-  return;
-  /* eslint-disable no-unreachable */
-  if(!username) { cb("Enter your username"); return; }
-  var key = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  if(!DB) { cb("No database connection"); return; }
-  DB.ref("users/"+key).once("value", function(sn){
-    var u = sn.val();
-    if(!u) { cb("Username not found"); return; }
-    cb(null, { username: u.username, groups: u.groups || [], emoji: u.emoji || "🎯" });
-  });
-}
 
 function authGoogleSignIn(cb) {
   if(!AUTH) { cb("Auth not available"); return; }
@@ -1299,46 +1248,12 @@ function addGroupToUser(uid, groupId) {
 }
 
 // ── GUEST MIGRATION ──────────────────────────────────────────────────────────
-function migrateGuestToUser(guestName, newUsername, cb) {
-  if(!DB || !guestName) { cb(); return; }
-  var guestKey = guestName.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  // Load all groups and find ones where guest is a player
-  DB.ref("groups").once("value", function(sn) {
-    var groups = sn.val() || {};
-    var migrations = [];
-    Object.keys(groups).forEach(function(gid) {
-      var g = groups[gid];
-      var players = g.players || [];
-      var idx = players.indexOf(guestName);
-      if(idx >= 0) migrations.push({ gid: gid, players: players, idx: idx });
-    });
-    if(migrations.length === 0) { cb(); return; }
-    var done = 0;
-    migrations.forEach(function(m) {
-      // Replace guest name with new username in group players
-      var newPlayers = m.players.slice();
-      newPlayers[m.idx] = newUsername;
-      DB.ref("groups/"+m.gid+"/players").set(newPlayers, function() {
-        // Add group to new user account
-        addGroupToUser(newUsername, m.gid);
-        done++;
-        if(done === migrations.length) cb();
-      });
-    });
-  });
-}
 
 // ── FIREBASE GROUP OPS ────────────────────────────────────────────────────────
-function currentUid(){
-  // Authoritative source is the live Firebase session; fall back to the uid we cached
-  // on SC.currentUser at sign-in. Used to stamp group ownership for the security rules.
-  try{ if(AUTH && AUTH.currentUser && AUTH.currentUser.uid) return AUTH.currentUser.uid; }catch(e){}
-  return (SC.currentUser && SC.currentUser.uid) || null;
-}
 
 function createGroup(name, adminPw, pools, cb) {
   var id = randCode();
-  var _uid = currentUid();
+  var _uid = ME();
   if(!_uid){ cb(null, "Please sign in with Google before creating a group."); return; }
   var group = {
     id: id,
@@ -1379,7 +1294,7 @@ function isGroupAdmin(group) {
   if(!group) return false;
   // Identity first: the group's ownerUid / adminUids (stamped at create) and master uid.
   // This is the authoritative check and survives display-name changes.
-  var uid = (typeof currentUid==="function") ? currentUid() : null;
+  var uid = ME();
   if(uid){
     if(isMasterUid()) return true;
     if(group.ownerUid && group.ownerUid === uid) return true;
@@ -1432,28 +1347,7 @@ var _WC_GROUP_IDS=["A","B","C","D","E","F","G","H","I","J","K","L"];
 var _WC_ALIASES={"united states":"USA","united states of america":"USA","usa":"USA","us":"USA","usmnt":"USA","ivory coast":"Ivory Coast","cote d'ivoire":"Ivory Coast","côte d'ivoire":"Ivory Coast","bosnia and herzegovina":"Bosnia & Herz.","bosnia & herzegovina":"Bosnia & Herz.","turkiye":"Türkiye","turkey":"Türkiye","south korea":"South Korea","korea republic":"South Korea","cape verde":"Cape Verde"};
 var _WC_PTS={groupWinner:2,qualifier:1,wildcard:1,perfectGroup:2};
 
-function _wcUkey(n){return (n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
-function _wcFindName(name){
-  if(!name) return name;
-  for(var gid in _WC_GROUPS){
-    var teams=_WC_GROUPS[gid];
-    for(var i=0;i<teams.length;i++){ if(teams[i]===name) return name; }
-  }
-  var alias=_WC_ALIASES[(name||"").toLowerCase().trim()];
-  return alias||name;
-}
-function _wcGetGroupRanking(picks, player, gid){
-  var uk=_wcUkey(player);
-  return ((picks[uk]&&picks[uk].groups&&picks[uk].groups[gid])||[]);
-}
-function _wcGetUserWildcards(picks, player){
-  var uk=_wcUkey(player);
-  return (picks[uk]&&picks[uk].wildcards)||[];
-}
 
-function computeWCScores(groupId, players) {
-  // No-op: scores are written by worldcup.html and read via subscribeWCData
-}
 
 function subscribeGroup(id) {
   if(!DB) return;
@@ -1841,7 +1735,6 @@ function renderAuth() {
 // ── PROFILE SCREEN ────────────────────────────────────────────────────────────
 var EMOJI_OPTIONS = ["🎯","⚡","🔥","🏆","🎲","🦁","🐺","🦊","🐻","🦅","🦋","🌊","🍀","🌙","⭐","🎸","🎮","🏄","🧠","🤠","👑","💎","🚀","🌈","🎪","🎭","🐉","🦄","🍕","🎲","🦈","🏹","⚔️","🎺","🌵","🍺","🏔️","🦋","🎳","🧊","🎨","🎬","🌸","🧨","💥"];
 
-function userKey(uname){ return (uname||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,""); }
 
 function saveUserEmoji(emoji) {
   if(!SC.currentUser || !DB) return;
@@ -3234,14 +3127,6 @@ function _feedUserKey() {
   return ME();
 }
 
-function loadFeedSeenAt(cb) {
-  var uk = _feedUserKey();
-  if(!uk || !DB) { cb && cb(); return; }
-  DB.ref("users/"+uk+"/feedSeenAt").once("value", function(sn){
-    SC._feedSeenAt = sn.val() || 0;
-    cb && cb();
-  });
-}
 
 function dismissFeedItem(idx, key) {
   var item = document.getElementById("feed-item-"+idx);
@@ -4297,77 +4182,6 @@ function renderUnauthLanding() {
   });
 }
 
-function renderLanding() {
-  var u = SC.currentUser;
-  var myGroups = u ? (u.groups || []) : [];
-  var last = loadLastGroup();
-
-  var h = topbar(false);
-  h += '<div class="main fade-up">';
-  h += '<div class="landing">';
-  h += '<div class="landing-logo"><span class="scorecery-logo">SCORECERY</span></div>';
-
-  h += '</div>';
-
-  h += '<div style="display:flex;gap:8px;margin-bottom:20px">';
-  h += '<button class="landing-btn landing-btn-primary" id="btn-create" style="flex:1;padding:11px;font-size:13px">+ Create a Group</button>';
-  h += '</div>';
-
-  // My groups
-  if(myGroups.length > 0) {
-    h += '<div class="section-label">My Groups</div>';
-    h += '<div class="standings-card" style="margin-bottom:24px"><table class="groups-table"><thead><tr><th>Group</th><th></th></tr></thead><tbody id="my-groups-tbody"><tr><td colspan="2" class="no-results">Loading...</td></tr></tbody></table></div>';
-  } else if(last) {
-    h += '<div style="margin-bottom:20px">';
-    h += '<button class="landing-btn" style="width:100%;padding:11px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);color:#fbbf24;font-size:13px" id="btn-return">&#8617; Return to Last Group</button>';
-    h += '</div>';
-  }
-
-  // All groups (search by name)
-  h += '<div class="section-label">All Groups</div>';
-  h += '<div class="search-wrap"><span class="search-icon">&#128269;</span><input class="search-input" id="group-search-landing" placeholder="Search by group name..." autocomplete="off"></div>';
-  h += '<div class="standings-card" style="margin-bottom:0"><table class="groups-table"><thead><tr><th>Group</th><th>Players</th><th>Competition</th><th></th></tr></thead><tbody id="groups-tbody-landing"><tr><td colspan="4" class="no-results">Loading groups...</td></tr></tbody></table></div>';
-
-  h += '</div>';
-  render(h);
-
-  document.getElementById("btn-create").addEventListener("click", function(){ SC.screen="create"; SC.error=""; SC.createForm={name:"",adminPw:"",pools:[],pgatourType:"salary"}; draw(); });
-
-  var rb = document.getElementById("btn-return");
-  if(rb) rb.addEventListener("click", function(){ joinGroup(last); });
-
-  // My groups table
-  if(myGroups.length > 0) {
-    var myTbody = document.getElementById("my-groups-tbody");
-    if(DB && myTbody) {
-      var promises = myGroups.map(function(gid){
-        return DB.ref("groups/"+gid).once("value").then(function(sn){ return sn.val(); });
-      });
-      Promise.all(promises).then(function(results){
-        var h="";
-        results.forEach(function(g){
-          if(!g) return;
-          h += '<tr class="clickable-row" data-gid="'+x(g.id)+'">';
-          h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
-          h += '<td><span class="join-link">Open &#8250;</span></td></tr>';
-        });
-        if(!h) h = '<tr><td colspan="2" class="no-results">No groups found</td></tr>';
-        myTbody.innerHTML = h;
-        myTbody.querySelectorAll("tr.clickable-row").forEach(function(el){
-          el.addEventListener("click", function(){ joinGroup(this.getAttribute("data-gid")); });
-        });
-      });
-    }
-  }
-
-  // All groups table
-  loadAllGroups(function(groups){ renderGroupsTableTo("groups-tbody-landing", groups, ""); });
-  var si = document.getElementById("group-search-landing");
-  if(si) si.addEventListener("input", function(){
-    var q=this.value;
-    loadAllGroups(function(groups){ renderGroupsTableTo("groups-tbody-landing", groups, q); });
-  });
-}
 
 // ── JOIN ─────────────────────────────────────────────────────────────────────
 function showGuestPrompt() {
@@ -5478,18 +5292,6 @@ function renderAdmin() {
   h += '<div id="admin-public-pool-players"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Loading players...</div></div>';
   h += '</div>';
 
-  h += '<div class="section-label">Master Password</div>';
-  h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:10px">Change the master password used across Scorecery and picks.html. Enter current password to confirm.</div>';
-  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-  h += '<input class="auth-input" id="mpw-current" type="password" placeholder="Current password" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
-  h += '<input class="auth-input" id="mpw-new" type="password" placeholder="New password" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
-  h += '<input class="auth-input" id="mpw-confirm" type="password" placeholder="Confirm new" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
-  h += '<button class="btn btn-gold" id="btn-change-mpw" style="padding:8px 14px;font-size:12px">Change</button>';
-  h += '</div>';
-  h += '<div id="mpw-msg" style="font-size:11px;min-height:16px;margin-top:6px"></div>';
-  h += '</div>';
-
   h += '<div class="section-label">Users</div>';
   h += '<div class="admin-panel">';
   h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">All Scorecery users. Google badge = signed in with Google. Delete removes permanently.</div>';
@@ -5775,31 +5577,6 @@ function renderAdmin() {
     });
   });
 
-  // Change master password
-  var changeMpwBtn = document.getElementById("btn-change-mpw");
-  if(changeMpwBtn) changeMpwBtn.addEventListener("click", function(){
-    var msgEl = document.getElementById("mpw-msg");
-    var cur = (document.getElementById("mpw-current").value||"").trim();
-    var nw  = (document.getElementById("mpw-new").value||"").trim();
-    var cnf = (document.getElementById("mpw-confirm").value||"").trim();
-    msgEl.style.color="#fca5a5";
-    if(!cur){ msgEl.textContent="Enter current password."; return; }
-    if(cur !== MASTER_PW){ msgEl.textContent="Current password is wrong."; return; }
-    if(!nw || nw.length < 4){ msgEl.textContent="New password must be at least 4 characters."; return; }
-    if(nw !== cnf){ msgEl.textContent="Passwords don't match."; return; }
-    if(!DB){ msgEl.textContent="Firebase unavailable."; return; }
-    DB.ref("globalSettings/masterPw").set(nw, function(err){
-      if(err){ msgEl.textContent="Failed to save."; return; }
-      MASTER_PW = nw;
-      document.getElementById("mpw-current").value="";
-      document.getElementById("mpw-new").value="";
-      document.getElementById("mpw-confirm").value="";
-      msgEl.style.color="#6ee7b7";
-      msgEl.textContent="Master password updated ✓";
-    });
-  });
-
-
   // Load Group Admins selector
   loadAllGroups(function(groups){
     var sel = document.getElementById("group-admin-select");
@@ -5985,131 +5762,7 @@ function renderGroupAdminMembers(group, container) {
   });
 }
 
-function loadAdminGuests(q) {
-  var list = document.getElementById("admin-guests-list");
-  if(!list) return;
-  if(!DB){ list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:16px">Firebase unavailable</div>'; return; }
 
-  DB.ref("users").once("value", function(usnap){
-    var realUsers = {};
-    Object.keys(usnap.val()||{}).forEach(function(k){ realUsers[k]=true; });
-
-    // guestMap: name -> { groups: [groupIds or "root"], hasPicks: bool }
-    var guestMap = {};
-
-    function addGuest(name, location, hasPicks) {
-      if(!name) return;
-      var key = userKey(name);
-      if(realUsers[key]) return; // registered user, skip
-      if(!guestMap[name]) guestMap[name] = { groups:[], hasPicks:false };
-      if(guestMap[name].groups.indexOf(location) < 0) guestMap[name].groups.push(location);
-      if(hasPicks) guestMap[name].hasPicks = true;
-    }
-
-    function renderGuests() {
-      var guests = Object.keys(guestMap);
-      // Apply search filter
-      if(q) guests = guests.filter(function(g){ return g.toLowerCase().indexOf(q.toLowerCase()) >= 0; });
-      if(!guests.length){
-        list.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:12px">'+(q?'No guests match your search.':'No guests found.')+'</div>';
-        return;
-      }
-      guests.sort();
-      var h='<table style="width:100%;border-collapse:collapse;font-size:11px">';
-      h+='<thead><tr>';
-      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Guest</th>';
-      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Groups</th>';
-      h+='<th style="text-align:left;color:#475569;padding:4px 6px;font-weight:500;font-size:9px;text-transform:uppercase;letter-spacing:.06em">Picks</th>';
-      h+='<th></th>';
-      h+='</tr></thead><tbody>';
-      guests.forEach(function(gname){
-        var info = guestMap[gname];
-        var hasRoot = info.groups.indexOf("root") >= 0;
-        var groupCount = info.groups.filter(function(g){ return g !== "root"; }).length;
-        var grpLabel = hasRoot
-          ? (groupCount ? '<span style="color:#fbbf24">No group</span>, '+groupCount+' group'+(groupCount!==1?'s':'') : '<span style="color:#fbbf24">No group</span>')
-          : groupCount+' group'+(groupCount!==1?'s':'');
-        h+='<tr style="border-top:1px solid #0f1923">';
-        h+='<td style="padding:7px 6px;color:#f1f5f9;font-weight:600">🎯 '+x(gname)+'</td>';
-        h+='<td style="padding:7px 6px;color:#475569">'+grpLabel+'</td>';
-        h+='<td style="padding:7px 6px">'+(info.hasPicks?'<span style="color:#6ee7b7;font-size:10px">✓ Yes</span>':'<span style="color:#334155;font-size:10px">—</span>')+'</td>';
-        h+='<td style="padding:7px 6px;text-align:right"><button class="btn btn-red btn-sm" style="font-size:9px" data-del-guest="'+x(gname)+'">Delete</button></td>';
-        h+='</tr>';
-      });
-      h+='</tbody></table>';
-      list.innerHTML=h;
-      list.querySelectorAll("[data-del-guest]").forEach(function(btn){
-        btn.addEventListener("click", async function(){
-          var gname = this.getAttribute("data-del-guest");
-          if(!await scConfirm('Remove guest "'+gname+'" from all groups and delete their picks? This cannot be undone.', {title:"Remove Guest", okLabel:"Remove", danger:true})) return;
-          var groupIds = guestMap[gname].groups.filter(function(g){ return g !== "root"; });
-          var hasRoot = guestMap[gname].groups.indexOf("root") >= 0;
-          deleteGuest(gname, groupIds, hasRoot);
-        });
-      });
-    }
-
-    var pending = 2;
-    function done() { pending--; if(pending===0) renderGuests(); }
-
-    // 1. Scan root pools/rwc/picks (ungrouped guests)
-    DB.ref("pools/rwc/picks").once("value", function(psn){
-      Object.keys(psn.val()||{}).forEach(function(pname){
-        addGuest(pname, "root", true);
-      });
-      done();
-    });
-
-    // 2. Scan all groups — players array + picks data
-    DB.ref("groups").once("value", function(gsnap){
-      Object.values(gsnap.val()||{}).forEach(function(g){
-        // Players array
-        (g.players||[]).forEach(function(p){ addGuest(p, g.id, false); });
-        // Picks data for all pools
-        var data = g.data || {};
-        Object.keys(data).forEach(function(poolId){
-          Object.keys((data[poolId]||{}).picks||{}).forEach(function(pname){
-            addGuest(pname, g.id, true);
-          });
-        });
-      });
-      done();
-    });
-  });
-}
-
-function deleteGuest(guestName, groupIds, hasRoot) {
-  if(!DB) return;
-  var updates = {};
-  var tasks = groupIds.length + (hasRoot ? 1 : 0);
-  if(tasks===0){ toast("Guest removed ✓"); loadAdminGuests(); return; }
-
-  function finish() {
-    tasks--;
-    if(tasks===0){
-      DB.ref().update(updates, function(err){
-        if(err){ toast("Delete failed"); return; }
-        toast('Guest "'+guestName+'" removed ✓');
-        loadAdminGuests();
-      });
-    }
-  }
-
-  // Remove from root pools/rwc/picks
-  if(hasRoot){
-    updates["pools/rwc/picks/"+guestName] = null;
-    finish();
-  }
-
-  // Remove from each group's players array
-  groupIds.forEach(function(gid){
-    DB.ref("groups/"+gid+"/players").once("value", function(sn){
-      var players = (sn.val()||[]).filter(function(p){ return p!==guestName; });
-      updates["groups/"+gid+"/players"] = players;
-      finish();
-    });
-  });
-}
 
 function loadAdminUsers(q) {
   var list = document.getElementById("admin-users-list");
@@ -6159,9 +5812,6 @@ function loadAdminUsers(q) {
       var em = u.emoji||"🍺";
       var displayName = u.username || "(unnamed)";
       var isMissing = !u.username;
-      // Google users (googleUid present) and password users are registered accounts
-      // Only flag as guest if no password AND no googleUid AND not an orphan with groups
-      var isGuestAcct = !u.password && !u.googleUid && !u._orphan;
       var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
       var authBadge = u.googleUid
         ? '<span style="font-size:8px;font-weight:700;color:#4285F4;background:rgba(66,133,244,.1);border:1px solid rgba(66,133,244,.3);border-radius:4px;padding:1px 5px">Google</span>'
@@ -6173,12 +5823,7 @@ function loadAdminUsers(q) {
       h+='<span style="color:'+(isMissing?'#fbbf24':'#f1f5f9')+';font-weight:600">'+em+' '+x(displayName)+'</span>'+authBadge;
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:transparent;color:#64748b;cursor:pointer;font-family:inherit">Rename</button>';
       h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:transparent;color:#6ee7b7;cursor:pointer;font-family:inherit">Merge</button>';
-      if(isGuestAcct) h+='<button data-setpw-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(251,191,36,.3);background:transparent;color:#fbbf24;cursor:pointer;font-family:inherit">Set PW</button>';
       h+='<button data-history-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(96,165,250,.35);background:transparent;color:#60a5fa;cursor:pointer;font-family:inherit">History</button>';
-      h+='</div>';
-      h+='<div id="setpw-area-'+safeKey+'" style="display:none;margin-top:5px">';
-      h+='<div style="font-size:9px;color:#475569;margin-bottom:4px">Set a password for this account so they can log in from any device.</div>';
-      h+='<div style="display:flex;gap:4px"><input class="form-input" type="password" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New password" maxlength="50" id="setpw-input-'+safeKey+'"><button data-confirm-setpw="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(251,191,36,.4);background:rgba(251,191,36,.1);color:#fbbf24;cursor:pointer;font-family:inherit;white-space:nowrap">Save ✓</button></div>';
       h+='</div>';
       h+='<div id="rename-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New username" maxlength="30" id="rename-input-'+safeKey+'" value="'+x(displayName)+'"><button data-confirm-rename="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.15);color:#a5b4fc;cursor:pointer;font-family:inherit;white-space:nowrap">Save</button></div>';
@@ -6271,36 +5916,6 @@ function loadAdminUsers(q) {
         if(opening) loadUserHistory(uname, key);
       });
     });
-    list.querySelectorAll("[data-setpw-user]").forEach(function(btn){
-      btn.addEventListener("click", function(){
-        var key = this.getAttribute("data-user-key");
-        // Close other areas
-        var ra = document.getElementById("rename-area-"+key);
-        if(ra) ra.style.display = "none";
-        var ma = document.getElementById("merge-area-"+key);
-        if(ma) ma.style.display = "none";
-        var area = document.getElementById("setpw-area-"+key);
-        if(area) { area.style.display = area.style.display==="none" ? "block" : "none"; }
-      });
-    });
-    list.querySelectorAll("[data-confirm-setpw]").forEach(function(btn){
-      btn.addEventListener("click", function(){
-        var uname = this.getAttribute("data-confirm-setpw");
-        var key = this.getAttribute("data-user-key");
-        var input = document.getElementById("setpw-input-"+key);
-        var pw = input ? input.value.trim() : "";
-        if(!pw || pw.length < 4){ toast("Password must be at least 4 characters"); return; }
-        if(!DB){ toast("Firebase unavailable"); return; }
-        var fbKey = uname.toLowerCase().replace(/[^a-z0-9_]/g,"");
-        DB.ref("users/"+fbKey+"/password").set(pw, function(err){
-          if(err){ toast("Failed to save password"); return; }
-          toast("Password set for "+uname+" ✓");
-          var area = document.getElementById("setpw-area-"+key);
-          if(area) area.style.display = "none";
-          loadAdminUsers((document.getElementById("user-search")||{}).value||"");
-        });
-      });
-    });
     }); // end groups scan
   }); // end users load
 }
@@ -6373,7 +5988,7 @@ function loadUserHistory(username, key) {
 
 function deleteUser(username) {
   if(!DB) return;
-  var key = userKey(username);
+  var key = ukey(username);
   // Remove from Firebase users node
   DB.ref("users/"+key).remove(function(err){
     if(err){ toast("Delete failed"); return; }
@@ -6415,7 +6030,7 @@ function mergeGuestIntoUser(guestName, guestFbKey, targetUsername, targetKeyOver
   // Prefer the caller-supplied real Firebase key. Deriving it from the username breaks
   // for Google accounts, whose key is a sanitized display name ("ryanwelton") rather
   // than userKey("Ryan Welton") ("ryan_welton").
-  var targetKey = targetKeyOverride || userKey(targetUsername);
+  var targetKey = targetKeyOverride || ukey(targetUsername);
   if(!targetKey){ toast("Invalid username"); return; }
 
   var guestUid = guestFbKey;      // both are uids now
