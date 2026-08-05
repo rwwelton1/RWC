@@ -1697,22 +1697,21 @@ function showProfileModal() {
     var newName = (document.getElementById("pm-username-input").value||"").trim();
     var errEl = document.getElementById("pm-err");
     if(!newName || newName.length < 2){ errEl.textContent = "Must be at least 2 characters"; return; }
-    // Username is now a pure display label (not a key), so spaces/punctuation are fine.
     errEl.textContent = "";
     var btn = document.getElementById("pm-save");
     var uid = ME();
     if(!uid){ errEl.textContent = "Please sign in again."; return; }
+    if(!DB){ errEl.textContent = "No connection"; return; }
     if(btn){ btn.disabled=true; btn.textContent="Saving…"; }
-    // Rename is now a single-field write — nothing else references the name.
+    // Identity is the uid. Rename writes ONLY the display-name field on users/{uid}.
+    // No key change, no group migration, no record creation — nothing else references it.
     DB.ref("users/"+uid+"/username").set(newName, function(err){
-      if(err){
-        errEl.textContent = "Failed to save — check connection";
-        if(btn){ btn.disabled=false; btn.textContent="Save Username"; }
-        return;
-      }
-      SC.currentUser.username = newName;
-      if(USER_DIR[uid]) USER_DIR[uid].username = newName; else USER_DIR[uid]={username:newName,emoji:(SC.currentUser.emoji||"🎯")};
-      saveSession(newName, SC.currentUser.emoji);
+      if(btn){ btn.disabled=false; btn.textContent="Save Username"; }
+      if(err){ errEl.textContent = "Failed to save — check connection"; return; }
+      if(SC.currentUser) SC.currentUser.username = newName;
+      if(USER_DIR[uid]) USER_DIR[uid].username = newName;
+      else USER_DIR[uid] = { username:newName, emoji:(SC.currentUser&&SC.currentUser.emoji)||"🎯" };
+      try{ localStorage.setItem("pp_user", newName); }catch(e){}
       el.remove();
       draw();
       toast("Username updated", "ok");
@@ -7279,82 +7278,76 @@ function autoSnapStatuses() {
 
   var savedUser = loadSession();
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
-  // Restore cached badges for instant rarity styling on first paint
   var _cachedBadges = (function(){ try{ var v=localStorage.getItem("pp_badges"); return v?JSON.parse(v):{}; }catch(e){ return {}; } })();
 
-  if(savedUser) {
-    // Restore cached groups list from localStorage for instant render — refined below
-    var _cachedUserGroups = [];
-    try{ var _cg = localStorage.getItem("pp_user_groups_"+savedUser); if(_cg) _cachedUserGroups = JSON.parse(_cg); }catch(e){}
-    // Restore cached statuses so pills render correctly on first paint
+  // Identity is the Google uid, resolved from the persisted Auth session — NOT the saved
+  // username. This makes display-name renames irrelevant to identity/groups. We paint
+  // instantly from cache, then load the authoritative record from users/{uid}.
+  function restoreByUid(uid){
+    if(!uid || !DB) return;
     try{ var _cs=localStorage.getItem("pp_statuses"); if(_cs) SC.globalStatuses=JSON.parse(_cs); }catch(e){}
-    SC.currentUser = { username: savedUser, groups: _cachedUserGroups, emoji: _cachedEmoji };
-    SC._cachedBadges = _cachedBadges; // available for rarity on first paint
+    // Instant paint from cache keyed by uid
+    var _cachedUserGroups = [];
+    try{ var _cg = localStorage.getItem("pp_user_groups_"+uid); if(_cg) _cachedUserGroups = JSON.parse(_cg); }catch(e){}
+    SC.currentUser = { username: savedUser||"", groups: _cachedUserGroups, emoji: _cachedEmoji, uid: uid, _key: uid };
+    SC._cachedBadges = _cachedBadges;
     SC.screen = "profile";
-    // Render immediately with cached data — no blocking "Loading..." splash
     if(_joinId) _handleDeepJoin(); else draw();
-    var key = savedUser.toLowerCase().replace(/[^a-z0-9_]/g,"");
-    if(DB) {
-      // Fetch user record, badges, feedSeenAt, and statuses in one parallel batch
-      Promise.all([
-        DB.ref("users/"+key).once("value"),
-        DB.ref("users/"+key+"/badges").once("value"),
-        DB.ref("users/"+key+"/feedSeenAt").once("value"),
-        DB.ref("globalSettings/statuses").once("value")
-      ]).then(function(snaps){
-        var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2], statusSn = snaps[3];
-        SC._feedSeenAt = fsnap.val() || 0;
-        var _newStatuses = statusSn.val() || {};
-        var _statusesChanged = JSON.stringify(_newStatuses) !== JSON.stringify(SC.globalStatuses||{});
-        SC.globalStatuses = _newStatuses;
-        try{ localStorage.setItem("pp_statuses", JSON.stringify(_newStatuses)); }catch(e){}
-        var u = sn.val();
-        if(u) {
-          var _newEmoji = u.emoji||"🎯";
-          var _newBadges = bsn.val()||{};
-          SC.currentUser = { username: u.username, groups: u.groups||[], emoji: _newEmoji, uid: u.googleUid || (SC.currentUser&&SC.currentUser.uid) || null, _key: key };
-          SC._cachedBadges = _newBadges;
-          try{
-            localStorage.setItem("pp_user_groups_"+savedUser, JSON.stringify(u.groups||[]));
-            localStorage.setItem("pp_emoji", _newEmoji);
-            localStorage.setItem("pp_badges", JSON.stringify(_newBadges));
-          }catch(e){}
-          // Only re-render if something actually changed from what we painted
-          var _groupsChanged = JSON.stringify(u.groups||[]) !== JSON.stringify(_cachedUserGroups);
-          var _emojiChanged = _newEmoji !== _cachedEmoji;
-          var _badgesChanged = JSON.stringify(_newBadges) !== JSON.stringify(_cachedBadges);
-          if(_groupsChanged || _emojiChanged || _badgesChanged || _statusesChanged) draw();
 
-          // ── Avatar integrity check — uses already-fetched badges, no extra read ──
-          if(_newEmoji !== "🎯"){
-            var _matchingBadge = null;
-            for(var _bi=0;_bi<BADGE_LIST.length;_bi++){
-              if(BADGE_LIST[_bi].icon===_newEmoji){ _matchingBadge=BADGE_LIST[_bi]; break; }
-            }
-            var _stillValid = _matchingBadge && _newBadges[_matchingBadge.id];
-            if(!_stillValid){
-              saveUserEmoji("🎯");
-              draw();
-            }
-          }
-        } else {
-          clearSession();
-          SC.currentUser = null;
-          SC.screen = "landing";
-          draw();
-        }
-      }); // end Promise.all.then
-    }
-  } else {
-    SC.currentUser = null;
-    if(_joinId){
-      // Not logged in with pending join — store it, show splash then auth modal
-      SC._pendingJoin = { id: _joinId, pw: _joinPw };
-      SC.screen = "home";
+    Promise.all([
+      DB.ref("users/"+uid).once("value"),
+      DB.ref("users/"+uid+"/badges").once("value"),
+      DB.ref("users/"+uid+"/feedSeenAt").once("value"),
+      DB.ref("globalSettings/statuses").once("value")
+    ]).then(function(snaps){
+      var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2], statusSn = snaps[3];
+      SC._feedSeenAt = fsnap.val() || 0;
+      var _newStatuses = statusSn.val() || {};
+      var _statusesChanged = JSON.stringify(_newStatuses) !== JSON.stringify(SC.globalStatuses||{});
+      SC.globalStatuses = _newStatuses;
+      try{ localStorage.setItem("pp_statuses", JSON.stringify(_newStatuses)); }catch(e){}
+      var u = sn.val();
+      if(u) {
+        var _newEmoji = u.emoji||"🎯";
+        var _newBadges = bsn.val()||{};
+        SC.currentUser = { username: u.username||savedUser||"", groups: u.groups||[], emoji: _newEmoji, uid: uid, _key: uid };
+        SC._cachedBadges = _newBadges;
+        if(USER_DIR[uid]) USER_DIR[uid] = { username: u.username||"", emoji: _newEmoji };
+        try{
+          localStorage.setItem("pp_user", u.username||"");
+          localStorage.setItem("pp_user_groups_"+uid, JSON.stringify(u.groups||[]));
+          localStorage.setItem("pp_emoji", _newEmoji);
+          localStorage.setItem("pp_badges", JSON.stringify(_newBadges));
+        }catch(e){}
+      }
       draw();
-    } else {
-      SC.screen = "home";
-      draw();
+    }).catch(function(){ draw(); });
+  }
+
+  if(AUTH){
+    AUTH.onAuthStateChanged(function(user){
+      if(user && user.uid){
+        restoreByUid(user.uid);
+      } else if(!savedUser){
+        // Signed out and no cached session → show landing/auth
+        SC.screen = "landing";
+        draw();
+      }
+    });
+  }
+
+  // Not signed in and no persisted session → landing.
+  if(!AUTH || (!savedUser && AUTH && !AUTH.currentUser)) {
+    if(!savedUser){
+      SC.currentUser = null;
+      if(_joinId){
+        SC._pendingJoin = { id: _joinId, pw: _joinPw };
+        SC.screen = "home";
+        draw();
+      } else {
+        SC.screen = "home";
+        draw();
+      }
     }
   }
 })();
