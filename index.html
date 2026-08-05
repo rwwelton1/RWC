@@ -1235,15 +1235,21 @@ function authGoogleSignIn(cb) {
   });
 }
 
-function addGroupToUser(uid, groupId) {
-  if(!DB || !uid) return;
+function addGroupToUser(uid, groupId, cb) {
+  if(!DB || !uid){ cb && cb(); return; }
+  // Optimistic in-memory update so the hub shows the group immediately, before the DB
+  // round-trip completes.
+  if(SC.currentUser && SC.currentUser.uid === uid){
+    if(!Array.isArray(SC.currentUser.groups)) SC.currentUser.groups = [];
+    if(SC.currentUser.groups.indexOf(groupId) < 0) SC.currentUser.groups.push(groupId);
+  }
   DB.ref("users/"+uid+"/groups").once("value", function(sn){
     var groups = sn.val() || [];
     if(groups.indexOf(groupId) < 0) {
       groups.push(groupId);
-      DB.ref("users/"+uid+"/groups").set(groups);
-      if(SC.currentUser) SC.currentUser.groups = groups;
-    }
+      DB.ref("users/"+uid+"/groups").set(groups, function(){ cb && cb(); });
+    } else { cb && cb(); }
+    if(SC.currentUser && SC.currentUser.uid === uid) SC.currentUser.groups = groups;
   });
 }
 
@@ -4417,9 +4423,6 @@ function submitCreate() {
   createGroup(f.name, f.adminPw, f.pools, function(group, err){
     if(err){ SC.error=err; draw(); return; }
     var _uid = ME();
-    if(_uid) {
-      addGroupToUser(_uid, group.id);
-    }
     SC.group = group;
     SC.isAdmin = true;
     SC.groupAdmin = true; SC.showGroupSettings = false;
@@ -4428,6 +4431,9 @@ function submitCreate() {
     subscribeGroup(group.id);
     if(SC.group&&SC.group.pools&&SC.group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
     subscribeGroupPlayers(group.id);
+    // Attach to the uid record (optimistic in-memory update happens synchronously inside);
+    // redraw again once the DB confirms so My Groups is definitely populated.
+    if(_uid) addGroupToUser(_uid, group.id, function(){ draw(); });
     draw();
   });
 }
