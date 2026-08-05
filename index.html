@@ -1266,7 +1266,13 @@ function authGoogleSignIn(cb) {
     DB.ref("users/"+uid).once("value", function(sn){
       var existing = sn.val();
       if(existing){
-        cb(null, { username: existing.username||displayName, groups: existing.groups||[], emoji: existing.emoji||"🎯", uid: uid, _key: uid });
+        // Heal a missing/blank username on an existing record (partial/deleted state).
+        var _nm = existing.username;
+        if(!_nm || !String(_nm).trim()){
+          _nm = displayName;
+          DB.ref("users/"+uid+"/username").set(_nm);
+        }
+        cb(null, { username: _nm, groups: existing.groups||[], emoji: existing.emoji||"🎯", uid: uid, _key: uid });
       } else {
         var data = { username: displayName, groups: [], emoji: "🎯", googleEmail: gUser.email, createdAt: Date.now() };
         DB.ref("users/"+uid).set(data, function(err){
@@ -6149,7 +6155,7 @@ function loadAdminUsers(q) {
     h+='</tr></thead><tbody>';
     users.forEach(function(u){
       var em = u.emoji||"🍺";
-      var displayName = u.username || u._key;
+      var displayName = u.username || "(unnamed)";
       var isMissing = !u.username;
       // Google users (googleUid present) and password users are registered accounts
       // Only flag as guest if no password AND no googleUid AND not an orphan with groups
@@ -7310,15 +7316,29 @@ function autoSnapStatuses() {
       if(u) {
         var _newEmoji = u.emoji||"🎯";
         var _newBadges = bsn.val()||{};
-        SC.currentUser = { username: u.username||savedUser||"", groups: u.groups||[], emoji: _newEmoji, uid: uid, _key: uid };
+        // SELF-HEAL: if the record has no username (e.g. it was partially deleted), backfill
+        // it from the Google display name so it never renders as a raw uid or splits on rename.
+        var _uname = u.username;
+        if(!_uname || !String(_uname).trim()){
+          try{ _uname = (AUTH && AUTH.currentUser && AUTH.currentUser.displayName) || (AUTH && AUTH.currentUser && AUTH.currentUser.email && AUTH.currentUser.email.split("@")[0]) || ""; }catch(e){ _uname=""; }
+          if(_uname){ DB.ref("users/"+uid+"/username").set(_uname); }
+        }
+        SC.currentUser = { username: _uname||savedUser||"", groups: u.groups||[], emoji: _newEmoji, uid: uid, _key: uid };
         SC._cachedBadges = _newBadges;
-        if(USER_DIR[uid]) USER_DIR[uid] = { username: u.username||"", emoji: _newEmoji };
+        USER_DIR[uid] = { username: _uname||"", emoji: _newEmoji };
         try{
-          localStorage.setItem("pp_user", u.username||"");
+          localStorage.setItem("pp_user", _uname||"");
           localStorage.setItem("pp_user_groups_"+uid, JSON.stringify(u.groups||[]));
           localStorage.setItem("pp_emoji", _newEmoji);
           localStorage.setItem("pp_badges", JSON.stringify(_newBadges));
         }catch(e){}
+      } else {
+        // No record at all for this uid → create a fresh one from the Google identity.
+        var _dn = "";
+        try{ _dn = (AUTH && AUTH.currentUser && AUTH.currentUser.displayName) || (AUTH && AUTH.currentUser && AUTH.currentUser.email && AUTH.currentUser.email.split("@")[0]) || "Player"; }catch(e){ _dn="Player"; }
+        DB.ref("users/"+uid).set({ username:_dn, groups:[], emoji:"🎯", googleEmail:(AUTH&&AUTH.currentUser&&AUTH.currentUser.email)||"", createdAt:Date.now() });
+        SC.currentUser = { username:_dn, groups:[], emoji:"🎯", uid:uid, _key:uid };
+        USER_DIR[uid] = { username:_dn, emoji:"🎯" };
       }
       draw();
     }).catch(function(){ draw(); });
