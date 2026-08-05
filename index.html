@@ -883,12 +883,23 @@ try {
 
 // ── HELPERS ──────────────────────────────────────────────────────────────────
 async function attemptMasterLogin(){
-  // Identity first — an allowlisted Google uid gets master with no prompt.
-  if(isMasterUid()){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); return; }
-  var pw = await scPrompt("Master password", "", {password:true});
-  if(!pw) return;
-  if(pw===MASTER_PW){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
-  else toast("Wrong password","err");
+  // Master access is granted purely by Google identity (allowlisted uid) — no password.
+  function grant(){ SC.isMaster=true; SC.isAdmin=true; SC.screen="admin"; draw(); toast("Master access granted","ok"); }
+  if(isMasterUid()){ grant(); return; }
+  // If the auth session simply hasn't resolved yet, wait for it once and re-check rather
+  // than rejecting — avoids a false "not authorized" on a freshly-loaded page.
+  if(AUTH && !(AUTH.currentUser && AUTH.currentUser.uid)){
+    var settled = await new Promise(function(res){
+      var done=false;
+      var unsub = AUTH.onAuthStateChanged(function(u){ if(done) return; done=true; try{unsub();}catch(e){} res(u); });
+      setTimeout(function(){ if(!done){ done=true; res(AUTH.currentUser); } }, 3000);
+    });
+    if(settled && settled.uid){
+      if(SC.currentUser) SC.currentUser.uid = settled.uid;
+      if(isMasterUid()){ grant(); return; }
+    }
+  }
+  toast("This account isn't a master admin","err");
 }
 function x(s){ var t=String(s||""); t=t.replace(/&/g,"&amp;"); t=t.replace(/</g,"&lt;"); t=t.replace(/>/g,"&gt;"); t=t.replace(/'/g,"&#39;"); return t; }
 // ── STYLED DIALOGS ────────────────────────────────────────────────────────────
@@ -1212,51 +1223,19 @@ function saveGuest(name){
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 function authSignup(username, cb) {
-  // New username/password accounts are disabled — Google sign-in only.
-  // Already-signed-in users may still use this path to rename their account.
+  // Username is a pure DISPLAY field on the uid record. "Signup"/rename just writes the
+  // display name to users/{uid}/username — no name-derived keys, no record migration.
   if(!SC.currentUser) { cb("Please sign in with Google."); return; }
-  if(!username || username.length < 2) { cb("Username must be at least 2 characters"); return; }
-  var newKey = username.toLowerCase().replace(/[^a-z0-9_]/g,"");
-  if(newKey !== username.toLowerCase()) { cb("Username can only contain letters, numbers and underscores"); return; }
+  if(!username || username.trim().length < 2) { cb("Username must be at least 2 characters"); return; }
+  username = username.trim();
+  var uid = ME();
+  if(!uid) { cb("Please sign in again."); return; }
   if(!DB) { cb("No database connection"); return; }
-  DB.ref("users/"+newKey).once("value", function(sn){
-    var existing = sn.val();
-    var currentKey = SC.currentUser ? userKey(SC.currentUser.username) : null;
-    if(existing && newKey !== currentKey) { cb("Username already taken — choose another"); return; }
-    if(!SC.currentUser){
-      // Brand new visitor — create a fresh account directly (no prior guest session to migrate)
-      var freshData = { username: username, groups: [], emoji: "🎯", createdAt: Date.now() };
-      DB.ref("users/"+newKey).set(freshData, function(err){
-        if(err){ cb("Failed to save — check connection"); return; }
-        cb(null, { username: username, groups: [], emoji: "🎯" });
-      });
-      return;
-    }
-    var oldKey = userKey(SC.currentUser.username);
-    DB.ref("users/"+oldKey).once("value", function(oldSn){
-      var oldData = oldSn.val()||{};
-      var newData = { username: username, groups: oldData.groups||[], emoji: oldData.emoji||"🎯" };
-      DB.ref("users/"+newKey).set(newData, function(err){
-        if(err){ cb("Failed to save — check connection"); return; }
-        if(oldKey !== newKey) DB.ref("users/"+oldKey).remove();
-        var namesToMatch = [SC.currentUser.username, oldKey].filter(function(v,i,a){ return v && a.indexOf(v)===i; });
-        DB.ref("groups").once("value", function(gsn){
-          var groups = gsn.val()||{};
-          var updates = {};
-          Object.values(groups).forEach(function(g){
-            if(!g||!g.players) return;
-            var idx = -1;
-            for(var i=0;i<namesToMatch.length;i++){ idx=g.players.indexOf(namesToMatch[i]); if(idx>=0) break; }
-            if(idx>=0){ var np=g.players.slice(); np[idx]=username; updates["groups/"+g.id+"/players"]=np; }
-          });
-          var finish = function(){
-            try{ localStorage.removeItem("pp_guest"); }catch(e){}
-            cb(null, { username: username, groups: newData.groups, emoji: newData.emoji });
-          };
-          if(Object.keys(updates).length>0) DB.ref().update(updates, finish); else finish();
-        });
-      });
-    });
+  DB.ref("users/"+uid+"/username").set(username, function(err){
+    if(err){ cb("Failed to save — check connection"); return; }
+    if(SC.currentUser) SC.currentUser.username = username;
+    if(USER_DIR[uid]) USER_DIR[uid].username = username; else USER_DIR[uid]={username:username, emoji:(SC.currentUser&&SC.currentUser.emoji)||"🎯"};
+    cb(null, { username: username, groups: (SC.currentUser&&SC.currentUser.groups)||[], emoji: (SC.currentUser&&SC.currentUser.emoji)||"🎯", uid: uid, _key: uid });
   });
 }
 
@@ -1860,9 +1839,12 @@ function userKey(uname){ return (uname||"").toLowerCase().replace(/\s+/g,"_").re
 
 function saveUserEmoji(emoji) {
   if(!SC.currentUser || !DB) return;
+  var uid = ME();
+  if(!uid) return;
   SC.currentUser.emoji = emoji;
   try{ localStorage.setItem("pp_emoji", emoji); }catch(e){}
-  DB.ref("users/"+userKey(SC.currentUser.username)+"/emoji").set(emoji);
+  DB.ref("users/"+uid+"/emoji").set(emoji);
+  if(USER_DIR[uid]) USER_DIR[uid].emoji = emoji;
 }
 
 // ── TIER SYSTEM ──────────────────────────────────────────────────────────────
@@ -5510,15 +5492,6 @@ function renderAdmin() {
   h += '<input class="search-input" id="user-search" placeholder="Search users..." autocomplete="off">';
   h += '</div>';
   h += '<div id="admin-users-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
-  h += '<div style="border-top:1px solid #1e2a3a;margin-top:14px;padding-top:14px">';
-  h += '<div style="font-size:10px;color:#fbbf24;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px">&#43; Add User</div>';
-  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-  h += '<input class="auth-input" id="new-user-name" placeholder="Username" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
-  h += '<input class="auth-input" id="new-user-pw" type="password" placeholder="Password" style="flex:1;min-width:120px;padding:8px 10px;font-size:12px">';
-  h += '<button class="btn btn-green" id="btn-add-user" style="padding:8px 14px;font-size:12px">Add</button>';
-  h += '</div>';
-  h += '<div id="add-user-err" style="font-size:10px;color:#fca5a5;min-height:14px;margin-top:6px"></div>';
-  h += '</div></div>';
 
   h += '</div>';
   render(h);
@@ -5914,28 +5887,6 @@ function renderAdmin() {
   if(us) us.addEventListener("input", function(){ loadAdminUsers(this.value.trim()); });
 
   // Add user
-  var addBtn = document.getElementById("btn-add-user");
-  if(addBtn) addBtn.addEventListener("click", function(){
-    var name = (document.getElementById("new-user-name").value||"").trim();
-    var pw   = (document.getElementById("new-user-pw").value||"").trim();
-    var errEl = document.getElementById("add-user-err");
-    if(!name){ errEl.textContent="Username required"; return; }
-    if(!pw || pw.length < 3){ errEl.textContent="Password must be at least 3 characters"; return; }
-    var key = userKey(name);
-    if(!key){ errEl.textContent="Invalid username"; return; }
-    if(!DB){ errEl.textContent="Firebase unavailable"; return; }
-    DB.ref("users/"+key).once("value", function(sn){
-      if(sn.val()){ errEl.textContent="Username already exists"; return; }
-      DB.ref("users/"+key).set({ username: name, password: pw, groups: [], emoji: "🍺" }, function(err){
-        if(err){ errEl.textContent="Error creating user"; return; }
-        document.getElementById("new-user-name").value="";
-        document.getElementById("new-user-pw").value="";
-        errEl.textContent="";
-        toast("User "+name+" created ✓");
-        loadAdminUsers((document.getElementById("user-search")||{}).value||"");
-      });
-    });
-  });
 }
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────────────────
