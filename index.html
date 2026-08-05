@@ -6125,19 +6125,21 @@ function loadAdminUsers(q) {
       if(!u) return;
       u._key = k;
       knownKeys[k] = true;
-      // Also index by username key
-      if(u.username) knownKeys[userKey(u.username)] = true;
       users.push(u);
     });
-    // Scan all groups for players not in users node
+    // Scan all groups for players (uids) not present in the users node. Players are uids
+    // now, so match them DIRECTLY against knownKeys — never run a uid through userKey(),
+    // which lowercases it and breaks the (case-sensitive) match, spawning phantom rows.
     DB.ref("groups").once("value", function(gsn){
       var groups = gsn.val()||{};
       Object.values(groups).forEach(function(g){
-        (g.players||[]).forEach(function(pname){
-          var pkey = userKey(pname);
-          if(!knownKeys[pkey] && pname) {
-            knownKeys[pkey] = true;
-            users.push({ username: pname, password: "", groups: [], emoji: "🎯", _key: pkey, _orphan: true });
+        (g.players||[]).forEach(function(puid){
+          if(!puid) return;
+          if(!knownKeys[puid]) {
+            knownKeys[puid] = true;
+            // A genuine orphan: a uid in a group with no users/{uid} record. Show it, but
+            // labeled clearly rather than as a raw key masquerading as a name.
+            users.push({ username: "", groups: [], emoji: "🎯", _key: puid, _orphan: true });
           }
         });
       });
