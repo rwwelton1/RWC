@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -32,7 +33,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .topbar-left{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .topbar-center{flex:1;min-width:0;overflow:hidden;text-align:center}
 .app-name{font-size:15px;font-weight:900;color:var(--text);white-space:nowrap;letter-spacing:-.02em}
-.app-sub{font-size:7px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase;letter-spacing:.06em;margin-top:3px;display:block}
+.app-sub{font-size:9px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:uppercase;letter-spacing:.06em;margin-top:3px;display:block}
 .topbar-right{display:flex;gap:5px;align-items:center;flex-shrink:0}
 .tag{background:var(--cream);border:2px solid var(--border);border-radius:20px;padding:3px 9px;font-size:9px;font-weight:800;color:var(--text);box-shadow:2px 2px 0 var(--border)}
 .btn{border-radius:8px;padding:4px 10px;font-size:9px;font-weight:800;border:2px solid var(--border);box-shadow:2px 2px 0 var(--border);font-family:'Nunito',sans-serif;transition:transform .1s,box-shadow .1s}
@@ -62,7 +63,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .user-grid{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
 .user-btn{padding:12px 22px;border-radius:12px;background:#ffffff;border:2px solid var(--border);font-size:14px;font-weight:800;color:var(--text);text-align:left;min-width:150px;box-shadow:3px 3px 0 var(--border)}
 .user-btn:active{transform:translate(3px,3px);box-shadow:none}
-.user-btn-sub{font-size:8px;font-weight:700;color:var(--muted);margin-top:3px}
+.user-btn-sub{font-size:9px;font-weight:700;color:var(--muted);margin-top:3px}
 
 /* ── ROSTER PAGE ── */
 .roster-cap-header{background:#ffffff;border-bottom:3px solid var(--border);padding:14px 14px 10px}
@@ -200,7 +201,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .lb-score.under{color:var(--green)}
 .lb-score.over{color:var(--red2)}
 .lb-score.even{color:var(--blue)}
-.lb-score-label{font-size:8px;font-weight:800;color:var(--muted)}
+.lb-score-label{font-size:9px;font-weight:800;color:var(--muted)}
 .lb-cap{font-size:9px;font-weight:700;color:var(--dim);margin-top:3px}
 
 /* ── ADMIN ── */
@@ -245,7 +246,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 /* Pull to refresh */
 .ptr-indicator{display:none;text-align:center;padding:10px;font-size:11px;font-weight:800;color:var(--muted);background:var(--cream)}
 .ptr-indicator.visible{display:block}
-.live-footer{text-align:center;font-size:8px;font-weight:700;color:var(--dim);padding:10px 0 4px}
+.live-footer{text-align:center;font-size:9px;font-weight:700;color:var(--dim);padding:10px 0 4px}
 .my-team-ribbon{background:var(--gold-bg);border-bottom:2px solid var(--border);padding:10px 14px 12px;margin-bottom:0}
 .my-team-title{font-size:9px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
 .my-team-total{font-size:16px;font-weight:900}
@@ -255,6 +256,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .my-team-chip.over{border-color:#fca5a5;background:#fef2f2;color:var(--red2)}
 .my-team-chip.cut{border-color:var(--border2);background:var(--cream);color:var(--dim);text-decoration:line-through}
 .my-team-chip .chip-score{font-size:9px;font-weight:900}
+
+/* ── ACCESSIBILITY ── */
+/* Visible keyboard focus without affecting touch/mouse users */
+button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{
+  outline:3px solid var(--blue);outline-offset:2px;border-radius:6px;
+}
+/* Respect reduced-motion: neutralize press/transition/live-update animations */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important;}
+}
 
 </style>
 </head>
@@ -343,11 +354,44 @@ function getMaxPicks(){
 
 var PARTS=[];
 
-var DB=null;
+var DB=null, AUTH=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB=firebase.database();
+  try{ AUTH=firebase.auth(); }catch(e){}
 }catch(e){}
+
+// Identity-based admin (mirrors cfbpool/index). uid is the identity; PARTS/ST.user/pick
+// keys are uids; username is a display label from USER_DIR.
+var MY_UID=null;
+var GROUP_OWNER_UID=null;
+var GROUP_ADMIN_UIDS={};
+var MASTER_UIDS={ "SJr0tv9puDcNZLAcNy1ErOUGijg1": true };   // keep in sync with database rules
+function isGroupAdminByUid(){
+  if(!MY_UID) return false;
+  if(MASTER_UIDS[MY_UID]) return true;
+  if(GROUP_OWNER_UID && MY_UID===GROUP_OWNER_UID) return true;
+  if(GROUP_ADMIN_UIDS[MY_UID]) return true;
+  return false;
+}
+var USER_DIR={};   // { uid: {username, emoji} }
+function nameOf(uid){
+  if(!uid) return "";
+  var e=USER_DIR[uid];
+  if(e&&e.username) return e.username;
+  if(typeof uid==="string" && uid.indexOf(" ")>=0) return uid;
+  return "(unknown)";
+}
+function emojiOf(uid){ var e=USER_DIR[uid]; return (e&&e.emoji)||""; }
+function loadUserDir(cb){
+  if(!DB){ cb&&cb(); return; }
+  DB.ref("users").once("value",function(sn){
+    var all=sn.val()||{};
+    USER_DIR={};
+    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯"}; });
+    cb&&cb();
+  }).catch(function(){ cb&&cb(); });
+}
 
 // ── Golfer data: PGA World Rankings + salary ──────────
 // Salary anchored at Scottie Scheffler (#1) = $15,000
@@ -596,7 +640,7 @@ function showPickConfirmation(){
 
 function submitPicks(){
   if(!ST.user||filledPickCount()<MAX_PICKS)return;
-  var uk=ukey(ST.user);
+  var uk=ST.user;   // uid
   var obj={name:ST.user,picks:draftPicks.slice(),cap:draftCapUsed(),ts:Date.now()};
   if(DB){
     DB.ref(BASE+"/picks/"+uk).set(obj,function(err){
@@ -679,9 +723,9 @@ function syncPlayerScoresToGroup(){
   // For each player who has submitted picks, compute their entry total
   for(var uk in ST.picks){
     var p=ST.picks[uk];
-    if(!p||!p.name)continue;
+    if(!p)continue;
     var total=entryTotal(p.picks||[]);
-    scores[ukey(p.name)]=total;
+    scores[uk]=total;   // uk is the player's uid
   }
   if(Object.keys(scores).length>0){
     DB.ref("groups/"+GROUP_ID+"/data/pgatour/playerscores").set(scores);
@@ -984,7 +1028,7 @@ function renderLeaderboard(){
   var entries=[];
   for(var uk in ST.picks){
     var p=ST.picks[uk];
-    entries.push({name:p.name,picks:p.picks||[],cap:p.cap||0,uk:uk,total:entryTotal(p.picks||[])});
+    entries.push({name:nameOf(uk),picks:p.picks||[],cap:p.cap||0,uk:uk,total:entryTotal(p.picks||[])});
   }
   entries.sort(function(a,b){return a.total-b.total;});
   var hasLive=Object.keys(liveScores).length>0;
@@ -1006,7 +1050,7 @@ function renderLeaderboard(){
     var e=entries[i];
     var rn=i+1;
     var rankCls=rn===1?"r1":rn===2?"r2":rn===3?"r3":"rn";
-    var isMe=ST.user&&ukey(ST.user)===e.uk;
+    var isMe=ST.user&&ST.user===e.uk;
     // Show E when picks exist but no scores yet; show -- only before picks close
     var scoreStr=showScore?fmtScore(e.total):"--";
     var scoreCls=e.total<0?"under":e.total>0?"over":"even";
@@ -1354,7 +1398,7 @@ function renderLiveInto(){
 
   var myPickedKeys={};
   if(ST.user){
-    var myP=(ST.picks[ukey(ST.user)]&&ST.picks[ukey(ST.user)].picks)||draftPicks;
+    var myP=(ST.picks[ST.user]&&ST.picks[ST.user].picks)||draftPicks;
     for(var mi=0;mi<myP.length;mi++)myPickedKeys[normName(myP[mi])]=true;
   }
 
@@ -1364,7 +1408,7 @@ function renderLiveInto(){
   // ── My Team ribbon ───────────────────────────────────────
   var ribbonHtml='';
   if(ST.user){
-    var myRosterPicks=(ST.picks[ukey(ST.user)]&&ST.picks[ukey(ST.user)].picks)||draftPicks;
+    var myRosterPicks=(ST.picks[ST.user]&&ST.picks[ST.user].picks)||draftPicks;
     if(myRosterPicks.length){
       var myTotal=entryTotal(myRosterPicks);
       var myTotalStr=myTotal===0?"E":myTotal>0?"+"+myTotal:""+myTotal;
@@ -1458,9 +1502,9 @@ function userSelectScreen(){
   var h='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
   for(var i=0;i<PARTS.length;i++){
     var p=PARTS[i];
-    var pk=ST.picks[ukey(p)];
+    var pk=ST.picks[p];   // p is a uid
     var sub=pk?"Picks submitted":"No picks yet";
-    h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+x(p)+'</div><div class="user-btn-sub">'+sub+'</div></button>';
+    h+='<button class="user-btn" data-user="'+x(p)+'"><div>'+(emojiOf(p)?emojiOf(p)+" ":"")+x(nameOf(p))+'</div><div class="user-btn-sub">'+sub+'</div></button>';
   }
   h+='</div></div>';
   return h;
@@ -1477,10 +1521,10 @@ function draw(){
   h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub" id="tour-subtitle">'+TOURNAMENT.name+' &bull; '+_typeLbl+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
-    h+='<span class="tag">'+x(ST.user)+'</span>';
+    h+='<span class="tag">'+(emojiOf(ST.user)?emojiOf(ST.user)+" ":"")+x(nameOf(ST.user))+'</span>';
     if(!URL_USER) h+='<button class="btn btn-ghost" id="b-switch">&#8646;</button>';
   }
-  h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
+  if(isGroupAdminByUid()) h+='<button class="btn '+(ST.admin?"btn-gold":"btn-ghost")+'" id="b-admin">'+(ST.admin?"&#9889;":"&#9881;")+'</button>';
   h+='</div></div>';
 
   // Page tabs
@@ -1797,7 +1841,7 @@ function bind(){
   els=document.querySelectorAll(".user-btn[data-user]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     ST.user=this.getAttribute("data-user");
-    var pk=ST.picks[ukey(ST.user)];
+    var pk=ST.picks[ST.user];
     draftPicks=pk&&pk.picks?pk.picks.slice():[];
     draw();
   });
@@ -1806,9 +1850,9 @@ function bind(){
 
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="picks";draw();return;}
-    var pw=prompt("Admin password:");if(pw===null)return;
-    if(pw===MASTER_PW){ST.admin=true;ST.page="admin";draw();toast("&#9889; Admin mode on");}
-    else toast("Wrong password");
+    // Admin by Google identity (group owner/admin or master) — no password.
+    if(isGroupAdminByUid()){ST.admin=true;ST.page="admin";draw();toast("&#9889; Admin mode on");}
+    else toast("Only the group admin can do that");
   });
 
   el=document.getElementById("b-lock"); if(el) el.addEventListener("click",function(){
@@ -1930,21 +1974,35 @@ function toggleCut(name){
 // ── Firebase load ─────────────────────────────────────
 function loadData(){
   if(!DB){draw();return;}
-  // Load tournament config + golfer field FIRST, then start pool subscriptions
-  // This ensures GOLFERS is populated before any draw() fires
-  loadTournamentConfig(function(){
-    loadGolferField(function(){
-      loadGroup(); // now start group/pool subscriptions
+  // Resolve the signed-in Google identity first so admin-by-uid and writes work.
+  var _started=false;
+  function _boot(){
+    if(_started) return; _started=true;
+    // Load tournament config + golfer field FIRST, then start pool subscriptions
+    loadTournamentConfig(function(){
+      loadGolferField(function(){
+        loadGroup(); // now start group/pool subscriptions
+      });
     });
-  });
+  }
+  if(AUTH){
+    AUTH.onAuthStateChanged(function(user){ MY_UID = user?user.uid:null; _boot(); });
+    setTimeout(_boot, 2500);   // safety net
+  } else { _boot(); }
 
   function loadGroup(){
-    if(!GROUP_ID){loadPool();return;}
+    if(!GROUP_ID){ loadUserDir(function(){ loadPool(); }); return; }
     DB.ref("groups/"+GROUP_ID).once("value",function(sn){
       var g=sn.val()||{};
       if(g.players&&g.players.length) PARTS=g.players;
-      loadPool();
-    },function(){loadPool();});
+      GROUP_OWNER_UID=(g&&g.ownerUid)||null;
+      GROUP_ADMIN_UIDS={};
+      var _au=(g&&g.adminUids)||{};
+      if(Array.isArray(_au)) _au.forEach(function(uid){ if(uid) GROUP_ADMIN_UIDS[uid]=true; });
+      else Object.keys(_au).forEach(function(k){ var v=_au[k]; GROUP_ADMIN_UIDS[(v===true||v===undefined)?k:v]=true; });
+      if(isGroupAdminByUid()){ ST.admin=true; }
+      loadUserDir(function(){ loadPool(); });
+    },function(){ loadUserDir(function(){ loadPool(); }); });
   }
 
   function loadPool(){
@@ -1957,7 +2015,7 @@ function loadData(){
       ST.picks=sn.val()||{};setTimeout(syncPlayerScoresToGroup,800);
       // If user already selected, sync draft with saved picks
       if(ST.user&&!draftPicks.length){
-        var saved=ST.picks[ukey(ST.user)];
+        var saved=ST.picks[ST.user];
         if(saved&&saved.picks) draftPicks=saved.picks.slice();
       }
       draw();
