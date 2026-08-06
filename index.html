@@ -2102,7 +2102,8 @@ function renderProfile() {
             return;
           }
           var st = effectiveStatus(g,pool.id);
-          if(st==="coming-soon") return;
+          // Previously hid coming-soon pools entirely — but then a group with only preseason
+          // pools showed no label at all. Always render a pill so the pool is identifiable.
           var bg = st==="open"?'var(--green-bg)':st==="locked"?'var(--red-bg)':st==="complete"?'var(--blue-bg)':'var(--cream)';
           var col = st==="open"?'var(--green)':st==="locked"?'var(--red2)':st==="complete"?'var(--blue)':'var(--dim)';
           var lbl = st==="open"?'Open':st==="locked"?'Live':st==="complete"?'Final':'Soon';
@@ -2475,9 +2476,26 @@ function renderProfile() {
 
     container.querySelectorAll(".gcard").forEach(function(el){
       el.addEventListener("click", function(){
-        var poolUrl = this.getAttribute("data-pool-url");
-        if(poolUrl) { window.location.href = poolUrl; }
-        else { joinGroupSilent(this.getAttribute("data-gid")); }
+        var gid = this.getAttribute("data-gid");
+        if(!gid || !DB) return;
+        // Open the group's detail view. Load fresh group data, set it as the active group,
+        // subscribe, and navigate — regardless of whether any pool is active yet.
+        DB.ref("groups/"+gid).once("value", function(sn){
+          var group = sn.val();
+          if(!group){ return; }
+          group.id = group.id || gid;
+          SC.isAdmin = false; SC.isMaster = false;
+          SC.group = group;
+          SC.group.data = group.data || {statuses:{},results:{}};
+          SC.groupAdmin = false; SC.showGroupSettings = false;
+          if(!SC.isMaster) checkGroupAdmin(group);
+          saveLastGroup(group.id);
+          subscribeGroup(group.id);
+          subscribeGroupPlayers(group.id);
+          if(group.pools && group.pools.indexOf("wc")>=0) subscribeWCData(group.id, group.players||[]);
+          SC.screen = "hub";
+          draw();
+        });
       });
     });
     container.querySelectorAll(".gcard-share-btn").forEach(function(btn){
