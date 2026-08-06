@@ -1116,6 +1116,22 @@ function parseKickoffTs(game){
   if(isNaN(d.getTime())) return null;
   return d.getTime();
 }
+// Convert a game's kickoff to the value a <input type="datetime-local"> expects
+// (YYYY-MM-DDTHH:MM in LOCAL time). Returns "" if unknown.
+function _kickoffToLocalInput(game){
+  var ts=parseKickoffTs(game);
+  if(!ts) return "";
+  var d=new Date(ts);
+  function p(n){return String(n).padStart(2,"0");}
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+"T"+p(d.getHours())+":"+p(d.getMinutes());
+}
+// Human display string from a timestamp, e.g. "Sat, Aug 29 at 12:00 PM".
+function _tsToKickoffLabel(ts){
+  if(!ts) return "";
+  var d=new Date(ts);
+  return d.toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric"})+" at "+
+         d.toLocaleString("en-US",{hour:"numeric",minute:"2-digit"});
+}
 
 // Returns true if this specific game's pick window is closed
 // (either the whole week is locked, or this game's kickoff has passed)
@@ -2164,8 +2180,13 @@ function renderAdmin(){
 
   // ── Step tabs: click to switch between Add Games / Finalize / Enter Results ──
   var nGames = weekId ? activeGames(weekId).length : 0;
-  var hasResults = false;
-  if(weekId){ var rr=ST.results[weekId]||{}; hasResults = Object.keys(rr).some(function(k){ return rr[k]; }); }
+  var hasResults = false, allResults = false;
+  if(weekId){
+    var rr=ST.results[weekId]||{};
+    var _act=activeGames(weekId);
+    hasResults = _act.some(function(gid){ return !!rr[gid]; });
+    allResults = _act.length>0 && _act.every(function(gid){ return !!rr[gid]; });
+  }
   // Auto-suggest a step the first time, but let the admin click freely.
   var autoStep = 1;
   if(nGames>0 && !locked) autoStep = 2;
@@ -2186,11 +2207,11 @@ function renderAdmin(){
     }
     h+='<div style="display:flex;gap:6px;margin:0 10px 4px">';
     h+=chip(1,'Add games', nGames>0);
-    h+=chip(2,'Finalize', locked);
-    h+=chip(3,'Enter results', hasResults);
+    h+=chip(2,'Set spreads', nGames>0);
+    h+=chip(3,'Enter results', allResults);
     h+='</div>';
     var hint = adminStep===1 ? 'Fetch the schedule, then tap 10 games to build the week. When done, go to Finalize.'
-             : adminStep===2 ? 'Adjust matchups, favorites, spreads and kickoffs. Tap Finalize week when the slate looks right — then move to Enter Results.'
+             : adminStep===2 ? 'Set each game\'s favorite and spread (used to score picks later) and confirm kickoff times. Save the schedule when it looks right, then move to Enter Results.'
              : 'Results auto-fetch while games are live and scores update in the standings. You can also set winners manually here.';
     h+='<div style="margin:0 10px 8px;font-size:9.5px;font-weight:700;color:var(--muted);line-height:1.4">'+hint+'</div>';
   })();
@@ -2216,7 +2237,7 @@ function renderAdmin(){
   // Row 2: action buttons
   h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--cream)">';
   if(weekId){
-    h+='<button class="btn '+(locked?"btn-red":"btn-green")+'" id="b-lockweek" style="font-size:10px;padding:4px 12px;flex-shrink:0">'+(locked?"&#128274; Finalized":"&#9989; Finalize week")+'</button>';
+    h+='<button class="btn '+(locked?"btn-red":"btn-ghost")+'" id="b-lockweek" style="font-size:9px;padding:4px 10px;flex-shrink:0">'+(locked?"&#128274; Week final":"Mark week final")+'</button>';
     h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px;padding:4px 9px;flex-shrink:0">&#128202; Results</button>';
     h+='<div style="flex:1"></div>';
     h+='<button class="adm-btn" id="b-week-settings-toggle" style="font-size:10px;padding:4px 8px;flex-shrink:0">&#9881;</button>';
@@ -2284,9 +2305,10 @@ function renderAdmin(){
       h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home">'+x(g.home||"Home")+'</button>';
       h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even">Pick &#39;em</button>';
       h+='</div>';
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Kickoff (date &amp; time)</div>';
       h+='<div class="adm-row">';
       h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
-      h+='<input class="adm-input" placeholder="Kickoff e.g. Sat 3:30 PM ET" value="'+x(g.kickoff||"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoff">';
+      h+='<input class="adm-input" type="datetime-local" value="'+_kickoffToLocalInput(g)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoffDt" style="flex:1">';
       h+='</div>';
     }
     if(adminStep===3 && g.away&&g.home){
@@ -2328,7 +2350,7 @@ function renderAdmin(){
   });
   // Step 2: save-and-advance button.
   if(adminStep===2){
-    h+='<button class="btn btn-gold" id="b-finalize-continue" style="width:calc(100% - 20px);margin:4px 10px 8px;font-size:11px;padding:8px">Save games &amp; go to Results &#8250;</button>';
+    h+='<button class="btn btn-gold" id="b-finalize-continue" style="width:calc(100% - 20px);margin:4px 10px 8px;font-size:11px;padding:8px">&#128274; Save schedule &amp; spreads &#8250;</button>';
   }
   } // end step 2/3 game cards
 
@@ -3075,24 +3097,29 @@ function bind(){
   })(els[i]);
 
 var _fieldDebounce={};
+  function _applyGameField(week,gid,field,val){
+    if(field==="kickoffDt"){
+      var ts = val ? new Date(val).getTime() : null;
+      setGameField(week,gid,"kickoffTs", ts||"");
+      setGameField(week,gid,"kickoff", ts?_tsToKickoffLabel(ts):"");
+      return;
+    }
+    if(field==="spread") val=Math.abs(parseFloat(val))||0;
+    setGameField(week,gid,field,val);
+  }
   els=document.querySelectorAll(".adm-input[data-field]");
   for(i=0;i<els.length;i++) els[i].addEventListener("input",function(){
     var el=this;
     var key=el.getAttribute("data-week")+"_"+el.getAttribute("data-gid")+"_"+el.getAttribute("data-field");
     clearTimeout(_fieldDebounce[key]);
     _fieldDebounce[key]=setTimeout(function(){
-      var v=el.value;
-      if(el.getAttribute("data-field")==="spread") v=Math.abs(parseFloat(v))||0;
-      setGameField(el.getAttribute("data-week"),el.getAttribute("data-gid"),el.getAttribute("data-field"),v);
+      _applyGameField(el.getAttribute("data-week"),el.getAttribute("data-gid"),el.getAttribute("data-field"),el.value);
     },800);
   });
-  // Keep change handler for blur/enter confirmation
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
     var key=this.getAttribute("data-week")+"_"+this.getAttribute("data-gid")+"_"+this.getAttribute("data-field");
     clearTimeout(_fieldDebounce[key]);
-    var v=this.value;
-    if(this.getAttribute("data-field")==="spread") v=Math.abs(parseFloat(v))||0;
-    setGameField(this.getAttribute("data-week"),this.getAttribute("data-gid"),this.getAttribute("data-field"),v);
+    _applyGameField(this.getAttribute("data-week"),this.getAttribute("data-gid"),this.getAttribute("data-field"),this.value);
   });
 
   els=document.querySelectorAll(".adm-btn[data-fav]");
