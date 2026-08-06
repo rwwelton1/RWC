@@ -5257,14 +5257,15 @@ function renderAdmin() {
       });
       h += '</div></div>';
       h += '<div style="font-size:9px;color:#475569;margin-bottom:8px">Set each week&#39;s scoring window. The current week is whichever window contains today. Groups still lock at their own earliest kickoff.</div>';
-      // Week rows — up to 20 weeks; show existing + one blank to add
-      var _weekNums = Object.keys(_weeks).map(Number).sort(function(a,b){return a-b;});
-      var _maxWeek = _weekNums.length ? _weekNums[_weekNums.length-1] : 0;
+      // Always show all 15 weeks (1–14 + Conference Championships). Auto-fill fills empties.
+      var TOTAL_CFB_WEEKS = 15;
+      h += '<button class="btn btn-ghost btn-sm" id="btn-autofill-cfb-weeks" style="padding:5px 10px;font-size:9px;margin-bottom:8px">&#128197; Auto-fill 15 weeks (Thu&ndash;Mon windows)</button>';
       h += '<div id="cfb-weeks-wrap" style="display:flex;flex-direction:column;gap:4px">';
-      for(var _wk=1; _wk<=Math.min(_maxWeek+1,20); _wk++){
+      for(var _wk=1; _wk<=TOTAL_CFB_WEEKS; _wk++){
         var _w=_weeks[_wk]||{};
+        var _wkLabel = _wk===15 ? 'Conf' : ('Wk '+_wk);
         h += '<div style="display:flex;align-items:center;gap:5px">';
-        h += '<span style="font-size:9px;font-weight:800;color:var(--muted);width:44px;flex-shrink:0">Wk '+_wk+'</span>';
+        h += '<span style="font-size:9px;font-weight:800;color:var(--muted);width:44px;flex-shrink:0">'+_wkLabel+'</span>';
         h += '<input type="datetime-local" class="cfb-wk-start" data-wk="'+_wk+'" value="'+x(_w.start||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="start">';
         h += '<span style="font-size:9px;color:var(--muted)">&rarr;</span>';
         h += '<input type="datetime-local" class="cfb-wk-end" data-wk="'+_wk+'" value="'+x(_w.end||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="end">';
@@ -5462,10 +5463,32 @@ function renderAdmin() {
       var wk=inp.getAttribute("data-wk");
       var endInp=document.querySelector('.cfb-wk-end[data-wk="'+wk+'"]');
       var s=inp.value.trim(), e=endInp?endInp.value.trim():"";
-      if(s||e){ weeks[wk]={ start:s, end:e, label:"Week "+wk }; }
+      if(s||e){ weeks[wk]={ start:s, end:e, label:(wk==15?"Conf Championships":"Week "+wk) }; }
     });
     SC._cfbWeeks = weeks;
   }
+  var autofillCfbBtn = document.getElementById("btn-autofill-cfb-weeks");
+  if(autofillCfbBtn) autofillCfbBtn.addEventListener("click", function(){
+    // Build 15 Thu→Mon scoring windows starting from the last Thursday of August this year.
+    function pad(n){return String(n).padStart(2,"0");}
+    function toLocal(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes()); }
+    var year = new Date().getFullYear();
+    // Find the last Thursday of August (a common Week 1 kickoff week).
+    var aug = new Date(year, 7, 31, 0, 0);           // Aug 31
+    while(aug.getDay() !== 4) aug.setDate(aug.getDate()-1);  // back up to Thursday (4)
+    if(!SC._cfbWeeks) SC._cfbWeeks = {};
+    for(var wk=1; wk<=15; wk++){
+      var start = new Date(aug.getTime());
+      start.setDate(start.getDate() + (wk-1)*7);     // Thursday of each week
+      var end = new Date(start.getTime());
+      end.setDate(end.getDate() + 4);                // following Monday
+      end.setHours(23,59);
+      start.setHours(0,0);
+      SC._cfbWeeks[wk] = { start: toLocal(start), end: toLocal(end) };
+    }
+    draw();
+  });
+
   var saveCfbWeeksBtn = document.getElementById("btn-save-cfb-weeks");
   if(saveCfbWeeksBtn) saveCfbWeeksBtn.addEventListener("click", function(){
     if(!DB) return;
