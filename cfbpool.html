@@ -320,6 +320,7 @@ var ST={
   importYear:null,
   importWeek:null,
   adminStep:null,   // admin sub-tab: 1=add games, 2=finalize/edit, 3=enter results
+  spreadsLocked:{}, // per-week: spreads confirmed & locked from accidental edits
   importGames:[],
   importSelected:{},
   importLoading:false,
@@ -705,6 +706,7 @@ function loadData(){
       DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};invalidateAllWeekCache();_lastSig=_completedSig();_onData();});
       DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};_onData();});
       DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};_onData();});
+      DB.ref(BASE+"/spreadsLocked").on("value",function(sn){ST.spreadsLocked=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
@@ -1356,6 +1358,130 @@ function setConf(weekId,gid,confRaw){
   }
 }
 
+// Count how many completed weeks each player has WON (for "his 2nd win" context).
+// Returns a map uid -> number of weekly wins up to & including weekId.
+function _weeklyWinCounts(uptoWeekId){
+  var wins={};
+  var idx=ST.weekIds.indexOf(uptoWeekId);
+  var weeks=ST.weekIds.slice(0, idx+1).filter(function(w){ return weekIsComplete(w); });
+  weeks.forEach(function(w){
+    var best=-1, winners=[];
+    PARTS.forEach(function(p){
+      var ws=weekScore(w,p);
+      if((ws.correct+ws.wrong)===0) return;   // didn't play
+      if(ws.total>best){ best=ws.total; winners=[p]; }
+      else if(ws.total===best){ winners.push(p); }
+    });
+    winners.forEach(function(p){ wins[p]=(wins[p]||0)+1; });
+  });
+  return wins;
+}
+function _ordinal(n){
+  var s=["th","st","nd","rd"], v=n%100;
+  return n+(s[(v-20)%10]||s[v]||s[0]);
+}
+function _joinNames(arr){
+  if(arr.length===1) return arr[0];
+  if(arr.length===2) return arr[0]+" & "+arr[1];
+  return arr.slice(0,-1).join(", ")+" & "+arr[arr.length-1];
+}
+
+// Weekly recap. mode "prose" (default) = narrative paragraph like a commissioner email;
+// mode "card" = compact stat card with medals.
+function shareWeekRecap(weekId, mode){
+  mode = mode || "prose";
+  var label=ST.weekLabels[weekId]||weekId;
+  var active=activeGames(weekId);
+  if(!active.length){ toast("No games this week yet"); return; }
+
+  var scored=PARTS.map(function(p){
+    var ws=weekScore(weekId,p);
+    return {name:p, total:ws.total, correct:ws.correct, wrong:ws.wrong};
+  }).filter(function(r){ return (r.correct+r.wrong)>0; });
+  if(!scored.length){ toast("No results yet for "+label); return; }
+  scored.sort(function(a,b){ return b.total-a.total; });
+
+  // Group into placement tiers (handles ties).
+  var winnerScore=scored[0].total;
+  var winners=scored.filter(function(r){return r.total===winnerScore;}).map(function(r){return nameOf(r.name);});
+  var secondScore=null, seconds=[];
+  for(var i=0;i<scored.length;i++){ if(scored[i].total<winnerScore){ secondScore=scored[i].total; break; } }
+  if(secondScore!=null) seconds=scored.filter(function(r){return r.total===secondScore;}).map(function(r){return nameOf(r.name);});
+  var lastScore=scored[scored.length-1].total;
+  var lasts=scored.filter(function(r){return r.total===lastScore;}).map(function(r){return nameOf(r.name);});
+
+  var winCounts=_weeklyWinCounts(weekId);
+  var gutsy=_gutsiestHit(weekId, active);
+
+  var text;
+  if(mode==="card"){
+    var medals=["🥇","🥈","🥉"];
+    var lines=["🏈 "+label+" Recap",""];
+    scored.slice(0,3).forEach(function(r,i){
+      lines.push(medals[i]+" "+nameOf(r.name)+" — "+r.total+" pts ("+r.correct+"-"+r.wrong+")");
+    });
+    if(scored.length>3){
+      lines.push("");
+      lines.push("🥄 Last: "+_joinNames(lasts)+" ("+lastScore+" pts)");
+    }
+    if(gutsy) lines.push("💪 Gutsiest: "+nameOf(gutsy.name)+" — "+gutsy.team+" for "+gutsy.conf);
+    lines.push("");
+    lines.push("— via Scorecery");
+    text=lines.join("\n");
+  } else {
+    // Narrative prose.
+    var parts=[];
+    // Winner sentence with win-count context.
+    var wc = winCounts[scored[0].name]||1;
+    var winnerPhrase;
+    if(winners.length>1){
+      winnerPhrase=_joinNames(winners)+" tied to win "+label+" with "+winnerScore+" points";
+    } else {
+      winnerPhrase=winners[0]+" won "+label+" with "+winnerScore+" points"
+        + (wc>1 ? " — their "+_ordinal(wc)+" weekly win of the season" : "");
+    }
+    parts.push(winnerPhrase+".");
+    // Second place.
+    if(seconds.length){
+      parts.push((seconds.length>1?_joinNames(seconds)+" tied for 2nd":seconds[0]+" took 2nd")+" with "+secondScore+".");
+    }
+    // Last place (wooden spoon) — only if more than a couple players.
+    if(scored.length>2 && lastScore<winnerScore){
+      parts.push(_joinNames(lasts)+" brought up the rear with "+(lastScore===0?"just ":"a total of ")+lastScore+" point"+(lastScore!==1?"s":"")+" 🥄.");
+    }
+    // Gutsiest pick as color.
+    if(gutsy){
+      parts.push("Gutsiest call of the week: "+nameOf(gutsy.name)+" put "+gutsy.conf+" on "+gutsy.team+" and it cashed.");
+    }
+    text="🏈 "+label+" Recap\n\n"+parts.join(" ")+"\n\n— via Scorecery";
+  }
+
+  if(navigator.share){
+    navigator.share({text:text}).catch(function(){});
+  } else {
+    try{ navigator.clipboard.writeText(text); toast("Recap copied ✓"); }
+    catch(e){ toast("Recap ready"); }
+  }
+}
+// Highest-confidence correct pick across all players for a week.
+function _gutsiestHit(weekId, active){
+  var games=ST.games[weekId]||{}, results=ST.results[weekId]||{}, gutsy=null;
+  PARTS.forEach(function(p){
+    var picks=((ST.picks[weekId]||{})[p])||{};
+    active.forEach(function(gid){
+      var pk=picks[gid], r=results[gid];
+      if(pk&&pk.side&&r&&r!=="push"&&pk.side===r){
+        var conf=Number(pk.conf)||0;
+        if(!gutsy||conf>gutsy.conf){
+          var g=games[gid]||{};
+          gutsy={name:p,conf:conf,team:(pk.side==="away"?g.away:g.home)};
+        }
+      }
+    });
+  });
+  return gutsy;
+}
+
 function shareMyPicks(weekId){
   var uk=ST.user;
   var picks=((ST.picks[weekId]||{})[uk])||{};
@@ -1521,6 +1647,19 @@ function toggleLock(weekId){
   }
   // Ensure the schedule is running (it self-gates on game windows).
   startResultSchedule();
+}
+
+// Lock/unlock the spreads for a week. Purely a confirmation guard — it freezes the
+// favorite/spread fields from accidental edits. It does NOT lock picks or end the week
+// (games still lock at their own kickoff, scoring stays live).
+function toggleSpreadsLock(weekId){
+  if(!weekId) return;
+  if(!ST.spreadsLocked) ST.spreadsLocked={};
+  var newVal=!ST.spreadsLocked[weekId];
+  ST.spreadsLocked[weekId]=newVal;
+  if(DB) DB.ref(BASE+"/spreadsLocked/"+weekId).set(newVal);
+  toast(newVal?"&#128274; Spreads locked in":"&#128275; Spreads unlocked");
+  draw();
 }
 
 function fetchAllResults(weekId){
@@ -1962,6 +2101,31 @@ function renderStandings(){
   });
   rows.sort(function(a,b){return b.total-a.total;});
 
+  // ── Week-to-week rank movement ──
+  // Compute each player's rank as of the PREVIOUS completed week (season total through the
+  // week before the most recent one), then compare to their current rank for an arrow.
+  (function(){
+    if(completedWeeks.length < 1) return;                 // need at least one completed week
+    // Weeks up to and including the previous completed week.
+    var priorWeeks = completedWeeks.slice(0, completedWeeks.length-1);
+    // Prior-week totals per player (season points through the previous completed week).
+    var priorTotals = PARTS.map(function(p){
+      var t=0;
+      priorWeeks.forEach(function(w){ t+=weekScore(w,p).total; });
+      return {name:p, total:t};
+    });
+    priorTotals.sort(function(a,b){ return b.total-a.total; });
+    var priorRank={};
+    priorTotals.forEach(function(r,i){ priorRank[r.name]=i+1; });
+    // Attach movement to each current row (positive = moved up).
+    rows.forEach(function(r,i){
+      var curRank=i+1;
+      var pr=priorRank[r.name];
+      r._move = (pr==null) ? 0 : (pr - curRank);          // +N = climbed N spots
+      r._hasPrior = priorWeeks.length>0;
+    });
+  })();
+
   var leaderTotal=rows.length?rows[0].total:0;
 
   var weekBest={}, weekWorst={};
@@ -1974,6 +2138,11 @@ function renderStandings(){
   // Controls row above table
   h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--cream);border-bottom:1px solid var(--border2)">';
   h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played &middot; '+weeksRemaining+' remaining</div>';
+  if(completedWeeks.length){
+    var _recapWk=completedWeeks[completedWeeks.length-1];
+    h+='<button id="b-week-recap" data-wk="'+_recapWk+'" style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:6px;border:1.5px solid var(--gold);background:var(--gold-bg);color:var(--gold-dark);cursor:pointer;font-family:\'Nunito\',sans-serif">&#128241; Recap</button>';
+    h+='<button id="b-week-recap-card" data-wk="'+_recapWk+'" style="font-size:8px;font-weight:800;padding:3px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif">&#127942; Card</button>';
+  }
   if(historyWeeks.length){
     h+='<button id="b-toggle-history" style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif">'+(showHistory?'&#8249; Hide history':'&#128202; History ('+historyWeeks.length+')')+'</button>';
   }
@@ -2006,7 +2175,14 @@ function renderStandings(){
     h+='<tr '+sortAttrs+(isMe?' style="background:var(--gold-bg)"':'')+' data-st-player="'+x(r.name)+'">';
 
     var rankCol=rank===1?'var(--gold-dark)':rank===2?'#888':rank===3?'#b45309':'var(--muted)';
-    h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+'</td>';
+    // Week-to-week movement arrow (only once there's a prior week to compare against).
+    var moveHtml='';
+    if(r._hasPrior){
+      if(r._move>0)      moveHtml='<div style="font-size:7px;font-weight:900;color:var(--green);line-height:1">&#9650;'+r._move+'</div>';
+      else if(r._move<0) moveHtml='<div style="font-size:7px;font-weight:900;color:var(--red2);line-height:1">&#9660;'+Math.abs(r._move)+'</div>';
+      else               moveHtml='<div style="font-size:7px;font-weight:800;color:var(--muted);line-height:1">&ndash;</div>';
+    }
+    h+='<td style="position:sticky;left:0;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';text-align:center;font-size:11px;font-weight:900;color:'+rankCol+';padding:7px 4px;border-right:1px solid var(--border2)">'+rank+moveHtml+'</td>';
 
     // Name + best/worst week callout
     var bestLabel=r.bestWk&&completedWeeks.length>1?'<span style="font-size:7px;color:var(--green);font-weight:700"> ▲'+r.bestPts+'</span>':'';
@@ -2237,8 +2413,10 @@ function renderAdmin(){
   // Row 2: action buttons
   h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--cream)">';
   if(weekId){
-    // (No manual "mark week final" — games lock at their own kickoff and scoring is live,
-    // driven by the season calendar. Nothing to end manually.)
+    // Lock spreads: confirms the favorites/spreads as official so they can't be edited by
+    // accident. Does NOT end the week — games still lock at their own kickoff, scoring is live.
+    var _spLocked = !!(ST.spreadsLocked && ST.spreadsLocked[weekId]);
+    h+='<button class="btn '+(_spLocked?"btn-gold":"btn-green")+'" id="b-lock-spreads" style="font-size:9px;padding:4px 10px;flex-shrink:0">'+(_spLocked?"&#128274; Spreads locked":"&#128275; Lock spreads")+'</button>';
     h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px;padding:4px 9px;flex-shrink:0">&#128202; Results</button>';
     h+='<div style="flex:1"></div>';
     h+='<button class="adm-btn" id="b-week-settings-toggle" style="font-size:10px;padding:4px 8px;flex-shrink:0">&#9881;</button>';
@@ -2295,20 +2473,21 @@ function renderAdmin(){
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Game '+(idx+1)+'</div>';
     if(adminStep===2){
+      var _spLk = !!(ST.spreadsLocked && ST.spreadsLocked[weekId]);
       h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Matchup (away @ home)</div>';
       h+='<div class="adm-row">';
       h+='<input class="adm-input" placeholder="Away team" value="'+x(g.away)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="away">';
       h+='<input class="adm-input" placeholder="Home team" value="'+x(g.home)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="home">';
       h+='</div>';
-      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Favorite &amp; spread</div>';
-      h+='<div class="adm-row" style="margin-bottom:4px">';
-      h+='<button class="adm-btn'+(g.favSide==="away"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="away">'+x(g.away||"Away")+'</button>';
-      h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home">'+x(g.home||"Home")+'</button>';
-      h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even">Pick &#39;em</button>';
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Favorite &amp; spread'+(_spLk?' &#128274;':'')+'</div>';
+      h+='<div class="adm-row" style="margin-bottom:4px"'+(_spLk?' style="opacity:.55;pointer-events:none"':'')+'>';
+      h+='<button class="adm-btn'+(g.favSide==="away"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="away"'+(_spLk?" disabled":"")+'>'+x(g.away||"Away")+'</button>';
+      h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home"'+(_spLk?" disabled":"")+'>'+x(g.home||"Home")+'</button>';
+      h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even"'+(_spLk?" disabled":"")+'>Pick &#39;em</button>';
       h+='</div>';
       h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Kickoff (date &amp; time)</div>';
       h+='<div class="adm-row">';
-      h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
+      h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px"'+(_spLk?" disabled":"")+'>';
       h+='<input class="adm-input" type="datetime-local" value="'+_kickoffToLocalInput(g)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoffDt" style="flex:1">';
       h+='</div>';
     }
@@ -2925,6 +3104,12 @@ function bind(){
   el=document.getElementById("b-toggle-history"); if(el) el.addEventListener("click",function(){
     ST._standingsShowHistory=!ST._standingsShowHistory; draw();
   });
+  el=document.getElementById("b-week-recap"); if(el) el.addEventListener("click",function(){
+    shareWeekRecap(this.getAttribute("data-wk"), "prose");
+  });
+  el=document.getElementById("b-week-recap-card"); if(el) el.addEventListener("click",function(){
+    shareWeekRecap(this.getAttribute("data-wk"), "card");
+  });
   el=document.querySelector("th[data-sort-possible]");
   if(el) el.addEventListener("click",function(){ stSortRows("data-possible"); });
   els=document.querySelectorAll("th[data-sort-week]");
@@ -3017,6 +3202,7 @@ function bind(){
     if(v&&v!==(ST.weekLabels[ST.curWeek]||ST.curWeek)) renameWeek(ST.curWeek, v);
   });
   el=document.getElementById("b-fetch-all-results"); if(el) el.addEventListener("click",function(){ fetchAllResults(ST.curWeek); });
+  el=document.getElementById("b-lock-spreads"); if(el) el.addEventListener("click",function(){ toggleSpreadsLock(ST.curWeek); });
   el=document.getElementById("b-copy-week"); if(el) el.addEventListener("change",function(){ if(this.value) copyWeekGames(this.value, ST.curWeek); this.value=""; });
   el=document.getElementById("b-week-settings-toggle"); if(el) el.addEventListener("click",function(){
     ST._showWeekSettings=!ST._showWeekSettings; draw();
