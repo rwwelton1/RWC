@@ -418,6 +418,12 @@ function activeGames(weekId){
   var g=ST.games[weekId]||{};
   return GAME_IDS.filter(function(gid){var gm=g[gid];return gm&&gm.away&&gm.home;});
 }
+// Normalized key for matching a game across the ESPN import list and the stored week
+// (so already-imported games can be pre-highlighted). Uses the same normalization as
+// team-name matching elsewhere.
+function _gameKey(away, home){
+  return normalizeTeamName(away||"")+"__"+normalizeTeamName(home||"");
+}
 function spreadLabel(g,side){
   var sp=parseFloat(g.spread);
   if(!sp||isNaN(sp)||g.favSide==="even") return "PK";
@@ -976,7 +982,21 @@ function fetchEspnSchedule(year,week,seasontype){
     .then(function(data){
       ST.importLoading=false;
       ST.importGames=parseEspnSchedule(data);
+      // Pre-select games that are already imported into this week, so the admin sees what's
+      // already in and doesn't re-add duplicates. Match on away+home team names.
       ST.importSelected={};
+      (function(){
+        var wk = ST.importWeek || ST.curWeek;
+        var existing = ST.games[wk] || {};
+        var existingSet = {};
+        Object.keys(existing).forEach(function(gid){
+          var gm = existing[gid];
+          if(gm && gm.away && gm.home) existingSet[_gameKey(gm.away, gm.home)] = true;
+        });
+        ST.importGames.forEach(function(g, i){
+          if(existingSet[_gameKey(g.away, g.home)]) ST.importSelected[i] = true;
+        });
+      })();
       ST.importConf=null;
       ST.importTop25=false;
       if(!ST.importGames.length) ST.importError="No games found. Try a different week or year.";
@@ -2034,9 +2054,15 @@ function renderImportResults(weekId){
     var checked=!!ST.importSelected[origIdx];
     var disable=!checked&&selCount>=10;
     var isTb=curTb.away&&curTb.home&&curTb.away===g.away&&curTb.home===g.home;
+    // Is this game already imported into the week? (used to label pre-checked rows)
+    var _wkNow = ST.importWeek || ST.curWeek;
+    var _existingNow = ST.games[_wkNow] || {};
+    var _alreadyIn = Object.keys(_existingNow).some(function(gid){
+      var gm=_existingNow[gid]; return gm&&gm.away&&gm.home&&_gameKey(gm.away,gm.home)===_gameKey(g.away,g.home);
+    });
     var awayRank=RANKINGS[normalizeTeamName(g.away)];
     var homeRank=RANKINGS[normalizeTeamName(g.home)];
-    h+='<label data-imp-label="'+origIdx+'" style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":"")+'">';
+    h+='<label data-imp-label="'+origIdx+'" style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":_alreadyIn?";background:var(--green-bg)":"")+'">';
     h+='<input type="checkbox" data-imp-idx="'+origIdx+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
     h+='<div style="flex:1;min-width:0">';
     h+='<div style="display:flex;align-items:center;gap:4px;font-size:11px;font-weight:800">';
@@ -2046,6 +2072,7 @@ function renderImportResults(weekId){
     if(g.homeLogo) h+='<img src="'+g.homeLogo+'" style="width:18px;height:18px;object-fit:contain" onerror="this.style.display=\'none\'">';
     if(homeRank) h+='<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px">#'+homeRank.rank+'</span>';
     h+=x(g.home);
+    if(_alreadyIn) h+='<span style="font-size:8px;font-weight:900;color:var(--green);background:var(--green-bg);border:1px solid var(--green);border-radius:3px;padding:0 4px;margin-left:4px">&#10003; IN WEEK</span>';
     if(isTb) h+='<span style="font-size:8px;font-weight:900;color:var(--purple);background:var(--purple-bg);border:1px solid var(--purple);border-radius:3px;padding:0 4px;margin-left:4px">TB</span>';
     h+='</div>';
     var meta=x(g.kickoff);
