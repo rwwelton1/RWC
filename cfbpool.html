@@ -319,6 +319,7 @@ var ST={
   showImport:false,
   importYear:null,
   importWeek:null,
+  adminStep:null,   // admin sub-tab: 1=add games, 2=finalize/edit, 3=enter results
   importGames:[],
   importSelected:{},
   importLoading:false,
@@ -2161,35 +2162,36 @@ function renderAdmin(){
   var locked=!!(weekId&&ST.locked[weekId]);
   var weekMeta=(weekId&&ST._weekMeta&&ST._weekMeta[weekId])||{};
 
-  // ── Step guide: shows the admin exactly what to do next, in order ──
+  // ── Step tabs: click to switch between Add Games / Finalize / Enter Results ──
+  var nGames = weekId ? activeGames(weekId).length : 0;
+  var hasResults = false;
+  if(weekId){ var rr=ST.results[weekId]||{}; hasResults = Object.keys(rr).some(function(k){ return rr[k]; }); }
+  // Auto-suggest a step the first time, but let the admin click freely.
+  var autoStep = 1;
+  if(nGames>0 && !locked) autoStep = 2;
+  if(locked && !hasResults) autoStep = 3;
+  if(locked && hasResults) autoStep = 3;
+  if(ST.adminStep==null) ST.adminStep = autoStep;
+  var adminStep = ST.adminStep;
   (function(){
-    var nGames = weekId ? activeGames(weekId).length : 0;
-    var hasResults = false;
-    if(weekId){ var rr=ST.results[weekId]||{}; hasResults = Object.keys(rr).some(function(k){ return rr[k]; }); }
-    // Determine which step is active.
-    var step = 1;                                  // 1=add games, 2=lock, 3=results
-    if(nGames>0 && !locked) step = 2;
-    if(locked && !hasResults) step = 3;
-    if(locked && hasResults) step = 4;             // done
-    function chip(n,label,done,active){
-      var bg = done?'var(--green-bg)':active?'var(--gold-bg)':'#fff';
-      var col = done?'var(--green)':active?'var(--gold-dark)':'var(--muted)';
+    function chip(n,label,done){
+      var active = adminStep===n;
+      var bg = active?'var(--gold-bg)':done?'var(--green-bg)':'#fff';
+      var col = active?'var(--gold-dark)':done?'var(--green)':'var(--muted)';
       var bd = active?'var(--gold-dark)':'var(--border2)';
-      var mark = done?'&#10003;':String(n);
-      return '<div style="flex:1;text-align:center;padding:6px 4px;border-radius:8px;border:1.5px solid '+bd+';background:'+bg+'">'
+      var mark = (done&&!active)?'&#10003;':String(n);
+      return '<button class="adm-step-tab" data-step="'+n+'" style="flex:1;text-align:center;padding:7px 4px;border-radius:8px;border:1.5px solid '+bd+';background:'+bg+';cursor:pointer;font-family:inherit">'
         +'<div style="font-size:12px;font-weight:900;color:'+col+'">'+mark+'</div>'
-        +'<div style="font-size:7.5px;font-weight:800;color:'+col+';text-transform:uppercase;letter-spacing:.03em;line-height:1.2;margin-top:1px">'+label+'</div></div>';
+        +'<div style="font-size:7.5px;font-weight:800;color:'+col+';text-transform:uppercase;letter-spacing:.03em;line-height:1.2;margin-top:1px">'+label+'</div></button>';
     }
     h+='<div style="display:flex;gap:6px;margin:0 10px 4px">';
-    h+=chip(1,'Add games', step>1, step===1);
-    h+=chip(2,'Finalize', step>2, step===2);
-    h+=chip(3,'Enter results', step>3, step===3);
+    h+=chip(1,'Add games', nGames>0);
+    h+=chip(2,'Finalize', locked);
+    h+=chip(3,'Enter results', hasResults);
     h+='</div>';
-    // One-line hint for the active step.
-    var hint = step===1 ? 'Fetch the schedule, then tap 10 games to build the week.'
-             : step===2 ? nGames+' game'+(nGames!==1?'s':'')+' added. Players pick now; each game locks at its own kickoff. Results auto-fetch as games go final and scores update live in the standings. Finalizing is optional — it just marks the week officially closed.'
-             : step===3 ? 'Results auto-fetch while games are live. You can also set winners manually below, or tap &#128202; Results to pull now.'
-             : 'Week complete &#10003; All results are in.';
+    var hint = adminStep===1 ? 'Fetch the schedule, then tap 10 games to build the week. When done, go to Finalize.'
+             : adminStep===2 ? 'Adjust matchups, favorites, spreads and kickoffs. Tap Finalize week when the slate looks right — then move to Enter Results.'
+             : 'Results auto-fetch while games are live and scores update in the standings. You can also set winners manually here.';
     h+='<div style="margin:0 10px 8px;font-size:9.5px;font-weight:700;color:var(--muted);line-height:1.4">'+hint+'</div>';
   })();
 
@@ -2256,29 +2258,43 @@ function renderAdmin(){
   if(!weekId){h+='<div class="lb-note">Set up season above to add weeks.</div></div>';return h;}
   ST.curWeek=weekId;
 
-  // Show import results (filter pills + game list) inline after fetch
-  h+=renderImportResults(weekId);
+  // ── STEP 1: Add games (ESPN import list) ──
+  if(adminStep===1){
+    h+=renderImportResults(weekId);
+  }
 
+  // ── STEP 2 & 3: per-game cards. Step 2 shows the editor (matchup/spread/kickoff),
+  // Step 3 shows the result buttons. ──
+  if(adminStep===2 || adminStep===3){
   GAME_IDS.forEach(function(gid,idx){
     var g=(ST.games[weekId]||{})[gid]||{away:"",home:"",favSide:"home",spread:0,kickoff:""};
+    // In results mode, only show games that actually exist.
+    if(adminStep===3 && (!g.away||!g.home)) return;
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Game '+(idx+1)+'</div>';
-    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Matchup (away @ home)</div>';
-    h+='<div class="adm-row">';
-    h+='<input class="adm-input" placeholder="Away team" value="'+x(g.away)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="away">';
-    h+='<input class="adm-input" placeholder="Home team" value="'+x(g.home)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="home">';
-    h+='</div>';
-    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Favorite &amp; spread</div>';
-    h+='<div class="adm-row" style="margin-bottom:4px">';
-    h+='<button class="adm-btn'+(g.favSide==="away"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="away">'+x(g.away||"Away")+'</button>';
-    h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home">'+x(g.home||"Home")+'</button>';
-    h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even">Pick &#39;em</button>';
-    h+='</div>';
-    h+='<div class="adm-row">';
-    h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
-    h+='<input class="adm-input" placeholder="Kickoff e.g. Sat 3:30 PM ET" value="'+x(g.kickoff||"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoff">';
-    h+='</div>';
-    if(g.away&&g.home){
+    if(adminStep===2){
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Matchup (away @ home)</div>';
+      h+='<div class="adm-row">';
+      h+='<input class="adm-input" placeholder="Away team" value="'+x(g.away)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="away">';
+      h+='<input class="adm-input" placeholder="Home team" value="'+x(g.home)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="home">';
+      h+='</div>';
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Favorite &amp; spread</div>';
+      h+='<div class="adm-row" style="margin-bottom:4px">';
+      h+='<button class="adm-btn'+(g.favSide==="away"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="away">'+x(g.away||"Away")+'</button>';
+      h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home">'+x(g.home||"Home")+'</button>';
+      h+='<button class="adm-btn'+(g.favSide==="even"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="even">Pick &#39;em</button>';
+      h+='</div>';
+      h+='<div class="adm-row">';
+      h+='<input class="adm-input" type="number" step="0.5" placeholder="Spread (favorite)" value="'+(g.spread&&g.favSide!=="even"?"-"+g.spread:"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="spread" style="max-width:110px">';
+      h+='<input class="adm-input" placeholder="Kickoff e.g. Sat 3:30 PM ET" value="'+x(g.kickoff||"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="kickoff">';
+      h+='</div>';
+    }
+    if(adminStep===3 && g.away&&g.home){
+      // Read-only matchup summary above the result buttons.
+      var spL = g.favSide==="even"?"PK":("-"+g.spread+" "+(g.favSide==="away"?x(g.away):x(g.home)));
+      h+='<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:4px">'+x(g.away)+' @ '+x(g.home)+' <span style="color:var(--muted);font-weight:700">&middot; '+spL+'</span></div>';
+    }
+    if(adminStep===3 && g.away&&g.home){
       var r=(ST.results[weekId]||{})[gid];
       // Look up live/final score from scoreboard data
       var _scoreStr="";
@@ -2310,7 +2326,14 @@ function renderAdmin(){
     }
     h+='</div>';
   });
-  // Tiebreaker section
+  // Step 2: save-and-advance button.
+  if(adminStep===2){
+    h+='<button class="btn btn-gold" id="b-finalize-continue" style="width:calc(100% - 20px);margin:4px 10px 8px;font-size:11px;padding:8px">Save games &amp; go to Results &#8250;</button>';
+  }
+  } // end step 2/3 game cards
+
+  // Tiebreaker (edited during setup / step 2).
+  if(adminStep===2){
   var tb=ST.tiebreaker[weekId]||{};
   h+='<div class="adm-sec-label">Tiebreaker Game</div>';
   h+='<div class="adm-game">';
@@ -2333,6 +2356,7 @@ function renderAdmin(){
     h+='<div style="font-size:10px;color:var(--muted);padding:8px 0">No tiebreaker set yet. Import games above and hold one to set it.</div>';
   }
   h+='</div>';
+  } // end tiebreaker (step 2)
 
   h+='</div>';
   return h;
@@ -3013,7 +3037,15 @@ function bind(){
       if(btn) btn.scrollIntoView({behavior:"smooth",block:"center"});
     }
   });
-  el=document.getElementById("b-add-imported"); if(el) el.addEventListener("click",function(){addImportedGames(ST.curWeek);});
+  el=document.getElementById("b-add-imported"); if(el) el.addEventListener("click",function(){ addImportedGames(ST.curWeek); ST.adminStep=2; draw(); });
+
+  // Step tabs — switch between Add games / Finalize / Enter results.
+  document.querySelectorAll(".adm-step-tab").forEach(function(t){
+    t.addEventListener("click", function(){ ST.adminStep=parseInt(this.getAttribute("data-step"))||1; draw(); });
+  });
+  // Step 2 → advance to results.
+  var _fc=document.getElementById("b-finalize-continue");
+  if(_fc) _fc.addEventListener("click", function(){ ST.adminStep=3; draw(); });
 
   // Long-press on import game labels to set as tiebreaker
   els=document.querySelectorAll("label[data-imp-label]");
