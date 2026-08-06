@@ -2058,9 +2058,12 @@ function renderImportResults(weekId){
   });
   h+='</div>';
 
-  h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 10px;border-top:1px solid var(--border2)">';
-  h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap to select &middot; Hold for tiebreaker</div>';
-  h+='<span style="font-size:11px;font-weight:900;color:'+(selCount===10?"var(--green)":"var(--text)")+'">'+selCount+'/10</span>';
+  h+='<div style="padding:6px 10px;border-top:1px solid var(--border2)">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center">';
+  h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap a game to add it</div>';
+  h+='<span style="font-size:12px;font-weight:900;color:'+(selCount===10?"var(--green)":selCount>10?"var(--red2)":"var(--gold-dark)")+'">'+selCount+' / 10 selected</span>';
+  h+='</div>';
+  h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:2px;line-height:1.3">Pick exactly 10. Press &amp; hold a game to mark it the tiebreaker (total points guess).</div>';
   h+='</div>';
 
   var curTb=ST.tiebreaker[weekId]||{};
@@ -2135,11 +2138,44 @@ function renderAdmin(){
   var locked=!!(weekId&&ST.locked[weekId]);
   var weekMeta=(weekId&&ST._weekMeta&&ST._weekMeta[weekId])||{};
 
+  // ── Step guide: shows the admin exactly what to do next, in order ──
+  (function(){
+    var nGames = weekId ? activeGames(weekId).length : 0;
+    var hasResults = false;
+    if(weekId){ var rr=ST.results[weekId]||{}; hasResults = Object.keys(rr).some(function(k){ return rr[k]; }); }
+    // Determine which step is active.
+    var step = 1;                                  // 1=add games, 2=lock, 3=results
+    if(nGames>0 && !locked) step = 2;
+    if(locked && !hasResults) step = 3;
+    if(locked && hasResults) step = 4;             // done
+    function chip(n,label,done,active){
+      var bg = done?'var(--green-bg)':active?'var(--gold-bg)':'#fff';
+      var col = done?'var(--green)':active?'var(--gold-dark)':'var(--muted)';
+      var bd = active?'var(--gold-dark)':'var(--border2)';
+      var mark = done?'&#10003;':String(n);
+      return '<div style="flex:1;text-align:center;padding:6px 4px;border-radius:8px;border:1.5px solid '+bd+';background:'+bg+'">'
+        +'<div style="font-size:12px;font-weight:900;color:'+col+'">'+mark+'</div>'
+        +'<div style="font-size:7.5px;font-weight:800;color:'+col+';text-transform:uppercase;letter-spacing:.03em;line-height:1.2;margin-top:1px">'+label+'</div></div>';
+    }
+    h+='<div style="display:flex;gap:6px;margin:0 10px 4px">';
+    h+=chip(1,'Add games', step>1, step===1);
+    h+=chip(2,'Lock week', step>2, step===2);
+    h+=chip(3,'Enter results', step>3, step===3);
+    h+='</div>';
+    // One-line hint for the active step.
+    var hint = step===1 ? 'Fetch the schedule, then tap 10 games to build the week.'
+             : step===2 ? nGames+' game'+(nGames!==1?'s':'')+' added. Lock the week once you\'re happy — players can pick until each game kicks off.'
+             : step===3 ? 'Week is locked. Tap &#128202; Results to auto-fetch finals, or set winners manually below.'
+             : 'Week complete &#10003; Results are in and scores are final.';
+    h+='<div style="margin:0 10px 8px;font-size:9.5px;font-weight:700;color:var(--muted);line-height:1.4">'+hint+'</div>';
+  })();
+
   // Single unified card
   h+='<div style="background:#fff;border:2px solid var(--border);border-radius:12px;box-shadow:4px 4px 0 var(--border);margin:8px 10px;overflow:hidden">';
 
   // Row 1: week dropdown + fetch + controls
-  h+='<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--border2)">';
+  h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:6px 10px 0">Choose a week, then fetch its schedule</div>';
+  h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px 8px;border-bottom:1px solid var(--border2)">';
   h+='<select class="week-select-main" id="week-dropdown" style="flex:1;min-width:0;border-radius:8px">';
   ST.weekIds.forEach(function(w){
     var lbl=ST.weekLabels[w]||w;
@@ -2149,7 +2185,7 @@ function renderAdmin(){
     h+='<option value="'+w+'"'+(weekId===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
   });
   h+='</select>';
-  h+='<button class="btn btn-gold" id="b-fetch-espn" style="font-size:10px;padding:5px 12px;flex-shrink:0">'+(ST.importLoading?"…":"Fetch")+'</button>';
+  h+='<button class="btn btn-gold" id="b-fetch-espn" style="font-size:10px;padding:5px 12px;flex-shrink:0">'+(ST.importLoading?"…":"&#128229; Fetch")+'</button>';
   h+='</div>';
 
   // Row 2: action buttons
@@ -2204,10 +2240,12 @@ function renderAdmin(){
     var g=(ST.games[weekId]||{})[gid]||{away:"",home:"",favSide:"home",spread:0,kickoff:""};
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Game '+(idx+1)+'</div>';
+    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Matchup (away @ home)</div>';
     h+='<div class="adm-row">';
     h+='<input class="adm-input" placeholder="Away team" value="'+x(g.away)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="away">';
     h+='<input class="adm-input" placeholder="Home team" value="'+x(g.home)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="home">';
     h+='</div>';
+    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Favorite &amp; spread</div>';
     h+='<div class="adm-row" style="margin-bottom:4px">';
     h+='<button class="adm-btn'+(g.favSide==="away"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="away">'+x(g.away||"Away")+'</button>';
     h+='<button class="adm-btn'+(g.favSide==="home"?" sel":"")+'" style="flex:1" data-week="'+weekId+'" data-gid="'+gid+'" data-fav="home">'+x(g.home||"Home")+'</button>';
@@ -2238,6 +2276,7 @@ function renderAdmin(){
           }
         });
       }
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:6px 0 2px">Result &mdash; who covered the spread?</div>';
       h+='<div class="adm-btns">';
       if(_scoreStr) h+='<div style="font-size:9px;font-weight:800;color:var(--muted);width:100%;margin-bottom:4px">'+_scoreStr+'</div>';
       h+='<button class="adm-btn'+(r==="away"?" sel":"")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-result="away">'+x(g.away)+' covers</button>';
