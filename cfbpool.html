@@ -469,7 +469,10 @@ function weekIsComplete(weekId){
 function seasonScore(user){
   var total=0;
   ST.weekIds.forEach(function(w){
-    if(weekIsComplete(w)) total+=weekScore(w,user).total;
+    // Live scoring: count each week's earned points as games finish, rather than waiting
+    // for the whole week to be complete/finalized. weekScore already only credits games
+    // that have a result, so partial weeks contribute their finished games.
+    total += weekScore(w,user).total;
   });
   return total;
 }
@@ -591,6 +594,7 @@ function publishSeasonToHub(metaOnly){
 
     function computeAndWrite(){
       var totals={};
+      var curW = calendarCurrentWeek ? calendarCurrentWeek() : ST.curWeek;
       (PARTS||[]).forEach(function(p){
         var total=0;   // p is a uid
         completed.forEach(function(w){
@@ -602,6 +606,16 @@ function publishSeasonToHub(metaOnly){
             if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
           });
         });
+        // Live scoring: add the current (in-progress) week's earned points from live picks,
+        // so the hub standings update as games go final — not only when the week completes.
+        if(curW && completed.indexOf(curW)<0){
+          var livePicks=(ST.picks[curW]||{})[p]||{};
+          var liveResults=ST.results[curW]||{};
+          activeGames(curW).forEach(function(gid){
+            var pk=livePicks[gid], r=liveResults[gid];
+            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
+          });
+        }
         totals[p]=total;
       });
       // One atomic write: scores + meta land together, hub never sees a half-updated state.
@@ -738,11 +752,11 @@ function loadData(){
       });
     });
 
-    // Start auto-result fetch schedule
+    // Start auto-result fetch schedule. It self-gates on each game's live window (kickoff →
+    // +5h), so we start it unconditionally rather than only when a week is locked.
     Promise.all(emojiPromises).then(function(){
       scheduleDraw();
-      var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
-      if(anyLocked) startResultSchedule();
+      startResultSchedule();
     });
   });
 }
@@ -829,24 +843,33 @@ function _inResultFetchWindow() {
   return false;
 }
 
+// A game is in its "live results window" from its kickoff until 5 hours after — that's when
+// auto-fetching its final makes sense. No admin lock required; it's purely time-driven.
+var RESULT_WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours
+function anyGameInLiveWindow(weekId){
+  if(!weekId) return false;
+  var games = ST.games[weekId] || {};
+  var now = Date.now();
+  return GAME_IDS.some(function(gid){
+    var g = games[gid];
+    if(!g || !g.away || !g.home) return false;
+    if((ST.results[weekId]||{})[gid]) return false;        // already has a result
+    var ts = parseKickoffTs(g);
+    if(!ts) return false;
+    return now >= ts && now <= ts + RESULT_WINDOW_MS;      // kicked off, within 5h
+  });
+}
+
 function startResultSchedule() {
   stopResultSchedule();
-  // Run if any week is locked OR global cfb status is locked
-  var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
-  var globalLocked = (window._cfbGlobalStatus||"") === "locked";
-  if(!anyLocked && !globalLocked) return;
 
   function tick() {
-    if (!_inResultFetchWindow()) return;
-    // Don't fire more than once per hour
-    if (Date.now() - _lastAutoResultFetch < 60 * 60 * 1000) return;
     var weekId = currentWeekId();
-    if (!weekId || !ST.locked[weekId]) return;
-    // Don't auto-fetch if all results already filled
-    var games = ST.games[weekId] || {};
-    var active = GAME_IDS.filter(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
-    var missing = active.filter(function(gid){ return !(ST.results[weekId]||{})[gid]; });
-    if (!missing.length) { stopResultSchedule(); return; } // all done — stop
+    if (!weekId) return;
+    // Only fetch while at least one game is in its live window (kickoff → +5h) and unresolved.
+    // This replaces the old hardcoded weekend-hours gate — games run Thu–Mon at all hours.
+    if (!anyGameInLiveWindow(weekId)) return;
+    if (Date.now() - _lastAutoResultFetch < 4 * 60 * 1000) return;
     _lastAutoResultFetch = Date.now();
     fetchAllResults(weekId);
   }
@@ -1475,14 +1498,12 @@ function toggleLock(weekId){
   }
   draw();
   if(newVal){
-    // Week locked — auto-fetch results and start schedule
+    // Finalizing pulls the latest results immediately; the ongoing schedule is game-time
+    // driven and already running regardless of finalize state.
     fetchAllResults(weekId);
-    startResultSchedule();
-  } else {
-    // Week unlocked — stop schedule if no other weeks still locked
-    var anyLocked = ST.weekIds.some(function(w){ return ST.locked[w]; });
-    if(!anyLocked) stopResultSchedule();
   }
+  // Ensure the schedule is running (it self-gates on game windows).
+  startResultSchedule();
 }
 
 function fetchAllResults(weekId){
@@ -1908,7 +1929,9 @@ function renderStandings(){
     ST.weekIds.forEach(function(w){
       var ws=weekScore(w,p);
       weekScores[w]=ws;
-      if(weekIsComplete(w)){ seasonCorrect+=ws.correct; seasonWrong+=ws.wrong; }
+      // Live record: count wins/losses from games that have finished (have a result),
+      // matching the live points total, not only fully-complete weeks.
+      seasonCorrect+=ws.correct; seasonWrong+=ws.wrong;
     });
     var possible=total + (weeksRemaining * MAX_PTS_PER_WEEK);
     // Best/worst week stats
@@ -2159,14 +2182,14 @@ function renderAdmin(){
     }
     h+='<div style="display:flex;gap:6px;margin:0 10px 4px">';
     h+=chip(1,'Add games', step>1, step===1);
-    h+=chip(2,'Lock week', step>2, step===2);
+    h+=chip(2,'Finalize', step>2, step===2);
     h+=chip(3,'Enter results', step>3, step===3);
     h+='</div>';
     // One-line hint for the active step.
     var hint = step===1 ? 'Fetch the schedule, then tap 10 games to build the week.'
-             : step===2 ? nGames+' game'+(nGames!==1?'s':'')+' added. Lock the week once you\'re happy — players can pick until each game kicks off.'
-             : step===3 ? 'Week is locked. Tap &#128202; Results to auto-fetch finals, or set winners manually below.'
-             : 'Week complete &#10003; Results are in and scores are final.';
+             : step===2 ? nGames+' game'+(nGames!==1?'s':'')+' added. Players pick now; each game locks at its own kickoff. Results auto-fetch as games go final and scores update live in the standings. Finalizing is optional — it just marks the week officially closed.'
+             : step===3 ? 'Results auto-fetch while games are live. You can also set winners manually below, or tap &#128202; Results to pull now.'
+             : 'Week complete &#10003; All results are in.';
     h+='<div style="margin:0 10px 8px;font-size:9.5px;font-weight:700;color:var(--muted);line-height:1.4">'+hint+'</div>';
   })();
 
@@ -2191,8 +2214,8 @@ function renderAdmin(){
   // Row 2: action buttons
   h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--cream)">';
   if(weekId){
-    h+='<button class="btn '+(locked?"btn-red":"btn-green")+'" id="b-lockweek" style="font-size:10px;padding:4px 12px;flex-shrink:0">'+(locked?"&#128274; Locked":"&#128275; Lock")+'</button>';
-    if(locked) h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px;padding:4px 9px;flex-shrink:0">&#128202; Results</button>';
+    h+='<button class="btn '+(locked?"btn-red":"btn-green")+'" id="b-lockweek" style="font-size:10px;padding:4px 12px;flex-shrink:0">'+(locked?"&#128274; Finalized":"&#9989; Finalize week")+'</button>';
+    h+='<button class="btn btn-ghost" id="b-fetch-all-results" style="font-size:9px;padding:4px 9px;flex-shrink:0">&#128202; Results</button>';
     h+='<div style="flex:1"></div>';
     h+='<button class="adm-btn" id="b-week-settings-toggle" style="font-size:10px;padding:4px 8px;flex-shrink:0">&#9881;</button>';
   }
