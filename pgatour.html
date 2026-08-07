@@ -485,7 +485,16 @@ function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&l
 function ukey(n){return String(n||"").toLowerCase().replace(/\s+/g,"_").replace(/[&']/g,"");}
 function fmt(n){return "$"+Number(n).toLocaleString();}
 function fmtK(n){return n>=1000?"$"+(n/1000).toFixed(n%1000===0?0:1)+"K":"$"+n;}
-function fmtScore(n){if(n===0)return "E";if(n>0)return "+"+n;return ""+n;}
+function fmtScore(n){
+  // Round to 1 decimal to avoid float drift (confidence pool produces fractional totals),
+  // then drop a trailing ".0" so whole numbers show clean.
+  var r=Math.round(Number(n)*10)/10;
+  if(Object.is(r,-0)) r=0;
+  var s=(r%1===0)?String(r):r.toFixed(1);
+  if(r===0)return "E";
+  if(r>0)return "+"+s;
+  return s;
+}
 function golferByName(n){for(var i=0;i<GOLFERS.length;i++)if(GOLFERS[i].name===n)return GOLFERS[i];return null;}
 
 // ── Toast ─────────────────────────────────────────────
@@ -687,7 +696,7 @@ function entryTotal(picks, picksObj){
       var multiplier=Math.sqrt(rank);
       t+=Math.round(Number(gs.score)*multiplier*10)/10;
     }
-    return t;
+    return Math.round(t*10)/10;  // round final total — summing 1-decimals can drift
   }
 
   if(type==="daily"){
@@ -1079,6 +1088,10 @@ function renderLeaderboard(){
   var liveLabel=hasLive?" \u00b7 Live":"";
   var _capStr=TOURNAMENT.type==="salary"?" \u00b7 $"+(TOURNAMENT.cap/1000)+"K Cap":"";
   h+='<div class="lb-head"><span class="lb-title">&#127954; Leaderboard</span><span class="lb-sub">'+entries.length+' entr'+(entries.length===1?"y":"ies")+liveLabel+_capStr+'</span></div>';
+  h+='<div style="display:flex;gap:6px;padding:6px 10px 2px">';
+  h+='<button id="b-event-recap" style="font-size:8px;font-weight:800;padding:3px 10px;border-radius:6px;border:1.5px solid var(--accent,#c9a86a);background:rgba(201,168,106,.15);color:#8a6d3b;cursor:pointer;font-family:inherit">&#128241; Recap</button>';
+  h+='<button id="b-event-recap-card" style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:6px;border:1.5px solid var(--border,#ddd);background:#fff;color:#888;cursor:pointer;font-family:inherit">&#127942; Card</button>';
+  h+='</div>';
   for(var i=0;i<entries.length;i++){
     var e=entries[i];
     var rn=i+1;
@@ -1165,6 +1178,83 @@ function renderLeaderboard(){
     h+='</div>';
   }
   return h;
+}
+
+// ── Shareable event recap (golf) ──────────────────────
+function _joinNames(arr){
+  if(arr.length===1) return arr[0];
+  if(arr.length===2) return arr[0]+" & "+arr[1];
+  return arr.slice(0,-1).join(", ")+" & "+arr[arr.length-1];
+}
+// Recap the current (or most recently archived) tournament. mode "prose" | "card".
+function shareEventRecap(mode){
+  mode = mode || "prose";
+  // Prefer a live/just-finished event from current picks; fall back to newest archived event.
+  var eventName = CUR_EVENT_NAME || "";
+  var scored=[];
+  for(var uk in ST.picks){
+    var p=ST.picks[uk];
+    if(!p) continue;
+    scored.push({name:nameOf(uk), total:entryTotal(p.picks||[])});
+  }
+  // If no live entries but we have an archive, recap the most recent archived event.
+  if(!scored.length){
+    var slugs=Object.keys(_pastEvents||{});
+    if(slugs.length){
+      slugs.sort(function(a,b){return (_pastEvents[b].endedAt||0)-(_pastEvents[a].endedAt||0);});
+      var ev=_pastEvents[slugs[0]];
+      eventName=ev.name||eventName;
+      (ev.podium||[]).forEach(function(pod){ scored.push({name:pod.name||nameOf(pod.uid), total:pod.pts}); });
+    }
+  }
+  if(!scored.length){ toast("No entries to recap yet"); return; }
+  if(!eventName) eventName=(TOURNAMENT&&TOURNAMENT.name)||"This Event";
+
+  // Golf: lower is better.
+  scored.sort(function(a,b){ return a.total-b.total; });
+
+  var winScore=scored[0].total;
+  var winners=scored.filter(function(r){return r.total===winScore;}).map(function(r){return r.name;});
+  var secondScore=null, seconds=[];
+  for(var i=0;i<scored.length;i++){ if(scored[i].total>winScore){ secondScore=scored[i].total; break; } }
+  if(secondScore!=null) seconds=scored.filter(function(r){return r.total===secondScore;}).map(function(r){return r.name;});
+  var lastScore=scored[scored.length-1].total;
+  var lasts=scored.filter(function(r){return r.total===lastScore;}).map(function(r){return r.name;});
+
+  var text;
+  if(mode==="card"){
+    var medals=["🥇","🥈","🥉"];
+    var lines=["⛳ "+eventName+" Recap",""];
+    scored.slice(0,3).forEach(function(r,i){
+      lines.push(medals[i]+" "+r.name+" ("+fmtScore(r.total)+")");
+    });
+    if(scored.length>3){
+      lines.push("");
+      lines.push("🥄 Last: "+_joinNames(lasts)+" ("+fmtScore(lastScore)+")");
+    }
+    lines.push("");
+    lines.push("— via Scorecery");
+    text=lines.join("\n");
+  } else {
+    var parts=[];
+    if(winners.length>1){
+      parts.push(_joinNames(winners)+" tied to win "+eventName+" at "+fmtScore(winScore)+".");
+    } else {
+      var margin = secondScore!=null ? (secondScore-winScore) : null;
+      parts.push(winners[0]+" took down "+eventName+" at "+fmtScore(winScore)
+        + (margin ? " — winning by "+margin : "")+".");
+    }
+    if(seconds.length){
+      parts.push((seconds.length>1?_joinNames(seconds)+" tied for 2nd":seconds[0]+" finished 2nd")+" at "+fmtScore(secondScore)+".");
+    }
+    if(scored.length>2 && lastScore>winScore){
+      parts.push(_joinNames(lasts)+" brought up the rear at "+fmtScore(lastScore)+" 🥄.");
+    }
+    text="⛳ "+eventName+" Recap\n\n"+parts.join(" ")+"\n\n— via Scorecery";
+  }
+
+  if(navigator.share){ navigator.share({text:text}).catch(function(){}); }
+  else { try{ navigator.clipboard.writeText(text); toast("Recap copied ✓"); }catch(e){ toast("Recap ready"); } }
 }
 
 function renderAdmin(){
@@ -1914,6 +2004,9 @@ function bind(){
   });
 
   el=document.getElementById("b-switch"); if(el) el.addEventListener("click",function(){ST.user=null;draftPicks=[];draw();});
+
+  el=document.getElementById("b-event-recap"); if(el) el.addEventListener("click",function(){ shareEventRecap("prose"); });
+  el=document.getElementById("b-event-recap-card"); if(el) el.addEventListener("click",function(){ shareEventRecap("card"); });
 
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
     if(ST.admin){ST.admin=false;if(ST.page==="admin")ST.page="picks";draw();return;}
