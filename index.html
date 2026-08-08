@@ -2293,19 +2293,8 @@ function renderProfile() {
       var _btnStyle = "flex:0 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:3px;border-radius:7px;padding:5px 10px;font-size:8px;font-weight:800;cursor:pointer;font-family:inherit;border:1.5px solid var(--border2);box-shadow:1px 1px 0 var(--border2);white-space:nowrap";
       gh += '<button class="gcard-share-btn" data-gid="'+x(g.id)+'" data-gname="'+x(g.name)+'" data-standings="'+shareStandingsData+'" style="'+_btnStyle+';background:var(--cream);color:var(--muted)">📤 Share</button>';
       if(_showInvite) gh += '<button class="gcard-invite-btn" data-gid="'+x(g.id)+'" style="'+_btnStyle+';background:var(--green-bg);color:var(--green)">🔗 Invite</button>';
-      // Admin: manually finalize this group's active pool — writes the podium to
-      // groups/{id}/data/{poolId}/results and flips the group's status to complete,
-      // which mints the trophy.
-      // PGA TOUR ONLY. Other pools reuse their id yearly but still reach a real global
-      // "complete" for that year's event, so they finalize on their own. pgatour is the
-      // only one running several different tournaments concurrently on one id, which is
-      // why it can never settle and needs a manual trigger.
-      var _canFinalize = _gcIsAdmin && activePool && activePool.id === "pgatour" &&
-                         standings.length > 0 && _inviteStatus !== "coming-soon";
-      if(_canFinalize){
-        gh += '<button class="gcard-final-btn" data-gid="'+x(g.id)+'" data-pid="'+x(activePool.id)+'" data-gname="'+x(g.name)+'" '+
-              'style="'+_btnStyle+';background:#dbeafe;color:#2563eb">🏁 Finalize</button>';
-      }
+      // PGA trophies are now minted automatically when the tournament ends (the pool page's
+      // auto-archive writes the podium + ranks + complete status). No manual Finalize needed.
       gh += '</div>';
 
       gh += '</div>'; // end gcard
@@ -2385,119 +2374,6 @@ function renderProfile() {
       });
     });
 
-    // ── Admin: manual Finalize (mints the trophy) ──────────────────────────
-    container.querySelectorAll(".gcard-final-btn").forEach(function(btn){
-      btn.addEventListener("click", function(e){
-        e.stopPropagation();
-        var gid = this.getAttribute("data-gid");
-        var pid = this.getAttribute("data-pid");
-        var gname = this.getAttribute("data-gname") || "";
-        if(!DB||!gid||!pid) return;
-        if(pid !== "pgatour") return;   // hard guard — finalize is pgatour-only
-        var grp = null;
-        (_allGroupsCache||[]).forEach(function(gg){ if(gg && gg.id===gid) grp = gg; });
-        if(!grp){ toast("Group not loaded","err"); return; }
-
-        // Podium comes from calcStandings — the exact same numbers shown on the card,
-        // so the trophy can never disagree with the leaderboard.
-        var final = calcStandings(grp, grp.data||{});
-        if(!final.length){ toast("No standings to finalize","err"); return; }
-        var _pool = poolById(pid);
-        var _nm = (_pool && (_pool.shortName||_pool.name)) || pid;
-
-        // Where the tournament name comes from, in priority order:
-        //   1. groups/{gid}/data/{pid}/tournamentName — per-group, set here. The only
-        //      thing that works when several tournaments run concurrently on one pool id.
-        //   2. globalSettings/{pid}/name — pgatour.html's config. Global, so it only
-        //      describes whichever event was configured last.
-        //   3. the library name ("PGA Tour") — generic, last resort.
-        var _gPool = (grp.data && grp.data[pid]) || {};
-        var _preset = _gPool.tournamentName || null;
-        DB.ref("globalSettings/"+pid+"/name").once("value", function(tsn){
-          _askName(_preset || tsn.val() || "");
-        }, function(){ _askName(_preset || ""); });
-
-        async function _askName(guess){
-          // If the best guess is just the generic pool name, it tells us nothing —
-          // make the admin name the actual event.
-          var _generic = !guess || guess===_nm || guess===(_pool&&_pool.name);
-          var tName = await scPrompt(
-            "Tournament name",
-            _generic ? "" : guess,
-            { message: "Group: "+gname, placeholder: _generic ? "e.g. Genesis Scottish Open" : "" }
-          );
-          if(tName===false) return;             // cancelled
-          tName = String(tName).trim();
-          if(!tName) tName = (_pool && _pool.name) || _nm;
-          _finalizeWith(tName);
-        }
-
-        async function _finalizeWith(tName){
-        // Group by competition rank so ties are preserved. first/second/third can only
-        // hold one name each, so they'd silently drop a co-2nd — `ranks` is the source
-        // of truth and holds everyone.
-        var byRank = {};
-        final.forEach(function(e){ (byRank[e.rank] = byRank[e.rank] || []).push(e.name); });
-        function _lbl(rk){ return (byRank[rk]||[]).join(" & ") || "—"; }
-
-        if(!await scConfirm(
-              "Group: "+gname+"\n\n🥇 "+_lbl(1)+
-              "\n🥈 "+_lbl(2)+
-              "\n🥉 "+_lbl(3)+
-              "\n\nThis mints trophies for everyone in the group.",
-              { title: "Finalize "+tName, okLabel: "Finalize" })) return;
-
-        var ranks = {};
-        final.forEach(function(e){ ranks[e.name] = e.rank; });
-
-        var results = {
-          // Legacy podium fields — kept for older readers. With a tie for 2nd there is
-          // no 3rd, so `third` is correctly absent rather than promoting the 4th player.
-          first:  (byRank[1]||[])[0] || null,
-          second: (byRank[2]||[])[0] || null,
-          third:  (byRank[3]||[])[0] || null,
-          ranks:  ranks,           // {name: rank} — ties intact, authoritative
-          tournamentName: tName,   // frozen — global name changes with the next event
-          groupName: gname,
-          finalizedAt: Date.now()
-        };
-        Object.keys(results).forEach(function(k){ if(results[k]===null) delete results[k]; });
-
-        // Persist on the group's pool node too, so it survives the next tournament
-        // overwriting globalSettings and is available before any finalize.
-        DB.ref("groups/"+gid+"/data/"+pid+"/tournamentName").set(tName);
-
-        DB.ref("groups/"+gid+"/data/"+pid+"/results").set(results, function(err){
-          if(err){ toast("Finalize failed","err"); return; }
-          DB.ref("groups/"+gid+"/data/statuses/"+pid).set("complete", function(){
-            // Mirror the status-switcher behaviour: auto-cycle back to Soon in 3 days
-            var _at = Date.now() + 3*24*60*60*1000;
-            DB.ref("groups/"+gid+"/data/statusSchedule/"+pid).set({status:"coming-soon", at:_at});
-            DB.ref("groups/"+gid+"/data/statusResetAt/"+pid).set(_at);
-
-            // Keep the local cache in step so the re-render shows it immediately
-            if(!grp.data) grp.data = {};
-            if(!grp.data.statuses) grp.data.statuses = {};
-            grp.data.statuses[pid] = "complete";
-            if(!grp.data[pid]) grp.data[pid] = {};
-            grp.data[pid].results = results;
-            grp.data[pid].tournamentName = tName;
-
-            writeActivityEvent(gid, {
-              type:"pool_finalized", actor:results.first||"",
-              text:"<strong>"+x(results.first||"—")+"</strong> won "+x(tName),
-              icon:"🏆", poolId:pid, poolName:tName
-            });
-            toast("Finalized ✓ trophies awarded","ok");
-            // Rebuild the trophy case so wins/podiums update without a reload
-            if(typeof renderTrophyCase==="function"){ try{ renderTrophyCase(); }catch(ex){} }
-            var c2 = document.getElementById("profile-groups");
-            if(c2) renderGroupCards(_allGroupsCache||[], c2);
-          });
-        });
-        } // end _finalizeWith
-      });
-    });
 
     // Delegate the card click to the container (survives inner re-renders). A tap anywhere
     // on a card that isn't a button opens that group.
