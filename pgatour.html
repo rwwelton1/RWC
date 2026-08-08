@@ -789,17 +789,45 @@ function syncPlayerScoresToGroup(){
     updatedAt: Date.now()
   });
 
-  // Auto-archive: when ESPN reports the tournament completed, freeze the top-3 ONCE.
+  // Auto-archive + auto-mint trophies: when ESPN reports the tournament completed, freeze the
+  // top-3 to the events history AND write the trophy results (podium + ranks) so everyone in
+  // the group gets their trophies — the same thing the old manual "Finalize" button did.
   if(CUR_EVENT_ENDED){
     var slug=_eventSlug(CUR_EVENT_NAME);
     var ref=DB.ref("groups/"+GROUP_ID+"/data/pgatour/events/"+slug);
     ref.once("value",function(sn){
-      if(sn.exists()) return;   // already archived — don't overwrite
-      // Rank players by total (golf = lower-better) and take top 3.
+      if(sn.exists()) return;   // already archived — don't overwrite/re-mint
+      // Rank players by total (golf = lower-better). Dense-rank so ties share a placement.
       var ranked=Object.keys(scores).map(function(u){ return {uid:u, name:nameOf(u), pts:scores[u]}; })
                        .sort(function(a,b){ return a.pts-b.pts; });
       var podium=ranked.slice(0,3);
       ref.set({ name:CUR_EVENT_NAME, endedAt:Date.now(), podium:podium });
+
+      // ── Mint trophies (podium + ranks with ties preserved) ──
+      if(ranked.length){
+        var ranks={}, byRank={}, lastPts=null, curRank=0, seen=0;
+        ranked.forEach(function(e){
+          seen++;
+          if(lastPts===null || e.pts!==lastPts){ curRank=seen; lastPts=e.pts; }
+          ranks[e.name]=curRank;                       // ties share the same rank
+          (byRank[curRank]=byRank[curRank]||[]).push(e.name);
+        });
+        var results={
+          first:(byRank[1]||[])[0]||null,
+          second:(byRank[2]||[])[0]||null,
+          third:(byRank[3]||[])[0]||null,
+          ranks:ranks,
+          tournamentName:CUR_EVENT_NAME,
+          finalizedAt:Date.now(),
+          auto:true
+        };
+        Object.keys(results).forEach(function(k){ if(results[k]===null) delete results[k]; });
+        DB.ref("groups/"+GROUP_ID+"/data/pgatour/tournamentName").set(CUR_EVENT_NAME);
+        DB.ref("groups/"+GROUP_ID+"/data/pgatour/results").set(results);
+        DB.ref("groups/"+GROUP_ID+"/data/statuses/pgatour").set("complete");
+        // Auto-cycle back to "coming-soon" in 3 days, ready for the next tournament.
+        DB.ref("groups/"+GROUP_ID+"/data/statusSchedule/pgatour").set({status:"coming-soon", at:Date.now()+3*24*60*60*1000});
+      }
     });
   }
 }
