@@ -559,6 +559,24 @@ var POOL_LIBRARY = [
     maxPicks:10,          capAmount:null,        entryCount:null,
     live:false,           liveSource:"manual",   recurring:true,
     kind:"season",        // many weeks → one cumulative total, one season champion
+    seasonWeeks:15,       // 1–14 + Conference Championships
+    tiebreaker:false,     year:2026
+  },
+  {
+    id:"epl",         name:"Premier League Pickem",    shortName:"EPL Pickem",
+    openDate:"2026-08-14", lockDate:"2026-08-15",
+    icon:"&#9917;",   bg:"linear-gradient(135deg,#38003c,#a020a0)",
+    url:"eplpool.html",
+    desc:"10 Fixtures · Win / Draw / Loss",
+    sport:"Soccer",       sportIcon:"⚽",
+    league:"Premier League", region:"international", gender:"mens",
+    format:["pick-em"],   duration:"season",    picks:"team", scoring:"points",
+    scoringDirection:"higher-better",
+    hasCut:false,         hasSalary:false,       teamSport:true,
+    maxPicks:10,          capAmount:null,        entryCount:null,
+    live:false,           liveSource:"manual",   recurring:true,
+    kind:"season",        // 38 matchweeks → one cumulative total, one season champion
+    seasonWeeks:38,       // drives the hub's season-calendar editor
     tiebreaker:false,     year:2026
   },
   {
@@ -681,7 +699,7 @@ function poolHasFormat(pool, fmt){ return pool&&pool.format&&pool.format.indexOf
 // "not built yet" — the hub will show it but refuse to navigate to a 404. Add an id
 // here the moment its file goes live.
 var POOL_FILE_READY = {
-  rwc:true, wc:true, cws:true, cfb:true, pgatour:true, usopen:true,
+  rwc:true, wc:true, cws:true, cfb:true, epl:true, pgatour:true, usopen:true,
   nhldraft:true, nbadraft:true, wimbledon:true, nbasummer:true, hrderby:true
   // masters, nhl: not yet deployed — omit until masters.html / nhl.html exist
 };
@@ -1094,8 +1112,8 @@ function poolJoinable(pool){
     // Season pools (CFB) are joinable whenever the season is active. Check both the loaded
     // poolDates and the live global status node, since either may be the fresher source
     // depending on load order.
-    var ss = (SC._poolDates && SC._poolDates[pool.id] && SC._poolDates[pool.id].seasonStatus)
-             || (SC._cfbSeasonStatus)
+    var ss = (SC._seasonCal && SC._seasonCal[pool.id] && SC._seasonCal[pool.id].seasonStatus)
+             || (SC._poolDates && SC._poolDates[pool.id] && SC._poolDates[pool.id].seasonStatus)
              || (SC.globalStatuses||{})[pool.id]
              || "preseason";
     return ss === "in-season";
@@ -2195,8 +2213,10 @@ function renderProfile() {
           if(st === "locked" || st === "complete") _hasLockedPool = true;
           if(st !== "locked" && st !== "complete" && st !== "open") return;
           var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
-          // CFB Pickem stores its data under groups/{gid}/data/cfbpool (not /cfb).
+          // CFB and EPL Pickem store their data under groups/{gid}/data/<id>pool,
+          // not /<id> — the /<id> node holds only the hub summary (playerscores + seasonMeta).
           if(pool.id==="cfb"&&g.data&&g.data["cfbpool"]) _dk="cfbpool";
+          if(pool.id==="epl"&&g.data&&g.data["eplpool"]) _dk="eplpool";
           var _pd = (g.data&&g.data[_dk])||{};
           // Picks may be stored flat ({ukey:...}) or nested by week/round
           // ({weekId:{ukey:...}}, as the CFB pool does under its own data node). Walk one
@@ -5131,37 +5151,45 @@ function renderAdmin() {
   POOL_LIBRARY.forEach(function(pool, pi){
     // ── kind:"season" pools get a WEEK CALENDAR + season-status editor, not single dates ──
     if(pool.kind==="season"){
-      var _seasonStatus = (SC._cfbSeasonStatus!=null ? SC._cfbSeasonStatus : ((SC._poolDates&&SC._poolDates[pool.id]&&SC._poolDates[pool.id].seasonStatus)||"preseason"));
-      var _weeks = (SC._cfbWeeks!=null ? SC._cfbWeeks : ((SC._poolDates&&SC._poolDates[pool.id]&&SC._poolDates[pool.id].weeks)||{}));
+      // Per-pool draft state, so multiple season pools can be edited independently.
+      if(!SC._seasonCal) SC._seasonCal={};
+      var _draft = SC._seasonCal[pool.id] || {};
+      var _pid = pool.id;
+      var _seasonStatus = (_draft.seasonStatus!=null ? _draft.seasonStatus
+                          : ((SC._poolDates&&SC._poolDates[_pid]&&SC._poolDates[_pid].seasonStatus)||"preseason"));
+      var _weeks = (_draft.weeks!=null ? _draft.weeks
+                   : ((SC._poolDates&&SC._poolDates[_pid]&&SC._poolDates[_pid].weeks)||{}));
+      var TOTAL_WEEKS = pool.seasonWeeks || 15;
+      // CFB's final week is the conference championships; other leagues just number through.
+      var _isCfb = (_pid==="cfb");
       h += '<div style="padding:10px 12px;border-bottom:1px solid var(--border2)">';
       h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
       h += '<span style="font-size:14px">'+pool.icon+'</span>';
       h += '<span style="font-size:11px;font-weight:900;flex:1">'+x(pool.shortName||pool.name)+'</span>';
-      // Season status segmented control (global)
+      // Season status segmented control (global, per pool)
       h += '<div style="display:flex;border:1.5px solid var(--border);border-radius:7px;overflow:hidden">';
       [["preseason","Preseason","#e2e8f0","#64748b"],["in-season","In Season","var(--green)","#fff"],["done","Done","var(--blue)","#fff"]].forEach(function(p){
         var active=_seasonStatus===p[0];
-        h += '<button class="cfb-season-btn" data-ss="'+p[0]+'" style="padding:4px 8px;font-size:8px;font-weight:800;border:none;cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap;background:'+(active?p[2]:"#fff")+';color:'+(active?p[3]:"#94a3b8")+'">'+p[1]+'</button>';
+        h += '<button class="season-status-btn" data-pool="'+_pid+'" data-ss="'+p[0]+'" style="padding:4px 8px;font-size:8px;font-weight:800;border:none;cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap;background:'+(active?p[2]:"#fff")+';color:'+(active?p[3]:"#94a3b8")+'">'+p[1]+'</button>';
       });
       h += '</div></div>';
       h += '<div style="font-size:9px;color:#475569;margin-bottom:8px">Set each week&#39;s scoring window. The current week is whichever window contains today. Groups still lock at their own earliest kickoff.</div>';
-      // Always show all 15 weeks (1–14 + Conference Championships). Auto-fill fills empties.
-      var TOTAL_CFB_WEEKS = 15;
-      h += '<button class="btn btn-ghost btn-sm" id="btn-autofill-cfb-weeks" style="padding:5px 10px;font-size:9px;margin-bottom:8px">&#128197; Auto-fill 15 weeks (Thu&ndash;Mon windows)</button>';
-      h += '<div id="cfb-weeks-wrap" style="display:flex;flex-direction:column;gap:4px">';
-      for(var _wk=1; _wk<=TOTAL_CFB_WEEKS; _wk++){
+      var _fillLabel = _isCfb ? 'Auto-fill 15 weeks (Thu&ndash;Mon windows)' : 'Auto-fill '+TOTAL_WEEKS+' weeks (Fri&ndash;Mon windows)';
+      h += '<button class="btn btn-ghost btn-sm season-autofill-btn" data-pool="'+_pid+'" style="padding:5px 10px;font-size:9px;margin-bottom:8px">&#128197; '+_fillLabel+'</button>';
+      h += '<div class="season-weeks-wrap" data-pool="'+_pid+'" style="display:flex;flex-direction:column;gap:4px;max-height:340px;overflow-y:auto">';
+      for(var _wk=1; _wk<=TOTAL_WEEKS; _wk++){
         var _w=_weeks[_wk]||{};
-        var _wkLabel = _wk===15 ? 'Conf' : ('Wk '+_wk);
+        var _wkLabel = (_isCfb && _wk===15) ? 'Conf' : ('Wk '+_wk);
         h += '<div style="display:flex;align-items:center;gap:5px">';
         h += '<span style="font-size:9px;font-weight:800;color:var(--muted);width:44px;flex-shrink:0">'+_wkLabel+'</span>';
-        h += '<input type="datetime-local" class="cfb-wk-start" data-wk="'+_wk+'" value="'+x(_w.start||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="start">';
+        h += '<input type="datetime-local" class="season-wk-start" data-pool="'+_pid+'" data-wk="'+_wk+'" value="'+x(_w.start||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="start">';
         h += '<span style="font-size:9px;color:var(--muted)">&rarr;</span>';
-        h += '<input type="datetime-local" class="cfb-wk-end" data-wk="'+_wk+'" value="'+x(_w.end||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="end">';
+        h += '<input type="datetime-local" class="season-wk-end" data-pool="'+_pid+'" data-wk="'+_wk+'" value="'+x(_w.end||"")+'" style="flex:1;font-size:9px;padding:3px 5px;border:1.5px solid var(--border2);border-radius:6px;min-width:0;font-family:\'Nunito\',sans-serif;color:var(--text)" placeholder="end">';
         h += '</div>';
       }
       h += '</div>';
-      h += '<button class="btn btn-gold btn-sm" id="btn-save-cfb-weeks" style="padding:6px 14px;font-size:10px;margin-top:8px">Save Season Calendar</button>';
-      h += '<span id="cfb-weeks-msg" style="font-size:9px;color:#6ee7b7;margin-left:8px"></span>';
+      h += '<button class="btn btn-gold btn-sm season-save-btn" data-pool="'+_pid+'" style="padding:6px 14px;font-size:10px;margin-top:8px">Save Season Calendar</button>';
+      h += '<span class="season-weeks-msg" data-pool="'+_pid+'" style="font-size:9px;color:#6ee7b7;margin-left:8px"></span>';
       h += '</div>';
       return;
     }
@@ -5336,66 +5364,99 @@ function renderAdmin() {
     });
   });
 
-  // ── CFB season calendar admin handlers ──
-  document.querySelectorAll(".cfb-season-btn").forEach(function(btn){
+  // ── Season calendar admin handlers (any kind:"season" pool) ──
+  // All state lives under SC._seasonCal[poolId] = {seasonStatus, weeks} so CFB and EPL
+  // can be edited side by side without stomping on each other.
+  function _seasonDraft(pid){
+    if(!SC._seasonCal) SC._seasonCal={};
+    if(!SC._seasonCal[pid]) SC._seasonCal[pid]={};
+    return SC._seasonCal[pid];
+  }
+  // Pull any unsaved week edits out of the DOM before a re-render throws them away.
+  function _captureSeasonWeeks(pid){
+    var weeks={};
+    var isCfb=(pid==="cfb");
+    document.querySelectorAll('.season-wk-start[data-pool="'+pid+'"]').forEach(function(inp){
+      var wk=inp.getAttribute("data-wk");
+      var endInp=document.querySelector('.season-wk-end[data-pool="'+pid+'"][data-wk="'+wk+'"]');
+      var st=inp.value.trim(), en=endInp?endInp.value.trim():"";
+      if(st||en){
+        weeks[wk]={ start:st, end:en,
+                    label:(isCfb&&String(wk)==="15") ? "Conf Championships" : ("Week "+wk) };
+      }
+    });
+    _seasonDraft(pid).weeks=weeks;
+  }
+
+  document.querySelectorAll(".season-status-btn").forEach(function(btn){
     btn.addEventListener("click", function(){
-      SC._cfbSeasonStatus = this.getAttribute("data-ss");
-      // Preserve any unsaved week edits in the DOM before re-render.
-      _captureCfbWeekEdits();
+      var pid=this.getAttribute("data-pool");
+      _captureSeasonWeeks(pid);
+      _seasonDraft(pid).seasonStatus=this.getAttribute("data-ss");
       draw();
     });
   });
-  function _captureCfbWeekEdits(){
-    var weeks = {};
-    document.querySelectorAll(".cfb-wk-start").forEach(function(inp){
-      var wk=inp.getAttribute("data-wk");
-      var endInp=document.querySelector('.cfb-wk-end[data-wk="'+wk+'"]');
-      var s=inp.value.trim(), e=endInp?endInp.value.trim():"";
-      if(s||e){ weeks[wk]={ start:s, end:e, label:(wk==15?"Conf Championships":"Week "+wk) }; }
+
+  document.querySelectorAll(".season-autofill-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      var pid=this.getAttribute("data-pool");
+      var pool=poolById(pid)||{};
+      var total=pool.seasonWeeks||15;
+      var isCfb=(pid==="cfb");
+      function pad(n){return String(n).padStart(2,"0");}
+      function toLocal(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes()); }
+      var year=new Date().getFullYear();
+      // CFB opens on the last Thursday of August; the Premier League on the second
+      // Friday of August. Both then run weekly windows through to the following Monday.
+      var seed;
+      if(isCfb){
+        seed=new Date(year,7,31,0,0);
+        while(seed.getDay()!==4) seed.setDate(seed.getDate()-1);   // back up to Thursday
+      } else {
+        seed=new Date(year,7,1,0,0);
+        while(seed.getDay()!==5) seed.setDate(seed.getDate()+1);   // first Friday
+        seed.setDate(seed.getDate()+7);                            // second Friday
+      }
+      var span=isCfb?4:3;   // Thu→Mon is 4 days; Fri→Mon is 3
+      var weeks=_seasonDraft(pid).weeks||{};
+      for(var wk=1; wk<=total; wk++){
+        var start=new Date(seed.getTime());
+        start.setDate(start.getDate()+(wk-1)*7);
+        var end=new Date(start.getTime());
+        end.setDate(end.getDate()+span);
+        start.setHours(0,0); end.setHours(23,59);
+        weeks[wk]={ start:toLocal(start), end:toLocal(end),
+                    label:(isCfb&&wk===15)?"Conf Championships":("Week "+wk) };
+      }
+      _seasonDraft(pid).weeks=weeks;
+      draw();
     });
-    SC._cfbWeeks = weeks;
-  }
-  var autofillCfbBtn = document.getElementById("btn-autofill-cfb-weeks");
-  if(autofillCfbBtn) autofillCfbBtn.addEventListener("click", function(){
-    // Build 15 Thu→Mon scoring windows starting from the last Thursday of August this year.
-    function pad(n){return String(n).padStart(2,"0");}
-    function toLocal(d){ return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+"T"+pad(d.getHours())+":"+pad(d.getMinutes()); }
-    var year = new Date().getFullYear();
-    // Find the last Thursday of August (a common Week 1 kickoff week).
-    var aug = new Date(year, 7, 31, 0, 0);           // Aug 31
-    while(aug.getDay() !== 4) aug.setDate(aug.getDate()-1);  // back up to Thursday (4)
-    if(!SC._cfbWeeks) SC._cfbWeeks = {};
-    for(var wk=1; wk<=15; wk++){
-      var start = new Date(aug.getTime());
-      start.setDate(start.getDate() + (wk-1)*7);     // Thursday of each week
-      var end = new Date(start.getTime());
-      end.setDate(end.getDate() + 4);                // following Monday
-      end.setHours(23,59);
-      start.setHours(0,0);
-      SC._cfbWeeks[wk] = { start: toLocal(start), end: toLocal(end) };
-    }
-    draw();
   });
 
-  var saveCfbWeeksBtn = document.getElementById("btn-save-cfb-weeks");
-  if(saveCfbWeeksBtn) saveCfbWeeksBtn.addEventListener("click", function(){
-    if(!DB) return;
-    _captureCfbWeekEdits();
-    var ss = SC._cfbSeasonStatus || "preseason";
-    var msg = document.getElementById("cfb-weeks-msg");
-    Promise.all([
-      DB.ref("globalSettings/poolDates/cfb/weeks").set(SC._cfbWeeks||{}),
-      DB.ref("globalSettings/poolDates/cfb/seasonStatus").set(ss)
-    ]).then(function(){
-      if(msg) msg.textContent = "Saved ✓";
-      // Keep local poolDates copy in sync so cards update immediately.
-      if(!SC._poolDates) SC._poolDates={};
-      if(!SC._poolDates.cfb) SC._poolDates.cfb={};
-      SC._poolDates.cfb.weeks = SC._cfbWeeks||{};
-      SC._poolDates.cfb.seasonStatus = ss;
-      setTimeout(function(){ if(msg) msg.textContent=""; }, 2000);
-    }).catch(function(err){
-      if(msg){ msg.style.color="#fca5a5"; msg.textContent = "Failed: "+err.message; }
+  document.querySelectorAll(".season-save-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){
+      if(!DB) return;
+      var pid=this.getAttribute("data-pool");
+      _captureSeasonWeeks(pid);
+      var d=_seasonDraft(pid);
+      var ss=d.seasonStatus
+             || (SC._poolDates&&SC._poolDates[pid]&&SC._poolDates[pid].seasonStatus)
+             || "preseason";
+      var msg=document.querySelector('.season-weeks-msg[data-pool="'+pid+'"]');
+      Promise.all([
+        DB.ref("globalSettings/poolDates/"+pid+"/weeks").set(d.weeks||{}),
+        DB.ref("globalSettings/poolDates/"+pid+"/seasonStatus").set(ss)
+      ]).then(function(){
+        if(msg){ msg.style.color="#6ee7b7"; msg.textContent="Saved \u2713"; }
+        // Keep the local poolDates copy in sync so cards update immediately.
+        if(!SC._poolDates) SC._poolDates={};
+        if(!SC._poolDates[pid]) SC._poolDates[pid]={};
+        SC._poolDates[pid].weeks=d.weeks||{};
+        SC._poolDates[pid].seasonStatus=ss;
+        setTimeout(function(){ if(msg) msg.textContent=""; }, 2000);
+      }).catch(function(err){
+        if(msg){ msg.style.color="#fca5a5"; msg.textContent="Failed: "+err.message; }
+      });
     });
   });
 
