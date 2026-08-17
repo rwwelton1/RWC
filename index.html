@@ -5470,6 +5470,10 @@ function renderAdmin() {
       var newSt = _psdSelected[pool.id] || (SC.globalStatuses||{})[pool.id] || "coming-soon";
       var prevSt = (SC.globalStatuses||{})[pool.id]||"coming-soon";
       if(newSt !== prevSt) statusUpdates[pool.id] = newSt;
+      // Season pools (kind:"season") are edited by their own week-calendar panel and have
+      // no openDate/lockDate/endDate inputs here. Writing blank dates for them would clear
+      // the calendar they DO own, so leave their poolDates subtree alone.
+      if(pool.kind==="season") return;
       var openInp  = document.getElementById("psd-date-"+pool.id+"-openDate");
       var lockInp  = document.getElementById("psd-date-"+pool.id+"-lockDate");
       var endInp   = document.getElementById("psd-date-"+pool.id+"-endDate");
@@ -5496,14 +5500,29 @@ function renderAdmin() {
       };
       dateUpdates[pool.id] = _pd;
     });
-    var dbWrites = [DB.ref("globalSettings/poolDates").set(dateUpdates)];
+    // Targeted field writes, never a whole-node set() — a set() here would delete any key
+    // not present in dateUpdates (e.g. a season pool's `weeks` and `seasonStatus`).
+    var datePaths = {};
+    Object.keys(dateUpdates).forEach(function(pid){
+      var pd = dateUpdates[pid];
+      Object.keys(pd).forEach(function(field){
+        datePaths["globalSettings/poolDates/"+pid+"/"+field] = pd[field];
+      });
+    });
+    var dbWrites = [];
+    if(Object.keys(datePaths).length) dbWrites.push(DB.ref().update(datePaths));
     var statusPaths = {};
     Object.keys(statusUpdates).forEach(function(pid){
       statusPaths["globalSettings/statuses/"+pid] = statusUpdates[pid];
     });
     if(Object.keys(statusPaths).length) dbWrites.push(DB.ref().update(statusPaths));
     Promise.all(dbWrites).then(function(){
-      SC._poolDates = dateUpdates;
+      // Merge into the local cache rather than replacing it, so season pools keep their
+      // weeks/seasonStatus in the UI without needing a reload.
+      if(!SC._poolDates) SC._poolDates = {};
+      Object.keys(dateUpdates).forEach(function(pid){
+        SC._poolDates[pid] = Object.assign({}, SC._poolDates[pid]||{}, dateUpdates[pid]);
+      });
       Object.keys(statusUpdates).forEach(function(pid){
         SC.globalStatuses[pid] = statusUpdates[pid];
         setStatus(pid, statusUpdates[pid]);
