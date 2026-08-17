@@ -824,9 +824,61 @@ function setupSeason(year){
   draw();
 }
 
-// Given a matchweek number and a season-opening Saturday, guess a Fri\u2192Mon window.
-// Used by the admin "Auto-fill dates" button; every date stays editable afterwards.
+// \u2500\u2500 Official 2026/27 Premier League matchweek windows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Import date ranges for all 38 matchweeks, built from the Premier League's fixture
+// release (19 Jun 2026). Each window brackets that round's listed fixtures by a day
+// either side so a TV reschedule still lands inside it, and no two windows overlap
+// \u2014 so fetching a matchweek can't pull in a neighbouring round's matches.
+//   s = range start (YYYY-MM-DD), e = range end, m = 1 for the five midweek rounds.
+// The season runs 21 Aug 2026 \u2192 30 May 2027 (shifted a week later for the World Cup).
+// Gaps at Sep 22\u2013Oct 8 and Nov 9\u201319 are the international breaks.
+var EPL_SEASON_WINDOWS_2026_27={
+  1:{s:"2026-08-20",e:"2026-08-25"},
+  2:{s:"2026-08-27",e:"2026-09-01"},
+  3:{s:"2026-09-03",e:"2026-09-07"},
+  4:{s:"2026-09-11",e:"2026-09-15"},
+  5:{s:"2026-09-17",e:"2026-09-21"},
+  6:{s:"2026-10-09",e:"2026-10-11"},
+  7:{s:"2026-10-16",e:"2026-10-18"},
+  8:{s:"2026-10-23",e:"2026-10-25"},
+  9:{s:"2026-10-30",e:"2026-11-01"},
+  10:{s:"2026-11-06",e:"2026-11-08"},
+  11:{s:"2026-11-20",e:"2026-11-22"},
+  12:{s:"2026-11-27",e:"2026-11-29"},
+  13:{s:"2026-12-01",e:"2026-12-03",m:1},
+  14:{s:"2026-12-04",e:"2026-12-06"},
+  15:{s:"2026-12-11",e:"2026-12-13"},
+  16:{s:"2026-12-18",e:"2026-12-20"},
+  17:{s:"2026-12-25",e:"2026-12-27"},
+  18:{s:"2026-12-29",e:"2026-12-31",m:1},
+  19:{s:"2027-01-01",e:"2027-01-03"},
+  20:{s:"2027-01-05",e:"2027-01-07",m:1},
+  21:{s:"2027-01-15",e:"2027-01-17"},
+  22:{s:"2027-01-22",e:"2027-01-24"},
+  23:{s:"2027-01-29",e:"2027-01-31"},
+  24:{s:"2027-02-05",e:"2027-02-07"},
+  25:{s:"2027-02-09",e:"2027-02-11",m:1},
+  26:{s:"2027-02-19",e:"2027-02-21"},
+  27:{s:"2027-02-26",e:"2027-02-28"},
+  28:{s:"2027-03-02",e:"2027-03-04",m:1},
+  29:{s:"2027-03-12",e:"2027-03-14"},
+  30:{s:"2027-03-19",e:"2027-03-21"},
+  31:{s:"2027-04-09",e:"2027-04-11"},
+  32:{s:"2027-04-16",e:"2027-04-18"},
+  33:{s:"2027-04-23",e:"2027-04-25"},
+  34:{s:"2027-04-30",e:"2027-05-02"},
+  35:{s:"2027-05-07",e:"2027-05-09"},
+  36:{s:"2027-05-14",e:"2027-05-16"},
+  37:{s:"2027-05-22",e:"2027-05-24"},
+  38:{s:"2027-05-29",e:"2027-05-31"}
+};
+
+// Look up a matchweek's window. Falls back to a generic Fri\u2192Mon guess for seasons
+// the table doesn't cover, so the button still does something sensible in 2027/28.
 function autoWindowFor(mw, seasonStartISO){
+  var w=EPL_SEASON_WINDOWS_2026_27[mw];
+  if(w) return {start:w.s, end:w.e};
+  if(!seasonStartISO) return null;
   var start=new Date(seasonStartISO+"T00:00:00");
   if(isNaN(start.getTime())) return null;
   var sat=new Date(start.getTime()+(mw-1)*7*86400000);
@@ -835,6 +887,34 @@ function autoWindowFor(mw, seasonStartISO){
   function f(d){ return d.getFullYear()+"-"+("0"+(d.getMonth()+1)).slice(-2)+"-"+("0"+d.getDate()).slice(-2); }
   return {start:f(fri), end:f(mon)};
 }
+
+// Write the whole season's date ranges in one shot, so the admin never types 38
+// pairs of dates by hand. Only touches weekMeta; games, picks and results are
+// untouched, so it's safe to re-run if the fixture list is revised.
+function prefillSeasonWindows(){
+  if(!ST.weekIds||!ST.weekIds.length){ toast("Set up the 38 matchweeks first"); return; }
+  var tbl=EPL_SEASON_WINDOWS_2026_27;
+  if(!confirm("Prefill import date ranges for all 38 matchweeks from the official 2026/27 fixture list?\\n\\nThis only sets dates \u2014 fixtures, picks and results are left alone.")) return;
+  if(!ST._weekMeta) ST._weekMeta={};
+  var upd={}, n=0, missed=0;
+  ST.weekIds.forEach(function(wid){
+    var meta=ST._weekMeta[wid]||{};
+    var mw=meta.mw||guessWeekNumber(ST.weekLabels[wid]||wid);
+    var w=tbl[mw];
+    if(!w){ missed++; return; }
+    ST._weekMeta[wid]=meta;
+    meta.mw=mw; meta.startDate=w.s; meta.endDate=w.e;
+    upd[BASE+"/meta/weekMeta/"+wid+"/mw"]=mw;
+    upd[BASE+"/meta/weekMeta/"+wid+"/startDate"]=w.s;
+    upd[BASE+"/meta/weekMeta/"+wid+"/endDate"]=w.e;
+    n++;
+  });
+  if(!n){ toast("No matchweeks matched the 2026/27 calendar"); return; }
+  if(DB) DB.ref().update(upd);
+  toast("\u2713 Prefilled "+n+" matchweek"+(n!==1?"s":"")+(missed?" ("+missed+" skipped)":""));
+  draw();
+}
+
 // YYYY-MM-DD \u2192 YYYYMMDD (ESPN's dates= format)
 function _espnDate(d){ return String(d||"").replace(/-/g,""); }
 // Build the ESPN dates= range for a week, falling back to a \u00b13-day window around today.
@@ -2412,6 +2492,7 @@ function renderAdmin(){
     h+='<span style="font-size:10px;font-weight:800;color:var(--muted)">\u2192</span>';
     h+='<input class="adm-input" type="date" id="wk-end-date" value="'+x(_m.endDate||"")+'" style="flex:1;min-width:110px;margin:0;font-size:10px">';
     h+='<button class="adm-btn" id="b-autofill-dates" style="font-size:9px;padding:4px 8px;white-space:nowrap">Auto</button>';
+    h+='<button class="adm-btn sel" id="b-prefill-season" style="font-size:9px;padding:4px 8px;white-space:nowrap;width:100%;margin-top:2px">&#128197; Prefill all 38 matchweeks (2026/27 fixtures)</button>';
     h+='</div>';
   })();
 
@@ -3223,18 +3304,23 @@ function bind(){
   el=document.getElementById("wk-start-date"); if(el) el.addEventListener("change",function(){ setWeekDate(ST.curWeek,"startDate",this.value); });
   el=document.getElementById("wk-end-date");   if(el) el.addEventListener("change",function(){ setWeekDate(ST.curWeek,"endDate",this.value); });
   el=document.getElementById("b-autofill-dates"); if(el) el.addEventListener("click",function(){
-    // Ask once for the season's opening Saturday, then derive a Fri→Mon window per matchweek.
+    // Fill just this matchweek from the official calendar. Only falls back to asking
+    // for a season-opening Saturday if the matchweek isn't in the 2026/27 table.
     var mw=((ST._weekMeta&&ST._weekMeta[ST.curWeek])||{}).mw || guessWeekNumber(ST.weekLabels[ST.curWeek]) || 1;
-    var seed=prompt("Opening Saturday of the season (YYYY-MM-DD):", ST._seasonSeed||"");
-    if(!seed) return;
-    ST._seasonSeed=seed;
-    var w=autoWindowFor(mw,seed);
-    if(!w){ toast("Couldn't read that date"); return; }
+    var w=autoWindowFor(mw,null);
+    if(!w){
+      var seed=prompt("Matchweek "+mw+" isn't in the 2026/27 calendar.\\nOpening Saturday of the season (YYYY-MM-DD):", ST._seasonSeed||"");
+      if(!seed) return;
+      ST._seasonSeed=seed;
+      w=autoWindowFor(mw,seed);
+      if(!w){ toast("Couldn't read that date"); return; }
+    }
     setWeekDate(ST.curWeek,"startDate",w.start);
     setWeekDate(ST.curWeek,"endDate",w.end);
     toast("\u2713 Matchweek "+mw+": "+w.start+" \u2192 "+w.end);
     draw();
   });
+  el=document.getElementById("b-prefill-season"); if(el) el.addEventListener("click",prefillSeasonWindows);
   el=document.getElementById("b-save-draw-bonus"); if(el) el.addEventListener("click",function(){
     var inp=document.getElementById("draw-bonus-input");
     if(inp) setDrawBonus(inp.value);
