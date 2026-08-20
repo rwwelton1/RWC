@@ -93,23 +93,39 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gc-pts.earned{color:var(--green)}
 
 
-.team-pick{padding:10px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border2)}
+.team-pick{padding:11px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border2);background:#fff;position:relative}
 .team-pick.clickable{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .team-pick.clickable:active{background:var(--cream)}
-.team-pick.mypick{background:var(--gold-bg)}
-.team-pick.mypick .tp-name{color:var(--gold-dark)}
-.team-pick.winner{background:var(--green-bg)}
+
+/* Selected pick — the only filled row on the card. */
+.team-pick.mypick{background:var(--gold);box-shadow:inset 5px 0 0 var(--gold-dark)}
+.team-pick.mypick .tp-name{color:var(--text);font-weight:900}
+.team-pick.mypick .tp-spread{color:var(--text)}
+.team-pick.mypick .tp-x{border-style:solid;border-color:var(--text);color:var(--text)}
+/* Tick on the chosen row, but not once the match has been graded — the header
+   already shows ✓/✗ there and a second mark would muddle a losing pick. */
+.team-pick.mypick:not(.winner):not(.loser) .tp-spread::before{content:"\2713\00a0\00a0";font-weight:900;color:var(--text)}
+
+.team-pick.winner{background:var(--green-bg);box-shadow:inset 5px 0 0 var(--green)}
 .team-pick.winner .tp-name{color:var(--green);font-weight:900}
 .team-pick.loser .tp-name{color:var(--dim)}
 .team-pick.loser .tp-spread{color:var(--dim)}
-.team-pick.draw-row{background:linear-gradient(90deg,var(--cream),#fff)}
-.team-pick.draw-row .tp-name{letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--muted)}
-.team-pick.draw-row.mypick .tp-name{color:var(--gold-dark)}
+
+/* The draw option reads as a distinct choice, but carries NO fill of its own.
+   This rule sits after .mypick, so the selected-draw case must be restated
+   below at higher specificity or it would lose the gold fill on order alone. */
+.team-pick.draw-row{background:#fff}
+.team-pick.draw-row .tp-name{letter-spacing:.08em;text-transform:uppercase;font-size:11px;color:var(--text)}
+.team-pick.draw-row.mypick{background:var(--gold);box-shadow:inset 5px 0 0 var(--gold-dark)}
+.team-pick.draw-row.mypick .tp-name{color:var(--text)}
 .team-pick.draw-row.winner .tp-name{color:var(--green)}
 .tp-x{width:22px;height:22px;border:2px dashed var(--border2);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:var(--muted);flex-shrink:0;margin-right:6px}
 .team-pick.winner .tp-x{border-color:var(--green);color:var(--green)}
 .tp-name{font-size:13px;font-weight:800;color:var(--text)}
 .tp-spread{font-size:11px;font-weight:800;color:var(--muted);flex-shrink:0;padding-left:8px}
+
+/* "PICK" chip in the header of any match still awaiting a selection. */
+.gc-need{font-size:8px;font-weight:900;color:var(--muted);background:#fff;border:1.5px dashed var(--border);border-radius:4px;padding:1px 6px;letter-spacing:.08em;flex-shrink:0}
 
 
 /* ── STANDINGS ── */
@@ -510,19 +526,40 @@ function calendarCurrentWeek(){
   var now=Date.now();
   var keys=Object.keys(EPL_CALENDAR||{});
   if(!keys.length) return currentWeekId();
-  // Match a week whose window contains now.
-  for(var i=0;i<keys.length;i++){
-    var w=EPL_CALENDAR[keys[i]]||{};
-    var s=w.start?new Date(w.start).getTime():null;
-    var e=w.end?new Date(w.end).getTime():null;
-    if(s!==null && e!==null && now>=s && now<=e) return _calWeekToId(keys[i]);
+  var GRACE_MS=60*60*60*1000;   // keep a finished round on screen for 60h
+
+  var nums=keys.map(Number).filter(function(n){return !isNaN(n);}).sort(function(a,b){return a-b;});
+  if(!nums.length) return currentWeekId();
+  function startOf(n){ var w=EPL_CALENDAR[n]||{}; return w.start?new Date(w.start).getTime():null; }
+  function endOf(n){ var w=EPL_CALENDAR[n]||{}; return w.end?new Date(w.end).getTime():null; }
+
+  // 1. Inside a window.
+  for(var i=0;i<nums.length;i++){
+    var s0=startOf(nums[i]), e0=endOf(nums[i]);
+    if(s0!==null&&e0!==null&&now>=s0&&now<=e0) return _calWeekToId(nums[i]);
   }
-  // Before the first window → first week; after the last → last week.
-  var nums=keys.map(Number).sort(function(a,b){return a-b;});
-  var firstW=EPL_CALENDAR[nums[0]], lastW=EPL_CALENDAR[nums[nums.length-1]];
-  if(firstW&&firstW.start&&now<new Date(firstW.start).getTime()) return _calWeekToId(nums[0]);
+  // 2. Before the season opens.
+  var firstStart=startOf(nums[0]);
+  if(firstStart!==null&&now<firstStart) return _calWeekToId(nums[0]);
+  // 3. In a gap: the most recently finished round, while it's still within grace.
+  var lastEnded=null;
+  for(var j=0;j<nums.length;j++){
+    var ej=endOf(nums[j]);
+    if(ej!==null&&now>ej) lastEnded=nums[j];
+  }
+  if(lastEnded!==null){
+    var le=endOf(lastEnded);
+    if(le!==null&&now<=le+GRACE_MS) return _calWeekToId(lastEnded);
+  }
+  // 4. Otherwise point at the next round that hasn't started yet.
+  for(var k=0;k<nums.length;k++){
+    var sk=startOf(nums[k]);
+    if(sk!==null&&sk>now) return _calWeekToId(nums[k]);
+  }
+  // 5. Past the final window — the season really is over.
   return _calWeekToId(nums[nums.length-1]);
 }
+
 // Map a calendar week number to the pool's internal weekId (they may differ in format).
 function _calWeekToId(weekNo){
   // Try to find a weekId whose guessed number matches; else assume weekId IS the number.
@@ -882,7 +919,7 @@ function autoWindowFor(mw, seasonStartISO){
 function prefillSeasonWindows(){
   if(!ST.weekIds||!ST.weekIds.length){ toast("Set up the 38 matchweeks first"); return; }
   var tbl=EPL_SEASON_WINDOWS_2026_27;
-  if(!confirm("Prefill import date ranges for all 38 matchweeks from the official 2026/27 fixture list?\\n\\nThis only sets dates \u2014 fixtures, picks and results are left alone.")) return;
+  if(!confirm("Prefill all 38 matchweeks from the official 2026/27 fixture list?\\n\\nSets the import date ranges AND the season calendar the hub reads. Fixtures, picks and results are left alone.")) return;
   if(!ST._weekMeta) ST._weekMeta={};
   var upd={}, n=0, missed=0;
   ST.weekIds.forEach(function(wid){
@@ -899,6 +936,28 @@ function prefillSeasonWindows(){
   });
   if(!n){ toast("No matchweeks matched the 2026/27 calendar"); return; }
   if(DB) DB.ref().update(upd);
+
+  // Also publish the global season calendar the hub uses to decide the current
+  // matchweek, so the pool page and the hub card can't disagree.
+  var cal={};
+  Object.keys(tbl).forEach(function(mw){
+    cal[mw]={ start:tbl[mw].s+"T00:00", end:tbl[mw].e+"T23:59", label:"Matchweek "+mw };
+  });
+  if(DB){
+    DB.ref("globalSettings/poolDates/epl/weeks").set(cal)
+      .then(function(){
+        EPL_CALENDAR=cal;
+        publishSeasonToHub(true);   // refresh the hub card immediately
+        toast("\u2713 Prefilled "+n+" matchweek"+(n!==1?"s":"")+" + season calendar");
+        draw();
+      })
+      .catch(function(){
+        // Global settings may be master-admin only; the per-pool dates still saved.
+        toast("\u2713 Prefilled "+n+" matchweek"+(n!==1?"s":"")+" (season calendar needs a master admin)");
+        draw();
+      });
+    return;
+  }
   toast("\u2713 Prefilled "+n+" matchweek"+(n!==1?"s":"")+(missed?" ("+missed+" skipped)":""));
   draw();
 }
@@ -1336,7 +1395,7 @@ function setPickSide(weekId,gid,side){
   _updatePickDom(weekId, gid, cur.side);
   // Remove unpicked accent border immediately
   var _wrap=document.querySelector('.unpicked-wrap[data-gid="'+gid+'"]');
-  if(_wrap) _wrap.style.borderLeftColor=cur.side?"transparent":"var(--border2)";
+  if(_wrap) _wrap.style.borderLeftColor=cur.side?"transparent":"var(--border)";
   _updateProgressBar(weekId);
   // Undo toast for 3 seconds before committing to Firebase
   if(_undoTimer){ clearTimeout(_undoTimer); }
@@ -1570,17 +1629,15 @@ function _updatePickDom(weekId, gid, side){
   var rows=document.querySelectorAll('[data-pick-week="'+weekId+'"][data-pick-gid="'+gid+'"]');
   rows.forEach(function(row){
     var rowSide=row.getAttribute("data-pick-side");
-    var base="team-pick clickable";
+    // Keep the row's own modifiers (draw-row) — only the mypick flag toggles.
+    var base="team-pick clickable"+(rowSide==="draw"?" draw-row":"");
     var nm=row.querySelector(".tp-name");
-    if(side&&side===rowSide){
-      row.className=base+" mypick";
-      if(nm) nm.style.color="var(--gold-dark)";
-    } else {
-      // Explicitly clear — covers switching from one team to the other
-      row.className=base;
-      if(nm) nm.style.color="";
-    }
+    row.className = (side&&side===rowSide) ? base+" mypick" : base;
+    if(nm) nm.style.color="";   // colours come from CSS, not inline overrides
   });
+  // Hide the outstanding-selection chip once this match has a pick.
+  var need=document.getElementById("need-"+gid);
+  if(need) need.style.display = side ? "none" : "";
 }
 
 // Update the progress bar's pick count without a full redraw.
@@ -1833,7 +1890,12 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result){
   var h='<div class="game-card">';
 
   // Header: kickoff, broadcaster, save tick, and points earned once resolved.
-  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div><div id="tick-'+gid+'" style="min-width:20px;max-width:20px;overflow:hidden;line-height:1;display:flex;align-items:center;justify-content:center"></div>';
+  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div>';
+  // Outstanding-selection marker: visible until this match has a pick.
+  if(canPick&&!gameLocked&&!result){
+    h+='<span class="gc-need" id="need-'+gid+'"'+(pick.side?' style="display:none"':'')+'>PICK</span>';
+  }
+  h+='<div id="tick-'+gid+'" style="min-width:20px;max-width:20px;overflow:hidden;line-height:1;display:flex;align-items:center;justify-content:center"></div>';
   if(effectiveLocked&&result){
     if(pick.side){
       var won=pick.side===result;
@@ -1985,7 +2047,7 @@ function renderPicks(){
     var cardHtml=renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result);
     // Wrap unpicked games with a subtle left accent
     if(!locked&&!isPicked&&ST.user&&!isGameLocked(weekId,gid)){
-      h+='<div style="border-left:3px solid var(--border2);margin-bottom:10px;border-radius:12px" class="unpicked-wrap" data-gid="'+gid+'">';
+      h+='<div style="border-left:5px solid var(--border);margin-bottom:10px;border-radius:12px" class="unpicked-wrap" data-gid="'+gid+'">';
       h+=cardHtml.replace('class="game-card"','class="game-card" style="margin-bottom:0"');
       h+='</div>';
     } else {
@@ -2871,7 +2933,7 @@ function bind(){
     document.getElementById("toast").classList.remove("show");
     _updatePickDom(u.weekId, u.gid, restored.side||null);
     var _wrap=document.querySelector('.unpicked-wrap[data-gid="'+u.gid+'"]');
-    if(_wrap) _wrap.style.borderLeftColor=restored.side?"transparent":"var(--border2)";
+    if(_wrap) _wrap.style.borderLeftColor=restored.side?"transparent":"var(--border)";
     _updateProgressBar(u.weekId);
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
   });
