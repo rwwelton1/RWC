@@ -609,13 +609,30 @@ function invalidateAllWeekCache(){ _weekPicksCache={}; }
 var _seasonSyncTimer=null;
 // metaOnly=true → only the seasonMeta line changed (calendar / season status); skip the
 // expensive score recompute entirely and write just the meta.
+// Which matchweek the hub card should advertise (see note above).
+function hubDisplayWeek(){
+  var cur=calendarCurrentWeek();
+  if(!cur) return cur;
+  if(groupWeekState(cur)!=="final") return cur;   // still open or live — show it as-is
+  var i=ST.weekIds.indexOf(cur);
+  if(i<0) return cur;
+  for(var j=i+1;j<ST.weekIds.length;j++){
+    var w=ST.weekIds[j];
+    if(!activeGames(w).length) continue;          // fixtures not imported — not open yet
+    if(groupWeekState(w)==="final") continue;     // already played out
+    return w;
+  }
+  return cur;   // nothing further ready, or the season is over
+}
+
 function publishSeasonToHub(metaOnly){
   if(!DB||!GROUP_ID) return;
   if(!(isGroupAdminByUid&&isGroupAdminByUid())) return;   // single trusted writer
   if(_seasonSyncTimer) clearTimeout(_seasonSyncTimer);
   _seasonSyncTimer=setTimeout(function(){
-    // Build the seasonMeta line (cheap — always computed).
-    var curW=calendarCurrentWeek();
+    // Build the seasonMeta line (cheap — always computed). Uses the display week,
+    // NOT the scoring week: the card should point at what players can act on.
+    var curW=hubDisplayWeek();
     var meta={
       seasonStatus: EPL_SEASON_STATUS || "in-season",
       currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
@@ -1524,7 +1541,7 @@ function shareWeekRecap(weekId, mode){
   var text;
   if(mode==="card"){
     var medals=["🥇","🥈","🥉"];
-    var lines=["🏈 "+label+" Recap",""];
+    var lines=["⚽ "+label+" Recap",""];
     scored.slice(0,3).forEach(function(r,i){
       lines.push(medals[i]+" "+nameOf(r.name)+" — "+r.total+" pts ("+r.correct+"-"+r.wrong+")");
     });
@@ -1561,7 +1578,7 @@ function shareWeekRecap(weekId, mode){
     if(gutsy){
       parts.push("Boldest call of the week: "+nameOf(gutsy.name)+" was the only one to back "+gutsy.team+" in "+gutsy.fixture+" — and it landed.");
     }
-    text="🏈 "+label+" Recap\n\n"+parts.join(" ")+"\n\n— via Scorecery";
+    text="⚽ "+label+" Recap\n\n"+parts.join(" ")+"\n\n— via Scorecery";
   }
 
   if(navigator.share){
