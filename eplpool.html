@@ -1076,17 +1076,22 @@ function stopResultSchedule() {
   clearInterval(_resultScheduleTimer);
   _resultScheduleTimer = null;
 }
-var _scTimer=null, _scData=null, _scLoading=false, _scLastFetch=0;
+var _scTimer=null, _scData=null, _scLoading=false, _scLastFetch=0, _scWeek=null;
+
+// The week whose slate the Scores tab reflects: whatever week the user is on.
+function scoresWeekId(){ return ST.curWeek || displayWeekId(); }
 
 function fetchScoreboard(){
   if(_scLoading) return;
   _scLoading=true;
-  var et=_nowET();
-  var ds=et.getFullYear()+""+("0"+(et.getMonth()+1)).slice(-2)+""+("0"+et.getDate()).slice(-2);
-  fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates="+ds+"&limit=100")
+  var _reqWeek=scoresWeekId();   // stamp the request so a week switch invalidates it
+  // Pull the matchweek's own date range, not today — a matchweek spans Fri→Mon and
+  // the user may be looking at it days before or after any of it kicks off.
+  var range=weekDateRange(scoresWeekId());
+  fetch("https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates="+range+"&limit=100")
     .then(function(r){return r.json();})
     .then(function(data){
-      _scLoading=false; _scLastFetch=Date.now(); _scData=data;
+      _scLoading=false; _scLastFetch=Date.now(); _scData=data; _scWeek=_reqWeek;
       if(ST.page==="scores") renderScoresInto();
     })
     .catch(function(){
@@ -1096,15 +1101,55 @@ function fetchScoreboard(){
     });
 }
 
+// Does this ESPN event correspond to one of the pool's stored games? Same tiered
+// match used when auto-filling results: team id, then abbreviation, then name.
+function _eventMatchesGame(ev, g){
+  if(!g||!g.away||!g.home) return false;
+  var comp=(ev.competitions||[])[0]||{};
+  var comps=comp.competitors||[];
+  var awayC=comps.find(function(c){return c.homeAway==="away";})||{};
+  var homeC=comps.find(function(c){return c.homeAway==="home";})||{};
+  var eAwayId=String((awayC.team&&awayC.team.id)||"");
+  var eHomeId=String((homeC.team&&homeC.team.id)||"");
+  if(g.awayId&&g.homeId&&eAwayId&&eHomeId) return g.awayId===eAwayId&&g.homeId===eHomeId;
+  var eA=String((awayC.team&&awayC.team.abbreviation)||"").toUpperCase();
+  var eH=String((homeC.team&&homeC.team.abbreviation)||"").toUpperCase();
+  if(g.awayAbbrev&&g.homeAbbrev&&eA&&eH) return g.awayAbbrev.toUpperCase()===eA&&g.homeAbbrev.toUpperCase()===eH;
+  var an=normalizeTeamName((awayC.team&&(awayC.team.shortDisplayName||awayC.team.displayName))||"");
+  var hn=normalizeTeamName((homeC.team&&(homeC.team.shortDisplayName||homeC.team.displayName))||"");
+  return an===normalizeTeamName(g.away)&&hn===normalizeTeamName(g.home)&&an.length>=3;
+}
+
+// Only the games this pool selected for the week, in slate order.
+function _slateEvents(){
+  var wk=scoresWeekId();
+  var games=(ST.games&&ST.games[wk])||{};
+  var all=(_scData&&_scData.events)||[];
+  var out=[];
+  activeGames(wk).forEach(function(gid){
+    var g=games[gid];
+    for(var i=0;i<all.length;i++){
+      if(_eventMatchesGame(all[i],g)){ out.push(all[i]); return; }
+    }
+  });
+  return out;
+}
+
 function renderScoresInto(){
   var el=document.getElementById("scores-wrap");
   if(!el) return;
-  if(!_scData||!_scData.events||!_scData.events.length){
-    el.innerHTML='<div class="scores-empty">&#9917;<br>No games found for today.<br><span style="font-size:9px;color:var(--dim)">Check back on game day</span></div>';
+  var _wkLabel=(ST.weekLabels&&ST.weekLabels[scoresWeekId()])||"";
+  var _slateSize=activeGames(scoresWeekId()).length;
+  if(!_slateSize){
+    el.innerHTML='<div class="scores-empty">&#9917;<br>No games in this week yet.<br><span style="font-size:9px;color:var(--dim)">Scores appear once the slate is set</span></div>';
     return;
   }
-
-  var events=_scData.events;
+  var events=_slateEvents();
+  if(!events.length){
+    el.innerHTML='<div class="scores-empty">&#9917;<br>Waiting on scores for '+x(_wkLabel)+'.<br><span style="font-size:9px;color:var(--dim)">Check back nearer kickoff</span>'+
+      '<br><br><button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button></div>';
+    return;
+  }
   var live=[],pre=[],done=[];
   events.forEach(function(ev){
     var comp=(ev.competitions||[])[0]; if(!comp) return;
@@ -1114,8 +1159,7 @@ function renderScoresInto(){
     else pre.push(ev);
   });
 
-  var d=new Date();
-  var dateLabel=d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
+  var dateLabel=_wkLabel||new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
 
   function card(ev){
     var comp=(ev.competitions||[])[0]; if(!comp) return "";
@@ -1173,7 +1217,7 @@ function renderScoresInto(){
 
   var ago=_scLastFetch?Math.round((Date.now()-_scLastFetch)/1000):0;
   var h='<div class="scores-date-header">'+
-    '<span>&#9917; Premier League &middot; '+dateLabel+'</span>'+
+    '<span>&#9917; '+x(dateLabel)+' &middot; '+events.length+' of '+_slateSize+'</span>'+
     '<button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button>'+
     '</div>';
   if(live.length) h+=section(live,"&#128308; In Progress");
@@ -2896,7 +2940,8 @@ function draw(){
   document.getElementById("root").innerHTML=h;
   bind();
   if(ST.page==="scores"){
-    if(_scData) renderScoresInto(); else startScoreRefresh();
+    // Refetch when the cached feed belongs to a different week than the one on screen.
+    if(_scData && _scWeek===scoresWeekId()) renderScoresInto(); else startScoreRefresh();
   } else {
     stopScoreRefresh();
   }
