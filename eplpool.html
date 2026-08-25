@@ -794,6 +794,14 @@ function loadData(){
         _picksRef.on("value",function(sn){
           var prev=ST.picks[wId]||{};
           ST.picks[wId]=sn.val()||{};
+          // Re-apply anything still inside its undo window: the snapshot predates
+          // those taps and would otherwise roll them back on screen.
+          Object.keys(_pendingPicks).forEach(function(k){
+            var p=_pendingPicks[k];
+            if(p.weekId!==wId) return;
+            if(!ST.picks[wId][p.uk]) ST.picks[wId][p.uk]={};
+            ST.picks[wId][p.uk][p.gid]=p.cur;
+          });
           // If on group tab, flash a brief "player picked" indicator
           if(ST.page==="group"&&ST.user){
             var uk=ST.user;
@@ -1456,6 +1464,41 @@ function addImportedGames(weekId){
 
 // ── Pick actions ─────────────────────────────────────────
 var _undoTimer=null, _undoPick=null;
+
+// Picks written but not yet committed, keyed week|user|game. A pick sits here for
+// the 3s undo window; anything still present is re-applied over incoming
+// snapshots so the server's older state can't erase it.
+var _pendingPicks={};
+function _pendKey(weekId,uk,gid){ return weekId+"|"+uk+"|"+gid; }
+
+// Commit one pending pick. Safe to call twice — the entry is removed first.
+function _flushPick(key){
+  var p=_pendingPicks[key];
+  if(!p) return;
+  delete _pendingPicks[key];
+  if(!DB) return;
+  DB.ref(BASE+"/picks/"+p.weekId+"/"+p.uk+"/"+p.gid).set(p.cur,function(err){
+    if(!err){
+      var t=document.getElementById("tick-"+p.gid);
+      if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
+    } else {
+      // Put it back so a later flush retries rather than silently dropping it.
+      _pendingPicks[key]=p;
+    }
+  });
+}
+// Commit everything outstanding, optionally sparing one key (the pick currently
+// showing an Undo button).
+function _flushAllPicks(exceptKey){
+  Object.keys(_pendingPicks).forEach(function(k){ if(k!==exceptKey) _flushPick(k); });
+}
+// Don't let a backgrounded or closed tab strand a pick inside its undo window.
+try{
+  window.addEventListener("pagehide",function(){ _flushAllPicks(); });
+  document.addEventListener("visibilitychange",function(){
+    if(document.visibilityState==="hidden") _flushAllPicks();
+  });
+}catch(e){}
 function setPickSide(weekId,gid,side){
   if(PUBLIC_VIEW) return;   // read-only spectator
   if(!ST.user){toast("Select your name first");return;}
@@ -1476,7 +1519,10 @@ function setPickSide(weekId,gid,side){
   if(_wrap) _wrap.style.borderLeftColor=cur.side?"transparent":"var(--border)";
   _updateProgressBar(weekId);
   // Undo toast for 3 seconds before committing to Firebase
-  if(_undoTimer){ clearTimeout(_undoTimer); }
+  // A new pick means the previous one's undo window is over — commit it rather
+  // than cancelling it, which is what silently dropped picks before.
+  if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
+  _flushAllPicks(_pendKey(weekId,uk,gid));
   var g=(ST.games[weekId]||{})[gid]||{};
   var teamName=cur.side?(cur.side==="draw"?("Draw \u2014 "+(g.home||"")+" v "+(g.away||"")):sideLabel(g,cur.side)):"cleared";
   _undoPick={weekId:weekId,gid:gid,prevSide:prevSide,cur:cur,uk:uk};
@@ -1484,14 +1530,13 @@ function setPickSide(weekId,gid,side){
   undoEl.innerHTML=(cur.side?"&#10003; "+x(teamName):"Cleared")+'&nbsp;&nbsp;<span id="undo-pick-btn" style="text-decoration:underline;cursor:pointer">Undo</span>';
   undoEl.classList.add("show");
   clearTimeout(_tt);
+  // Hold this pick for the undo window, but record it as pending so a snapshot
+  // can't wipe it and a page-hide can still flush it.
+  var _key=_pendKey(weekId,uk,gid);
+  _pendingPicks[_key]={weekId:weekId,uk:uk,gid:gid,cur:cur};
   _undoTimer=setTimeout(function(){
     undoEl.classList.remove("show"); _undoPick=null; _undoTimer=null;
-    if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
-      if(!err){
-        var t=document.getElementById("tick-"+gid);
-        if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
-      }
-    });
+    _flushPick(_key);
   },3000);
 }
 
@@ -3041,6 +3086,7 @@ function bind(){
     if(!_undoPick) return;
     clearTimeout(_undoTimer); _undoTimer=null;
     var u=_undoPick; _undoPick=null;
+    delete _pendingPicks[_pendKey(u.weekId,u.uk,u.gid)];   // the pick is being reverted
     if(!ST.picks[u.weekId]) ST.picks[u.weekId]={};
     if(!ST.picks[u.weekId][u.uk]) ST.picks[u.weekId][u.uk]={};
     var restored=ST.picks[u.weekId][u.uk][u.gid]||{};
@@ -3052,6 +3098,7 @@ function bind(){
     var _wrap=document.querySelector('.unpicked-wrap[data-gid="'+u.gid+'"]');
     if(_wrap) _wrap.style.borderLeftColor=restored.side?"transparent":"var(--border)";
     _updateProgressBar(u.weekId);
+    // Write the reverted value straight away — there is nothing left to undo.
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
   });
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){

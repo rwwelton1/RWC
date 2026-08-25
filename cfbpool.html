@@ -441,6 +441,10 @@ function spreadLabel(g,side){
 }
 
 // ── Scoring ──────────────────────────────────────────────
+// A pick only counts once it has a side AND a confidence value — a side on its
+// own can never score, so it isn't a completed pick.
+function pickComplete(p){ return !!(p && p.side && Number(p.conf)); }
+
 var _weekScoreCache={};
 function weekScore(weekId,user){
   var picks=((ST.picks[weekId]||{})[user])||{};
@@ -451,7 +455,7 @@ function weekScore(weekId,user){
   var total=0,correct=0,wrong=0,pending=0;
   GAME_IDS.forEach(function(gid){
     var p=picks[gid],r=results[gid];
-    if(!p||!p.side)return;
+    if(!pickComplete(p))return;   // no confidence = no pick, so neither correct nor wrong
     if(r==="push")return;
     if(r){
       if(p.side===r){total+=Number(p.conf)||0;correct++;}
@@ -774,13 +778,21 @@ function loadData(){
         _picksRef.on("value",function(sn){
           var prev=ST.picks[wId]||{};
           ST.picks[wId]=sn.val()||{};
+          // Re-apply anything still inside its undo window: the snapshot predates
+          // those taps and would otherwise roll them back on screen.
+          Object.keys(_pendingPicks).forEach(function(k){
+            var p=_pendingPicks[k];
+            if(p.weekId!==wId) return;
+            if(!ST.picks[wId][p.uk]) ST.picks[wId][p.uk]={};
+            ST.picks[wId][p.uk][p.gid]=p.cur;
+          });
           // If on group tab, flash a brief "player picked" indicator
           if(ST.page==="group"&&ST.user){
             var uk=ST.user;
             Object.keys(ST.picks[wId]).forEach(function(puk){
               if(puk===uk) return; // ignore own picks
-              var prevCount=Object.keys(prev[puk]||{}).filter(function(g){return (prev[puk]||{})[g]&&(prev[puk]||{})[g].side;}).length;
-              var newCount=Object.keys(ST.picks[wId][puk]||{}).filter(function(g){return ST.picks[wId][puk][g]&&ST.picks[wId][puk][g].side;}).length;
+              var prevCount=Object.keys(prev[puk]||{}).filter(function(g){return pickComplete((prev[puk]||{})[g]);}).length;
+              var newCount=Object.keys(ST.picks[wId][puk]||{}).filter(function(g){return pickComplete(ST.picks[wId][puk][g]);}).length;
               if(newCount>prevCount){
                 toast("&#9998; "+x(nameOf(puk))+" just updated their picks");
               }
@@ -1359,6 +1371,41 @@ function addImportedGames(weekId){
 
 // ── Pick actions ─────────────────────────────────────────
 var _undoTimer=null, _undoPick=null;
+
+// Picks written but not yet committed, keyed week|user|game. A pick sits here for
+// the 3s undo window; anything still present is re-applied over incoming
+// snapshots so the server's older state can't erase it.
+var _pendingPicks={};
+function _pendKey(weekId,uk,gid){ return weekId+"|"+uk+"|"+gid; }
+
+// Commit one pending pick. Safe to call twice — the entry is removed first.
+function _flushPick(key){
+  var p=_pendingPicks[key];
+  if(!p) return;
+  delete _pendingPicks[key];
+  if(!DB) return;
+  DB.ref(BASE+"/picks/"+p.weekId+"/"+p.uk+"/"+p.gid).set(p.cur,function(err){
+    if(!err){
+      var t=document.getElementById("tick-"+p.gid);
+      if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
+    } else {
+      // Put it back so a later flush retries rather than silently dropping it.
+      _pendingPicks[key]=p;
+    }
+  });
+}
+// Commit everything outstanding, optionally sparing one key (the pick currently
+// showing an Undo button).
+function _flushAllPicks(exceptKey){
+  Object.keys(_pendingPicks).forEach(function(k){ if(k!==exceptKey) _flushPick(k); });
+}
+// Don't let a backgrounded or closed tab strand a pick inside its undo window.
+try{
+  window.addEventListener("pagehide",function(){ _flushAllPicks(); });
+  document.addEventListener("visibilitychange",function(){
+    if(document.visibilityState==="hidden") _flushAllPicks();
+  });
+}catch(e){}
 function setPickSide(weekId,gid,side){
   if(PUBLIC_VIEW) return;   // read-only spectator
   if(!ST.user){toast("Select your name first");return;}
@@ -1379,7 +1426,10 @@ function setPickSide(weekId,gid,side){
   if(_wrap) _wrap.style.borderLeftColor=cur.side?"transparent":"var(--border2)";
   _updateProgressBar(weekId);
   // Undo toast for 3 seconds before committing to Firebase
-  if(_undoTimer){ clearTimeout(_undoTimer); }
+  // A new pick means the previous one's undo window is over — commit it rather
+  // than cancelling it, which is what silently dropped picks before.
+  if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
+  _flushAllPicks(_pendKey(weekId,uk,gid));
   var g=(ST.games[weekId]||{})[gid]||{};
   var teamName=cur.side?(cur.side==="away"?g.away:g.home):"cleared";
   _undoPick={weekId:weekId,gid:gid,prevSide:prevSide,cur:cur,uk:uk};
@@ -1387,14 +1437,13 @@ function setPickSide(weekId,gid,side){
   undoEl.innerHTML=(cur.side?"&#10003; "+x(teamName):"Cleared")+'&nbsp;&nbsp;<span id="undo-pick-btn" style="text-decoration:underline;cursor:pointer">Undo</span>';
   undoEl.classList.add("show");
   clearTimeout(_tt);
+  // Hold this pick for the undo window, but record it as pending so a snapshot
+  // can't wipe it and a page-hide can still flush it.
+  var _key=_pendKey(weekId,uk,gid);
+  _pendingPicks[_key]={weekId:weekId,uk:uk,gid:gid,cur:cur};
   _undoTimer=setTimeout(function(){
     undoEl.classList.remove("show"); _undoPick=null; _undoTimer=null;
-    if(DB)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).set(cur,function(err){
-      if(!err){
-        var t=document.getElementById("tick-"+gid);
-        if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
-      }
-    });
+    _flushPick(_key);
   },3000);
 }
 
@@ -1612,13 +1661,13 @@ function shareMyPicks(weekId){
   sorted.forEach(function(gid){
     var g=games[gid]||{};
     var p=picks[gid]||{};
-    if(!p.side) return;
+    if(!pickComplete(p)) return;
     var team=p.side==="away"?g.away:g.home;
     var spread=spreadLabel(g,p.side);
     var conf=p.conf?"("+p.conf+")":"";
     lines.push("  "+team+" "+spread+" "+conf);
   });
-  var unpicked=active.filter(function(gid){ return !picks[gid]||!picks[gid].side; }).length;
+  var unpicked=active.filter(function(gid){ return !pickComplete(picks[gid]); }).length;
   if(unpicked) lines.push("  ⚠ "+unpicked+" unpicked");
   var text=lines.join("\n");
   if(navigator.share){
@@ -1677,7 +1726,7 @@ function _updateProgressBar(weekId){
   var made=0,confsMade=0,confs={},dupes=false;
   active.forEach(function(gid){
     var p=picks[gid];
-    if(p&&p.side) made++;
+    if(pickComplete(p)) made++;   // side + confidence
     if(p&&p.conf){ var c=Number(p.conf); confs[c]=(confs[c]||0)+1; confsMade++; }
   });
   Object.keys(confs).forEach(function(k){ if(confs[k]>1) dupes=true; });
@@ -2041,7 +2090,7 @@ function renderPicks(){
     var made=0, confsMade=0, confs={}, gamesLocked=0;
     active.forEach(function(gid){
       var p=viewerPicks[gid];
-      if(p&&p.side) made++;
+      if(pickComplete(p)) made++;   // side + confidence
       if(p&&p.conf){ confs[p.conf]=(confs[p.conf]||0)+1; confsMade++; }
       if(isGameLocked(weekId,gid)) gamesLocked++;
     });
@@ -2109,7 +2158,7 @@ function renderPicks(){
   active.forEach(function(gid){
     var g=ST.games[weekId][gid];
     var result=(ST.results[weekId]||{})[gid];
-    var isPicked=!!(viewerPicks[gid]&&viewerPicks[gid].side);
+    var isPicked=pickComplete(viewerPicks[gid]);
     // usedConfs for this game = all used EXCEPT this game's own pick
     var thisConf=Number((viewerPicks[gid]||{}).conf)||null;
     var usedConfs={};
@@ -2369,7 +2418,7 @@ function renderStandings(){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[r.name])||{};
       var made=0;
-      active.forEach(function(gid){var p=picks[gid]||{};if(p.side)made++;});
+      active.forEach(function(gid){ if(pickComplete(picks[gid])) made++; });
       var allDone=active.length>0&&made===active.length;
       h+='<td style="text-align:center;padding:7px 6px">';
       if(allDone){
@@ -2822,7 +2871,7 @@ function renderGroupPicks(){
         var r=wResults[gid];
         if(!r||r==="push") return; // only resolved non-push games
         var p=wPicks[gid]||{};
-        if(!p.side) return; // must have picked
+        if(!pickComplete(p)) return; // must have picked AND set a confidence
         var ts=parseKickoffTs(g)||0;
         allResolved.push({ts:ts,correct:p.side===r});
       });
@@ -2860,8 +2909,8 @@ function renderGroupPicks(){
       // Hide picks for other players until the game kicks off
       var showPick=isMyRow||gameLocked;
       h+='<td>';
-      if(!p.side){
-        // No pick made → blank cell.
+      if(!pickComplete(p)){
+        // No pick, or a side with no confidence yet → blank cell.
         h+='<span class="gp-nopick"></span>';
       } else if(!showPick){
         // Pick made but the game hasn't kicked off → subtle dash (conceals the choice but
@@ -2933,7 +2982,7 @@ function draw(){
       if(_firstKick&&_hoursToKick!==null&&_hoursToKick<=4&&_hoursToKick>0){
         var _active=activeGames(_cw);
         var _myPk=((ST.picks[_cw]||{})[ST.user])||{};
-        var _made=_active.filter(function(gid){return _myPk[gid]&&_myPk[gid].side;}).length;
+        var _made=_active.filter(function(gid){ return pickComplete(_myPk[gid]); }).length;
         if(_made<_active.length){
           var _left=_active.length-_made;
           tabs[1].lbl='&#128101; Group <span style="background:var(--red2);color:#fff;border-radius:8px;font-size:8px;padding:1px 5px;margin-left:3px;vertical-align:middle">'+_left+'</span>';
@@ -3070,6 +3119,7 @@ function bind(){
     if(!_undoPick) return;
     clearTimeout(_undoTimer); _undoTimer=null;
     var u=_undoPick; _undoPick=null;
+    delete _pendingPicks[_pendKey(u.weekId,u.uk,u.gid)];   // the pick is being reverted
     if(!ST.picks[u.weekId]) ST.picks[u.weekId]={};
     if(!ST.picks[u.weekId][u.uk]) ST.picks[u.weekId][u.uk]={};
     var restored=ST.picks[u.weekId][u.uk][u.gid]||{};
@@ -3081,6 +3131,7 @@ function bind(){
     var _wrap=document.querySelector('.unpicked-wrap[data-gid="'+u.gid+'"]');
     if(_wrap) _wrap.style.borderLeftColor=restored.side?"transparent":"var(--border2)";
     _updateProgressBar(u.weekId);
+    // Write the reverted value straight away — there is nothing left to undo.
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
   });
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){
