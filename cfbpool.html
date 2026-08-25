@@ -445,6 +445,57 @@ function spreadLabel(g,side){
 // own can never score, so it isn't a completed pick.
 function pickComplete(p){ return !!(p && p.side && Number(p.conf)); }
 
+// Card order on the Picks tab. Persisted per browser so it sticks between visits.
+var PICK_SORTS=[
+  {id:"time", label:"Game time"},
+  {id:"spread", label:"Spread"},
+  {id:"conf", label:"Confidence"}
+];
+function pickSortMode(){
+  if(!ST._pickSort){
+    var v=null;
+    try{ v=localStorage.getItem("cfb_picksort_"+(GROUP_ID||"g")); }catch(e){}
+    ST._pickSort=(v&&PICK_SORTS.some(function(o){return o.id===v;}))?v:"time";
+  }
+  return ST._pickSort;
+}
+function setPickSortMode(mode){
+  ST._pickSort=mode;
+  try{ localStorage.setItem("cfb_picksort_"+(GROUP_ID||"g"), mode); }catch(e){}
+  draw();
+}
+function pickSortLabel(){
+  var m=pickSortMode();
+  for(var i=0;i<PICK_SORTS.length;i++) if(PICK_SORTS[i].id===m) return PICK_SORTS[i].label;
+  return "Game time";
+}
+// Order the week's games for display. Kickoff order is the tie-breaker throughout
+// so the list is never arbitrary.
+function sortActiveGames(active, weekId, viewerPicks){
+  var games=ST.games[weekId]||{};
+  var mode=pickSortMode();
+  var idx={}; active.forEach(function(gid,i){ idx[gid]=i; });
+  function kick(gid){ return parseKickoffTs(games[gid]||{}) || (8640000000000000 + idx[gid]); }
+  var out=active.slice();
+  out.sort(function(a,b){
+    if(mode==="spread"){
+      // Tightest line first — the toss-ups people most want to think about.
+      var as=Math.abs(Number((games[a]||{}).spread)||0);
+      var bs=Math.abs(Number((games[b]||{}).spread)||0);
+      if(as!==bs) return as-bs;
+    } else if(mode==="conf"){
+      // Highest confidence first; anything not yet given a number sinks to the end.
+      var ac=Number((viewerPicks[a]||{}).conf)||0;
+      var bc=Number((viewerPicks[b]||{}).conf)||0;
+      if(ac!==bc) return bc-ac;
+    }
+    var ak=kick(a), bk=kick(b);
+    if(ak!==bk) return ak-bk;
+    return idx[a]-idx[b];
+  });
+  return out;
+}
+
 var _weekScoreCache={};
 function weekScore(weekId,user){
   var picks=((ST.picks[weekId]||{})[user])||{};
@@ -2105,7 +2156,8 @@ function renderPicks(){
     h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
     h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
     // Sort button
-    if(ST.user&&made>0) h+='<button id="b-sort-picks" style="font-size:8px;font-weight:800;padding:2px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap">&#8645; Sort</button>';
+    // Always visible (not just once picks exist) — the order matters most while picking.
+    h+='<button id="b-sort-picks" title="Change the order games are listed in" style="font-size:8px;font-weight:800;padding:2px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap">&#8645; '+x(pickSortLabel())+'</button>';
     h+='</div>';
     // Dual progress bar: picks (solid) + conf (lighter track behind)
     h+='<div style="height:5px;background:var(--border2);border-radius:3px;overflow:hidden;position:relative">';
@@ -2155,7 +2207,7 @@ function renderPicks(){
     var p=viewerPicks[gid]||{};
     if(p.conf) allUsedConfs[Number(p.conf)]=true;
   });
-  active.forEach(function(gid){
+  sortActiveGames(active, weekId, viewerPicks).forEach(function(gid){
     var g=ST.games[weekId][gid];
     var result=(ST.results[weekId]||{})[gid];
     var isPicked=pickComplete(viewerPicks[gid]);
@@ -3047,7 +3099,6 @@ function bind(){
   el=document.getElementById("week-dropdown"); if(el) el.addEventListener("change",function(){
     var prev=ST.curWeek;
     ST.curWeek=this.value;
-    _picksSorted=false; _picksOriginalOrder=null;
     if(ST.curWeek!==prev&&ST._subscribePicksForWeek){
       if(!ST.picks[ST.curWeek]) ST._subscribePicksForWeek(ST.curWeek);
     }
@@ -3076,42 +3127,14 @@ function bind(){
   });
 
   // Sort picks by confidence (desc) — toggle between sorted and original order
-  var _picksSorted=false, _picksOriginalOrder=null;
+  // Cycle Game time → Spread → Confidence. Sorting happens during render, so it
+  // survives redraws (the old DOM-shuffle version silently reverted on any update).
   el=document.getElementById("b-sort-picks"); if(el) el.addEventListener("click",function(){
-    var wrap=document.getElementById("games-wrap");
-    if(!wrap) return;
-    if(_picksSorted){
-      // Restore original order
-      if(_picksOriginalOrder){
-        _picksOriginalOrder.forEach(function(c){ wrap.appendChild(c); });
-      }
-      _picksSorted=false;
-      this.innerHTML="&#8645; Sort";
-      this.style.color="var(--muted)";
-    } else {
-      // Save original order before sorting
-      _picksOriginalOrder=Array.prototype.slice.call(wrap.children);
-      var cards=_picksOriginalOrder.slice();
-      cards.sort(function(a,b){
-        var aGid=a.getAttribute("data-gid")||"";
-        var bGid=b.getAttribute("data-gid")||"";
-        if(!aGid){ var aq=a.querySelector("[data-pick-gid]"); if(aq) aGid=aq.getAttribute("data-pick-gid"); }
-        if(!bGid){ var bq=b.querySelector("[data-pick-gid]"); if(bq) bGid=bq.getAttribute("data-pick-gid"); }
-        var weekId=ST.curWeek||displayWeekId();
-        var uk=ST.user;
-        var ap=((ST.picks[weekId]||{})[uk]||{})[aGid]||{};
-        var bp=((ST.picks[weekId]||{})[uk]||{})[bGid]||{};
-        var aConf=Number(ap.conf)||0, bConf=Number(bp.conf)||0;
-        var aPicked=!!ap.side, bPicked=!!bp.side;
-        if(!aPicked&&bPicked) return -1;
-        if(aPicked&&!bPicked) return 1;
-        return bConf-aConf;
-      });
-      cards.forEach(function(c){ wrap.appendChild(c); });
-      _picksSorted=true;
-      this.innerHTML="&#8645; Unsort";
-      this.style.color="var(--green)";
-    }
+    var cur=pickSortMode(), i=0;
+    for(var k=0;k<PICK_SORTS.length;k++) if(PICK_SORTS[k].id===cur) i=k;
+    var next=PICK_SORTS[(i+1)%PICK_SORTS.length];
+    setPickSortMode(next.id);
+    toast("&#8645; Sorted by "+next.label.toLowerCase());
   });
 
   // Undo pick
