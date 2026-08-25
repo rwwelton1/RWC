@@ -1067,6 +1067,97 @@ function _slateEvents(){
   return out;
 }
 
+// "9/5 12p" / "9/5 12:45p" — short enough for a third-width card. Top-level so
+// both the score cards and the tiebreaker panel can use it.
+function _compactWhen(ev){
+  var d=(ev&&ev.date)?new Date(ev.date):null;
+  if(!d||isNaN(d.getTime())) return "";
+  var hr=d.getHours(), mn=d.getMinutes();
+  var ap=hr>=12?"p":"a", h12=hr%12; if(h12===0) h12=12;
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+h12+(mn?(":"+("0"+mn).slice(-2)):"")+ap;
+}
+
+// Find the tiebreaker match in the raw feed. Matched on its own because it is
+// frequently outside the pool's own slate and so never survives _slateEvents().
+function _tiebreakerEvent(){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[scoresWeekId()])||{};
+  if(!tb.away||!tb.home) return null;
+  var all=(_scData&&_scData.events)||[];
+  var nA=normalizeTeamName(tb.away), nH=normalizeTeamName(tb.home);
+  for(var i=0;i<all.length;i++){
+    var comp=(all[i].competitions||[])[0]||{};
+    var comps=comp.competitors||[];
+    var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+    var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+    var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
+    var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
+    if(an===nA&&hn===nH) return all[i];
+  }
+  return null;
+}
+
+// Tiebreaker panel: running combined total, the viewer's guess, and the gap.
+function _tiebreakerPanel(){
+  var wk=scoresWeekId();
+  var tb=(ST.tiebreaker&&ST.tiebreaker[wk])||{};
+  if(!tb.away||!tb.home) return "";
+  var guess=((ST.picks[wk]||{})[ST.user]||{}).tb;
+  var ev=_tiebreakerEvent();
+
+  var total=null, state="", detail="";
+  if(tb.actual!=null){
+    total=Number(tb.actual); state="post";                 // admin-confirmed final
+  } else if(ev){
+    var comp=(ev.competitions||[])[0]||{};
+    var comps=comp.competitors||[];
+    var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+    var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+    state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+    detail=(comp.status&&comp.status.type&&comp.status.type.shortDetail)||"";
+    if(state==="in"||state==="post") total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
+  }
+
+  var isLive=(state==="in"), isFinal=(state==="post"||tb.actual!=null);
+  var accent=isLive?"var(--red2)":isFinal?"var(--blue)":"var(--border2)";
+  var h='<div style="border:2px solid '+accent+';border-radius:10px;background:#fff;box-shadow:2px 2px 0 var(--border);margin:2px 0 10px;overflow:hidden">';
+  h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 8px;background:var(--purple-bg);border-bottom:2px solid var(--border2)">';
+  h+='<span style="font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--purple)">&#127942; Tiebreaker</span>';
+  h+='<span style="font-size:8px;font-weight:900;color:'+(isLive?"var(--red2)":isFinal?"var(--blue)":"var(--dim)")+'">'+
+       (isLive?"&#9679; LIVE"+(detail?" &middot; "+x(detail):""):isFinal?"Final":(ev?x(_compactWhen(ev)):"Not started"))+'</span>';
+  h+='</div>';
+
+  h+='<div style="padding:7px 9px">';
+  h+='<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:5px">'+
+       x((tb.away||"")+" @ "+(tb.home||""))+'</div>';
+  h+='<div style="display:flex;align-items:stretch;gap:6px">';
+  // Running combined total
+  h+='<div style="flex:1;text-align:center;background:var(--cream);border-radius:7px;padding:5px 3px">';
+  h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Combined</div>';
+  h+='<div style="font-size:19px;font-weight:900;color:'+(isLive?"var(--red2)":"var(--text)")+';line-height:1.2">'+(total==null?"&ndash;":total)+'</div>';
+  h+='</div>';
+  // The viewer's guess
+  h+='<div style="flex:1;text-align:center;background:var(--cream);border-radius:7px;padding:5px 3px">';
+  h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Your guess</div>';
+  h+='<div style="font-size:19px;font-weight:900;color:'+(guess?"var(--text)":"var(--dim)")+';line-height:1.2">'+(guess?x(String(guess)):"&ndash;")+'</div>';
+  h+='</div>';
+  // Distance from the guess, once there is something to compare against
+  if(guess&&total!=null){
+    var diff=Math.abs(Number(guess)-total);
+    h+='<div style="flex:1;text-align:center;background:'+(diff===0?"var(--green-bg)":"var(--cream)")+';border-radius:7px;padding:5px 3px">';
+    h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">'+(isFinal?"Off by":"Off by now")+'</div>';
+    h+='<div style="font-size:19px;font-weight:900;color:'+(diff===0?"var(--green)":"var(--text)")+';line-height:1.2">'+(diff===0?"&#10003;":diff)+'</div>';
+    h+='</div>';
+  }
+  h+='</div>';
+  if(!guess){
+    h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:5px">No guess entered &mdash; add one on the Picks tab.</div>';
+  } else if(isLive){
+    h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:5px">Still climbing &mdash; totals only count at full time.</div>';
+  }
+  h+='</div></div>';
+  return h;
+}
+
 function renderScoresInto(){
   var el=document.getElementById("scores-wrap");
   if(!el) return;
@@ -1078,7 +1169,7 @@ function renderScoresInto(){
   }
   var events=_slateEvents();
   if(!events.length){
-    el.innerHTML='<div class="scores-empty">&#127944;<br>Waiting on scores for '+x(_wkLabel)+'.<br><span style="font-size:9px;color:var(--dim)">Check back nearer kickoff</span>'+
+    el.innerHTML=_tiebreakerPanel()+'<div class="scores-empty">&#127944;<br>Waiting on scores for '+x(_wkLabel)+'.<br><span style="font-size:9px;color:var(--dim)">Check back nearer kickoff</span>'+
       '<br><br><button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button></div>';
     return;
   }
@@ -1092,15 +1183,6 @@ function renderScoresInto(){
   });
 
   var dateLabel=_wkLabel||new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
-
-  // "9/5 12p" / "9/5 12:45p" — short enough for a third-width card.
-  function _compactWhen(ev){
-    var d=(ev&&ev.date)?new Date(ev.date):null;
-    if(!d||isNaN(d.getTime())) return "";
-    var hr=d.getHours(), mn=d.getMinutes();
-    var ap=hr>=12?"p":"a", h12=hr%12; if(h12===0) h12=12;
-    return (d.getMonth()+1)+"/"+d.getDate()+" "+h12+(mn?(":"+("0"+mn).slice(-2)):"")+ap;
-  }
 
   function card(ev){
     var comp=(ev.competitions||[])[0]; if(!comp) return "";
@@ -1161,6 +1243,7 @@ function renderScoresInto(){
     '<span>&#127944; '+x(dateLabel)+' &middot; '+events.length+' of '+_slateSize+'</span>'+
     '<button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button>'+
     '</div>';
+  h+=_tiebreakerPanel();
   if(live.length) h+=section(live,"&#128308; In Progress");
   h+=section(pre,"&#128336; Upcoming");
   h+=section(done,"&#10003; Final");
@@ -2494,10 +2577,11 @@ function renderImportResults(weekId){
     if(ST.importError) return '<div style="font-size:10px;font-weight:700;color:var(--red2);padding:8px 10px">'+x(ST.importError)+'</div>';
     return '';
   }
+  // ESPN group IDs — do not renumber these without re-verifying against the API.
   var CONFS=[
-    {v:"1",l:"ACC"},{v:"4",l:"Big 12"},{v:"5",l:"Big Ten"},{v:"9",l:"SEC"},
-    {v:"17",l:"AAC"},{v:"8",l:"MWC"},{v:"151",l:"Sun Belt"},
-    {v:"37",l:"CUSA"},{v:"18",l:"MAC"},{v:"48",l:"Ind"}
+    {v:"1",l:"ACC"},{v:"5",l:"Big Ten"},{v:"4",l:"Big 12"},{v:"8",l:"SEC"},
+    {v:"9",l:"Pac-12"},{v:"151",l:"AAC"},{v:"17",l:"MWC"},{v:"37",l:"Sun Belt"},
+    {v:"12",l:"CUSA"},{v:"15",l:"MAC"},{v:"18",l:"Ind"}
   ];
   var h='';
   var selCount=Object.keys(ST.importSelected).length;
@@ -2508,7 +2592,8 @@ function renderImportResults(weekId){
   });
 
   h+='<div style="padding:6px 10px;border-top:1px solid var(--border2);display:flex;gap:5px;flex-wrap:wrap">';
-  h+='<button id="b-imp-top25" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#fff;color:var(--muted)')+'"># Top 25</button>';
+  var _haveRanks=!!Object.keys(RANKINGS||{}).length;
+  h+='<button id="b-imp-top25"'+(_haveRanks?'':' disabled title="Rankings not loaded yet"')+' style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(_haveRanks?'':'opacity:.45;cursor:not-allowed;')+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#fff;color:var(--muted)')+'"># '+x(_haveRanks?RANKINGS_SOURCE:"Top 25")+'</button>';
   CONFS.forEach(function(c){
     var active=ST.importConf===c.v;
     h+='<button class="imp-conf-pill" data-conf="'+c.v+'" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(active?'background:var(--blue-bg);color:var(--blue)':'background:#fff;color:var(--muted)')+'">'+(active?'✕ ':'')+c.l+'</button>';
@@ -3556,7 +3641,8 @@ var _fieldDebounce={};
 })();
 
 // ── CFB Rankings ──────────────────────────────────────────
-var RANKINGS = {}; // normalized team name → {rank, source}
+var RANKINGS = {};
+var RANKINGS_SOURCE = "Top 25";   // set once the poll loads (AP / Coaches / CFP) // normalized team name → {rank, source}
 
 // Common CFB name variants that differ between hand entry and ESPN's feed.
 // Keys and values are compared after stripping to lowercase-alphanumeric.
@@ -3645,25 +3731,40 @@ function fetchRankings(){
     .then(function(r){return r.json();})
     .then(function(data){
       var polls=(data&&data.rankings)||[];
-      // Priority: CFP first, then AP Top 25
-      var cfp=null, ap=null;
+      if(!polls.length) return;
+      function nameOfPoll(p){ return String((p&&(p.name||p.shortName||p.type))||"").toLowerCase(); }
+      function ranksOf(p){ return (p&&(p.ranks||p.entries))||[]; }
+      // Prefer the playoff committee poll when it exists (it only appears late in
+      // the season), then AP, then coaches, then simply the first poll with data.
+      var cfp=null, ap=null, coaches=null, any=null;
       polls.forEach(function(p){
-        var n=String(p.name||p.shortName||"");
-        if(!cfp&&n.indexOf("CFP")>=0) cfp=p;
-        if(!ap&&n.indexOf("AP")>=0) ap=p;
+        if(!ranksOf(p).length) return;
+        var n=nameOfPoll(p);
+        if(!any) any=p;
+        if(!cfp && (n.indexOf("playoff")>=0 || n.indexOf("cfp")>=0)) cfp=p;
+        if(!ap && n.indexOf("ap ")===0) ap=p;
+        if(!ap && n.indexOf("ap top")>=0) ap=p;
+        if(!coaches && (n.indexOf("coaches")>=0 || n.indexOf("afca")>=0 || n.indexOf("usa today")>=0)) coaches=p;
       });
-      var poll=cfp||ap;
-      if(!poll||!poll.ranks) return;
-      var source=cfp?"CFP":"AP";
+      var poll=cfp||ap||coaches||any;
+      if(!poll) return;
+      var n2=nameOfPoll(poll);
+      var source=(poll===cfp)?"CFP":(poll===ap)?"AP":(poll===coaches)?"Coaches":(poll.shortName||"Poll");
       var map={};
-      poll.ranks.forEach(function(entry){
-        var team=entry.team&&(entry.team.shortDisplayName||entry.team.displayName||entry.team.name);
-        if(team) map[normalizeTeamName(team)]={rank:entry.current||entry.rank,source:source};
+      ranksOf(poll).forEach(function(entry){
+        var t=entry.team||{};
+        var nm=t.shortDisplayName||t.displayName||t.name||t.nickname;
+        var rank=entry.current!=null?entry.current:(entry.rank!=null?entry.rank:null);
+        if(nm&&rank) map[normalizeTeamName(nm)]={rank:Number(rank),source:source};
       });
+      if(!Object.keys(map).length) return;
       RANKINGS=map;
-      if(ST.page==="group") draw();
+      RANKINGS_SOURCE=source;
+      // Redraw whatever is on screen — the import list, pick cards and group grid
+      // all show rank badges and were built before this resolved.
+      scheduleDraw();
     })
-    .catch(function(){}); // silently fail — rankings are optional
+    .catch(function(){}); // silently fail — rankings are decorative
 }
 fetchRankings();
 </script>
