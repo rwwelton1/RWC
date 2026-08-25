@@ -80,6 +80,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .lock-bar{display:flex;align-items:center;gap:7px;padding:7px 12px;border-bottom:2px solid var(--border2);flex-wrap:wrap;background:var(--cream);flex-shrink:0}
 .lock-info{font-size:10px;font-weight:800;color:var(--text)}
 .lock-chips{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+/* Rank badge — same construction as .tag/.wtab: solid fill, 2px border, hard
+   shadow. Sized to sit inline with a team name without pushing the row taller. */
+.rank-badge{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
+  background:var(--gold);color:var(--text);border:2px solid var(--border);border-radius:5px;
+  box-shadow:1px 1px 0 var(--border);font-family:'Nunito',sans-serif;
+  font-size:8px;font-weight:900;line-height:1;padding:2px 4px;min-width:17px;
+  vertical-align:middle;margin-left:5px}
+/* Compact variant for dense rows (import list, group header). */
+.rank-badge.sm{font-size:7px;padding:2px 3px;min-width:15px;margin-left:3px;box-shadow:1px 1px 0 var(--border)}
+
 .lchip{padding:3px 9px;border-radius:20px;font-size:9px;font-weight:800;border:2px solid var(--border);box-shadow:1px 1px 0 var(--border);font-family:'Nunito',sans-serif;background:#ffffff;color:var(--muted)}
 .lchip.done{background:var(--gold);color:var(--text)}
 
@@ -181,6 +191,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .score-card{background:#ffffff;border:2px solid var(--border);border-radius:10px;overflow:hidden;min-width:0;box-shadow:2px 2px 0 var(--border)}
 .score-card.live{border-color:var(--red2)}
 .score-card.final{opacity:.78}
+/* The tiebreaker sits in the grid like any other game, marked out in purple.
+   It never dims when final — it is the one card people come back to check. */
+.score-card.tiebreak{border-color:var(--purple)}
+.score-card.tiebreak.final{opacity:1}
+.sc-tb{display:flex;justify-content:space-between;align-items:center;gap:4px;padding:3px 6px;background:var(--purple-bg);border-top:2px solid var(--border2);font-size:8px;font-weight:900;color:var(--purple);white-space:nowrap;overflow:hidden}
+.sc-tb b{font-size:10px;color:var(--text)}
 .sc-head{padding:3px 6px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;justify-content:space-between;align-items:center;gap:3px;min-width:0}
 .sc-status{font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sc-status.live{color:var(--red2);animation:sc-pulse 1.4s ease-in-out infinite}
@@ -583,6 +599,17 @@ function _calWeekMeta(weekId){
 }
 
 // A group's lock moment for a week = earliest kickoff among the games it actually added.
+// Earliest kickoff of the season's first populated week. This is the real
+// join deadline: once the opening game starts, the pool is under way.
+function seasonOpenLockTs(){
+  var ids=ST.weekIds||[];
+  for(var i=0;i<ids.length;i++){
+    if(!activeGames(ids[i]).length) continue;   // week not built yet — keep looking
+    return groupLockTs(ids[i])||null;
+  }
+  return null;
+}
+
 function groupLockTs(weekId){
   var g=ST.games[weekId]||{}, min=null;
   activeGames(weekId).forEach(function(gid){
@@ -645,6 +672,9 @@ function publishSeasonToHub(metaOnly){
       currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
       weekLabel: curW ? (ST.weekLabels[curW]||("Week "+curW)) : "",
       lockTs: curW ? (groupLockTs(curW)||null) : null,
+      // First kickoff of the opening week — the point after which joining closes.
+      // Null while no games are set, which keeps the pool open to newcomers.
+      seasonLockTs: seasonOpenLockTs(),
       weekState: groupWeekState(curW),
       updatedAt: Date.now()
     };
@@ -1143,7 +1173,70 @@ function _slateEvents(){
       if(_eventMatchesGame(all[i],g)){ out.push(all[i]); return; }
     }
   });
+  // The tiebreaker is usually not one of the pool's own games, so add it here —
+  // it is shown alongside them rather than in a banner of its own.
+  var tbEv=_tiebreakerEvent();
+  if(tbEv && out.indexOf(tbEv)<0) out.push(tbEv);
   return out;
+}
+
+// "9/5 12p" / "9/5 12:45p" — short enough for a third-width card. Top-level so
+// both the score cards and the tiebreaker panel can use it.
+function _compactWhen(ev){
+  var d=(ev&&ev.date)?new Date(ev.date):null;
+  if(!d||isNaN(d.getTime())) return "";
+  var hr=d.getHours(), mn=d.getMinutes();
+  var ap=hr>=12?"p":"a", h12=hr%12; if(h12===0) h12=12;
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+h12+(mn?(":"+("0"+mn).slice(-2)):"")+ap;
+}
+
+// Find the tiebreaker match in the raw feed. Matched on its own because it is
+// frequently outside the pool's own slate and so never survives _slateEvents().
+function _tiebreakerEvent(){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[scoresWeekId()])||{};
+  if(!tb.away||!tb.home) return null;
+  var all=(_scData&&_scData.events)||[];
+  var nA=normalizeTeamName(tb.away), nH=normalizeTeamName(tb.home);
+  for(var i=0;i<all.length;i++){
+    var comp=(all[i].competitions||[])[0]||{};
+    var comps=comp.competitors||[];
+    var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+    var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+    var an=normalizeTeamName((ac.team&&(ac.team.shortDisplayName||ac.team.displayName))||"");
+    var hn=normalizeTeamName((hc.team&&(hc.team.shortDisplayName||hc.team.displayName))||"");
+    if(an===nA&&hn===nH) return all[i];
+  }
+  return null;
+}
+
+// Is this event the week's tiebreaker match?
+function _isTiebreakerEvent(ev){
+  var tbEv=_tiebreakerEvent();
+  return !!(tbEv && ev===tbEv);
+}
+
+// Footer strip inside the tiebreaker's own card: running combined total and the
+// viewer's guess. An admin-confirmed total takes precedence over the live feed.
+function _tiebreakerFooter(ev){
+  var wk=scoresWeekId();
+  var tb=(ST.tiebreaker&&ST.tiebreaker[wk])||{};
+  var guess=((ST.picks[wk]||{})[ST.user]||{}).tb;
+  var total=null;
+  if(tb.actual!=null){
+    total=Number(tb.actual);
+  } else if(ev){
+    var comp=(ev.competitions||[])[0]||{};
+    var comps=comp.competitors||[];
+    var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+    var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+    var st=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+    if(st==="in"||st==="post") total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
+  }
+  var h='<div class="sc-tb">';
+  h+='<span>TOT <b>'+(total==null?"&ndash;":total)+'</b></span>';
+  h+='<span>YOU <b>'+(guess?x(String(guess)):"&ndash;")+'</b></span>';
+  h+='</div>';
+  return h;
 }
 
 function renderScoresInto(){
@@ -1171,15 +1264,6 @@ function renderScoresInto(){
   });
 
   var dateLabel=_wkLabel||new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
-
-  // "9/5 12p" / "9/5 12:45p" — short enough for a third-width card.
-  function _compactWhen(ev){
-    var d=(ev&&ev.date)?new Date(ev.date):null;
-    if(!d||isNaN(d.getTime())) return "";
-    var hr=d.getHours(), mn=d.getMinutes();
-    var ap=hr>=12?"p":"a", h12=hr%12; if(h12===0) h12=12;
-    return (d.getMonth()+1)+"/"+d.getDate()+" "+h12+(mn?(":"+("0"+mn).slice(-2)):"")+ap;
-  }
 
   function card(ev){
     var comp=(ev.competitions||[])[0]; if(!comp) return "";
@@ -1216,13 +1300,15 @@ function renderScoresInto(){
         '</div>';
     }
 
-    return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+'">'+
+    var isTb=_isTiebreakerEvent(ev);
+    return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+(isTb?" tiebreak":"")+'">'+
       '<div class="sc-head">'+
-        '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
+        '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isTb?'&#127942; ':'')+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
         '<span class="sc-detail">'+x(isLive?detail:"")+'</span>'+
       '</div>'+
       teamRow(aName,tcolor(away),aScore,aWin,aLead)+
       teamRow(hName,tcolor(home),hScore,hWin,hLead)+
+      (isTb?_tiebreakerFooter(ev):"")+
       '</div>';
   }
 
@@ -1237,7 +1323,7 @@ function renderScoresInto(){
 
   var ago=_scLastFetch?Math.round((Date.now()-_scLastFetch)/1000):0;
   var h='<div class="scores-date-header">'+
-    '<span>&#9917; '+x(dateLabel)+' &middot; '+events.length+' of '+_slateSize+'</span>'+
+    '<span>&#9917; '+x(dateLabel)+' &middot; '+events.filter(function(e){return !_isTiebreakerEvent(e);}).length+' of '+_slateSize+'</span>'+
     '<button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button>'+
     '</div>';
   if(live.length) h+=section(live,"&#128308; In Progress");
@@ -2058,7 +2144,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result){
       var team=(side==="home"?g.home:g.away)||"TBD";
       var logo=(side==="home"?g.homeLogo:g.awayLogo)||"";
       var pos=RANKINGS[normalizeTeamName(team)];
-      var posBadge=pos?'<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 3px;margin-left:5px;line-height:1.5;vertical-align:middle;flex-shrink:0">'+pos.rank+'</span>':'';
+      var posBadge=pos?'<span class="rank-badge" title="League position">'+pos.rank+'</span>':'';
       h+=logoImg(logo)+'<div class="tp-name">'+x(team)+'</div>'+posBadge;
     }
     h+='</div>';
@@ -2487,7 +2573,7 @@ function renderImportResults(weekId){
     });
     var homePos=RANKINGS[normalizeTeamName(g.home)];
     var awayPos=RANKINGS[normalizeTeamName(g.away)];
-    function posBadge(p){ return p?'<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px">'+p.rank+'</span>':''; }
+    function posBadge(p){ return p?'<span class="rank-badge sm" title="League position">'+p.rank+'</span>':''; }
     h+='<label data-imp-label="'+origIdx+'" style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border2);cursor:pointer'+(isTb?";background:var(--purple-bg)":_alreadyIn?";background:var(--green-bg)":"")+'">';
     h+='<input type="checkbox" data-imp-idx="'+origIdx+'" '+(checked?"checked":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
     h+='<div style="flex:1;min-width:0">';

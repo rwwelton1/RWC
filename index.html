@@ -1165,6 +1165,31 @@ function poolJoinable(pool){
   return ((SC.globalStatuses||{})[pool.id]||"coming-soon") === "open";
 }
 
+// Where a group's own pool data lives: cfb/epl keep picks under data/<id>pool
+// while the hub summary (playerscores + seasonMeta) sits under data/<id>.
+function _groupSeasonMeta(g, pid){
+  var d=(g&&g.data)||{};
+  var node=d[pid]||{};
+  return node.seasonMeta||null;
+}
+
+// Has the opening game of the season already kicked off for this group?
+// Returns false when nothing is scheduled yet, so an empty pool stays joinable.
+function _seasonUnderway(g, pid){
+  var meta=_groupSeasonMeta(g, pid);
+  var ts=meta&&meta.seasonLockTs;
+  if(!ts) return false;
+  return Date.now() >= Number(ts);
+}
+
+// Can this season pool still take new members? Open until the first kickoff of
+// the opening week, regardless of the season-status toggle.
+function _seasonJoinOpen(g, pool){
+  var ss=(SC._poolDates&&SC._poolDates[pool.id]&&SC._poolDates[pool.id].seasonStatus)||"preseason";
+  if(ss==="done") return false;                 // season finished
+  return !_seasonUnderway(g, pool.id);
+}
+
 // First pool in a group that someone could actually join right now, kind-aware.
 // A raw globalStatuses check can never match a season pool — see note above.
 function _firstJoinablePool(g){
@@ -1172,7 +1197,13 @@ function _firstJoinablePool(g){
   ((g&&g.pools)||[]).forEach(function(pid){
     if(found) return;
     var pool=poolById(pid);
-    if(pool && pool.kind==="season"){ if(poolJoinable(pool)) found=pid; return; }
+    if(pool && pool.kind==="season"){
+      // Show the group for the whole season — the row decides between Join and
+      // View standings based on whether the opening game has kicked off.
+      var ss=(SC._poolDates&&SC._poolDates[pid]&&SC._poolDates[pid].seasonStatus)||"preseason";
+      if(ss!=="done") found=pid;
+      return;
+    }
     var st=(SC.globalStatuses||{})[pid]||"coming-soon";
     if(st==="open"||st==="locked") found=pid;   // Live pools stay joinable mid-event
   });
@@ -4893,6 +4924,8 @@ function renderHub() {
         if(openPool){
           var poolDef = POOL_LIBRARY.find(function(p){ return p.id===openPool; });
           var statusLabel = _joinPoolLabel(openPool);
+      // Season pools that are still open to newcomers say so explicitly.
+      if(poolDef && poolDef.kind === "season" && _seasonJoinOpen(g, poolDef)) statusLabel = "Open";
           var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
           var icon = poolDef ? poolDef.icon : "🏆";
           compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span></span>';
@@ -5132,6 +5165,8 @@ function renderHub() {
         var poolDef = null;
         for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
         var statusLabel = _joinPoolLabel(openPool);
+      // Season pools that are still open to newcomers say so explicitly.
+      if(poolDef && poolDef.kind === "season" && _seasonJoinOpen(g, poolDef)) statusLabel = "Open";
         var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
         var scores = ((g.data||{})[openPool]||{}).scores || {};
         var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
@@ -6773,6 +6808,8 @@ function renderGroupsTableTo(tbodyId, groups, query) {
       var poolDef = null;
       for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
       var statusLabel = _joinPoolLabel(openPool);
+      // Season pools that are still open to newcomers say so explicitly.
+      if(poolDef && poolDef.kind === "season" && _seasonJoinOpen(g, poolDef)) statusLabel = "Open";
       var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
       var scores = ((g.data||{})[openPool]||{}).scores || {};
       var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
@@ -6783,6 +6820,8 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     // Decide the row's action from the pool kind and the group's public flag.
     var _isSeason = !!(poolDef && poolDef.kind === "season");
     var _action = "join", _actionHtml = '<span class="join-link">Join &#8250;</span>', _viewUrl = "";
+    // A season pool takes new members right up to its opening kickoff.
+    if(_isSeason && _seasonJoinOpen(g, poolDef)) _isSeason = false;
     if(_isSeason){
       if(g.public){
         _action = "view";
