@@ -163,6 +163,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .score-card{background:#ffffff;border:2px solid var(--border);border-radius:10px;overflow:hidden;min-width:0;box-shadow:2px 2px 0 var(--border)}
 .score-card.live{border-color:var(--red2)}
 .score-card.final{opacity:.78}
+/* The tiebreaker sits in the grid like any other game, marked out in purple.
+   It never dims when final — it is the one card people come back to check. */
+.score-card.tiebreak{border-color:var(--purple)}
+.score-card.tiebreak.final{opacity:1}
+.sc-tb{display:flex;justify-content:space-between;align-items:center;gap:4px;padding:3px 6px;background:var(--purple-bg);border-top:2px solid var(--border2);font-size:8px;font-weight:900;color:var(--purple);white-space:nowrap;overflow:hidden}
+.sc-tb b{font-size:10px;color:var(--text)}
 .sc-head{padding:3px 6px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;justify-content:space-between;align-items:center;gap:3px;min-width:0}
 .sc-status{font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sc-status.live{color:var(--red2);animation:sc-pulse 1.4s ease-in-out infinite}
@@ -1064,6 +1070,10 @@ function _slateEvents(){
       if(_eventMatchesGame(all[i],g)){ out.push(all[i]); return; }
     }
   });
+  // The tiebreaker is usually not one of the pool's own games, so add it here —
+  // it is shown alongside them rather than in a banner of its own.
+  var tbEv=_tiebreakerEvent();
+  if(tbEv && out.indexOf(tbEv)<0) out.push(tbEv);
   return out;
 }
 
@@ -1096,65 +1106,33 @@ function _tiebreakerEvent(){
   return null;
 }
 
-// Tiebreaker panel: running combined total, the viewer's guess, and the gap.
-function _tiebreakerPanel(){
+// Is this event the week's tiebreaker match?
+function _isTiebreakerEvent(ev){
+  var tbEv=_tiebreakerEvent();
+  return !!(tbEv && ev===tbEv);
+}
+
+// Footer strip inside the tiebreaker's own card: running combined total and the
+// viewer's guess. An admin-confirmed total takes precedence over the live feed.
+function _tiebreakerFooter(ev){
   var wk=scoresWeekId();
   var tb=(ST.tiebreaker&&ST.tiebreaker[wk])||{};
-  if(!tb.away||!tb.home) return "";
   var guess=((ST.picks[wk]||{})[ST.user]||{}).tb;
-  var ev=_tiebreakerEvent();
-
-  var total=null, state="", detail="";
+  var total=null;
   if(tb.actual!=null){
-    total=Number(tb.actual); state="post";                 // admin-confirmed final
+    total=Number(tb.actual);
   } else if(ev){
     var comp=(ev.competitions||[])[0]||{};
     var comps=comp.competitors||[];
     var ac=comps.find(function(c){return c.homeAway==="away";})||{};
     var hc=comps.find(function(c){return c.homeAway==="home";})||{};
-    state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
-    detail=(comp.status&&comp.status.type&&comp.status.type.shortDetail)||"";
-    if(state==="in"||state==="post") total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
+    var st=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+    if(st==="in"||st==="post") total=(parseInt(ac.score)||0)+(parseInt(hc.score)||0);
   }
-
-  var isLive=(state==="in"), isFinal=(state==="post"||tb.actual!=null);
-  var accent=isLive?"var(--red2)":isFinal?"var(--blue)":"var(--border2)";
-  var h='<div style="border:2px solid '+accent+';border-radius:10px;background:#fff;box-shadow:2px 2px 0 var(--border);margin:2px 0 10px;overflow:hidden">';
-  h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 8px;background:var(--purple-bg);border-bottom:2px solid var(--border2)">';
-  h+='<span style="font-size:8px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--purple)">&#127942; Tiebreaker</span>';
-  h+='<span style="font-size:8px;font-weight:900;color:'+(isLive?"var(--red2)":isFinal?"var(--blue)":"var(--dim)")+'">'+
-       (isLive?"&#9679; LIVE"+(detail?" &middot; "+x(detail):""):isFinal?"Final":(ev?x(_compactWhen(ev)):"Not started"))+'</span>';
+  var h='<div class="sc-tb">';
+  h+='<span>TOT <b>'+(total==null?"&ndash;":total)+'</b></span>';
+  h+='<span>YOU <b>'+(guess?x(String(guess)):"&ndash;")+'</b></span>';
   h+='</div>';
-
-  h+='<div style="padding:7px 9px">';
-  h+='<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:5px">'+
-       x((tb.away||"")+" @ "+(tb.home||""))+'</div>';
-  h+='<div style="display:flex;align-items:stretch;gap:6px">';
-  // Running combined total
-  h+='<div style="flex:1;text-align:center;background:var(--cream);border-radius:7px;padding:5px 3px">';
-  h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Combined</div>';
-  h+='<div style="font-size:19px;font-weight:900;color:'+(isLive?"var(--red2)":"var(--text)")+';line-height:1.2">'+(total==null?"&ndash;":total)+'</div>';
-  h+='</div>';
-  // The viewer's guess
-  h+='<div style="flex:1;text-align:center;background:var(--cream);border-radius:7px;padding:5px 3px">';
-  h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Your guess</div>';
-  h+='<div style="font-size:19px;font-weight:900;color:'+(guess?"var(--text)":"var(--dim)")+';line-height:1.2">'+(guess?x(String(guess)):"&ndash;")+'</div>';
-  h+='</div>';
-  // Distance from the guess, once there is something to compare against
-  if(guess&&total!=null){
-    var diff=Math.abs(Number(guess)-total);
-    h+='<div style="flex:1;text-align:center;background:'+(diff===0?"var(--green-bg)":"var(--cream)")+';border-radius:7px;padding:5px 3px">';
-    h+='<div style="font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">'+(isFinal?"Off by":"Off by now")+'</div>';
-    h+='<div style="font-size:19px;font-weight:900;color:'+(diff===0?"var(--green)":"var(--text)")+';line-height:1.2">'+(diff===0?"&#10003;":diff)+'</div>';
-    h+='</div>';
-  }
-  h+='</div>';
-  if(!guess){
-    h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:5px">No guess entered &mdash; add one on the Picks tab.</div>';
-  } else if(isLive){
-    h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:5px">Still climbing &mdash; totals only count at full time.</div>';
-  }
-  h+='</div></div>';
   return h;
 }
 
@@ -1169,7 +1147,7 @@ function renderScoresInto(){
   }
   var events=_slateEvents();
   if(!events.length){
-    el.innerHTML=_tiebreakerPanel()+'<div class="scores-empty">&#127944;<br>Waiting on scores for '+x(_wkLabel)+'.<br><span style="font-size:9px;color:var(--dim)">Check back nearer kickoff</span>'+
+    el.innerHTML='<div class="scores-empty">&#127944;<br>Waiting on scores for '+x(_wkLabel)+'.<br><span style="font-size:9px;color:var(--dim)">Check back nearer kickoff</span>'+
       '<br><br><button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button></div>';
     return;
   }
@@ -1219,13 +1197,15 @@ function renderScoresInto(){
         '</div>';
     }
 
-    return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+'">'+
+    var isTb=_isTiebreakerEvent(ev);
+    return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+(isTb?" tiebreak":"")+'">'+
       '<div class="sc-head">'+
-        '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
+        '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isTb?'&#127942; ':'')+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
         '<span class="sc-detail">'+x(isLive?detail:"")+'</span>'+
       '</div>'+
       teamRow(aName,tcolor(away),aScore,aWin,aLead)+
       teamRow(hName,tcolor(home),hScore,hWin,hLead)+
+      (isTb?_tiebreakerFooter(ev):"")+
       '</div>';
   }
 
@@ -1240,10 +1220,9 @@ function renderScoresInto(){
 
   var ago=_scLastFetch?Math.round((Date.now()-_scLastFetch)/1000):0;
   var h='<div class="scores-date-header">'+
-    '<span>&#127944; '+x(dateLabel)+' &middot; '+events.length+' of '+_slateSize+'</span>'+
+    '<span>&#127944; '+x(dateLabel)+' &middot; '+events.filter(function(e){return !_isTiebreakerEvent(e);}).length+' of '+_slateSize+'</span>'+
     '<button class="scores-refresh" onclick="fetchScoreboard()">&#8635; Refresh</button>'+
     '</div>';
-  h+=_tiebreakerPanel();
   if(live.length) h+=section(live,"&#128308; In Progress");
   h+=section(pre,"&#128336; Upcoming");
   h+=section(done,"&#10003; Final");
@@ -2169,7 +2148,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     } else if(sel) cls+=" mypick";
     if(effectiveCanPick) cls+=" clickable";
     h+='<div class="'+cls+'" data-pick-week="'+weekId+'" data-pick-gid="'+gid+'" data-pick-side="'+side+'">';
-    var teamRank=RANKINGS[normalizeTeamName(team)];
+    var teamRank=rankFor(team, side==="away"?g.awayId:g.homeId);
     var rankBadge=teamRank?'<span style="font-size:8px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 3px;margin-left:5px;line-height:1.5;vertical-align:middle;flex-shrink:0">#'+teamRank.rank+'</span>':'';
     h+='<div style="display:flex;align-items:center;flex:1;min-width:0">'+logoImg(logo)+'<div class="tp-name">'+x(team)+'</div>'+rankBadge+'</div>';
     h+='<div class="tp-spread">'+spreadLabel(g,side)+'</div>';
@@ -2587,12 +2566,12 @@ function renderImportResults(weekId){
   var selCount=Object.keys(ST.importSelected).length;
   var filteredGames=ST.importGames.filter(function(g){
     var confOk=!ST.importConf||(g.awayConf===ST.importConf||g.homeConf===ST.importConf);
-    var rankOk=!ST.importTop25||(RANKINGS[normalizeTeamName(g.away)]||RANKINGS[normalizeTeamName(g.home)]);
+    var rankOk=!ST.importTop25||(rankFor(g.away,g.awayId)||rankFor(g.home,g.homeId));
     return confOk&&rankOk;
   });
 
   h+='<div style="padding:6px 10px;border-top:1px solid var(--border2);display:flex;gap:5px;flex-wrap:wrap">';
-  var _haveRanks=!!Object.keys(RANKINGS||{}).length;
+  var _haveRanks=!!(Object.keys(RANKINGS_BY_ID||{}).length||Object.keys(RANKINGS||{}).length);
   h+='<button id="b-imp-top25"'+(_haveRanks?'':' disabled title="Rankings not loaded yet"')+' style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(_haveRanks?'':'opacity:.45;cursor:not-allowed;')+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#fff;color:var(--muted)')+'"># '+x(_haveRanks?RANKINGS_SOURCE:"Top 25")+'</button>';
   CONFS.forEach(function(c){
     var active=ST.importConf===c.v;
@@ -2621,8 +2600,8 @@ function renderImportResults(weekId){
     var _alreadyIn = Object.keys(_existingNow).some(function(gid){
       var gm=_existingNow[gid]; return gm&&gm.away&&gm.home&&_gameKey(gm.away,gm.home)===_gameKey(g.away,g.home);
     });
-    var awayRank=RANKINGS[normalizeTeamName(g.away)];
-    var homeRank=RANKINGS[normalizeTeamName(g.home)];
+    var awayRank=rankFor(g.away,g.awayId);
+    var homeRank=rankFor(g.home,g.homeId);
     h+='<label data-imp-label="'+origIdx+'" style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border2);cursor:pointer'+(disable?";opacity:.4":"")+(isTb?";background:var(--purple-bg)":_alreadyIn?";background:var(--green-bg)":"")+'">';
     h+='<input type="checkbox" data-imp-idx="'+origIdx+'" '+(checked?"checked":"")+(disable?" disabled":"")+' style="width:16px;height:16px;flex-shrink:0;accent-color:var(--gold)">';
     h+='<div style="flex:1;min-width:0">';
@@ -2642,7 +2621,7 @@ function renderImportResults(weekId){
     h+='<div style="font-size:9px;color:var(--muted)">'+meta+'</div>';
     h+='</div></label>';
   });
-  if(!filteredGames.length) h+='<div style="font-size:10px;color:var(--muted);padding:10px;text-align:center">No games match the filter</div>';
+  if(!filteredGames.length) h+='<div style="font-size:10px;color:var(--muted);padding:10px;text-align:center">No games match this filter &mdash; tap it again to clear</div>';
   h+='</div>';
   h+='<div style="padding:8px 10px;border-top:1px solid var(--border2)">';
   h+='<button class="btn btn-green" id="b-add-imported" style="width:100%;font-size:11px">Set '+x(ST.weekLabels[weekId]||weekId)+' to these '+selCount+' game'+(selCount!==1?'s':'')+'</button>';
@@ -2960,7 +2939,7 @@ function renderGroupPicks(){
       favSpread="PK";
     } else {
       favName=g.favSide==="away"?(g.away||""):(g.home||"");
-      favRank=RANKINGS[normalizeTeamName(favName)]||null;
+      favRank=rankFor(favName, g.favSide==="away"?g.awayId:g.homeId);
       favSpread=x(favName)+(favRank?'<span style="font-size:7px;font-weight:900;color:var(--gold-dark);background:var(--gold-bg);border:1px solid var(--gold);border-radius:3px;padding:0 2px;margin-left:2px;line-height:1.4;vertical-align:middle">#'+favRank.rank+'</span>':'')+' -'+g.spread;
     }
     h+='<div style="font-size:8px;color:var(--muted);font-weight:800;white-space:nowrap">'+favSpread+'</div>';
@@ -3641,7 +3620,19 @@ var _fieldDebounce={};
 })();
 
 // ── CFB Rankings ──────────────────────────────────────────
-var RANKINGS = {};
+var RANKINGS = {};          // normalized-name → {rank, source}
+var RANKINGS_BY_ID = {};    // ESPN team id → {rank, source}  (the reliable key)
+
+// Rank for a team, preferring the ESPN id. `name` is a fallback for older weeks
+// whose games were stored before ids were captured.
+function rankFor(name, id){
+  if(id && RANKINGS_BY_ID[String(id)]) return RANKINGS_BY_ID[String(id)];
+  if(name){
+    var r=RANKINGS[normalizeTeamName(name)];
+    if(r) return r;
+  }
+  return null;
+}
 var RANKINGS_SOURCE = "Top 25";   // set once the poll loads (AP / Coaches / CFP) // normalized team name → {rank, source}
 
 // Common CFB name variants that differ between hand entry and ESPN's feed.
@@ -3750,15 +3741,26 @@ function fetchRankings(){
       if(!poll) return;
       var n2=nameOfPoll(poll);
       var source=(poll===cfp)?"CFP":(poll===ap)?"AP":(poll===coaches)?"Coaches":(poll.shortName||"Poll");
-      var map={};
+      var map={}, byId={};
       ranksOf(poll).forEach(function(entry){
         var t=entry.team||{};
-        var nm=t.shortDisplayName||t.displayName||t.name||t.nickname;
         var rank=entry.current!=null?entry.current:(entry.rank!=null?entry.rank:null);
-        if(nm&&rank) map[normalizeTeamName(nm)]={rank:Number(rank),source:source};
+        if(!rank) return;
+        var rec={rank:Number(rank),source:source};
+        if(t.id) byId[String(t.id)]=rec;
+        // Index every name the feed gives. `location` is the school ("Ohio State");
+        // `name` is usually only the nickname ("Buckeyes") so it is indexed last
+        // and never relied upon on its own.
+        [t.location, t.shortDisplayName, t.displayName, t.abbreviation, t.nickname, t.name]
+          .forEach(function(nm){
+            if(!nm) return;
+            var k=normalizeTeamName(nm);
+            if(k && !map[k]) map[k]=rec;
+          });
       });
-      if(!Object.keys(map).length) return;
+      if(!Object.keys(byId).length && !Object.keys(map).length) return;
       RANKINGS=map;
+      RANKINGS_BY_ID=byId;
       RANKINGS_SOURCE=source;
       // Redraw whatever is on screen — the import list, pick cards and group grid
       // all show rank badges and were built before this resolved.
