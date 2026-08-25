@@ -521,7 +521,7 @@ var EPL_CALENDAR = {};        // globalSettings/poolDates/epl/weeks  {weekNo:{st
 var EPL_SEASON_STATUS = "";   // globalSettings/poolDates/epl/seasonStatus  (in-season|done|preseason)
 
 // Which week is "current" per the GLOBAL calendar: the week whose [start,end] window
-// contains now. Falls back to the page's kickoff-based currentWeekId() if no calendar set.
+// contains now. Falls back to the page's kickoff-based displayWeekId() if no calendar set.
 function calendarCurrentWeek(){
   var now=Date.now();
   var keys=Object.keys(EPL_CALENDAR||{});
@@ -610,7 +610,7 @@ var _seasonSyncTimer=null;
 // metaOnly=true → only the seasonMeta line changed (calendar / season status); skip the
 // expensive score recompute entirely and write just the meta.
 // Which matchweek the hub card should advertise (see note above).
-function hubDisplayWeek(){
+function displayWeekId(){
   var cur=calendarCurrentWeek();
   if(!cur) return cur;
   if(groupWeekState(cur)!=="final") return cur;   // still open or live — show it as-is
@@ -632,7 +632,7 @@ function publishSeasonToHub(metaOnly){
   _seasonSyncTimer=setTimeout(function(){
     // Build the seasonMeta line (cheap — always computed). Uses the display week,
     // NOT the scoring week: the card should point at what players can act on.
-    var curW=hubDisplayWeek();
+    var curW=displayWeekId();
     var meta={
       seasonStatus: EPL_SEASON_STATUS || "in-season",
       currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
@@ -809,16 +809,16 @@ function loadData(){
         ST.weekLabels=meta.weekLabels||{};
         ST._weekMeta=meta.weekMeta||{};
         if(!ST._weekInit&&ST.weekIds.length){
-          ST.curWeek=currentWeekId(); ST._weekInit=true;
+          ST.curWeek=displayWeekId(); ST._weekInit=true;
           // Pre-populate from cache for instant render
           var cached=_loadPickCache(ST.curWeek);
           if(cached&&!ST.picks[ST.curWeek]){ ST.picks[ST.curWeek]=cached; scheduleDraw(); }
           subscribePicksForWeek(ST.curWeek);
         } else if(ST.curWeek&&ST.weekIds.indexOf(ST.curWeek)===-1){
-          ST.curWeek=currentWeekId();
+          ST.curWeek=displayWeekId();
           subscribePicksForWeek(ST.curWeek);
         } else if(!ST.curWeek&&ST.weekIds.length){
-          ST.curWeek=currentWeekId();
+          ST.curWeek=displayWeekId();
           subscribePicksForWeek(ST.curWeek);
         }
         scheduleDraw();
@@ -1871,15 +1871,16 @@ function weekDropdown(curWeek, extraContent){
   var h='<div class="week-select-bar">';
   h+='<select class="week-select-main" id="week-dropdown">';
   // Build visible weeks: admin sees all, players see only open/completed weeks
+  var _cur=displayWeekId();
   var showWeeks=ST.admin?ST.weekIds:ST.weekIds.filter(function(w){
     if(ST.locked[w]) return true;
-    if(w===currentWeekId()) return true;
+    if(w===_cur) return true;
     var games=ST.games[w]||{};
     return GAME_IDS.some(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
   });
   showWeeks.forEach(function(w){
     var lbl=ST.weekLabels[w]||w;
-    var isCurrent=w===currentWeekId();
+    var isCurrent=w===_cur;
     var isLocked=!!ST.locked[w];
     var suffix=isLocked&&isCurrent?" · Current · Locked":isLocked?" · Final":isCurrent?" · Current":"";
     h+='<option value="'+w+'"'+(curWeek===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
@@ -1972,16 +1973,17 @@ function renderPicks(){
   // Admin sees all weeks
   var visibleWeekIds=ST.weekIds;
   if(!ST.admin){
+    var _curVis=displayWeekId();
     visibleWeekIds=ST.weekIds.filter(function(w){
       if(ST.locked[w]) return true; // completed weeks always visible
-      if(w===currentWeekId()) return true; // current open week
+      if(w===_curVis) return true; // current open week
       // Has any games been filled in? If yes it's been opened
       var games=ST.games[w]||{};
       var hasGames=GAME_IDS.some(function(gid){ var g=games[gid]; return g&&g.away&&g.home; });
       return hasGames;
     });
   }
-  var weekId=ST.curWeek||currentWeekId();
+  var weekId=ST.curWeek||displayWeekId();
   // All weeks locked — show a clear message
   var allLocked=ST.weekIds.length>0&&ST.weekIds.every(function(w){return ST.locked[w];});
   if(allLocked&&!weekId){
@@ -2141,7 +2143,7 @@ function renderStandings(){
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
 
   var completedWeeks=ST.weekIds.filter(function(w){return weekIsComplete(w);});
-  var curWeekId=currentWeekId();
+  var curWeekId=displayWeekId();
   var curLocked=!!(curWeekId&&weekIsComplete(curWeekId));
   var weeksPlayed=completedWeeks.length;
   var weeksRemaining=Math.max(0, SEASON_WEEKS - weeksPlayed);
@@ -2456,9 +2458,10 @@ function renderAdmin(){
   h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:6px 10px 0">Choose a matchweek, set its dates, then fetch</div>';
   h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px 8px;border-bottom:1px solid var(--border2)">';
   h+='<select class="week-select-main" id="week-dropdown" style="flex:1;min-width:0;border-radius:8px">';
+  var _curAdm=displayWeekId();
   ST.weekIds.forEach(function(w){
     var lbl=ST.weekLabels[w]||w;
-    var isCurrent=w===currentWeekId();
+    var isCurrent=w===_curAdm;
     var isLocked=!!ST.locked[w];
     var suffix=isLocked&&isCurrent?" · Locked":isLocked?" · Final":isCurrent?" · Current":"";
     h+='<option value="'+w+'"'+(weekId===w?" selected":"")+'>'+x(lbl+suffix)+'</option>';
@@ -2635,7 +2638,7 @@ function renderGroupPicks(){
   }
 
   // Week selector — dropdown with Compare button
-  var weekId=ST.curWeek||currentWeekId();
+  var weekId=ST.curWeek||displayWeekId();
   var compareBtnHtml='<button class="gp-compare-btn'+(ST.compareMode?" active":"")+'" id="b-compare-toggle">'+(ST.compareMode?'&#10005; Clear':'&#9878; Compare')+'</button>';
   h+=weekDropdown(weekId, compareBtnHtml);
   if(ST.compareMode){
@@ -2850,7 +2853,7 @@ function draw(){
   var tabs=[{id:"standings",lbl:"&#128202; Standings"},{id:"picks",lbl:"&#9917; Picks"},{id:"group",lbl:"&#128101; Group"},{id:"scores",lbl:"&#128308; Scores"}];
   // Missing picks badge — only show to the current user if THEY haven't finished, within 4h of kickoff
   if(ST.weekIds.length&&ST.user){
-    var _cw=currentWeekId();
+    var _cw=displayWeekId();
     if(_cw&&!ST.locked[_cw]){
       var _firstKick=getFirstKickoff(_cw);
       var _hoursToKick=_firstKick?(_firstKick-Date.now())/(1000*60*60):null;
@@ -2970,7 +2973,7 @@ function bind(){
     try{ localStorage.removeItem("epl_user_"+(GROUP_ID||"g")); }catch(e){}
     draw();
   });
-  el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||currentWeekId()); });
+  el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
 
   // Tiebreaker guess input (picks tab)
