@@ -1165,6 +1165,26 @@ function poolJoinable(pool){
   return ((SC.globalStatuses||{})[pool.id]||"coming-soon") === "open";
 }
 
+// First pool in a group that someone could actually join right now, kind-aware.
+// A raw globalStatuses check can never match a season pool — see note above.
+function _firstJoinablePool(g){
+  var found=null;
+  ((g&&g.pools)||[]).forEach(function(pid){
+    if(found) return;
+    var pool=poolById(pid);
+    if(pool && pool.kind==="season"){ if(poolJoinable(pool)) found=pid; return; }
+    var st=(SC.globalStatuses||{})[pid]||"coming-soon";
+    if(st==="open"||st==="locked") found=pid;   // Live pools stay joinable mid-event
+  });
+  return found;
+}
+// Short state label for that pool: season pools read "In Season", not Open/Live.
+function _joinPoolLabel(pid){
+  var pool=poolById(pid);
+  if(pool && pool.kind==="season") return "In Season";
+  return ((SC.globalStatuses||{})[pid]==="locked") ? "Live" : "Open";
+}
+
 function poolState(pool, g){
   var kind = (pool && pool.kind) || "single";
   if(kind==="season"){
@@ -4869,14 +4889,11 @@ function renderHub() {
       _hubFiltered.forEach(function(g){
         var playerCount = (g.players||[]).length;
         var openPool = null, compHtml = '<span style="color:#334155;font-size:10px">—</span>';
-        (g.pools||[]).forEach(function(pid){
-          var status = (SC.globalStatuses||{})[pid]||"coming-soon";
-          if((status==="open"||status==="locked") && !openPool) openPool = pid;
-        });
+        openPool = _firstJoinablePool(g);
         if(openPool){
           var poolDef = POOL_LIBRARY.find(function(p){ return p.id===openPool; });
-          var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Live" : "Open";
-          var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
+          var statusLabel = _joinPoolLabel(openPool);
+          var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
           var icon = poolDef ? poolDef.icon : "🏆";
           compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span></span>';
         }
@@ -5110,15 +5127,12 @@ function renderHub() {
     filtered.forEach(function(g){
       var playerCount = (g.players||[]).length;
       var openPool = null, compHtml = '<span style="color:#334155;font-size:10px">—</span>';
-      (g.pools||[]).forEach(function(pid){
-        var status = (SC.globalStatuses||{})[pid]||"coming-soon";
-        if((status==="open"||status==="locked") && !openPool) openPool = pid;
-      });
+      openPool = _firstJoinablePool(g);
       if(openPool) {
         var poolDef = null;
         for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
-        var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Live" : "Open";
-        var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
+        var statusLabel = _joinPoolLabel(openPool);
+        var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
         var scores = ((g.data||{})[openPool]||{}).scores || {};
         var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
         var myRank = myName ? ranked.indexOf(myName)+1 : 0;
@@ -6738,11 +6752,8 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     // Only surface groups you can actually join right now: they must have at least one
     // pool that is currently "open" or "locked" (Live). Groups with no pools, all
     // coming-soon pools, or all completed pools are hidden from Find-a-Group.
-    var pools = g.pools || [];
-    var hasJoinablePool = pools.some(function(pid){
-      var st = (SC.globalStatuses||{})[pid] || "coming-soon";
-      return st === "open" || st === "locked";
-    });
+    // Kind-aware: season pools are joinable for the whole season.
+    var hasJoinablePool = !!_firstJoinablePool(g);
     if(!hasJoinablePool) return false;
     if(!q) return true;
     return (g.name||"").toLowerCase().indexOf(q)>=0;
@@ -6756,16 +6767,13 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     var playerCount = (g.players||[]).length;
     // Competition column — same as hub
     var openPool = null;
-    (g.pools||[]).forEach(function(pid){
-      var status = (SC.globalStatuses||{})[pid]||"coming-soon";
-      if((status==="open"||status==="locked") && !openPool) openPool = pid;
-    });
+    openPool = _firstJoinablePool(g);
     var compHtml = '<span style="color:#334155;font-size:10px">—</span>';
     if(openPool) {
       var poolDef = null;
       for(var _pi=0;_pi<POOL_LIBRARY.length;_pi++){ if(POOL_LIBRARY[_pi].id===openPool){ poolDef=POOL_LIBRARY[_pi]; break; } }
-      var statusLabel = (SC.globalStatuses||{})[openPool]==="locked" ? "Live" : "Open";
-      var statusColor = statusLabel==="Open" ? "#6ee7b7" : "#fbbf24";
+      var statusLabel = _joinPoolLabel(openPool);
+      var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
       var scores = ((g.data||{})[openPool]||{}).scores || {};
       var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
       var myRank = myName ? ranked.indexOf(myName)+1 : 0;
