@@ -506,26 +506,55 @@ function calendarCurrentWeek(){
   var now=Date.now();
   var keys=Object.keys(CFB_CALENDAR||{});
   if(!keys.length) return currentWeekId();
-  // Match a week whose window contains now.
-  for(var i=0;i<keys.length;i++){
-    var w=CFB_CALENDAR[keys[i]]||{};
-    var s=w.start?new Date(w.start).getTime():null;
-    var e=w.end?new Date(w.end).getTime():null;
-    if(s!==null && e!==null && now>=s && now<=e) return _calWeekToId(keys[i]);
+  var GRACE_MS=60*60*60*1000;   // keep a finished week on screen for 60h
+
+  var nums=keys.map(Number).filter(function(n){return !isNaN(n);}).sort(function(a,b){return a-b;});
+  if(!nums.length) return currentWeekId();
+  function startOf(n){ var w=CFB_CALENDAR[n]||{}; return w.start?new Date(w.start).getTime():null; }
+  function endOf(n){ var w=CFB_CALENDAR[n]||{}; return w.end?new Date(w.end).getTime():null; }
+
+  // 1. Inside a window.
+  for(var i=0;i<nums.length;i++){
+    var s0=startOf(nums[i]), e0=endOf(nums[i]);
+    if(s0!==null&&e0!==null&&now>=s0&&now<=e0) return _calWeekToId(nums[i]);
   }
-  // Before the first window → first week; after the last → last week.
-  var nums=keys.map(Number).sort(function(a,b){return a-b;});
-  var firstW=CFB_CALENDAR[nums[0]], lastW=CFB_CALENDAR[nums[nums.length-1]];
-  if(firstW&&firstW.start&&now<new Date(firstW.start).getTime()) return _calWeekToId(nums[0]);
+  // 2. Before the season opens.
+  var firstStart=startOf(nums[0]);
+  if(firstStart!==null&&now<firstStart) return _calWeekToId(nums[0]);
+  // 3. In a gap (every Tue/Wed): the week that just ended, while within grace.
+  var lastEnded=null;
+  for(var j=0;j<nums.length;j++){
+    var ej=endOf(nums[j]);
+    if(ej!==null&&now>ej) lastEnded=nums[j];
+  }
+  if(lastEnded!==null){
+    var le=endOf(lastEnded);
+    if(le!==null&&now<=le+GRACE_MS) return _calWeekToId(lastEnded);
+  }
+  // 4. Otherwise the next week that hasn't started yet.
+  for(var k=0;k<nums.length;k++){
+    var sk=startOf(nums[k]);
+    if(sk!==null&&sk>now) return _calWeekToId(nums[k]);
+  }
+  // 5. Past the final window — the season really is over.
   return _calWeekToId(nums[nums.length-1]);
 }
+
 // Map a calendar week number to the pool's internal weekId (they may differ in format).
 function _calWeekToId(weekNo){
-  // Try to find a weekId whose guessed number matches; else assume weekId IS the number.
+  // 1. Exact match on the stored ESPN week number. This is the only thing that
+  //    resolves "Conf Championships", whose label carries no digits.
   for(var i=0;i<ST.weekIds.length;i++){
     var wid=ST.weekIds[i];
-    if(String(guessWeekNumber(ST.weekLabels[wid]||wid))===String(weekNo)) return wid;
+    var m=(ST._weekMeta&&ST._weekMeta[wid])||{};
+    if(m.espnWeek!=null && String(m.espnWeek)===String(weekNo)) return wid;
   }
+  // 2. Fall back to a number parsed out of the label ("Week 7" → 7).
+  for(var j=0;j<ST.weekIds.length;j++){
+    var wid2=ST.weekIds[j];
+    if(String(guessWeekNumber(ST.weekLabels[wid2]||wid2))===String(weekNo)) return wid2;
+  }
+  // 3. Last resort: assume the weekId IS the number.
   return String(weekNo);
 }
 function _calWeekMeta(weekId){
@@ -568,13 +597,34 @@ function invalidateAllWeekCache(){ _weekPicksCache={}; }
 var _seasonSyncTimer=null;
 // metaOnly=true → only the seasonMeta line changed (calendar / season status); skip the
 // expensive score recompute entirely and write just the meta.
+// Which week the hub card should advertise (see note above).
+function hubDisplayWeek(){
+  var cur=calendarCurrentWeek();
+  if(!cur) return cur;
+  // Guard 1: only treat the week as done when its results are in (weekIsComplete
+  // also returns true for an admin-locked week). Deliberately stricter than
+  // groupWeekState, which calls a week final as soon as the calendar window ends.
+  if(!weekIsComplete(cur)) return cur;
+  var i=ST.weekIds.indexOf(cur);
+  if(i<0) return cur;
+  for(var j=i+1;j<ST.weekIds.length;j++){
+    var w=ST.weekIds[j];
+    // Guard 2: games must be entered before a week can be called open.
+    if(!activeGames(w).length) continue;
+    if(weekIsComplete(w)) continue;          // already played out
+    return w;
+  }
+  return cur;   // nothing further ready, or the season is over
+}
+
 function publishSeasonToHub(metaOnly){
   if(!DB||!GROUP_ID) return;
   if(!(isGroupAdminByUid&&isGroupAdminByUid())) return;   // single trusted writer
   if(_seasonSyncTimer) clearTimeout(_seasonSyncTimer);
   _seasonSyncTimer=setTimeout(function(){
-    // Build the seasonMeta line (cheap — always computed).
-    var curW=calendarCurrentWeek();
+    // Build the seasonMeta line (cheap — always computed). Uses the display week,
+    // NOT the scoring week: the card should point at what players can act on.
+    var curW=hubDisplayWeek();
     var meta={
       seasonStatus: CFB_SEASON_STATUS || "in-season",
       currentWeek: curW ? (guessWeekNumber(ST.weekLabels[curW]||curW)||curW) : null,
