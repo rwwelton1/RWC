@@ -859,7 +859,7 @@ var BADGE_LIST = [
   {id:"bronze",      icon:"🎽", name:"Bronze Age",       rarity:"common",    desc:"Finish 3rd in any pool.",                                              category:"Placement"},
   {id:"triple_crown",icon:"💎", name:"Triple Crown",     rarity:"mythic",    desc:"Win 3 pools each in a different sport.",                                category:"Placement"},
   {id:"heptathlon",  icon:"🌐", name:"Heptathlete",      rarity:"legendary", desc:"Compete in 7 different sports.",                                       category:"Multi-sport"},
-  {id:"perfectionist",icon:"💯",name:"Perfectionist",    rarity:"epic",      desc:"Win a pick'em pool with a perfect score.",                             category:"Placement"},
+  {id:"perfectionist",icon:"💯",name:"Perfectionist",    rarity:"epic",      desc:"Go perfect for a week — every pick correct (55 in CFB, 10 in the Prem).", category:"Placement"},
   {id:"landslide",   icon:"🏔️", name:"Landslide",        rarity:"epic",      desc:"Win a pool by 15 or more points.",                                     category:"Margin"},
   {id:"heartbreak",  icon:"💔", name:"Heartbreaker",     rarity:"uncommon",  desc:"Finish 2nd twice in the same sport.",                                  category:"Margin"},
   {id:"veteran",     icon:"🎗️",name:"Grizzled Veteran", rarity:"epic",      desc:"Compete in 50 or more pools.",                                         category:"General"},
@@ -1133,7 +1133,18 @@ function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(i
 // otherwise a group set to Final never archives a trophy.
 function poolStatusFor(g, poolId){
   var grpSt = (g && g.data && g.data.statuses && g.data.statuses[poolId]);
-  return grpSt || (SC.globalStatuses||{})[poolId] || "coming-soon";
+  if(grpSt) return grpSt;                       // explicit per-group override wins
+  // Season pools express their state as seasonStatus, not as a pool status. Map
+  // it onto the same vocabulary so everything downstream — badges especially —
+  // can treat a finished season like any other finished pool.
+  var pool = poolById(poolId);
+  if(pool && pool.kind === "season"){
+    var ss = (SC._poolDates && SC._poolDates[poolId] && SC._poolDates[poolId].seasonStatus) || null;
+    if(ss === "done")      return "complete";
+    if(ss === "in-season") return "locked";
+    if(ss === "preseason") return "open";
+  }
+  return (SC.globalStatuses||{})[poolId] || "coming-soon";
 }
 
 // ── poolState: the kind-aware, two-slot status the new card renders from ──────────
@@ -2940,6 +2951,7 @@ function computeAndWritePoolResults(groups, ukey) {
       if(pool.id==="cws" && g.data&&g.data["cws2026"]) _dataKey="cws2026";
       var poolData = (g.data&&g.data[_dataKey])||{};
       var scores = poolData.playerscores || poolData.scores || {};
+      var pstats = poolData.playerstats || {};
       var picks = poolData.picks || {};
       var liveScores = poolData.livescores || {};
       var adminScores = poolData.scores || {};
@@ -2949,7 +2961,10 @@ function computeAndWritePoolResults(groups, ukey) {
       if(myScore === undefined && typeof myScore !== "number") return;
 
       // Sort all players by score (lower=better for golf, higher=better for others)
-      var isGolf = pool.id==="usopen"||pool.id==="masters";
+      // poolIsGolf covers every Golf-sport pool; the old inline check missed PGA
+      // Tour, so it was ranked highest-wins (wrong) and the golf badges — On the
+      // Beach, Birdie Brain, Cap Space — could never apply to it.
+      var isGolf = poolIsGolf(pool);
       var players = (g.players||[]);
       var playerScores = {};
       players.forEach(function(p){
@@ -3038,7 +3053,18 @@ function computeAndWritePoolResults(groups, ukey) {
         allCut:       allCut,
         pickCount:    myPicks.length,
         picksUnderPar: picksUnderPar,
-        correctPct:   null
+        // Season pools publish accuracy; single-event pools don't, so it stays null.
+        correctPct:   (function(){
+                        var mine = pstats[myUkey];
+                        if(!mine || mine.total===undefined || !mine.total) return null;
+                        return (mine.pct!==undefined && mine.pct!==null)
+                          ? Number(mine.pct)
+                          : Number(mine.correct||0)/Number(mine.total);
+                      })(),
+        perfectWeeks: (function(){
+                        var mine = pstats[myUkey];
+                        return mine && mine.perfectWeeks ? Number(mine.perfectWeeks) : 0;
+                      })()
       };
 
       writePoolResultStats(ukey, pool.id, g.id, resultData);
@@ -3450,7 +3476,8 @@ function checkAndRenderBadges(ctx) {
       if(r.myRank===1&&r.margin!==null&&r.margin>=15)         unlock("landslide");
       if(r.myRank===1&&r.margin===0)                          unlock("disco");
       if(r.myRank===2&&r.margin===1)                          unlock("tissue");
-      if(r.myRank===1&&!r.isGolf&&!r.isDraft&&r.correctPct!==null&&r.correctPct!==undefined&&r.correctPct>=1) unlock("perfectionist");
+      if(r.perfectWeeks && r.perfectWeeks>=1) unlock("perfectionist");
+      else if(r.myRank===1&&!r.isGolf&&!r.isDraft&&r.correctPct!==null&&r.correctPct!==undefined&&r.correctPct>=1) unlock("perfectionist");
       if(r.myRank===1&&r.totalPlayers!==null&&r.totalPlayers>=8) unlock("underdog");
       if(r.myRank===1&&r.admin&&r.admin!==ME()&&r.adminRank>1) unlock("troll");
       if(r.myRank===1&&r.hasSalary)                           unlock("cap_win");

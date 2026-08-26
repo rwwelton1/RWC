@@ -752,7 +752,7 @@ function publishSeasonToHub(metaOnly){
     var missing=completed.filter(function(w){ return !_weekPicksCache[w]; });
 
     function computeAndWrite(){
-      var totals={};
+      var totals={}, stats={};
       var curW = calendarCurrentWeek ? calendarCurrentWeek() : ST.curWeek;
       (PARTS||[]).forEach(function(p){
         var total=0;   // p is a uid
@@ -776,10 +776,41 @@ function publishSeasonToHub(metaOnly){
           });
         }
         totals[p]=total;
+
+        // ── Accuracy, for the hub's pick-accuracy badges ──────────────────
+        // A week counts as perfect only if it had games, every one is resolved,
+        // and the player called them all — so an unplayed week can't qualify.
+        var nCorrect=0, nResolved=0, nPerfectWeeks=0;
+        var scanWeeks=completed.slice();
+        if(curW && scanWeeks.indexOf(curW)<0) scanWeeks.push(curW);
+        scanWeeks.forEach(function(w){
+          var wp=(completed.indexOf(w)>=0) ? (_weekPicksCache[w]||{}) : (ST.picks[w]||{});
+          var picks=wp[p]||{};
+          var results=ST.results[w]||{};
+          var act=activeGames(w);
+          if(!act.length) return;
+          var wCorrect=0, wResolved=0;
+          act.forEach(function(gid){
+            var pk=picks[gid], r=results[gid];
+            if(!r) return;                       // not played yet
+            wResolved++;
+            if(pk&&pk.side&&pk.side===r) wCorrect++;
+          });
+          nCorrect+=wCorrect; nResolved+=wResolved;
+          if(wResolved===act.length && wCorrect===act.length) nPerfectWeeks++;
+        });
+        stats[p]={
+          correct:nCorrect,
+          total:nResolved,
+          pct: nResolved>0 ? (nCorrect/nResolved) : null,
+          perfectWeeks:nPerfectWeeks
+        };
       });
-      // One atomic write: scores + meta land together, hub never sees a half-updated state.
+      // One atomic write: scores + stats + meta land together, hub never sees a
+      // half-updated state.
       var upd={};
       upd["groups/"+GROUP_ID+"/data/cfb/playerscores"]=totals;
+      upd["groups/"+GROUP_ID+"/data/cfb/playerstats"]=stats;
       upd["groups/"+GROUP_ID+"/data/cfb/seasonMeta"]=meta;
       DB.ref().update(upd);
     }
