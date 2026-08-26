@@ -177,6 +177,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .sc-status.pre{color:var(--dim)}
 @keyframes sc-pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .sc-detail{font-size:8px;font-weight:700;color:var(--dim);text-align:right;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Broadcaster chip — same blue treatment as the one on the Picks page. */
+.sc-tv{font-size:7.5px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;
+  padding:1px 3px;letter-spacing:.02em;white-space:nowrap;flex-shrink:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .sc-team{display:flex;align-items:center;gap:3px;padding:5px 4px;min-height:26px;min-width:0}
 .sc-team:not(:last-child){border-bottom:1px solid var(--border2)}
 .sc-team.winner .sc-name{color:var(--text);font-weight:900}
@@ -1113,6 +1116,37 @@ function _slateEvents(){
   return out;
 }
 
+// Broadcaster, trimmed to fit a third-width card. ESPN's own shortName is often
+// already an abbreviation (ACCN, SECN, FS1); the map covers the ones it spells
+// out, and anything else falls back to an initialism or a 5-character clip.
+var _TV_SHORT={
+  "ACC NETWORK":"ACCN","SEC NETWORK":"SECN","BIG TEN NETWORK":"BTN",
+  "CBS SPORTS NETWORK":"CBSSN","FOX SPORTS 1":"FS1","FOX SPORTS 2":"FS2",
+  "NFL NETWORK":"NFLN","USA NETWORK":"USA","THE CW":"CW","PARAMOUNT+":"PARA",
+  "PEACOCK":"PCOCK","ESPN NETWORKS":"ESPN","ESPNEWS":"ESPNN","PAC-12 NETWORK":"P12N",
+  "MOUNTAIN WEST NETWORK":"MWN","NBC SPORTS":"NBCSN","AMAZON PRIME VIDEO":"PRIME"
+};
+function _tvShort(name){
+  var up=String(name||"").trim().toUpperCase();
+  if(!up) return "";
+  if(_TV_SHORT[up]) return _TV_SHORT[up];
+  if(up.length<=5) return up;                       // ESPN, ABC, CBS, ACCN, FS1
+  var words=up.split(/[\s\-\/]+/).filter(Boolean);
+  if(words.length>1){                                // multi-word → initialism
+    var ini=words.map(function(w){return w.charAt(0);}).join("");
+    if(ini.length>=2&&ini.length<=5) return ini;
+  }
+  return up.slice(0,5);
+}
+// Pull the TV network off a competition, same fields the schedule import uses.
+function _tvFor(comp){
+  var tv="";
+  var geo=((comp&&comp.geoBroadcasts)||[]).find(function(b){ return b.type&&b.type.shortName==="TV"; });
+  if(geo&&geo.media) tv=geo.media.shortName||geo.media.name||"";
+  if(!tv&&comp&&comp.broadcasts&&comp.broadcasts.length) tv=(comp.broadcasts[0].names||[])[0]||"";
+  return _tvShort(tv);
+}
+
 // "9/5 12p" / "9/5 12:45p" — short enough for a third-width card. Top-level so
 // both the score cards and the tiebreaker panel can use it.
 function _compactWhen(ev){
@@ -1180,6 +1214,7 @@ function renderScoresInto(){
     var state=(status.type&&status.type.state)||"pre";
     var detail=(status.type&&status.type.shortDetail)||"";
     var isLive=state==="in", isFinal=state==="post";
+    var tvNet=_tvFor(comp);
 
     var comps=comp.competitors||[];
     var away=comps.find(function(c){return c.homeAway==="away";})||comps[0]||{};
@@ -1235,7 +1270,9 @@ function renderScoresInto(){
     return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+'">'+
       '<div class="sc-head">'+
         '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
-        '<span class="sc-detail">'+x(isLive?detail:"")+'</span>'+
+        (isLive
+          ? '<span class="sc-detail">'+x(detail)+'</span>'
+          : (tvNet ? '<span class="sc-tv">'+x(tvNet)+'</span>' : '<span class="sc-detail"></span>'))+
       '</div>'+
       teamRow(aName,tcolor(away),aScore,aWin,aLead,tlogo(away))+
       teamRow(hName,tcolor(home),hScore,hWin,hLead,tlogo(home))+
