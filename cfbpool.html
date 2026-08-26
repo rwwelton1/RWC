@@ -1607,23 +1607,35 @@ function setTiebreakerGuess(weekId,value){
     else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/tb").remove();
   }
 }
-function resetAllConf(weekId){
+// Wipe the whole week: every pick and every confidence value. Games that have
+// already kicked off keep theirs — those are final and can't be re-picked.
+function resetAllPicks(weekId){
   if(PUBLIC_VIEW) return;   // read-only spectator
   if(!ST.user){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
   var uk=ST.user;
-  var active=activeGames(weekId);
   if(!ST.picks[weekId]||!ST.picks[weekId][uk]) return;
-  active.forEach(function(gid){
-    if(ST.picks[weekId][uk][gid]){
-      delete ST.picks[weekId][uk][gid].conf;
-      if(DB) DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
-    }
+  var active=activeGames(weekId);
+  var clearable=active.filter(function(gid){
+    if(isGameLocked(weekId,gid)) return false;
+    var p=ST.picks[weekId][uk][gid];
+    return !!(p&&(p.side||p.conf));
+  });
+  if(!clearable.length){ toast("Nothing to clear"); return; }
+  var anyLocked=active.some(function(gid){ return isGameLocked(weekId,gid); });
+  if(!confirm("Clear all "+clearable.length+" of your picks and confidence for this week?"+
+              (anyLocked?"\n\nGames that have already kicked off will keep their picks.":""))) return;
+  // Any pick still inside its undo window would otherwise commit over the wipe.
+  if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
+  _undoPick=null;
+  clearable.forEach(function(gid){
+    delete _pendingPicks[_pendKey(weekId,uk,gid)];
+    delete ST.picks[weekId][uk][gid];
+    if(DB) DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).remove();
   });
   _savePickCache(weekId, uk, ST.picks[weekId][uk]);
-  _updateConfChipsDom(weekId, ST.picks[weekId][uk]);
-  _updateProgressBar(weekId);
-  toast("Confidence reset");
+  toast("&#129529; Picks cleared");
+  draw();
 }
 function setConf(weekId,gid,confRaw){
   if(!ST.user){toast("Select your name first");return;}
@@ -2256,7 +2268,7 @@ function renderPicks(){
         h+='<span style="font-size:9px;font-weight:800;color:var(--red2);flex-shrink:0;text-align:right;white-space:nowrap;padding-left:8px">&#128274; Live</span>';
       }
     }
-    if(ST.user) h+='<button class="btn btn-ghost" id="b-reset-conf" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#8635;</button>';
+    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:11px;padding:3px 9px;flex-shrink:0" title="Clear all picks and confidence">&#129529;</button>';
     if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#128279;</button>';
     if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
@@ -3232,7 +3244,11 @@ function bind(){
     if(!ST.picks[u.weekId]) ST.picks[u.weekId]={};
     if(!ST.picks[u.weekId][u.uk]) ST.picks[u.weekId][u.uk]={};
     var restored=ST.picks[u.weekId][u.uk][u.gid]||{};
-    if(u.prevSide) restored.side=u.prevSide; else delete restored.side;
+    // A cleared pick restores wholesale (side AND confidence); a side change
+    // restores just the side.
+    if(u.prevObj){ restored=JSON.parse(JSON.stringify(u.prevObj)); }
+    else if(u.prevSide) restored.side=u.prevSide;
+    else delete restored.side;
     ST.picks[u.weekId][u.uk][u.gid]=restored;
     _savePickCache(u.weekId, u.uk, restored);
     document.getElementById("toast").classList.remove("show");
@@ -3242,6 +3258,7 @@ function bind(){
     _updateProgressBar(u.weekId);
     // Write the reverted value straight away — there is nothing left to undo.
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
+    if(u.prevObj) draw();   // bring the confidence chips back
   });
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){
     ST.user=null; ST.viewUser=null;
@@ -3249,7 +3266,7 @@ function bind(){
     draw();
   });
   el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
-  el=document.getElementById("b-reset-conf"); if(el) el.addEventListener("click",function(){ if(confirm("Clear all confidence values for this week?")) resetAllConf(ST.curWeek); });
+  el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
 
   // Tiebreaker guess input (picks tab)
   el=document.getElementById("tb-guess-input"); if(el) el.addEventListener("change",function(){
