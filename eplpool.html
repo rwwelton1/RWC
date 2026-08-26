@@ -259,7 +259,10 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
    drops out of the row and the frozen column loses vertical alignment. */
 .gp-name-txt{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Game header */
-.gp-game-head{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:78px;padding:1px 0}
+.gp-game-head{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:78px;padding:1px 0 9px}
+/* Lock sits in the cell's bottom-right corner. The padding above reserves a strip
+   for it so it can't overlap the spread/kickoff line, which runs full width. */
+.gp-lock{position:absolute;right:1px;bottom:0;font-size:8px;line-height:1;opacity:.8;pointer-events:none}
 .gp-logos{display:flex;align-items:center;gap:3px;justify-content:center}
 .gp-logo{width:21px;height:21px;object-fit:contain;border-radius:3px}
 .gp-logo-fallback{width:22px;height:22px;border-radius:3px;background:var(--border2);display:inline-block}
@@ -1659,15 +1662,19 @@ function resetAllPicks(weekId){
   var active=activeGames(weekId);
   var anyLocked=active.some(function(gid){ return isGameLocked(weekId,gid); });
   if(!confirm("Clear all your picks for this matchweek?"+(anyLocked?"\\n\\nMatches that have already kicked off will keep their picks.":""))) return;
+  // Any pick still inside its undo window would otherwise commit over the wipe.
+  if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
+  _undoPick=null;
   active.forEach(function(gid){
     if(isGameLocked(weekId,gid)) return;   // a kicked-off match is final
     if(ST.picks[weekId][uk][gid]){
+      delete _pendingPicks[_pendKey(weekId,uk,gid)];
       delete ST.picks[weekId][uk][gid];
       if(DB) DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid).remove();
     }
   });
   _savePickCache(weekId, uk, ST.picks[weekId][uk]);
-  toast("Picks cleared");
+  toast("&#129529; Picks cleared");
   draw();
 }
 
@@ -2221,7 +2228,7 @@ function renderPicks(){
         h+='<span style="font-size:9px;font-weight:800;color:var(--red2);flex-shrink:0;text-align:right;white-space:nowrap;padding-left:8px">&#128274; Live</span>';
       }
     }
-    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:9px;padding:3px 9px;flex-shrink:0" title="Clear all picks">&#8635;</button>';
+    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:11px;padding:3px 9px;flex-shrink:0" title="Clear all picks">&#129529;</button>';
     if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" style="font-size:9px;padding:3px 9px;flex-shrink:0">&#128279;</button>';
     if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
@@ -2901,7 +2908,7 @@ function renderGroupPicks(){
     if(_hPos) h+='<span class="rank-badge sm">'+_hPos.rank+'</span>';
     h+=homeLogo?'<img class="gp-logo" src="'+homeLogo+'" onerror="this.style.display=\'none\'">'
                :'<span class="gp-logo-fallback"></span>';
-    h+='<span class="gp-vs">'+(gameIsLocked?'&#128274;':'v')+'</span>';
+    h+='<span class="gp-vs">v</span>';
     if(_aPos) h+='<span class="rank-badge sm">'+_aPos.rank+'</span>';
     h+=awayLogo?'<img class="gp-logo" src="'+awayLogo+'" onerror="this.style.display=\'none\'">'
                :'<span class="gp-logo-fallback"></span>';
@@ -2915,6 +2922,7 @@ function renderGroupPicks(){
       sub=new Date(g.kickoffTs).toLocaleString("en-US",{weekday:"short",hour:"numeric"});
     }
     h+='<div style="font-size:8px;color:var(--muted);font-weight:800;white-space:nowrap">'+sub+'</div>';
+    if(gameIsLocked) h+='<span class="gp-lock" title="Locked">&#128274;</span>';
     h+='</div>';
     h+='</th>';
   });
@@ -3174,7 +3182,11 @@ function bind(){
     if(!ST.picks[u.weekId]) ST.picks[u.weekId]={};
     if(!ST.picks[u.weekId][u.uk]) ST.picks[u.weekId][u.uk]={};
     var restored=ST.picks[u.weekId][u.uk][u.gid]||{};
-    if(u.prevSide) restored.side=u.prevSide; else delete restored.side;
+    // A cleared pick restores wholesale (side AND confidence); a side change
+    // restores just the side.
+    if(u.prevObj){ restored=JSON.parse(JSON.stringify(u.prevObj)); }
+    else if(u.prevSide) restored.side=u.prevSide;
+    else delete restored.side;
     ST.picks[u.weekId][u.uk][u.gid]=restored;
     _savePickCache(u.weekId, u.uk, restored);
     document.getElementById("toast").classList.remove("show");
@@ -3184,6 +3196,7 @@ function bind(){
     _updateProgressBar(u.weekId);
     // Write the reverted value straight away — there is nothing left to undo.
     if(DB) DB.ref(BASE+"/picks/"+u.weekId+"/"+u.uk+"/"+u.gid).set(restored);
+    if(u.prevObj) draw();   // bring the confidence chips back
   });
   el=document.getElementById("b-switch2"); if(el) el.addEventListener("click",function(){
     ST.user=null; ST.viewUser=null;
