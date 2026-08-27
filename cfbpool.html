@@ -1191,7 +1191,9 @@ function _compactWhen(ev){
 // Find the tiebreaker match in the raw feed. Matched on its own because it is
 // frequently outside the pool's own slate and so never survives _slateEvents().
 function _tiebreakerEvent(){
-  var tb=(ST.tiebreaker&&ST.tiebreaker[scoresWeekId()])||{};
+  var wk=scoresWeekId();
+  if(tbMode(wk)==="prop") return null;   // a prop isn't tied to a fixture
+  var tb=(ST.tiebreaker&&ST.tiebreaker[wk])||{};
   if(!tb.away||!tb.home) return null;
   var all=(_scData&&_scData.events)||[];
   var nA=normalizeTeamName(tb.away), nH=normalizeTeamName(tb.home);
@@ -1672,6 +1674,24 @@ scheduleDraw=function(){
     },0);
   }
 };
+// "total" = combined score of the nominated game (default, auto-fetchable)
+// "prop"  = a question the admin writes, answered with a number and entered by hand.
+function tbMode(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  return tb.mode==="prop" ? "prop" : "total";
+}
+// Is the week's tiebreaker set up enough to show players?
+function tbReady(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  return tbMode(weekId)==="prop" ? !!(tb.prop&&String(tb.prop).trim())
+                                 : !!(tb.away&&tb.home);
+}
+// What players are being asked for.
+function tbLabel(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  return tbMode(weekId)==="prop" ? String(tb.prop||"Prop") : "Total Points";
+}
+
 function setTiebreakerField(weekId,field,value){
   if(!ST.tiebreaker[weekId]) ST.tiebreaker[weekId]={};
   ST.tiebreaker[weekId][field]=value;
@@ -2404,7 +2424,8 @@ function renderPicks(){
 
   // Tiebreaker card
   var tb=ST.tiebreaker[weekId]||{};
-  if(tb.away&&tb.home){
+  if(tbReady(weekId)){
+    var _tbProp=tbMode(weekId)==="prop";
     var tbPick=((ST.picks[weekId]||{})[ST.user]||{}).tb||"";
     var tbLocked=!!ST.locked[weekId];
     h+='<div class="games-wrap" style="padding-top:0">';
@@ -2413,18 +2434,23 @@ function renderPicks(){
     if(tb.actual!=null) h+='<div class="gc-pts earned">Actual: '+tb.actual+'</div>';
     h+='</div>';
     h+='<div style="padding:10px 12px;display:flex;align-items:center;gap:8px">';
-    if(tb.awayLogo) h+='<img src="'+tb.awayLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
-    h+='<span style="font-size:12px;font-weight:800">'+x(tb.away)+'</span>';
-    h+='<span style="font-size:10px;color:var(--muted);font-weight:700">@</span>';
-    if(tb.homeLogo) h+='<img src="'+tb.homeLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
-    h+='<span style="font-size:12px;font-weight:800">'+x(tb.home)+'</span>';
+    if(_tbProp){
+      // A prop is just a question — no matchup to show.
+      h+='<span style="font-size:12px;font-weight:800;line-height:1.35">'+x(tb.prop||"")+'</span>';
+    } else {
+      if(tb.awayLogo) h+='<img src="'+tb.awayLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+      h+='<span style="font-size:12px;font-weight:800">'+x(tb.away)+'</span>';
+      h+='<span style="font-size:10px;color:var(--muted);font-weight:700">@</span>';
+      if(tb.homeLogo) h+='<img src="'+tb.homeLogo+'" style="width:22px;height:22px;object-fit:contain" onerror="this.style.display=\'none\'">';
+      h+='<span style="font-size:12px;font-weight:800">'+x(tb.home)+'</span>';
+    }
     h+='</div>';
     h+='<div style="padding:8px 12px;background:var(--cream);border-top:1px solid var(--border2);display:flex;align-items:center;gap:8px">';
-    h+='<span style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Total Points</span>';
+    h+='<span style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">'+x(_tbProp?"Your number":"Total Points")+'</span>';
     if(tbLocked){
       h+='<span style="font-size:14px;font-weight:900;color:var(--purple)">'+(tbPick||'–')+'</span>';
     } else {
-      h+='<input id="tb-guess-input" type="number" min="0" max="200" placeholder="e.g. 47" value="'+x(tbPick)+'" '+(ST.user?'':'disabled')+' style="width:80px;border:2px solid var(--border);border-radius:6px;padding:5px 8px;font-size:13px;font-weight:800;font-family:\'Nunito\',sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
+      h+='<input id="tb-guess-input" type="number" min="0" placeholder="'+(_tbProp?'e.g. 275':'e.g. 47')+'" value="'+x(tbPick)+'" '+(ST.user?'':'disabled')+' style="width:80px;border:2px solid var(--border);border-radius:6px;padding:5px 8px;font-size:13px;font-weight:800;font-family:\'Nunito\',sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
     }
     h+='</div>';
     h+='</div></div>';
@@ -2956,8 +2982,27 @@ function renderAdmin(){
   // Tiebreaker — set up in step 2, enter the actual total in step 3 (Enter Results).
   if(adminStep===2 || adminStep===3){
   var tb=ST.tiebreaker[weekId]||{};
-  h+='<div class="adm-sec-label">Tiebreaker Game'+(adminStep===3?' &mdash; Enter Final Total':'')+'</div>';
+  var _mode=tbMode(weekId), _isProp=_mode==="prop";
+  h+='<div class="adm-sec-label">Tiebreaker'+(adminStep===3?' &mdash; Enter the Answer':'')+'</div>';
   h+='<div class="adm-game">';
+  // Mode switch — a game total, or a prop the admin writes themselves.
+  h+='<div class="adm-btns" style="margin-bottom:8px">';
+  h+='<button class="adm-btn'+(!_isProp?" sel":"")+'" id="b-tb-mode-total">&#127944; Game total</button>';
+  h+='<button class="adm-btn'+(_isProp?" sel":"")+'" id="b-tb-mode-prop">&#127919; Prop bet</button>';
+  h+='</div>';
+  if(_isProp){
+    h+='<div class="adm-game-title">Ask anything with a number for an answer &mdash; e.g. &ldquo;Mitch Griffis passing yards&rdquo;. Players guess, closest wins.</div>';
+    h+='<div class="adm-row">';
+    h+='<input class="adm-input" id="tb-prop" placeholder="Mitch Griffis passing yards" value="'+x(tb.prop||"")+'" style="flex:1">';
+    h+='</div>';
+    h+='<div class="adm-row">';
+    h+='<input class="adm-input" id="tb-actual" type="number" placeholder="Actual answer" value="'+(tb.actual!=null?tb.actual:"")+'" style="flex:1">';
+    h+='<button class="adm-btn sel" id="b-tb-save">Save</button>';
+    h+='</div>';
+    if(tb.prop&&tb.actual!=null){
+      h+='<div style="font-size:10px;font-weight:800;color:var(--purple);margin-top:6px">'+x(tb.prop)+' &mdash; '+tb.actual+'</div>';
+    }
+  } else {
   if(adminStep===2) h+='<div class="adm-game-title">Hold any game in the ESPN import list to set it as the tiebreaker</div>';
   else h+='<div class="adm-game-title">Enter the combined final score of the tiebreaker game to break standings ties.</div>';
   if(tb.away&&tb.home){
@@ -2977,6 +3022,7 @@ function renderAdmin(){
   } else {
     h+='<div style="font-size:10px;color:var(--muted);padding:8px 0">No tiebreaker set yet. Import games above and hold one to set it.</div>';
   }
+  }  // end game-total mode
   h+='</div>';
   } // end tiebreaker (step 2)
 
@@ -3358,7 +3404,19 @@ function bind(){
 
   // Tiebreaker admin
   el=document.getElementById("b-tb-fetch-result"); if(el) el.addEventListener("click",function(){ fetchTiebreakerResult(ST.curWeek); });
+  el=document.getElementById("b-tb-mode-total"); if(el) el.addEventListener("click",function(){
+    setTiebreakerField(ST.curWeek,"mode","total"); draw();
+  });
+  el=document.getElementById("b-tb-mode-prop"); if(el) el.addEventListener("click",function(){
+    setTiebreakerField(ST.curWeek,"mode","prop"); draw();
+  });
+  el=document.getElementById("tb-prop"); if(el) el.addEventListener("change",function(){
+    setTiebreakerField(ST.curWeek,"prop",this.value.trim());
+  });
+
   el=document.getElementById("b-tb-save"); if(el) el.addEventListener("click",function(){
+    var pr=document.getElementById("tb-prop");
+    if(pr) setTiebreakerField(ST.curWeek,"prop",pr.value.trim());
     var act=document.getElementById("tb-actual");
     if(act) setTiebreakerField(ST.curWeek,"actual",act.value!==''?Number(act.value):null);
     toast("&#10003; Tiebreaker saved");
