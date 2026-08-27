@@ -1433,7 +1433,7 @@ function parseEspnSchedule(data){
         }
       }
     }
-    return {away:awayName,home:homeName,awayId:awayId,homeId:homeId,awayAbbrev:awayAbbrev,homeAbbrev:homeAbbrev,awayLogo:awayLogo,homeLogo:homeLogo,awayConf:awayConf,homeConf:homeConf,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide};
+    return {eventId:String(ev.id||""),away:awayName,home:homeName,awayId:awayId,homeId:homeId,awayAbbrev:awayAbbrev,homeAbbrev:homeAbbrev,awayLogo:awayLogo,homeLogo:homeLogo,awayConf:awayConf,homeConf:homeConf,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide};
   });
 }
 function guessWeekNumber(label){
@@ -1676,6 +1676,14 @@ scheduleDraw=function(){
 };
 // "total" = combined score of the nominated game (default, auto-fetchable)
 // "prop"  = a question the admin writes, answered with a number and entered by hand.
+// The question players read is derived from the player and stat, so the admin
+// never has to phrase it twice.
+function _syncPropLabel(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  var spec=propStatById(tb.stat);
+  if(tb.player&&spec) setTiebreakerField(weekId,"prop",tb.player+" \u2014 "+spec.name);
+}
+
 function tbMode(weekId){
   var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
   return tb.mode==="prop" ? "prop" : "total";
@@ -1690,6 +1698,86 @@ function tbReady(weekId){
 function tbLabel(weekId){
   var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
   return tbMode(weekId)==="prop" ? String(tb.prop||"Prop") : "Total Points";
+}
+
+// Stats that map cleanly onto a column in ESPN's box score. `group` is the
+// box-score section; `label` is matched against that section's own column
+// headers rather than a fixed index, so a layout change can't silently read the
+// wrong number.
+var PROP_STATS=[
+  {id:"pass_yds",  name:"Passing yards",    group:"passing",   label:"YDS"},
+  {id:"pass_td",   name:"Passing TDs",      group:"passing",   label:"TD"},
+  {id:"pass_int",  name:"Interceptions",    group:"passing",   label:"INT"},
+  {id:"rush_yds",  name:"Rushing yards",    group:"rushing",   label:"YDS"},
+  {id:"rush_td",   name:"Rushing TDs",      group:"rushing",   label:"TD"},
+  {id:"rush_car",  name:"Carries",          group:"rushing",   label:"CAR"},
+  {id:"rec_yds",   name:"Receiving yards",  group:"receiving", label:"YDS"},
+  {id:"rec_rec",   name:"Receptions",       group:"receiving", label:"REC"},
+  {id:"rec_td",    name:"Receiving TDs",    group:"receiving", label:"TD"},
+  {id:"tackles",   name:"Total tackles",    group:"defensive", label:"TOT"},
+  {id:"sacks",     name:"Sacks",            group:"defensive", label:"SACKS"}
+];
+function propStatById(id){
+  for(var i=0;i<PROP_STATS.length;i++) if(PROP_STATS[i].id===id) return PROP_STATS[i];
+  return null;
+}
+// Loose name compare: lowercase, strip punctuation/accents-ish, collapse spaces.
+function _normName(n){
+  return String(n||"").toLowerCase().replace(/[.'`-]/g,"").replace(/\s+/g," ").trim();
+}
+// Read one player's stat out of a game's box score.
+// Reports what it found rather than guessing: a player who didn't record a line
+// is "no stat", not zero — that distinction decides someone's week.
+function fetchPropResult(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  if(!tb.eventId){ toast("Pick the game first (press & hold it in the import list)"); return; }
+  if(!tb.player){ toast("Enter the player's name"); return; }
+  var spec=propStatById(tb.stat);
+  if(!spec){ toast("Choose a stat"); return; }
+  var btn=document.getElementById("b-tb-fetch-prop");
+  if(btn){ btn.textContent="Loading\u2026"; btn.disabled=true; }
+  function done(){ if(btn){ btn.textContent="\u{1F4CA} Fetch"; btn.disabled=false; } }
+
+  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event="+encodeURIComponent(tb.eventId))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      var teams=(data&&data.boxscore&&data.boxscore.players)||[];
+      if(!teams.length){ done(); toast("No box score yet \u2014 try after kickoff"); return; }
+      var want=_normName(tb.player), wantLast=want.split(" ").pop();
+      var found=null, sawPlayer=false;
+      teams.forEach(function(t){
+        (t.statistics||[]).forEach(function(grp){
+          if(String(grp.name||"").toLowerCase()!==spec.group) return;
+          var labels=(grp.labels||[]).map(function(l){return String(l).toUpperCase();});
+          var idx=labels.indexOf(spec.label.toUpperCase());
+          (grp.athletes||[]).forEach(function(row){
+            var a=row.athlete||{};
+            var nm=_normName(a.displayName||a.shortName||a.fullName);
+            var hit = nm===want || (wantLast && nm.split(" ").pop()===wantLast);
+            if(!hit) return;
+            sawPlayer=true;
+            if(idx<0) return;                       // player found, column missing
+            var v=(row.stats||[])[idx];
+            if(v===undefined||v===null||v==="") return;
+            var num=parseFloat(String(v).replace(/[^0-9.\-]/g,""));
+            if(!isNaN(num)) found={value:num, name:a.displayName||tb.player};
+          });
+        });
+      });
+      done();
+      if(found){
+        setTiebreakerField(weekId,"actual",found.value);
+        var inp=document.getElementById("tb-actual");
+        if(inp) inp.value=found.value;
+        toast("\u2713 "+found.name+" \u2014 "+spec.name+": "+found.value);
+        draw();
+      } else if(sawPlayer){
+        toast(tb.player+" has no "+spec.name.toLowerCase()+" recorded \u2014 enter it by hand");
+      } else {
+        toast("Couldn't find "+tb.player+" in this box score");
+      }
+    })
+    .catch(function(){ done(); toast("Could not reach ESPN"); });
 }
 
 function setTiebreakerField(weekId,field,value){
@@ -2991,16 +3079,40 @@ function renderAdmin(){
   h+='<button class="adm-btn'+(_isProp?" sel":"")+'" id="b-tb-mode-prop">&#127919; Prop bet</button>';
   h+='</div>';
   if(_isProp){
-    h+='<div class="adm-game-title">Ask anything with a number for an answer &mdash; e.g. &ldquo;Mitch Griffis passing yards&rdquo;. Players guess, closest wins.</div>';
+    h+='<div class="adm-game-title">Press &amp; hold a game in the import list to pick which box score to read, then name the player and the stat.</div>';
+    // Which game the stat will be read from — same selection as the game total.
+    if(tb.away&&tb.home){
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:8px;background:var(--purple-bg);border-radius:8px;border:1px solid var(--purple)">';
+      if(tb.awayLogo) h+='<img src="'+tb.awayLogo+'" style="width:20px;height:20px;object-fit:contain" onerror="this.style.display=\'none\'">';
+      h+='<span style="font-size:11px;font-weight:800">'+x(tb.away)+'</span>';
+      h+='<span style="color:var(--muted);font-weight:700">@</span>';
+      if(tb.homeLogo) h+='<img src="'+tb.homeLogo+'" style="width:20px;height:20px;object-fit:contain" onerror="this.style.display=\'none\'">';
+      h+='<span style="font-size:11px;font-weight:800">'+x(tb.home)+'</span>';
+      if(!tb.eventId) h+='<span style="margin-left:auto;font-size:8px;font-weight:800;color:var(--red2)">re-select to enable fetch</span>';
+      h+='</div>';
+    } else {
+      h+='<div style="font-size:10px;color:var(--red2);font-weight:700;padding:4px 0 8px">No game selected &mdash; press &amp; hold one in the import list above.</div>';
+    }
     h+='<div class="adm-row">';
-    h+='<input class="adm-input" id="tb-prop" placeholder="Mitch Griffis passing yards" value="'+x(tb.prop||"")+'" style="flex:1">';
+    h+='<input class="adm-input" id="tb-player" placeholder="Player name (e.g. Mitch Griffis)" value="'+x(tb.player||"")+'" style="flex:1">';
+    h+='</div>';
+    h+='<div class="adm-row">';
+    h+='<select class="adm-input" id="tb-stat" style="flex:1">';
+    h+='<option value="">Choose a stat\u2026</option>';
+    PROP_STATS.forEach(function(o){
+      h+='<option value="'+o.id+'"'+(tb.stat===o.id?' selected':'')+'>'+x(o.name)+'</option>';
+    });
+    h+='</select>';
     h+='</div>';
     h+='<div class="adm-row">';
     h+='<input class="adm-input" id="tb-actual" type="number" placeholder="Actual answer" value="'+(tb.actual!=null?tb.actual:"")+'" style="flex:1">';
+    h+='<button class="adm-btn" id="b-tb-fetch-prop"'+((tb.eventId&&tb.player&&tb.stat)?'':' disabled style="opacity:.45"')+' style="white-space:nowrap">&#128202; Fetch</button>';
     h+='<button class="adm-btn sel" id="b-tb-save">Save</button>';
     h+='</div>';
-    if(tb.prop&&tb.actual!=null){
-      h+='<div style="font-size:10px;font-weight:800;color:var(--purple);margin-top:6px">'+x(tb.prop)+' &mdash; '+tb.actual+'</div>';
+    var _pv=propStatById(tb.stat);
+    if(tb.player&&_pv){
+      h+='<div style="font-size:10px;font-weight:800;color:var(--purple);margin-top:6px">Players will guess: '+x(tb.player)+' &mdash; '+x(_pv.name)+
+         (tb.actual!=null?(' &nbsp;(actual: '+tb.actual+')'):'')+'</div>';
     }
   } else {
   if(adminStep===2) h+='<div class="adm-game-title">Hold any game in the ESPN import list to set it as the tiebreaker</div>';
@@ -3410,13 +3522,24 @@ function bind(){
   el=document.getElementById("b-tb-mode-prop"); if(el) el.addEventListener("click",function(){
     setTiebreakerField(ST.curWeek,"mode","prop"); draw();
   });
-  el=document.getElementById("tb-prop"); if(el) el.addEventListener("change",function(){
-    setTiebreakerField(ST.curWeek,"prop",this.value.trim());
+  el=document.getElementById("tb-player"); if(el) el.addEventListener("change",function(){
+    setTiebreakerField(ST.curWeek,"player",this.value.trim());
+    _syncPropLabel(ST.curWeek); draw();
+  });
+  el=document.getElementById("tb-stat"); if(el) el.addEventListener("change",function(){
+    setTiebreakerField(ST.curWeek,"stat",this.value);
+    _syncPropLabel(ST.curWeek); draw();
+  });
+  el=document.getElementById("b-tb-fetch-prop"); if(el) el.addEventListener("click",function(){
+    fetchPropResult(ST.curWeek);
   });
 
   el=document.getElementById("b-tb-save"); if(el) el.addEventListener("click",function(){
-    var pr=document.getElementById("tb-prop");
-    if(pr) setTiebreakerField(ST.curWeek,"prop",pr.value.trim());
+    var pl=document.getElementById("tb-player");
+    if(pl) setTiebreakerField(ST.curWeek,"player",pl.value.trim());
+    var stl=document.getElementById("tb-stat");
+    if(stl) setTiebreakerField(ST.curWeek,"stat",stl.value);
+    _syncPropLabel(ST.curWeek);
     var act=document.getElementById("tb-actual");
     if(act) setTiebreakerField(ST.curWeek,"actual",act.value!==''?Number(act.value):null);
     toast("&#10003; Tiebreaker saved");
@@ -3730,6 +3853,8 @@ function bind(){
         if(!g) return;
         setTiebreakerField(ST.curWeek,"away",g.away);
         setTiebreakerField(ST.curWeek,"home",g.home);
+        // The event id is what lets a prop read this game's box score later.
+        if(g.eventId) setTiebreakerField(ST.curWeek,"eventId",g.eventId);
         if(g.awayLogo) setTiebreakerField(ST.curWeek,"awayLogo",g.awayLogo);
         if(g.homeLogo) setTiebreakerField(ST.curWeek,"homeLogo",g.homeLogo);
         toast("&#128081; Tiebreaker set: "+g.away+" @ "+g.home);
