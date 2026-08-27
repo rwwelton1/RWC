@@ -85,6 +85,27 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .rch-bar-fill{height:100%;border-radius:3px;background:var(--green);transition:width .3s}
 .rch-bar-fill.over{background:var(--red2)}
 
+/* ── LOCKED ROSTER GRID (2 x 3) ── */
+.locked-grid-wrap{background:#ffffff;padding:12px 14px 14px;border-bottom:3px solid var(--border)}
+.locked-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.lg-card{border:2px solid var(--border);border-radius:10px;background:var(--cream);
+  box-shadow:2px 2px 0 var(--border);padding:8px 9px;min-width:0;display:flex;
+  flex-direction:column;gap:3px}
+.lg-name{font-size:12px;font-weight:900;color:var(--text);line-height:1.2;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lg-row{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
+.lg-score{font-size:16px;font-weight:900;line-height:1}
+.lg-score.under{color:var(--green)}
+.lg-score.over{color:var(--red2)}
+.lg-score.even{color:var(--muted)}
+.lg-score.cut{color:var(--muted);text-decoration:line-through;font-size:13px}
+.lg-meta{font-size:9px;font-weight:800;color:var(--muted);white-space:nowrap}
+.lg-thru{font-size:9px;font-weight:700;color:var(--dim)}
+.lg-total{display:flex;align-items:baseline;justify-content:space-between;
+  padding:2px 2px 8px;font-size:10px;font-weight:900;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.06em}
+.lg-total-score{font-size:15px;font-weight:900}
+
 /* ── SLOT GRID ── */
 .slot-grid-wrap{background:#ffffff;padding:12px 14px 14px;border-bottom:3px solid var(--border)}
 .slot-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
@@ -472,6 +493,48 @@ var _pastEvents={};   // { slug: {name, endedAt, podium:[{uid,name,pts}]} }
 
 // Effective lock state for golf: picks are locked if the admin manually locked, OR the
 // scheduled lock time has passed, OR ESPN says the tournament is underway/finished.
+// Locked view: the six picks as a 2x3 grid with live scores. Uses the same
+// score/cut conventions as the leaderboard ribbon so the two always agree.
+function renderLockedRoster(picks){
+  var names=(picks||[]).filter(function(nm){ return nm && nm.trim && nm.trim(); });
+  if(!names.length) return "";
+  var h='<div class="locked-grid-wrap">';
+
+  // Team total — cut golfers contribute nothing, matching the hub's scoring.
+  var total=0, counted=0;
+  names.forEach(function(nm){
+    var live=(typeof getLiveForGolfer==="function")?getLiveForGolfer(nm):null;
+    var sc=live||ST.scores[nm]||{};
+    if(sc.cut) return;
+    if(sc.score!==undefined&&sc.score!==null){ total+=Number(sc.score); counted++; }
+  });
+  var tStr=counted===0?"\u2013":(total===0?"E":total>0?"+"+total:""+total);
+  var tCls=counted===0?"even":total<0?"under":total>0?"over":"even";
+  h+='<div class="lg-total"><span>My Team</span><span class="lg-total-score '+tCls+'">'+tStr+'</span></div>';
+
+  h+='<div class="locked-grid">';
+  names.forEach(function(nm){
+    var g=golferByName(nm);
+    var live=(typeof getLiveForGolfer==="function")?getLiveForGolfer(nm):null;
+    var sc=live||ST.scores[nm]||{};
+    var isCut=!!sc.cut;
+    var val=(sc.score!==undefined&&sc.score!==null)?Number(sc.score):null;
+    var str=isCut?"CUT":(val===null?"\u2013":(val===0?"E":val>0?"+"+val:""+val));
+    var cls=isCut?"cut":(val===null?"even":val<0?"under":val>0?"over":"even");
+    var thru=(live&&live.thru)?String(live.thru):"";
+    h+='<div class="lg-card">';
+    h+='<div class="lg-name">'+x(nm)+'</div>';
+    h+='<div class="lg-row">';
+    h+='<span class="lg-score '+cls+'">'+str+'</span>';
+    if(thru&&thru!=="F") h+='<span class="lg-thru">'+x(thru)+'</span>';
+    else if(g&&g.salary) h+='<span class="lg-meta">'+fmt(g.salary)+'</span>';
+    h+='</div>';
+    h+='</div>';
+  });
+  h+='</div></div>';
+  return h;
+}
+
 function isLocked(){
   if(ST.locked) return true;                                  // manual override (lock early)
   if(ST.lockTs && Date.now() >= ST.lockTs) return true;       // scheduled auto-lock
@@ -931,6 +994,10 @@ function renderPicks(){
     h+='<div class="rch-remaining '+(over?"over":n>0?"ok":"neutral")+'">'+fmt(Math.abs(remaining))+'</div>';
     h+='<div class="rch-count">'+n+' / '+MAX_PICKS+' golfers</div></div></div>';
     h+='<div class="rch-bar-track"><div class="rch-bar-fill'+(over?" over":"")+'" style="width:'+pct+'%"></div></div></div>';
+    // ── Locked: 2x3 grid of the picked golfers with their scores ──
+    if(isLocked()){
+      h+=renderLockedRoster(draftPicks);
+    } else {
     // ── Slot grid ──
     h+='<div class="slot-grid-wrap"><div class="slot-grid">';
     for(var i=0;i<MAX_PICKS;i++){
@@ -944,6 +1011,7 @@ function renderPicks(){
       h+='</div>';
     }
     h+='</div></div>';
+    }
   } else {
     // ── Tier / Daily / Confidence slot area ──
     var _mx=getMaxPicks(), _filled=draftPicks.filter(function(p){return p&&p.trim();}).length;
@@ -965,6 +1033,11 @@ function renderPicks(){
   h+='</div>';
 
   // ── Roster body ──
+  // Locked: the grid above already shows the team, so skip the pick list entirely.
+  if(isLocked() && !ST.showPicker && ST.activeSlot===null){
+    h+=renderSubmitBar();
+    return h;
+  }
   h+='<div class="roster-body">';
   h+='<div class="roster-section-label">My Roster</div>';
 
