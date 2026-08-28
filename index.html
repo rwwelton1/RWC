@@ -823,6 +823,18 @@ var BADGE_LIST = [
   {id:"gm",          icon:"📋", name:"The GM",            rarity:"epic",      desc:"Win a draft pool.",                                                    category:"Draft"},
   {id:"war_room",    icon:"🗺️", name:"War Room",         rarity:"legendary", desc:"Win a draft pool with 3 or more exact picks.",                         category:"Draft"},
 
+  // ── Dynasty (CFB Dynasty, single player) ──
+  {id:"dyn_hired",   icon:"📋", name:"Fresh Whistle",     rarity:"common",    desc:"Start a coaching career in CFB Dynasty.",                              category:"Dynasty"},
+  {id:"dyn_winning", icon:"📈", name:"Winning Season",    rarity:"common",    desc:"Finish a Dynasty season above .500.",                                  category:"Dynasty"},
+  {id:"dyn_conf",    icon:"🏅", name:"Conference Champ",  rarity:"uncommon",  desc:"Win a conference title in Dynasty.",                                   category:"Dynasty"},
+  {id:"dyn_natty",   icon:"🏆", name:"Natty",             rarity:"rare",      desc:"Win a national championship in Dynasty.",                              category:"Dynasty"},
+  {id:"dyn_backtoback", icon:"🔁", name:"Back-to-Back",   rarity:"epic",      desc:"Win national championships in consecutive Dynasty seasons.",           category:"Dynasty"},
+  {id:"dyn_dynasty", icon:"👑", name:"Dynasty",           rarity:"epic",      desc:"Win 3 national championships with one program.",                       category:"Dynasty"},
+  {id:"dyn_century", icon:"💯", name:"Century Club",      rarity:"rare",      desc:"Reach 100 career wins in Dynasty.",                                    category:"Dynasty"},
+  {id:"dyn_journey", icon:"🧳", name:"Journeyman",        rarity:"uncommon",  desc:"Coach at 3 different programs.",                                       category:"Dynasty"},
+  {id:"dyn_lifer",   icon:"⏳", name:"Lifer",             rarity:"rare",      desc:"Coach 10 seasons in Dynasty.",                                         category:"Dynasty"},
+  {id:"dyn_builder", icon:"🏗️", name:"Program Builder",   rarity:"legendary", desc:"Win a national title with a team that started below 60 prestige.",     category:"Dynasty"},
+
   // ── Multi-Sport ──────────────────────────────────────────────────────────
   {id:"globetrotter",icon:"🌍", name:"Globe Trotter",    rarity:"rare",      desc:"Compete in 3 different sports.",                                       category:"Multi-sport"},
   {id:"pentathlon",  icon:"🏋️", name:"Pentathlete",     rarity:"epic",      desc:"Compete in 5 different sports.",                                       category:"Multi-sport"},
@@ -1131,6 +1143,66 @@ function groupPools(g){ return (g.pools||[]).map(function(id){ return poolById(i
 // per-group override at groups/{id}/data/statuses/{poolId} is authoritative — the global
 // status is only a fallback. Anything that asks "is this pool done?" must use this,
 // otherwise a group set to Final never archives a trophy.
+// Award Dynasty badges from the game's save blob. Tolerant of missing fields —
+// an older save simply won't satisfy the newer criteria.
+function applyDynastyBadges(d, unlock){
+  if(!d || typeof d!=="object") return;
+  var natl    = Number(d.natlTitles||0);
+  var conf    = Number(d.titles||0);          // conference titles
+  var cw      = Number(d.careerWins||0);
+  var cl      = Number(d.careerLosses||0);
+  var seasons = Number(d.seasonsPlayed||0);
+  var jobs    = Number(d.jobsHeld||0);
+  var hist    = Array.isArray(d.history) ? d.history : [];
+  var champs  = Array.isArray(d.champHistory) ? d.champHistory : [];
+
+  unlock("dyn_hired");                                   // a save exists at all
+  if(conf>=1)     unlock("dyn_conf");
+  if(natl>=1)     unlock("dyn_natty");
+  if(cw>=100)     unlock("dyn_century");
+  if(jobs>=3)     unlock("dyn_journey");
+  if(seasons>=10) unlock("dyn_lifer");
+
+  // A winning season: any completed year with more wins than losses. Falls back
+  // to the current year when there's no history yet.
+  var winningYear = hist.some(function(h){ return Number((h&&h.wins)||0) > Number((h&&h.losses)||0); });
+  if(!winningYear && Number(d.wins||0) > Number(d.losses||0) && (Number(d.wins||0)+Number(d.losses||0))>0) winningYear=true;
+  if(winningYear) unlock("dyn_winning");
+
+  // Championship years. history[] is the richer record — each season carries
+  // natlTitle and the school — so prefer it and fall back to champHistory.
+  var titleYears=[], titleSchools=[];
+  hist.forEach(function(h){
+    if(h && h.natlTitle){
+      titleYears.push(Number(h.season||h.year||0));
+      if(h.school) titleSchools.push(h.school);
+    }
+  });
+  if(!titleYears.length){
+    champs.forEach(function(c){
+      var yr = (typeof c==="number") ? c : Number((c&&(c.season||c.year))||0);
+      if(yr) titleYears.push(yr);
+      var sc = c && (c.school||c.team);
+      if(sc) titleSchools.push(sc);
+    });
+  }
+  titleYears=titleYears.filter(Boolean).sort(function(a,b){return a-b;});
+  for(var i=1;i<titleYears.length;i++){
+    if(titleYears[i]-titleYears[i-1]===1){ unlock("dyn_backtoback"); break; }
+  }
+
+  // Three titles at one school.
+  var bySchool={}, maxAtOne=0;
+  titleSchools.forEach(function(sc){ if(sc) bySchool[sc]=(bySchool[sc]||0)+1; });
+  Object.keys(bySchool).forEach(function(k){ if(bySchool[k]>maxAtOne) maxAtOne=bySchool[k]; });
+  // No school recorded against the titles (older save) — fall back to the raw count.
+  if(maxAtOne>=3 || (!titleSchools.length && natl>=3)) unlock("dyn_dynasty");
+
+  // Built it from nothing: a national title at a program that started weak.
+  var startPrestige = Number(d.startPrestige!==undefined ? d.startPrestige : (d._startPrestige!==undefined ? d._startPrestige : NaN));
+  if(natl>=1 && !isNaN(startPrestige) && startPrestige<60) unlock("dyn_builder");
+}
+
 function poolStatusFor(g, poolId){
   var grpSt = (g && g.data && g.data.statuses && g.data.statuses[poolId]);
   if(grpSt) return grpSt;                       // explicit per-group override wins
@@ -2408,8 +2480,12 @@ function renderProfile() {
               var _rk = s.rank||(i+1), _td = !!s.tied;
               var prev = prevRanksShare && prevRanksShare[s.name] !== undefined ? prevRanksShare[s.name] : null;
               var mv = prev !== null ? prev - (i+1) : 0;
-              var gs = s.golfScores && _sharePoolId && s.golfScores[_sharePoolId] ? s.golfScores[_sharePoolId][s.name] : null;
-              return {name:s.name, pts:s.pts, mv:mv, rank:_rk, tied:_td, golfScore: gs ? gs.score : null, golfCut: gs ? gs.cut : false};
+              // Keyed by uid — the same key the group card uses. Looking this up
+              // by name silently missed and every golfer rendered as "E".
+              var _gsPool = (s.golfScores && _sharePoolId) ? s.golfScores[_sharePoolId] : null;
+              var gs = _gsPool ? (_gsPool[s.uid] || _gsPool[s.name]) : null;
+              return {name:(s.name||""), uid:s.uid||null, pts:s.pts, mv:mv, rank:_rk, tied:_td,
+                      golfScore: gs ? gs.score : null, golfCut: gs ? gs.cut : false};
             })
           }))
         : "";
@@ -3492,6 +3568,17 @@ function checkAndRenderBadges(ctx) {
       if(r.isDraft&&r.myRank===1&&r.exactPicks>=3)            unlock("war_room");
     });
 
+    // ── Dynasty (single player, saved outside group data) ────────────────
+    // Fire-and-forget: the scan doesn't wait on it, and a missing save is simply
+    // a player who hasn't started a career.
+    if(DB && _uk){
+      DB.ref("pools/dynasty/"+_uk).once("value").then(function(dsn){
+        var d = dsn && dsn.val();
+        if(!d) return;
+        applyDynastyBadges(d, unlock);
+      }).catch(function(){});
+    }
+
     // Committed — 10+ pools with picks submitted
     if(_careerEntered>=10) unlock("committed");
 
@@ -3574,6 +3661,15 @@ function openStandingsShareModal(groupName, standings, poolId) {
   var isGolf = pool && pool.sport === "Golf";
   var poolShortName = pool ? (pool.shortName||pool.name) : poolId;
 
+  // The payload may have been built before USER_DIR loaded, when nameOf() returns
+  // "" for everyone but you. Re-resolve from the uid now; fall back to whatever
+  // was baked in, then to a neutral label so a row is never blank.
+  function _shareName(p){
+    var live = p.uid ? nameOf(p.uid) : "";
+    if(live && live !== "(unknown)") return live;
+    return p.name || "Player";
+  }
+
   function fmtPts(p) {
     if(isGolf) {
       if(p.golfCut) return "CUT";
@@ -3588,7 +3684,8 @@ function openStandingsShareModal(groupName, standings, poolId) {
     if(list.length > 0) {
       list.forEach(function(p, i){
         var arrow = p.mv > 0 ? " ▲"+p.mv : p.mv < 0 ? " ▼"+Math.abs(p.mv) : "";
-        var name = p.name.length > 16 ? p.name.substring(0,15)+"…" : p.name;
+        var _nm = _shareName(p);
+        var name = _nm.length > 16 ? _nm.substring(0,15)+"…" : _nm;
         var _rk = p.rank || (i+1);
         // Tied players share a medal; mark it T so the tie is obvious in the share text
         var _badge = (medals[_rk-1] || ("#"+_rk)) + (p.tied ? "T" : "");
@@ -3620,7 +3717,8 @@ function openStandingsShareModal(groupName, standings, poolId) {
           : p.mv < 0
           ? '<span style="color:var(--red);font-size:9px;font-weight:900"> ▼'+Math.abs(p.mv)+'</span>'
           : '<span style="color:var(--dim);font-size:9px"> —</span>';
-        var name = p.name.length > 16 ? p.name.substring(0,15)+"…" : p.name;
+        var _nm = _shareName(p);
+        var name = _nm.length > 16 ? _nm.substring(0,15)+"…" : _nm;
         var _rk2 = p.rank || (i+1);
         var _badge2 = (medals[_rk2-1] || ("#"+_rk2)) + (p.tied ? "T" : "");
         html += _badge2+" "+name+"  "+fmtPts(p)+arrowHtml+"\n";

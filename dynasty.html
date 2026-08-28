@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1851,10 +1852,13 @@ var URL_USER=(function(){
 })();
 var GROUP_ID=(function(){var m=location.search.match(/[?&]group=([^&]+)/);return m?decodeURIComponent(m[1]):null;})();
 
-var DB=null, DB_ERR=null;
+var DB=null, AUTH=null, MY_UID=null, DB_ERR=null;
 try{
   firebase.initializeApp({apiKey:"AIzaSyAL0ansyAjP9A0oh35lhUV7EcxE7iYSc5Y",authDomain:"rwc-picks.firebaseapp.com",databaseURL:"https://rwc-picks-default-rtdb.firebaseio.com",projectId:"rwc-picks",appId:"1:965978379243:web:35f9db9a664f9170e27fae"});
   DB=firebase.database();
+  // Same shared session the hub and pool pages use. Writes must carry it or the
+  // security rules reject them with "permission denied".
+  try{ AUTH=firebase.auth(); }catch(_a){}
 }catch(e){
   // Do NOT swallow this. If the SDK didn't load, DB stays null and persist() becomes a
   // permanent no-op — a whole dynasty played and nothing written, with no sign anything is
@@ -3119,6 +3123,9 @@ function newSave(team, role){
   roster.forEach(function(p){ if(p.yr!=="FR") p.rsUsed=true; });
   var s={
     school:team.n, conf:team.c, prestige:team.p, role:role,
+    // Where the program stood on day one. Prestige moves every season, so without
+    // this there's no way to tell a built-from-nothing title from a blue-blood one.
+    startPrestige:team.p, startSchool:team.n,
     archetype:(ST.setup&&ST.setup.archetype)||"offensive",
     season:1, week:0, wins:0, losses:0,
     roster:roster, schedule:genSchedule(team), history:[],
@@ -3576,6 +3583,28 @@ function loadData(){
 // Now every failure is recorded on ST._saveState and surfaced (see saveBadge). A save that
 // silently doesn't happen is worse than one that loudly fails.
 var _saveSeq=0;
+// Retry a save that failed before the session was ready. Called once auth lands.
+function _retryFailedSave(){
+  if(!DB || !ST.save) return;
+  var st=ST._saveState;
+  if(st && st.ok===false){
+    try{ persist(function(okNow){ if(okNow){ try{ toast("\u2713 Saved"); }catch(_){} draw(); } }); }catch(_){}
+  }
+}
+// Flush an unsaved dynasty when the page goes away. A backgrounded tab can be
+// discarded by the OS without warning.
+try{
+  window.addEventListener("pagehide", function(){
+    var st=ST._saveState;
+    if(ST.save && (!st || st.ok!==true)) { try{ persist(); }catch(_){} }
+  });
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState!=="hidden") return;
+    var st=ST._saveState;
+    if(ST.save && (!st || st.ok!==true)) { try{ persist(); }catch(_){} }
+  });
+}catch(e){}
+
 function persist(cb){
   if(!ST.save) return;
   if(!DB){
@@ -3636,7 +3665,14 @@ function persist(cb){
         // Say WHY. "Save failed" alone gives nothing to act on — permission denied, offline and
         // payload-too-big all need different fixes, and the message is the only clue available
         // on a phone.
-        try{ toast("⚠️ Save failed — "+x(String(msg).slice(0,90))); }catch(_){}
+        // A permissions failure almost always means the write raced the sign-in.
+        // Say so, rather than leaving a bare "permission denied" on screen.
+        var _friendly = /permission|denied/i.test(String(msg))
+          ? "Save failed — not signed in yet. Retrying\u2026"
+          : "\u26a0\ufe0f Save failed — "+String(msg).slice(0,90);
+        try{ toast(x(_friendly)); }catch(_){}
+        // One automatic retry shortly after, by which point auth has usually landed.
+        if(/permission|denied/i.test(String(msg))) setTimeout(_retryFailedSave, 1500);
         try{ console.error("Dynasty save failed:", e, "path:", BASE(), "bytes:", JSON.stringify(ST.save).length); }catch(_){}
       });
     } else {
@@ -15335,7 +15371,24 @@ function takeJob(offer){
 }
 
 // ── Boot ─────────────────────────────────────────────────
-loadData();
+// Resolve the signed-in identity BEFORE the first read/write, so the save is
+// keyed to the right account and carries an authenticated session. Mirrors the
+// bootWithAuth() the pool pages use.
+(function bootWithAuth(){
+  if(!AUTH){ loadData(); return; }
+  var _started=false;
+  function _go(){ if(_started) return; _started=true; loadData(); }
+  AUTH.onAuthStateChanged(function(user){
+    MY_UID = user ? user.uid : null;
+    // The hub passes ?user=<uid>; if it didn't, fall back to the live session so
+    // the save still lands under this account rather than under "guest".
+    if(!ST.user && MY_UID) ST.user = MY_UID;
+    _go();
+    // If a save was rejected while the session was still resolving, send it again.
+    if(MY_UID) setTimeout(_retryFailedSave, 0);
+  });
+  setTimeout(_go, 2500);   // don't hang if auth is slow or unavailable
+})();
 draw();
 </script>
 </body>
