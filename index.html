@@ -2169,7 +2169,17 @@ function renderProfile() {
     // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
     function effectiveStatus(g, poolId){
       var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
-      return grpSt || statuses[poolId] || "coming-soon";
+      if(grpSt) return grpSt;
+      // Season pools express state as seasonStatus, not as a pool status —
+      // without this they read "coming-soon" all season and never count as active.
+      var _p = poolById(poolId);
+      if(_p && _p.kind === "season"){
+        var ss = (SC._poolDates && SC._poolDates[poolId] && SC._poolDates[poolId].seasonStatus) || null;
+        if(ss === "done")      return "complete";
+        if(ss === "in-season") return "locked";
+        if(ss === "preseason") return "open";
+      }
+      return statuses[poolId] || "coming-soon";
     }
 
     // Sort groups by pool status: Live → Open → Final → Coming Soon
@@ -2495,6 +2505,18 @@ function renderProfile() {
       var _btnStyle = "flex:0 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:3px;border-radius:7px;padding:5px 10px;font-size:8px;font-weight:800;cursor:pointer;font-family:inherit;border:1.5px solid var(--border2);box-shadow:1px 1px 0 var(--border2);white-space:nowrap";
       gh += '<button class="gcard-share-btn" data-gid="'+x(g.id)+'" data-gname="'+x(g.name)+'" data-standings="'+shareStandingsData+'" style="'+_btnStyle+';background:var(--cream);color:var(--muted)">📤 Share</button>';
       if(_showInvite) gh += '<button class="gcard-invite-btn" data-gid="'+x(g.id)+'" style="'+_btnStyle+';background:var(--green-bg);color:var(--green)">🔗 Invite</button>';
+      // Direct link to this week's picks, for people already in the group.
+      // Season pools only: it exists to nudge people before a weekly lock, which
+      // a single-event pool never has. Falls back to the group's first season
+      // pool so the button isn't missing just because nothing reads as "active".
+      var _seasonPools = pools.filter(function(pp){ return pp && pp.kind === "season"; });
+      var _linkPool = (activePool && activePool.kind === "season") ? activePool : (_seasonPools[0] || null);
+      var _linkDone = _linkPool ? (effectiveStatus(g, _linkPool.id) === "complete") : true;
+      if(_linkPool && _linkPool.url && !_linkDone){
+        gh += '<button class="gcard-picks-btn" data-gid="'+x(g.id)+'" data-gname="'+x(g.name)+'"'+
+              ' data-purl="'+x(_linkPool.url)+'" data-pname="'+x(_linkPool.shortName||_linkPool.name||"")+'"'+
+              ' style="'+_btnStyle+';background:var(--blue-bg);color:var(--blue)">'+(_linkPool.icon||"&#128279;")+' Picks</button>';
+      }
       // PGA trophies are now minted automatically when the tournament ends (the pool page's
       // auto-archive writes the podium + ranks + complete status). No manual Finalize needed.
       gh += '</div>';
@@ -2585,7 +2607,7 @@ function renderProfile() {
         var card = ev.target.closest && ev.target.closest(".gcard");
         if(!card || !container.contains(card)) return;
         // Ignore clicks on interactive children (share/invite/status buttons, links).
-        if(ev.target.closest("button, a, .gcst-btn, .gcard-share-btn, .gcard-invite-btn, .gcard-final-btn")) return;
+        if(ev.target.closest("button, a, .gcst-btn, .gcard-share-btn, .gcard-invite-btn, .gcard-picks-btn, .gcard-final-btn")) return;
         var gid = card.getAttribute("data-gid");
         if(!gid || !DB) return;
         // Open the group's pool page directly (e.g. cfbpool.html?group=...&user=...).
@@ -2623,6 +2645,27 @@ function renderProfile() {
         openStandingsShareModal(gname, standings, poolId);
       });
     });
+    container.querySelectorAll(".gcard-picks-btn").forEach(function(btn){
+      btn.addEventListener("click", function(e){
+        e.stopPropagation();
+        var gid=this.getAttribute("data-gid");
+        var gname=this.getAttribute("data-gname")||gid;
+        var purl=this.getAttribute("data-purl");
+        var pname=this.getAttribute("data-pname")||"picks";
+        // Absolute URL so it survives being pasted into any messaging app.
+        var link=location.origin+location.pathname.replace(/[^\/]*$/,"")+purl+"?group="+encodeURIComponent(gid);
+        var msg=gname+" \u2014 "+pname+"\n"+link;
+        if(navigator.share){
+          navigator.share({title:gname, text:gname+" \u2014 "+pname, url:link}).catch(function(){});
+        } else if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(msg).then(function(){ toast("Picks link copied \u2713","ok"); })
+            .catch(function(){ prompt("Copy this link:", link); });
+        } else {
+          prompt("Copy this link:", link);
+        }
+      });
+    });
+
     container.querySelectorAll(".gcard-invite-btn").forEach(function(btn){
       btn.addEventListener("click", function(e){
         e.stopPropagation();
@@ -7178,7 +7221,17 @@ function autoSnapStatuses() {
     // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
     function effectiveStatus(g, poolId){
       var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
-      return grpSt || statuses[poolId] || "coming-soon";
+      if(grpSt) return grpSt;
+      // Season pools express state as seasonStatus, not as a pool status —
+      // without this they read "coming-soon" all season and never count as active.
+      var _p = poolById(poolId);
+      if(_p && _p.kind === "season"){
+        var ss = (SC._poolDates && SC._poolDates[poolId] && SC._poolDates[poolId].seasonStatus) || null;
+        if(ss === "done")      return "complete";
+        if(ss === "in-season") return "locked";
+        if(ss === "preseason") return "open";
+      }
+      return statuses[poolId] || "coming-soon";
     }
           var destPool = null;
           for(var _i=0;_i<pools.length;_i++){
@@ -7204,7 +7257,17 @@ function autoSnapStatuses() {
     // Per-group status (groups/{id}/data/statuses/{poolId}) overrides global
     function effectiveStatus(g, poolId){
       var grpSt = (g.data && g.data.statuses && g.data.statuses[poolId]);
-      return grpSt || statuses[poolId] || "coming-soon";
+      if(grpSt) return grpSt;
+      // Season pools express state as seasonStatus, not as a pool status —
+      // without this they read "coming-soon" all season and never count as active.
+      var _p = poolById(poolId);
+      if(_p && _p.kind === "season"){
+        var ss = (SC._poolDates && SC._poolDates[poolId] && SC._poolDates[poolId].seasonStatus) || null;
+        if(ss === "done")      return "complete";
+        if(ss === "in-season") return "locked";
+        if(ss === "preseason") return "open";
+      }
+      return statuses[poolId] || "coming-soon";
     }
           var destPool = null;
           for(var _i=0;_i<pools.length;_i++){

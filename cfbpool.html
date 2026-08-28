@@ -828,6 +828,19 @@ function publishSeasonToHub(metaOnly){
   },1200);
 }
 
+// Recognise a signed-in member arriving on a shared group link, so they don't
+// have to pick themselves out of a list every time. Returns true if it resolved.
+function autoIdentifyMember(){
+  if(PUBLIC_VIEW) return false;        // spectators stay anonymous by design
+  if(ST.user) return false;            // already identified
+  if(!MY_UID) return false;            // not signed in
+  var members = PARTS || [];
+  if(members.indexOf(MY_UID) < 0) return false;   // signed in, but not in THIS group
+  ST.user = MY_UID;
+  try{ localStorage.setItem("cfb_user_"+(GROUP_ID||"g"), ST.user); }catch(e){}
+  return true;
+}
+
 function loadData(){
   if(!DB){draw();return;}
   draw();   // paint the shell immediately so there's no blank "Loading…" gap
@@ -836,6 +849,9 @@ function loadData(){
     ? DB.ref("groups/"+GROUP_ID).once("value").then(function(sn){
         var g=sn.val()||{};
         if(g&&g.players&&g.players.length) PARTS=g.players;
+        // Members list is now known — a signed-in member on a shared link can be
+        // identified without the "Who are you?" step.
+        autoIdentifyMember();
         GROUP_ADMIN_PW=(g&&(g.adminPw||g.groupAdminPw))||null;
         ST.groupPublic=!!(g&&g.public);
         GROUP_OWNER_UID=(g&&g.ownerUid)||null;
@@ -3917,6 +3933,9 @@ var _fieldDebounce={};
   function _go(){ if(_started) return; _started=true; loadData(); }
   AUTH.onAuthStateChanged(function(user){
     MY_UID = user ? user.uid : null;
+    // Auth and the group record race each other; whichever lands second resolves
+    // the identity. Harmless to call twice — it no-ops once ST.user is set.
+    if(autoIdentifyMember()) scheduleDraw();
     _go();
   });
   // Safety net: if auth is slow/unavailable, don't hang the page.
