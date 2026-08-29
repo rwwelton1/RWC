@@ -1116,6 +1116,8 @@ function fetchScoreboard(){
     .then(function(r){return r.json();})
     .then(function(data){
       _scLoading=false; _scLastFetch=Date.now(); _scData=data; _scWeek=_reqWeek;
+      // Fresh feed — post any finals it reveals before the tab repaints.
+      try{ autoPostFinalsFromScoreboard(); }catch(e){}
       if(ST.page==="scores") renderScoresInto();
     })
     .catch(function(){
@@ -1229,6 +1231,62 @@ function _tiebreakerEvent(){
 function _isTiebreakerEvent(ev){
   var tbEv=_tiebreakerEvent();
   return !!(tbEv && ev===tbEv);
+}
+
+// Post results for any slate game the scoreboard now shows as final. Driven by
+// the same poll that powers the Scores tab, so it keeps working long after the
+// scheduled fetch window has closed.
+// Admin-only: results are the group's shared truth and only the admin may write
+// them, so for everyone else this is a no-op rather than a failed write.
+function autoPostFinalsFromScoreboard(){
+  if(PUBLIC_VIEW) return 0;
+  if(!DB) return 0;
+  if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) return 0;
+  var wk=scoresWeekId();
+  if(!wk) return 0;
+  var games=(ST.games&&ST.games[wk])||{};
+  var results=(ST.results&&ST.results[wk])||{};
+  var all=(_scData&&_scData.events)||[];
+  if(!all.length) return 0;
+  var posted=0;
+
+  activeGames(wk).forEach(function(gid){
+    if(results[gid]) return;                       // already resolved
+    var g=games[gid];
+    if(!g||!g.away||!g.home) return;
+    for(var i=0;i<all.length;i++){
+      var ev=all[i];
+      if(!_eventMatchesGame(ev,g)) continue;
+      var comp=(ev.competitions||[])[0]||{};
+      var state=(comp.status&&comp.status.type&&comp.status.type.state)||"";
+      if(state!=="post") return;                   // matched, but not final yet
+      var comps=comp.competitors||[];
+      var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+      var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+      var as=parseInt(ac.score), hs=parseInt(hc.score);
+      if(isNaN(as)||isNaN(hs)) return;             // final with no score — leave it
+      // Against the spread — identical rule to the manual Fetch, including pushes.
+      var _sp=parseFloat(g.spread)||0, _r;
+      if(!_sp || g.favSide==="even"){
+        _r = as>hs ? "away" : hs>as ? "home" : "push";
+      } else {
+        var _fav = g.favSide==="away" ? as : hs;
+        var _dog = g.favSide==="away" ? hs : as;
+        var _margin = _fav-_dog;
+        if(Math.abs(_margin-_sp)<0.01) _r="push";
+        else _r = _margin>_sp ? g.favSide : (g.favSide==="away" ? "home" : "away");
+      }
+      setResult(wk,gid,_r);
+      setGameField(wk,gid,"awayScore",as);
+      setGameField(wk,gid,"homeScore",hs);
+      posted++;
+      return;
+    }
+  });
+  if(posted){
+    toast("\u2713 "+posted+" result"+(posted!==1?"s":"")+" posted automatically");
+  }
+  return posted;
 }
 
 function renderScoresInto(){
