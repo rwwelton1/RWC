@@ -4422,10 +4422,10 @@ function renderUnauthLanding() {
   document.getElementById("btn-landing-login").addEventListener("click", function(){ showAuthModal("login"); });
 
   // Groups table
-  loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, ""); });
+  loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, "", true); });
   var si = document.getElementById("landing-group-search");
   if(si) si.addEventListener("input", function(){
-    loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, this.value.trim()); }.bind(this));
+    loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, this.value.trim(), true); }.bind(this));
   });
 }
 
@@ -6933,18 +6933,30 @@ function loadAllGroups(cb) {
     // Safety net: if neither callback fires within 6s (e.g. a permission-denied that
     // silently stalls, or a dropped connection), resolve to an empty list so the
     // "Find a Group" table shows its empty state instead of hanging on "Loading…".
-    var _timer = setTimeout(function(){ _resolve(_groupsCache || []); }, 6000);
+    // Only a genuine read populates the cache. A timeout or error still calls
+    // back (so the table shows its empty state rather than hanging) but leaves
+    // the cache untouched, so the next attempt actually retries instead of
+    // serving an empty list for the next 30 seconds.
+    function _fail(){
+      if(_settled) return; _settled = true;
+      _groupsCache = null; _groupsCacheTime = 0;
+      cb([]);
+    }
+    var _timer = setTimeout(_fail, 6000);
     DB.ref("groups").once("value", function(sn){
       clearTimeout(_timer);
       _resolve(Object.values(sn.val()||{}));
     }, function(err){
       clearTimeout(_timer);
-      _resolve(_groupsCache || []);
+      _fail();
     });
   } else if(!_groupsCache) cb([]);
 }
 
-function renderGroupsTableTo(tbodyId, groups, query) {
+// browseMode=true is the signed-out splash: show every group that's running,
+// whether or not the viewer could join it right now. Joining is a separate
+// question and is handled per-row.
+function renderGroupsTableTo(tbodyId, groups, query, browseMode) {
   var tbody = document.getElementById(tbodyId);
   if(!tbody) return;
   var q = (query||"").toLowerCase().trim();
@@ -6957,12 +6969,25 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     // coming-soon pools, or all completed pools are hidden from Find-a-Group.
     // Kind-aware: season pools are joinable for the whole season.
     var hasJoinablePool = !!_firstJoinablePool(g);
-    if(!hasJoinablePool) return false;
+    if(!hasJoinablePool){
+      // Browse mode still shows it as long as the group has a pool that hasn't
+      // finished — visitors want to see what's running, not just what's open.
+      if(!browseMode) return false;
+      var _anyLive = ((g.pools)||[]).some(function(pid){
+        var pd=poolById(pid);
+        if(!pd) return false;
+        return poolStatusFor(g, pid) !== "complete";
+      });
+      if(!_anyLive) return false;
+    }
     if(!q) return true;
     return (g.name||"").toLowerCase().indexOf(q)>=0;
   });
   if(filtered.length===0){
-    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+(q?"No groups match your search":"No other groups to join right now")+'</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+
+      (q ? "No groups match your search"
+         : (browseMode ? "No groups yet \u2014 be the first to create one"
+                       : "No other groups to join right now"))+'</td></tr>';
     return;
   }
   var h = "";
@@ -6988,6 +7013,11 @@ function renderGroupsTableTo(tbodyId, groups, query) {
     // Decide the row's action from the pool kind and the group's public flag.
     var _isSeason = !!(poolDef && poolDef.kind === "season");
     var _action = "join", _actionHtml = '<span class="join-link">Join &#8250;</span>', _viewUrl = "";
+    // Not signed in: browsing is fine, joining needs an account.
+    if(!myName){
+      _action = "signin";
+      _actionHtml = '<span class="join-link" style="color:var(--blue)">Sign in &#8250;</span>';
+    } else {
     // A season pool takes new members right up to its opening kickoff.
     if(_isSeason && _seasonJoinOpen(g, poolDef)) _isSeason = false;
     if(_isSeason){
@@ -7004,6 +7034,7 @@ function renderGroupsTableTo(tbodyId, groups, query) {
         _actionHtml = "";
       }
     }
+    }  // end signed-in branch
     h += '<tr'+(_action!=="none"?' class="clickable-row"':' style="opacity:.72"')+' data-gid="'+x(g.id)+'" data-action="'+_action+'"'+(_viewUrl?' data-view-url="'+x(_viewUrl)+'"':'')+'>';
     h += '<td class="group-name-cell">'+x(g.name||"Unnamed")+'</td>';
     h += '<td style="color:#64748b;font-size:11px">'+playerCount+'</td>';
@@ -7014,6 +7045,11 @@ function renderGroupsTableTo(tbodyId, groups, query) {
   tbody.querySelectorAll("tr.clickable-row").forEach(function(el){
     el.addEventListener("click", function(){
       var act = this.getAttribute("data-action");
+      if(act === "signin"){
+        // Same entry point the splash's own "Sign in with Google" link uses.
+        try{ showAuthModal("login"); }catch(e){}
+        return;
+      }
       if(act === "view"){
         // Read-only leaderboard: no user param, so the pool page treats this as a
         // guest view and the visitor is never added to the group.
@@ -7037,9 +7073,10 @@ function subscribeGlobalStatuses() {
     var prev = JSON.stringify(SC.globalStatuses||{});
     SC.globalStatuses = sn.val() || {};
     // Skip redraw on first fire (boot draw already pending) or if unchanged
-    if(_firstStatusFire){ _firstStatusFire=false; return; }
+    if(_firstStatusFire){ _firstStatusFire=false; _refreshLandingGroups(); return; }
     if(JSON.stringify(SC.globalStatuses) === prev) return;
     if(SC.screen==="hub"||SC.screen==="profile") scheduleDraw();
+    _refreshLandingGroups();
   });
   DB.ref("globalSettings/completedAt").once("value", function(sn){
     SC.completedAt = sn.val() || {};
@@ -7060,7 +7097,17 @@ function subscribeGlobalStatuses() {
   DB.ref("globalSettings/poolDates").once("value", function(sn){
     SC._poolDates = sn.val() || {};
     autoSnapStatuses();
+    // Season groups only qualify once seasonStatus is known. If this landed after
+    // the splash rendered, that list is stale — redraw it.
+    _refreshLandingGroups();
   });
+}
+
+// Re-render the splash's group list in place, if it's on screen.
+function _refreshLandingGroups(){
+  if(!document.getElementById("landing-groups-tbody")) return;
+  var q=(document.getElementById("landing-group-search")||{}).value||"";
+  loadAllGroups(function(groups){ renderGroupsTableTo("landing-groups-tbody", groups, q.trim(), true); });
 }
 
 // Archive completed pool results before cycling back to Soon
