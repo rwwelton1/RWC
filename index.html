@@ -6937,18 +6937,21 @@ function loadAllGroups(cb) {
     // back (so the table shows its empty state rather than hanging) but leaves
     // the cache untouched, so the next attempt actually retries instead of
     // serving an empty list for the next 30 seconds.
-    function _fail(){
+    function _fail(err){
       if(_settled) return; _settled = true;
       _groupsCache = null; _groupsCacheTime = 0;
+      // Remember WHY, so the table can say something truthful.
+      SC._groupsReadError = (err && (err.code || err.message)) ? String(err.code||err.message) : "unavailable";
       cb([]);
     }
     var _timer = setTimeout(_fail, 6000);
     DB.ref("groups").once("value", function(sn){
       clearTimeout(_timer);
+      SC._groupsReadError = null;         // a real read succeeded
       _resolve(Object.values(sn.val()||{}));
     }, function(err){
       clearTimeout(_timer);
-      _fail();
+      _fail(err);
     });
   } else if(!_groupsCache) cb([]);
 }
@@ -6984,10 +6987,21 @@ function renderGroupsTableTo(tbodyId, groups, query, browseMode) {
     return (g.name||"").toLowerCase().indexOf(q)>=0;
   });
   if(filtered.length===0){
-    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+
-      (q ? "No groups match your search"
-         : (browseMode ? "No groups yet \u2014 be the first to create one"
-                       : "No other groups to join right now"))+'</td></tr>';
+    var _msg;
+    if(q){
+      _msg = "No groups match your search";
+    } else if(SC._groupsReadError){
+      // The read was refused or timed out — say so rather than implying the app
+      // is empty. Permission denied here means the database rules don't allow
+      // reading /groups without a signed-in user.
+      _msg = /permission|denied/i.test(SC._groupsReadError)
+        ? 'Sign in to browse groups'
+        : "Couldn't load groups \u2014 check your connection";
+    } else {
+      _msg = browseMode ? "No groups yet \u2014 be the first to create one"
+                        : "No other groups to join right now";
+    }
+    tbody.innerHTML = '<tr><td colspan="4" class="no-results">'+_msg+'</td></tr>';
     return;
   }
   var h = "";
@@ -6996,6 +7010,15 @@ function renderGroupsTableTo(tbodyId, groups, query, browseMode) {
     // Competition column — same as hub
     var openPool = null;
     openPool = _firstJoinablePool(g);
+    // Nothing joinable: still describe what the group is playing. Prefer a pool
+    // that hasn't finished, otherwise just the first one it has.
+    if(!openPool){
+      var _pl=(g.pools||[]);
+      for(var _q=0;_q<_pl.length;_q++){
+        if(poolById(_pl[_q]) && poolStatusFor(g,_pl[_q])!=="complete"){ openPool=_pl[_q]; break; }
+      }
+      if(!openPool && _pl.length && poolById(_pl[0])) openPool=_pl[0];
+    }
     var compHtml = '<span style="color:#334155;font-size:10px">—</span>';
     if(openPool) {
       var poolDef = null;
@@ -7003,11 +7026,22 @@ function renderGroupsTableTo(tbodyId, groups, query, browseMode) {
       var statusLabel = _joinPoolLabel(openPool);
       // Season pools that are still open to newcomers say so explicitly.
       if(poolDef && poolDef.kind === "season" && _seasonJoinOpen(g, poolDef)) statusLabel = "Open";
-      var statusColor = statusLabel==="Live" ? "#fbbf24" : "#6ee7b7";
+      // A pool that isn't joinable still has a state worth naming.
+      var _realSt = poolStatusFor(g, openPool);
+      if(poolDef && poolDef.kind !== "season"){
+        if(_realSt==="locked")        statusLabel = "Live";
+        else if(_realSt==="complete") statusLabel = "Final";
+        else if(_realSt==="open")     statusLabel = "Open";
+        else                          statusLabel = "Soon";
+      }
+      var statusColor = statusLabel==="Live" ? "#fbbf24"
+                      : statusLabel==="Final" ? "#94a3b8"
+                      : statusLabel==="Soon"  ? "#94a3b8" : "#6ee7b7";
       var scores = ((g.data||{})[openPool]||{}).scores || {};
       var ranked = (g.players||[]).slice().sort(function(a,b){ return (scores[b]||0)-(scores[a]||0); });
       var myRank = myName ? ranked.indexOf(myName)+1 : 0;
-      var icon = poolDef ? poolDef.icon : "🏆";
+      // Prefer the sport icon so every golf event reads ⛳, every football 🏈.
+      var icon = poolDef ? (poolDef.sportIcon || poolDef.icon) : "🏆";
       compHtml = '<span style="font-size:10px;color:#94a3b8">'+icon+' <span style="color:'+statusColor+'">'+statusLabel+'</span>'+(myRank>0?' · #'+myRank+' of '+playerCount:'')+'</span>';
     }
     // Decide the row's action from the pool kind and the group's public flag.
