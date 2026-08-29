@@ -2290,7 +2290,8 @@ function renderProfile() {
       // Status label from stackedPills
       var _stText = "";
       pools.forEach(function(pool){
-        var _st = effectiveStatus(g,pool.id);
+        // Derived, not stored — an event whose auto-lock has passed reads Live.
+        var _st = displayStatusFor(g,pool);
         if(_st==="coming-soon") return;
         var _stCol = _st==="open"?"var(--green)":_st==="locked"?"var(--red2)":_st==="complete"?"var(--blue)":"var(--dim)";
         var _stLbl = _st==="open"?"Open":_st==="locked"?"Live":"Final";
@@ -6956,6 +6957,38 @@ function loadAllGroups(cb) {
   } else if(!_groupsCache) cb([]);
 }
 
+// The status a card should DISPLAY for a pool, accounting for a lock time that
+// has quietly passed. effectiveStatus() reports what's stored; this reports what
+// is actually true right now, which is what a header should say.
+function displayStatusFor(g, pool){
+  if(!pool) return "coming-soon";
+  // effectiveStatus() is defined inside each render closure, so resolve the
+  // stored status here rather than depending on one of those being in scope.
+  var base = (g && g.data && g.data.statuses && g.data.statuses[pool.id]) || null;
+  if(!base){
+    if(pool.kind === "season"){
+      var ss = (SC._poolDates && SC._poolDates[pool.id] && SC._poolDates[pool.id].seasonStatus) || null;
+      if(ss === "done")           base = "complete";
+      else if(ss === "in-season") base = "locked";
+      else if(ss === "preseason") base = "open";
+    }
+    if(!base) base = (SC.globalStatuses||{})[pool.id] || "coming-soon";
+  }
+  var pdata = (g && g.data && g.data[pool.id]) || {};
+  var cur = pdata.currentEvent || null;
+  if(cur){
+    // A finished event always wins; otherwise a manual lock, an elapsed lock time,
+    // or ESPN reporting play under way all mean "live".
+    var espn = cur.espnState || "";
+    if(espn === "final" || cur.state === "final") return "complete";
+    if(cur.manualLock || (cur.lockTs && Date.now() >= cur.lockTs) || espn === "live") return "locked";
+  }
+  // Season pools publish their week lock the same way.
+  var meta = pdata.seasonMeta || null;
+  if(meta && meta.lockTs && Date.now() >= meta.lockTs && base === "open") return "locked";
+  return base;
+}
+
 // browseMode=true is the signed-out splash: show every group that's running,
 // whether or not the viewer could join it right now. Joining is a separate
 // question and is handled per-row.
@@ -7026,8 +7059,9 @@ function renderGroupsTableTo(tbodyId, groups, query, browseMode) {
       var statusLabel = _joinPoolLabel(openPool);
       // Season pools that are still open to newcomers say so explicitly.
       if(poolDef && poolDef.kind === "season" && _seasonJoinOpen(g, poolDef)) statusLabel = "Open";
-      // A pool that isn't joinable still has a state worth naming.
-      var _realSt = poolStatusFor(g, openPool);
+      // A pool that isn't joinable still has a state worth naming. Derived, so an
+      // event whose auto-lock has passed reads Live here too.
+      var _realSt = displayStatusFor(g, poolDef) || poolStatusFor(g, openPool);
       if(poolDef && poolDef.kind !== "season"){
         if(_realSt==="locked")        statusLabel = "Live";
         else if(_realSt==="complete") statusLabel = "Final";
