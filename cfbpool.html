@@ -413,7 +413,8 @@ function loadUserDir(cb){
   if(!DB){ cb&&cb(); return; }
   DB.ref("users").once("value",function(sn){
     var all=sn.val()||{};
-    USER_DIR={};
+    // Merge rather than replace: a spectator's read of /users returns nothing, and
+    // clearing here would discard the names seeded from the group record.
     Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯"}; });
     cb&&cb();
   }).catch(function(){ cb&&cb(); });
@@ -809,6 +810,14 @@ function publishSeasonToHub(metaOnly){
       // One atomic write: scores + stats + meta land together, hub never sees a
       // half-updated state.
       var upd={};
+      // Display names, so a public spectator can read the leaderboard without
+      // access to /users. Only names already resolved locally are written.
+      var nameMap={};
+      PARTS.forEach(function(p){
+        var n=(USER_DIR[p]&&USER_DIR[p].username)||"";
+        if(n) nameMap[p]={name:n, emoji:(USER_DIR[p]&&USER_DIR[p].emoji)||""};
+      });
+      if(Object.keys(nameMap).length) upd["groups/"+GROUP_ID+"/data/cfb/playernames"]=nameMap;
       upd["groups/"+GROUP_ID+"/data/cfb/playerscores"]=totals;
       upd["groups/"+GROUP_ID+"/data/cfb/playerstats"]=stats;
       upd["groups/"+GROUP_ID+"/data/cfb/seasonMeta"]=meta;
@@ -849,6 +858,16 @@ function loadData(){
     ? DB.ref("groups/"+GROUP_ID).once("value").then(function(sn){
         var g=sn.val()||{};
         if(g&&g.players&&g.players.length) PARTS=g.players;
+        // Seed display names from the group itself. A signed-out spectator can't
+        // read /users, so without this the leaderboard has no names at all. The
+        // authoritative directory still overwrites this if it loads.
+        var _pn=(g&&g.data&&g.data["cfb"]&&g.data["cfb"].playernames)||null;
+        if(_pn){
+          Object.keys(_pn).forEach(function(uid){
+            var rec=_pn[uid]||{};
+            if(!USER_DIR[uid] && rec.name) USER_DIR[uid]={username:rec.name, emoji:rec.emoji||"\uD83C\uDFAF"};
+          });
+        }
         // Members list is now known — a signed-in member on a shared link can be
         // identified without the "Who are you?" step.
         autoIdentifyMember();
