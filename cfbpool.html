@@ -2672,6 +2672,13 @@ function renderStandings(){
   var completedWeeks=ST.weekIds.filter(function(w){return weekIsComplete(w);});
   var curWeekId=displayWeekId();
   var curLocked=!!(curWeekId&&weekIsComplete(curWeekId));
+  // Has scoring started for the current week? Once any of its games has a result
+  // the column stops being about picks and starts being about points.
+  var curScoring=(function(){
+    if(!curWeekId||curLocked) return false;
+    var res=(ST.results&&ST.results[curWeekId])||{};
+    return activeGames(curWeekId).some(function(gid){ return !!res[gid]; });
+  })();
   var weeksPlayed=completedWeeks.length;
   var weeksRemaining=Math.max(0, SEASON_WEEKS - weeksPlayed);
 
@@ -2763,7 +2770,10 @@ function renderStandings(){
   });
 
   if(curWeekId&&!curLocked){
-    h+='<th style="min-width:62px;text-align:center;font-size:9px;color:var(--green)">&#9998; '+x(ST.weekLabels[curWeekId]||curWeekId)+'<div style="font-size:7px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">picks</div></th>';
+    h+='<th style="min-width:62px;text-align:center;font-size:9px;color:'+(curScoring?'var(--red2)':'var(--green)')+'">'+
+       (curScoring?'&#128308; ':'&#9998; ')+x(ST.weekLabels[curWeekId]||curWeekId)+
+       '<div style="font-size:7px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">'+
+       (curScoring?'live':'picks')+'</div></th>';
   }
 
   h+='</tr></thead><tbody>';
@@ -2832,14 +2842,27 @@ function renderStandings(){
     if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[r.name])||{};
-      var made=0;
-      active.forEach(function(gid){ if(pickComplete(picks[gid])) made++; });
-      var allDone=active.length>0&&made===active.length;
       h+='<td style="text-align:center;padding:7px 6px">';
-      if(allDone){
-        h+='<div style="font-size:16px">&#10003;</div>';
+      if(curScoring){
+        // Scoring has started — show the running total and record, as a finished
+        // week does, so the column reads the same way all week.
+        var cs=weekScore(curWeekId,r.name);
+        if(cs.total>0||cs.correct>0||cs.wrong>0){
+          h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+cs.total+'</div>';
+          h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+cs.correct+'-'+cs.wrong+'</div>';
+        } else {
+          h+='<span class="gp-nopick">&ndash;</span>';
+        }
       } else {
-        h+='<div style="font-size:10px;font-weight:800;color:var(--muted)">'+made+'/'+active.length+'</div>';
+        var made=0;
+        // Confidence pool: a pick only counts with a side AND a number.
+        active.forEach(function(gid){ if(pickComplete(picks[gid])) made++; });
+        var allDone=active.length>0&&made===active.length;
+        if(allDone){
+          h+='<div style="font-size:16px">&#10003;</div>';
+        } else {
+          h+='<div style="font-size:10px;font-weight:800;color:var(--muted)">'+made+'/'+active.length+'</div>';
+        }
       }
       h+='</td>';
     }
