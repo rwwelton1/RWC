@@ -7001,13 +7001,29 @@ function displayStatusFor(g, pool){
     if(!base) base = (SC.globalStatuses||{})[pool.id] || "coming-soon";
   }
   var pdata = (g && g.data && g.data[pool.id]) || {};
+  function _s(v){ return String(v==null?"":v).trim().toLowerCase(); }
+
+  // 1. A recorded result is the strongest evidence there is — the event is over,
+  //    whatever any status field still says.
+  var r = pdata.results || null;
+  if(r && (r.first || r.finalizedAt || (r.ranks && Object.keys(r.ranks).length))) return "complete";
+  if(pdata.meta && pdata.meta.finalizedAt) return "complete";
+
+  // 2. An archived event means the pool was frozen and put away.
+  var ev = pdata.events || null;
+  if(ev && Object.keys(ev).length){
+    var anyEnded=false;
+    Object.keys(ev).forEach(function(k){ if(ev[k] && ev[k].endedAt) anyEnded=true; });
+    if(anyEnded) return "complete";
+  }
+
   var cur = pdata.currentEvent || null;
   if(cur){
-    // A finished event always wins; otherwise a manual lock, an elapsed lock time,
-    // or ESPN reporting play under way all mean "live".
-    var espn = cur.espnState || "";
-    if(espn === "final" || cur.state === "final") return "complete";
-    if(cur.manualLock || (cur.lockTs && Date.now() >= cur.lockTs) || espn === "live") return "locked";
+    // 3/4. ESPN's own view. Case-insensitive: the pool writes "Live", not "live".
+    var espn = _s(cur.espnState), st = _s(cur.state);
+    if(espn === "final" || espn === "post" || st === "final") return "complete";
+    if(cur.manualLock || (cur.lockTs && Date.now() >= cur.lockTs) ||
+       espn === "live" || espn === "in" || st === "live") return "locked";
   }
   // Season pools publish their week lock the same way.
   var meta = pdata.seasonMeta || null;

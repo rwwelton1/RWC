@@ -824,6 +824,9 @@ function normName(n){
 }
 
 function syncPlayerScoresToGroup(){
+  // Frozen: the archived totals are the record. Anything computed from the live
+  // feed now belongs to a different tournament.
+  if((typeof isFrozen==="function") && isFrozen()) return;
   if(!DB||!GROUP_ID)return;
   var scores={};
   // For each player who has submitted picks, compute their entry total
@@ -843,12 +846,18 @@ function syncPlayerScoresToGroup(){
   if(!CUR_EVENT_NAME) return;
 
   // Current-event summary for the hub series card.
+  // Frozen: this event is finished. Report it as such and keep OUR name, not the
+  // next tournament ESPN has rolled on to.
+  var _frozen = (typeof isFrozen==="function") && isFrozen();
+  var _archName = (ST.archive && ST.archive.name) || TOURNAMENT.name || CUR_EVENT_NAME;
   DB.ref("groups/"+GROUP_ID+"/data/pgatour/currentEvent").set({
-    name: CUR_EVENT_NAME,
-    state: (CUR_EVENT_STATE==="open" && isLocked()) ? "live" : CUR_EVENT_STATE,
-    espnState: CUR_EVENT_STATE,        // raw ESPN state, so the hub can distinguish
+    name: _frozen ? _archName : CUR_EVENT_NAME,
+    state: _frozen ? "final"
+                   : ((CUR_EVENT_STATE==="open" && isLocked()) ? "live" : CUR_EVENT_STATE),
+    espnState: _frozen ? "final" : CUR_EVENT_STATE,   // raw ESPN state, so the hub can distinguish
     lockTs: ST.lockTs || null,         // scheduled lock time — lets the hub derive lock live
     manualLock: !!ST.locked,           // admin early-lock override
+    finalizedAt: _frozen ? ((ST.archive && ST.archive.endedAt) || Date.now()) : null,
     updatedAt: Date.now()
   });
 
