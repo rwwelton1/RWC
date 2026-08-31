@@ -1413,6 +1413,17 @@ function renderAdmin(){
   h+='<span style="font-size:12px;font-weight:800;flex:1">Finalize &amp; Record Result</span>';
   h+='<button class="btn btn-gold" id="b-finalize">&#127942; Finalize</button>';
   h+='</div>';
+  // Scheduled auto-finalize — same shape as the auto-lock above.
+  h+='<div class="adm-row" style="margin-top:8px;flex-direction:column;align-items:stretch;gap:4px">';
+  h+='<span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Auto-finalize time (result records at this moment)</span>';
+  h+='<input type="datetime-local" id="b-finalts" value="'+_lockTsToLocalInput(ST.finalizeTs||null)+'" style="font-size:12px;padding:6px 8px;border:2px solid var(--border);border-radius:8px;font-family:Nunito,sans-serif">';
+  var _finState = ST.finalized ? "Already finalized"
+    : (ST.finalizeTs
+        ? (Date.now()>=ST.finalizeTs ? "Time passed \u2014 finalizing on next refresh"
+                                     : "Finalizes "+new Date(ST.finalizeTs).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))
+        : "No auto-finalize set \u2014 ESPN completion still finalizes automatically");
+  h+='<span style="font-size:9px;font-weight:700;color:'+(ST.finalized?"var(--blue)":(ST.finalizeTs&&Date.now()>=ST.finalizeTs?"var(--red2)":"var(--muted)"))+'">'+_finState+'</span>';
+  h+='</div>';
   h+='</div>';
   h+='<div class="section-label">Player Field</div>';
   h+='<div class="adm-card">';
@@ -2014,6 +2025,37 @@ function importPlayerField() {
   });
 }
 
+// Record the result once the scheduled moment passes. Admin-only, runs at most
+// once, and refuses to finalize a pool with nothing in it — a mis-set time
+// shouldn't freeze an empty leaderboard as the final word.
+var _autoFinalizing=false;
+function maybeAutoFinalize(){
+  if(!DB || !ST.isAdmin) return;
+  if(_autoFinalizing || ST.finalized) return;
+  if(!ST.finalizeTs || Date.now() < ST.finalizeTs) return;
+  var entries=[];
+  for(var uk in ST.picks){
+    var p=ST.picks[uk];
+    if(!p||!p.name) continue;
+    entries.push({name:p.name, total:entryTotal(p.picks||[])});
+  }
+  if(!entries.length) return;                 // nothing to record yet
+  entries.sort(function(a,b){ return a.total-b.total; });
+  _autoFinalizing=true;
+  var result={
+    first:(entries[0]||{}).name||"",
+    second:(entries[1]||{}).name||"",
+    third:(entries[2]||{}).name||"",
+    ts:Date.now(), tournament:TOURNAMENT.name, year:TOURNAMENT.year, auto:true
+  };
+  DB.ref("globalSettings/results/pgatour").set(result);
+  DB.ref("globalSettings/statuses/pgatour").set("complete");
+  DB.ref(BASE+"/meta/finalizedAt").set(Date.now());
+  ST.finalized=true;
+  toast("\u{1F3C6} Auto-finalized \u2014 result recorded");
+  draw();
+}
+
 function finalizePool() {
   if(!DB||!ST.isAdmin) return;
   // Compute standings from current picks + scores
@@ -2157,6 +2199,15 @@ function bind(){
     ST.locked=!ST.locked;
     if(DB) DB.ref(BASE+"/meta/locked").set(ST.locked);
     toast(ST.locked?"&#128274; Picks locked":"&#9998; Picks opened");
+    draw();
+  });
+
+  el=document.getElementById("b-finalts"); if(el) el.addEventListener("change",function(){
+    var ts = this.value ? new Date(this.value).getTime() : null;
+    ST.finalizeTs = ts;
+    if(DB) DB.ref(BASE+"/meta/finalizeTs").set(ts||null);
+    toast(ts?"\u{1F3C6} Auto-finalize set":"Auto-finalize cleared");
+    maybeAutoFinalize();
     draw();
   });
 
@@ -2319,6 +2370,9 @@ function loadData(){
       var now=isLocked();
       if(_lastLockState!==null && now!==_lastLockState) draw();
       _lastLockState=now;
+      // Same tick handles the scheduled finalize, so it fires on its own rather
+      // than waiting for someone to open the admin tab.
+      try{ maybeAutoFinalize(); }catch(e){}
     }, 60*1000);
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
     DB.ref(BASE+"/meta/locked").on("value",function(sn){
@@ -2327,6 +2381,15 @@ function loadData(){
     });
     DB.ref(BASE+"/meta/lockTs").on("value",function(sn){
       ST.lockTs=sn.val()||null;
+      draw();
+    });
+    DB.ref(BASE+"/meta/finalizeTs").on("value",function(sn){
+      ST.finalizeTs=sn.val()||null;
+      maybeAutoFinalize();
+      draw();
+    });
+    DB.ref(BASE+"/meta/finalizedAt").on("value",function(sn){
+      ST.finalized=!!sn.val();
       draw();
     });
     // Series: past-event archive (top-3 per completed tournament).
