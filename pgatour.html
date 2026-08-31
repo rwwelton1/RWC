@@ -872,14 +872,19 @@ function syncPlayerScoresToGroup(){
         ranked.forEach(function(e){
           seen++;
           if(lastPts===null || e.pts!==lastPts){ curRank=seen; lastPts=e.pts; }
-          ranks[e.name]=curRank;                       // ties share the same rank
-          (byRank[curRank]=byRank[curRank]||[]).push(e.name);
+          // Keyed by UID — the hub matches these against ME(), which is a uid.
+          // A name-keyed map silently never matches and the win is lost.
+          ranks[e.uid]=curRank;                        // ties share the same rank
+          (byRank[curRank]=byRank[curRank]||[]).push(e.uid);
         });
         var results={
           first:(byRank[1]||[])[0]||null,
           second:(byRank[2]||[])[0]||null,
           third:(byRank[3]||[])[0]||null,
           ranks:ranks,
+          // Display names alongside, so anything rendering the podium doesn't
+          // have to resolve uids itself.
+          names:(function(){ var m={}; ranked.forEach(function(e){ m[e.uid]=e.name; }); return m; })(),
           tournamentName:CUR_EVENT_NAME,
           finalizedAt:Date.now(),
           auto:true
@@ -2037,19 +2042,34 @@ function maybeAutoFinalize(){
   for(var uk in ST.picks){
     var p=ST.picks[uk];
     if(!p||!p.name) continue;
-    entries.push({name:p.name, total:entryTotal(p.picks||[])});
+    entries.push({uid:uk, name:p.name, total:entryTotal(p.picks||[])});
   }
   if(!entries.length) return;                 // nothing to record yet
   entries.sort(function(a,b){ return a.total-b.total; });
   _autoFinalizing=true;
+  // Dense-rank so ties share a placement, exactly as the ESPN path does.
+  var ranks={}, byRank={}, lastTot=null, curRank=0, seen=0, names={};
+  entries.forEach(function(e){
+    seen++;
+    if(lastTot===null || e.total!==lastTot){ curRank=seen; lastTot=e.total; }
+    ranks[e.uid]=curRank;
+    names[e.uid]=e.name;
+    (byRank[curRank]=byRank[curRank]||[]).push(e.uid);
+  });
   var result={
-    first:(entries[0]||{}).name||"",
-    second:(entries[1]||{}).name||"",
-    third:(entries[2]||{}).name||"",
-    ts:Date.now(), tournament:TOURNAMENT.name, year:TOURNAMENT.year, auto:true
+    first:(byRank[1]||[])[0]||null,
+    second:(byRank[2]||[])[0]||null,
+    third:(byRank[3]||[])[0]||null,
+    ranks:ranks, names:names,
+    tournamentName:TOURNAMENT.name, year:TOURNAMENT.year,
+    finalizedAt:Date.now(), auto:true
   };
-  DB.ref("globalSettings/results/pgatour").set(result);
-  DB.ref("globalSettings/statuses/pgatour").set("complete");
+  Object.keys(result).forEach(function(k){ if(result[k]===null) delete result[k]; });
+  // The trophy case reads the GROUP's results, not globalSettings — writing only
+  // to globalSettings records the result nowhere the badge scan will find it.
+  DB.ref("groups/"+GROUP_ID+"/data/pgatour/results").set(result);
+  DB.ref("groups/"+GROUP_ID+"/data/pgatour/tournamentName").set(TOURNAMENT.name);
+  DB.ref("groups/"+GROUP_ID+"/data/statuses/pgatour").set("complete");
   DB.ref(BASE+"/meta/finalizedAt").set(Date.now());
   ST.finalized=true;
   toast("\u{1F3C6} Auto-finalized \u2014 result recorded");
