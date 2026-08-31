@@ -3963,18 +3963,14 @@ function renderTrophyCase() {
             else if(t.finish===3){ finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
             else finish=99;
           });
-        } else if(r && r.ranks && r.ranks[ME()]) {
-          // Authoritative: ties preserved. Two players tied for 2nd BOTH get a silver.
-          var _rk = Number(r.ranks[ME()]) || 99;
+        } else if(r && resultFinishFor(r, ME())!==null) {
+          // Ties preserved: two players tied for 2nd BOTH get a silver. Works for
+          // uid-keyed results and older name-keyed ones alike.
+          var _rk = resultFinishFor(r, ME());
           if(_rk===1)      { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
           else if(_rk===2) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
           else if(_rk===3) { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
           else             { finish=99; }
-        } else if(r && (r.first||r.second||r.third)){
-          if(r.first===ME())       { finish=1; pts=4; totalWins++; totalPodiums++; sportMap[sid].wins++; }
-          else if(r.second===ME()) { finish=2; pts=2; totalPodiums++; sportMap[sid].seconds++; }
-          else if(r.third===ME())  { finish=3; pts=1; totalPodiums++; sportMap[sid].thirds++; }
-          else if(r.first||r.second)     { finish=99; }
         } else if(isFinished) {
           // Fallback: compute from live group scores
           var _dataKey = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dataKey="cws2026";
@@ -6960,6 +6956,36 @@ function loadAllGroups(cb) {
 // The status a card should DISPLAY for a pool, accounting for a lock time that
 // has quietly passed. effectiveStatus() reports what's stored; this reports what
 // is actually true right now, which is what a header should say.
+// Where did this user finish in a stored result? Understands both the uid-keyed
+// shape and the older name-keyed one, so nothing has to be migrated.
+// Returns 1/2/3, 99 for "competed", or null if the result says nothing about them.
+function resultFinishFor(r, uid){
+  if(!r || !uid) return null;
+  var myName = (typeof nameOf==="function") ? nameOf(uid) : "";
+  if(myName==="(unknown)") myName="";
+  function sameAsMe(v){
+    if(v===undefined || v===null) return false;
+    if(v===uid) return true;                                  // uid-keyed (current)
+    return !!(myName && String(v)===String(myName));          // name-keyed (legacy)
+  }
+  if(r.ranks){
+    // Prefer the uid entry; fall back to the display name.
+    var rk = r.ranks[uid];
+    if(rk===undefined && myName) rk = r.ranks[myName];
+    if(rk!==undefined){
+      var n = Number(rk) || 99;
+      return (n===1||n===2||n===3) ? n : 99;
+    }
+  }
+  if(r.first||r.second||r.third){
+    if(sameAsMe(r.first))  return 1;
+    if(sameAsMe(r.second)) return 2;
+    if(sameAsMe(r.third))  return 3;
+    return 99;                                                // result exists, not me
+  }
+  return null;
+}
+
 function displayStatusFor(g, pool){
   if(!pool) return "coming-soon";
   // effectiveStatus() is defined inside each render closure, so resolve the
