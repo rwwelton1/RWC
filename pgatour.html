@@ -864,7 +864,19 @@ function syncPlayerScoresToGroup(){
       var ranked=Object.keys(scores).map(function(u){ return {uid:u, name:nameOf(u), pts:scores[u]}; })
                        .sort(function(a,b){ return a.pts-b.pts; });
       var podium=ranked.slice(0,3);
-      ref.set({ name:CUR_EVENT_NAME, endedAt:Date.now(), podium:podium });
+      // Freeze everything needed to rebuild this leaderboard later: the golfer
+      // scores AND each entry's total. Without the golfer scores the pick chips
+      // re-render from whatever ESPN is serving now, which is another event.
+      var _frozenGolfers={};
+      for(var _gk in liveScores){
+        var _g=liveScores[_gk];
+        _frozenGolfers[_gk]={name:_g.name,score:_g.score,thru:_g.thru||"",pos:_g.pos||"",cut:!!_g.cut};
+      }
+      ref.set({
+        name:CUR_EVENT_NAME, endedAt:Date.now(), podium:podium,
+        scores:scores,                 // uid -> entry total
+        golfers:_frozenGolfers         // normalised golfer -> final score
+      });
 
       // ── Mint trophies (podium + ranks with ties preserved) ──
       if(ranked.length){
@@ -1477,14 +1489,27 @@ function renderAdmin(){
 }
 
 // ── Live ESPN scoring ─────────────────────────────────
+// True once this pool's event is finalized/archived. Everything downstream reads
+// the frozen snapshot from that point on.
+function isFrozen(){
+  return !!(ST.finalized || (ST.archive && ST.archive.scores));
+}
+
 function fetchLiveScores(){
   if(_liveLoading)return;
+  // Finalized: ESPN has rolled on to the next tournament, so anything it returns
+  // now belongs to a different event. Never overwrite a frozen result with it.
+  if(isFrozen()){ stopLiveRefresh(); renderFrozenNotice(); return; }
   _liveLoading=true;
   var url=TOURNAMENT.espnUrl||"https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard";
   fetch(url)
     .then(function(r){return r.json();})
     .then(function(data){
-      _liveLoading=false;_liveLastFetch=Date.now();_liveData=data;
+      _liveLoading=false;_liveLastFetch=Date.now();
+      // A request can be in flight when the pool is finalized; drop its result
+      // rather than letting the next tournament's scores land.
+      if(isFrozen()){ stopLiveRefresh(); return; }
+      _liveData=data;
       parseLiveScores(data);
       // Persist live scores to Firebase so other users get them immediately
       if(DB&&Object.keys(liveScores).length){
@@ -1497,7 +1522,9 @@ function fetchLiveScores(){
       }
       syncPlayerScoresToGroup();
       // Cache to localStorage so switching tabs doesn't lose scores
-      try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
+      if(!isFrozen()){
+        try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
+      }
       if(ST.page==="live")renderLiveInto();
       if(ST.page==="leaderboard")draw();
     })
@@ -1803,11 +1830,25 @@ function renderLive(){
 function startLiveRefresh(){
   clearInterval(_liveTimer);
   _liveTimer=null;
+  if(isFrozen()) return;   // finished — nothing left to poll for
   // Only fetch if we don't have recent data (within 5 min)
   if(!_liveData||Date.now()-_liveLastFetch>300000) fetchLiveScores();
   else renderLiveInto();
 }
 function stopLiveRefresh(){clearInterval(_liveTimer);_liveTimer=null;}
+
+// Replace the auto-refresh footer once the event is archived, so a frozen page
+// doesn't look like a stalled one.
+function renderFrozenNotice(){
+  var el=document.getElementById("live-wrap");
+  if(!el || ST.page!=="live") return;
+  var nm=(ST.archive&&ST.archive.name)||TOURNAMENT.name||"This event";
+  var when=(ST.archive&&ST.archive.endedAt)?new Date(ST.archive.endedAt).toLocaleDateString("en-US",{month:"short",day:"numeric"}):"";
+  var note='<div style="text-align:center;font-size:9px;font-weight:700;color:var(--muted);padding:10px 6px">'+
+           "\u2713 "+x(nm)+" is final"+(when?" \u2014 "+when:"")+". Scores are archived and no longer updating."+
+           '</div>';
+  if(el.innerHTML.indexOf("no longer updating")<0) el.innerHTML+=note;
+}
 
 function userSelectScreen(){
   var h='<div class="user-screen"><h2>Who are you?</h2><div class="user-grid">';
@@ -2479,6 +2520,26 @@ function loadData(){
       draw();
     });
     // Load cached live scores from Firebase (written by whoever last refreshed)
+    // Archived event for this pool: if one exists, it IS the truth.
+    DB.ref("groups/"+GROUP_ID+"/data/pgatour/events").on("value",function(sn){
+      var all=sn.val()||{};
+      var latest=null;
+      Object.keys(all).forEach(function(k){
+        var e=all[k]||{};
+        if(!e.scores && !e.golfers) return;                    // podium-only, older shape
+        if(!latest || (e.endedAt||0)>(latest.endedAt||0)) latest=e;
+      });
+      ST.archive=latest||null;
+      if(latest && latest.golfers){
+        // Serve the frozen golfer scores instead of the live feed.
+        liveScores={};
+        Object.keys(latest.golfers).forEach(function(k){ liveScores[k]=latest.golfers[k]; });
+        ST.finalized=true;
+        stopLiveRefresh();
+      }
+      draw();
+    });
+
     DB.ref(BASE+"/livescores").once("value",function(sn){
       var raw=sn.val()||{};
       if(Object.keys(raw).length){
@@ -2488,7 +2549,9 @@ function loadData(){
           if(!liveScores[_k].rounds) liveScores[_k].rounds={};
         }
         // Update localStorage with Firebase data (may be more recent than cache)
-        try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
+        if(!isFrozen()){
+          try{ localStorage.setItem("sc_livescores_"+(GROUP_ID||""), JSON.stringify(liveScores)); }catch(e){}
+        }
         _liveLastFetch=Date.now(); // mark as "have data" so leaderboard shows scores
         if(ST.page==="live") renderLiveInto();
         else draw();
