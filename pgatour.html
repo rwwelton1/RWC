@@ -2035,7 +2035,8 @@ function importPlayerField() {
 // shouldn't freeze an empty leaderboard as the final word.
 var _autoFinalizing=false;
 function maybeAutoFinalize(){
-  if(!DB || !ST.isAdmin) return;
+  if(!DB) return;
+  if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) return;
   if(_autoFinalizing || ST.finalized) return;
   if(!ST.finalizeTs || Date.now() < ST.finalizeTs) return;
   var entries=[];
@@ -2077,31 +2078,61 @@ function maybeAutoFinalize(){
 }
 
 function finalizePool() {
-  if(!DB||!ST.isAdmin) return;
-  // Compute standings from current picks + scores
-  var picks = ST.picks;
-  var entries = [];
-  for(var uk in picks){
-    var p = picks[uk];
-    if(!p||!p.name) continue;
-    entries.push({ name:p.name, total:entryTotal(p.picks||[]) });
+  if(!DB){ toast("Offline — can't finalize right now","err"); return; }
+  if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())){
+    toast("Only a group admin can finalize","err"); return;
   }
-  entries.sort(function(a,b){ return a.total-b.total; });
+  // Already done: say so instead of appearing to do nothing.
+  if(ST.finalized){
+    var _prev=ST.finalizedResult||null;
+    var _who=_prev && _prev.names && _prev.first ? (_prev.names[_prev.first]||"") : "";
+    toast("\u2705 Already finalized"+(_who?" \u2014 "+_who+" won":""),"ok");
+    return;
+  }
+  // Standings from current picks + scores. Keyed by uid: the trophy case matches
+  // results against the account uid, and a name-keyed record credits nobody.
+  var entries = [];
+  for(var uk in ST.picks){
+    var p = ST.picks[uk];
+    if(!p||!p.name) continue;
+    entries.push({ uid:uk, name:p.name, total:entryTotal(p.picks||[]) });
+  }
   if(!entries.length){ toast("No entries to finalize","err"); return; }
-  var first  = entries[0] ? entries[0].name : "";
-  var second = entries[1] ? entries[1].name : "";
-  var third  = entries[2] ? entries[2].name : "";
+  entries.sort(function(a,b){ return a.total-b.total; });
+
+  // Dense-rank so ties share a placement.
+  var ranks={}, byRank={}, names={}, lastTot=null, curRank=0, seen=0;
+  entries.forEach(function(e){
+    seen++;
+    if(lastTot===null || e.total!==lastTot){ curRank=seen; lastTot=e.total; }
+    ranks[e.uid]=curRank; names[e.uid]=e.name;
+    (byRank[curRank]=byRank[curRank]||[]).push(e.uid);
+  });
+  function _nm(uid){ return uid ? (names[uid]||uid) : ""; }
+  var firstU=(byRank[1]||[])[0]||null, secondU=(byRank[2]||[])[0]||null, thirdU=(byRank[3]||[])[0]||null;
+
   var msg = "Finalize "+TOURNAMENT.name+"?\n\n"
-    +"1st: "+first+"\n"+(second?"2nd: "+second+"\n":"")+(third?"3rd: "+third+"\n":"")
+    +"1st: "+_nm(firstU)+"\n"+(secondU?"2nd: "+_nm(secondU)+"\n":"")+(thirdU?"3rd: "+_nm(thirdU)+"\n":"")
     +"\nThis records the result and cannot be undone.";
   if(!confirm(msg)) return;
-  var result = { first:first, second:second||"", third:third||"", ts:Date.now(),
-    tournament:TOURNAMENT.name, year:TOURNAMENT.year };
-  DB.ref("globalSettings/results/pgatour").set(result, function(){
-    toast("Pool finalized ✓","ok");
+
+  var result = {
+    first:firstU, second:secondU, third:thirdU,
+    ranks:ranks, names:names,
+    tournamentName:TOURNAMENT.name, year:TOURNAMENT.year,
+    finalizedAt:Date.now()
+  };
+  Object.keys(result).forEach(function(k){ if(result[k]===null) delete result[k]; });
+  // The group node is what the hub's trophy case reads.
+  DB.ref("groups/"+GROUP_ID+"/data/pgatour/results").set(result, function(err){
+    if(err){ toast("Finalize failed — "+String(err).slice(0,60),"err"); return; }
+    toast("\u{1F3C6} Finalized \u2014 "+_nm(firstU)+" won","ok");
   });
-  // Also set status to complete
-  DB.ref("globalSettings/statuses/pgatour").set("complete");
+  DB.ref("groups/"+GROUP_ID+"/data/pgatour/tournamentName").set(TOURNAMENT.name);
+  DB.ref("groups/"+GROUP_ID+"/data/statuses/pgatour").set("complete");
+  DB.ref(BASE+"/meta/finalizedAt").set(Date.now());
+  ST.finalized=true; ST.finalizedResult=result;
+  draw();
 }
 
 // ── TOURNAMENT EDITOR — admin can swap tournament details ──────────────────
@@ -2410,6 +2441,12 @@ function loadData(){
     });
     DB.ref(BASE+"/meta/finalizedAt").on("value",function(sn){
       ST.finalized=!!sn.val();
+      draw();
+    });
+    DB.ref("groups/"+GROUP_ID+"/data/pgatour/results").on("value",function(sn){
+      var r=sn.val();
+      ST.finalizedResult=r||null;
+      if(r) ST.finalized=true;      // a recorded result IS the finalized state
       draw();
     });
     // Series: past-event archive (top-3 per completed tournament).
