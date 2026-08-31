@@ -2127,17 +2127,38 @@ function maybeAutoFinalize(){
   draw();
 }
 
+// Can the hub credit this stored result? It needs rank keys that are uids of
+// people in this pool. A name-keyed record (or none at all) has to be rewritten.
+function resultNeedsRepublish(r){
+  if(!r) return true;                                   // nothing stored
+  var mine = ST.picks || {};
+  var keys = r.ranks ? Object.keys(r.ranks) : [];
+  if(!keys.length){
+    // Podium-only: check the winner is a uid we know.
+    return !(r.first && mine[r.first]);
+  }
+  for(var i=0;i<keys.length;i++){ if(mine[keys[i]]) return false; }   // at least one real uid
+  return true;
+}
+
 function finalizePool() {
   if(!DB){ toast("Offline — can't finalize right now","err"); return; }
   if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())){
     toast("Only a group admin can finalize","err"); return;
   }
-  // Already done: say so instead of appearing to do nothing.
+  // Already done — but only leave it alone if what's stored is actually usable.
   if(ST.finalized){
     var _prev=ST.finalizedResult||null;
-    var _who=_prev && _prev.names && _prev.first ? (_prev.names[_prev.first]||"") : "";
-    toast("\u2705 Already finalized"+(_who?" \u2014 "+_who+" won":""),"ok");
-    return;
+    if(!resultNeedsRepublish(_prev)){
+      var _who=_prev && _prev.names && _prev.first ? (_prev.names[_prev.first]||_prev.first) : "";
+      toast("\u2705 Already finalized"+(_who?" \u2014 "+_who+" won":""),"ok");
+      return;
+    }
+    // Stored, but in a shape the hub can't credit. Offer to fix it rather than
+    // refusing and leaving no way out.
+    if(!confirm("This pool is finalized, but the recorded result is in an old format "
+              + "and isn't crediting anyone's trophy case.\n\nRepublish it now?")) return;
+    // fall through and rewrite it properly
   }
   // Standings from current picks + scores. Keyed by uid: the trophy case matches
   // results against the account uid, and a name-keyed record credits nobody.
