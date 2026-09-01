@@ -561,6 +561,79 @@ function weekScore(weekId,user){
 // A week counts toward the season once it's "complete": either the admin locked it,
 // or every active game in it has a result. This prevents correct picks from silently
 // not counting when an admin forgets (or is slow) to lock a finished week.
+// ── MONEY LEAGUE ──────────────────────────────────────────────────────────
+// Settings live on the group so every member sees the same pot.
+function moneyOn(){ return !!(ST.money && ST.money.enabled && Number(ST.money.buyIn)>0); }
+function moneyBuyIn(){ return Number((ST.money&&ST.money.buyIn)||0); }
+function moneyPot(){ return moneyBuyIn() * (PARTS||[]).length; }
+// Share of the pot paid out weekly. The rest goes to the season winner.
+// Defaults to 0: the whole pot rides on the season unless an admin says otherwise.
+function moneyWeeklyPct(){
+  var v=(ST.money&&ST.money.weeklyPct);
+  v=(v===undefined||v===null)?0:Number(v);
+  if(isNaN(v)) v=0;
+  return Math.max(0,Math.min(100,v));
+}
+function moneyWeeklyPool(){ return moneyPot()*(moneyWeeklyPct()/100); }
+function moneySeasonPrize(){ return moneyPot()-moneyWeeklyPool(); }
+// The weekly share is spread over every week of the season, whether or not it's
+// been played — otherwise the prize would balloon early and shrink later.
+function moneyPerWeek(){
+  var wks=(ST.weekIds||[]).length;
+  return wks>0 ? moneyWeeklyPool()/wks : 0;
+}
+// The season prize is only real once every week has finished.
+function seasonComplete(){
+  var wks=(ST.weekIds||[]);
+  if(!wks.length) return false;
+  for(var i=0;i<wks.length;i++){ if(!weekIsComplete(wks[i])) return false; }
+  return true;
+}
+// What each player has won so far, keyed by uid.
+function moneyWinnings(){
+  var out={};
+  (PARTS||[]).forEach(function(p){ out[p]=0; });
+  if(!moneyOn()) return out;
+  var per=moneyPerWeek();
+  // Note: per can be 0 when the split is 100% season — carry on, because the
+  // season prize below still needs to be awarded.
+  (ST.weekIds||[]).forEach(function(w){
+    if(!per) return;                                // nothing paid weekly
+    if(!weekIsComplete(w)) return;                  // not won until it's finished
+    var best=null, winners=[];
+    (PARTS||[]).forEach(function(p){
+      var t=weekScore(w,p).total;
+      if(best===null||t>best){ best=t; winners=[p]; }
+      else if(t===best) winners.push(p);
+    });
+    if(best===null||best<=0) return;                // nobody scored; nothing to award
+    var share=per/winners.length;                   // ties split the week
+    winners.forEach(function(p){ out[p]=(out[p]||0)+share; });
+  });
+
+  // Season prize — only once the whole season is in the books.
+  var seasonPrize=moneySeasonPrize();
+  if(seasonPrize>0 && seasonComplete()){
+    var sBest=null, sWinners=[];
+    (PARTS||[]).forEach(function(p){
+      var tot=0;
+      (ST.weekIds||[]).forEach(function(w){ tot+=weekScore(w,p).total; });
+      if(sBest===null||tot>sBest){ sBest=tot; sWinners=[p]; }
+      else if(tot===sBest) sWinners.push(p);
+    });
+    if(sBest!==null && sBest>0){
+      var sShare=seasonPrize/sWinners.length;       // ties split the season too
+      sWinners.forEach(function(p){ out[p]=(out[p]||0)+sShare; });
+    }
+  }
+  return out;
+}
+// Whole dollars where possible, cents only when a split needs them.
+function moneyFmt(v){
+  var n=Number(v)||0;
+  return "$"+(Math.abs(n-Math.round(n))<0.005 ? String(Math.round(n)) : n.toFixed(2));
+}
+
 function weekIsComplete(weekId){
   if(ST.locked[weekId]) return true;
   var active=activeGames(weekId);
@@ -937,6 +1010,7 @@ function loadData(){
       DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};_onData();});
       DB.ref(BASE+"/spreadsLocked").on("value",function(sn){ST.spreadsLocked=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/meta/money").on("value",function(sn){ST.money=sn.val()||null;scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
       function subscribePicksForWeek(wId){
@@ -2814,6 +2888,19 @@ function renderStandings(){
   h+='<th data-sort-total="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:9px">Pts</th>';
   h+='<th data-sort-possible="1" style="cursor:pointer;min-width:48px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
 
+  // Money column sits between Poss and the first week, so winnings read next to
+  // the points that produced them.
+  var _money = moneyOn() ? moneyWinnings() : null;
+  if(_money){
+    var _wk=moneyPerWeek(), _sn=moneySeasonPrize();
+    var _sub = _wk>0 && _sn>0 ? moneyFmt(_wk)+'/wk &middot; '+moneyFmt(_sn)+' season'
+             : _wk>0          ? moneyFmt(_wk)+'/wk'
+             :                  moneyFmt(_sn)+' season';
+    h+='<th style="min-width:56px;text-align:center;font-size:9px;color:var(--green)">&#128176; Won'+
+       '<div style="font-size:7px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap">'+
+       _sub+'</div></th>';
+  }
+
   visibleWeeks.forEach(function(w){
     h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:58px;text-align:center;font-size:9px">'+x(ST.weekLabels[w]||w)+'</th>';
   });
@@ -2867,6 +2954,14 @@ function renderStandings(){
       h+='<div style="font-size:12px;font-weight:900;color:var(--blue)">'+r.possible+'</div>';
     }
     h+='</td>';
+
+    if(_money){
+      var _won=_money[r.name]||0;
+      h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
+      h+='<div style="font-size:12px;font-weight:900;color:'+(_won>0?'var(--green)':'var(--dim)')+'">'+
+         (_won>0?moneyFmt(_won):'&ndash;')+'</div>';
+      h+='</td>';
+    }
 
     visibleWeeks.forEach(function(w){
       var ws=r.weekScores[w];
@@ -3011,6 +3106,49 @@ function renderAdmin(){
     h+='<button class="adm-btn'+(ST.groupPublic?" sel":"")+'" id="b-pub-on">On</button>';
     h+='<button class="adm-btn'+(!ST.groupPublic?" sel":"")+'" id="b-pub-off">Off</button>';
     h+='</div></div>';
+    // Money league — buy-in per player, split evenly across the season's weeks.
+    h+='<div class="adm-game">';
+    h+='<div class="adm-game-title">Money League &mdash; each week\'s top scorer wins a share of the pot</div>';
+    h+='<div class="adm-btns" style="margin-bottom:8px">';
+    h+='<button class="adm-btn'+(moneyOn()?" sel":"")+'" id="b-money-on">&#128176; On</button>';
+    h+='<button class="adm-btn'+(!moneyOn()?" sel":"")+'" id="b-money-off">Off</button>';
+    h+='</div>';
+    h+='<div class="adm-row">';
+    h+='<input class="adm-input" id="money-buyin" type="number" min="0" step="1" placeholder="Buy-in per player"'+
+       ' value="'+(moneyBuyIn()||"")+'" style="flex:1">';
+    h+='<button class="adm-btn sel" id="b-money-save">Save</button>';
+    h+='</div>';
+    // How the pot is split between weekly prizes and the season winner.
+    h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:8px 0 4px">Payout split</div>';
+    h+='<div class="adm-btns" style="margin-bottom:6px">';
+    [0,25,50,75,100].forEach(function(pc){
+      h+='<button class="adm-btn'+(moneyWeeklyPct()===pc?" sel":"")+'" data-money-pct="'+pc+'">'+pc+'%</button>';
+    });
+    h+='</div>';
+    h+='<div class="adm-row">';
+    h+='<input class="adm-input" id="money-pct" type="number" min="0" max="100" step="1" placeholder="% paid weekly"'+
+       ' value="'+moneyWeeklyPct()+'" style="flex:1">';
+    h+='<button class="adm-btn sel" id="b-money-pct-save">Set</button>';
+    h+='</div>';
+    h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:4px">'+
+       moneyWeeklyPct()+'% paid weekly &middot; '+(100-moneyWeeklyPct())+'% to the season winner</div>';
+    if(moneyOn()){
+      h+='<div style="font-size:10px;font-weight:800;color:var(--green);margin-top:6px">'+
+         moneyFmt(moneyBuyIn())+' \u00d7 '+(PARTS||[]).length+' players = '+moneyFmt(moneyPot())+' pot</div>';
+      h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:2px">';
+      if(moneyWeeklyPool()>0){
+        h+=moneyFmt(moneyWeeklyPool())+' weekly \u2014 '+moneyFmt(moneyPerWeek())+
+           ' \u00d7 '+((ST.weekIds||[]).length)+' weeks';
+      }
+      if(moneyWeeklyPool()>0 && moneySeasonPrize()>0) h+='<br>';
+      if(moneySeasonPrize()>0){
+        h+=moneyFmt(moneySeasonPrize())+' to the season winner'+
+           (seasonComplete()?'':' (paid when every week is final)');
+      }
+      h+='</div>';
+    }
+    h+='</div>';
+
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Pool Password &mdash; required for new members to join</div>';
     h+='<div class="adm-row">';
@@ -3963,6 +4101,47 @@ function bind(){
   el=document.getElementById("b-lockweek"); if(el) el.addEventListener("click",function(){toggleLock(ST.curWeek);});
   el=document.getElementById("b-pub-on"); if(el) el.addEventListener("click",function(){ setGroupPublic(true); });
   el=document.getElementById("b-pub-off"); if(el) el.addEventListener("click",function(){ setGroupPublic(false); });
+  el=document.getElementById("b-money-on"); if(el) el.addEventListener("click",function(){
+    var amt=moneyBuyIn();
+    if(!amt){
+      var inp=document.getElementById("money-buyin");
+      amt=inp&&inp.value?Number(inp.value):0;
+      if(!amt){ toast("Enter a buy-in amount first"); return; }
+    }
+    ST.money={enabled:true, buyIn:amt, weeklyPct:moneyWeeklyPct()};
+    if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
+    toast("\u{1F4B0} Money league on"); draw();
+  });
+  el=document.getElementById("b-money-off"); if(el) el.addEventListener("click",function(){
+    ST.money={enabled:false, buyIn:moneyBuyIn(), weeklyPct:moneyWeeklyPct()};
+    if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
+    toast("Money league off"); draw();
+  });
+  els=document.querySelectorAll("[data-money-pct]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var pc=Number(this.getAttribute("data-money-pct"))||0;
+    ST.money={enabled:moneyOn()||moneyBuyIn()>0, buyIn:moneyBuyIn(), weeklyPct:pc};
+    if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
+    toast(pc+"% weekly \u00b7 "+(100-pc)+"% season"); draw();
+  });
+  el=document.getElementById("b-money-pct-save"); if(el) el.addEventListener("click",function(){
+    var inp=document.getElementById("money-pct");
+    var pc=inp&&inp.value!==""?Number(inp.value):0;
+    if(isNaN(pc)||pc<0||pc>100){ toast("Enter a percentage between 0 and 100"); return; }
+    ST.money={enabled:moneyOn()||moneyBuyIn()>0, buyIn:moneyBuyIn(), weeklyPct:pc};
+    if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
+    toast(pc+"% weekly \u00b7 "+(100-pc)+"% season"); draw();
+  });
+
+  el=document.getElementById("b-money-save"); if(el) el.addEventListener("click",function(){
+    var inp=document.getElementById("money-buyin");
+    var amt=inp&&inp.value?Number(inp.value):0;
+    if(!(amt>0)){ toast("Enter a buy-in above 0"); return; }
+    ST.money={enabled:true, buyIn:amt, weeklyPct:moneyWeeklyPct()};
+    if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
+    toast("\u{1F4B0} Buy-in set to "+moneyFmt(amt)); draw();
+  });
+
   el=document.getElementById("b-change-pw"); if(el) el.addEventListener("click",function(){
     var inp=document.getElementById("new-group-pw");
     var newPw=inp?inp.value.trim():"";
