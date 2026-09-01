@@ -1203,6 +1203,34 @@ function applyDynastyBadges(d, unlock){
   if(natl>=1 && !isNaN(startPrestige) && startPrestige<60) unlock("dyn_builder");
 }
 
+// Which groups is this user actually in? The union of their own index and every
+// group whose players list contains them — the latter being the copy that the
+// standings and scoring use, so it's the one to trust.
+function _myGroupIds(u){
+  // Dedupe as well as drop blanks — a duplicated entry would render the same
+  // group card twice and get written straight back into the index.
+  var seen = {}, ids = [];
+  ((u && u.groups) || []).forEach(function(g){
+    if(!g || seen[g]) return;
+    seen[g]=true; ids.push(g);
+  });
+  var uid = ME();
+  var missing = [];
+  if(uid && _allGroupsCache && _allGroupsCache.length){
+    _allGroupsCache.forEach(function(g){
+      if(!g || !g.id || seen[g.id]) return;
+      if(((g.players)||[]).indexOf(uid) < 0) return;
+      seen[g.id]=true; ids.push(g.id); missing.push(g.id);
+    });
+  }
+  // Heal the index so it stops being wrong — additive only, never removes.
+  if(missing.length && DB && uid){
+    DB.ref("users/"+uid+"/groups").set(ids);
+    if(SC.currentUser) SC.currentUser.groups = ids;
+  }
+  return ids;
+}
+
 function poolStatusFor(g, poolId){
   var grpSt = (g && g.data && g.data.statuses && g.data.statuses[poolId]);
   if(grpSt) return grpSt;                       // explicit per-group override wins
@@ -2006,7 +2034,7 @@ function renderProfile() {
   if(!u) { SC.screen="landing"; draw(); return; }
 
   var em = (u && u.emoji) || "🎯";
-  var myGroupIds = (u && u.groups) || [];
+  var myGroupIds = _myGroupIds(u);
 
   // Compute rarity styling from cached badges — no Firebase read needed
   var _rarityBorder = "var(--border)";
@@ -5597,6 +5625,10 @@ function renderAdmin() {
   h += '<div class="search-wrap" style="margin-bottom:12px"><span class="search-icon">&#128269;</span>';
   h += '<input class="search-input" id="user-search" placeholder="Search users..." autocomplete="off">';
   h += '</div>';
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
+  h += '<button class="btn btn-sm" id="btn-repair-memberships" style="padding:6px 12px;font-size:10px;background:var(--blue-bg);color:var(--blue);border:2px solid var(--border);border-radius:8px;font-weight:800">&#128736;&#65039; Repair memberships</button>';
+  h += '<span id="repair-msg" style="font-size:10px;font-weight:700;color:var(--muted)"></span>';
+  h += '</div>';
   h += '<div id="admin-users-list"><div style="color:#334155;font-size:11px;text-align:center;padding:16px">Loading...</div></div>';
 
   h += '</div>';
@@ -6049,6 +6081,60 @@ function renderAdmin() {
   var us = document.getElementById("user-search");
   if(us) us.addEventListener("input", function(){ loadAdminUsers(this.value.trim()); });
 
+  // Membership repair (master admin).
+  // Rebuilds users/{uid}/groups from groups/{gid}/players — the authoritative
+  // copy. Additive: it only ever ADDS groups a user is demonstrably a member of
+  // and never removes an entry, so a group missing from this read can't be
+  // dropped from someone's account.
+  var _rep=document.getElementById("btn-repair-memberships");
+  if(_rep && !_rep._bound){
+    _rep._bound=true;
+    _rep.addEventListener("click", function(){
+      var msg=document.getElementById("repair-msg");
+      if(msg) msg.textContent="Checking\u2026";
+      // Read groups fresh — the cache may be partial.
+      DB.ref("groups").once("value", function(gsn){
+        var groups=gsn.val()||{};
+        DB.ref("users").once("value", function(usn){
+          var users=usn.val()||{};
+          // Build the authoritative membership map from each group's players.
+          var should={};
+          Object.keys(groups).forEach(function(gid){
+            var g=groups[gid]||{};
+            ((g.players)||[]).forEach(function(uid){
+              if(!uid) return;
+              (should[uid]=should[uid]||{})[gid]=true;
+            });
+          });
+          var updates={}, fixedUsers=0, addedLinks=0;
+          Object.keys(should).forEach(function(uid){
+            if(!users[uid]) return;                       // no such account — skip
+            var have={}, list=[];
+            ((users[uid].groups)||[]).forEach(function(g){ if(g && !have[g]){ have[g]=true; list.push(g); } });
+            var added=0;
+            Object.keys(should[uid]).forEach(function(gid){
+              if(have[gid]) return;
+              have[gid]=true; list.push(gid); added++;
+            });
+            if(added){ updates["users/"+uid+"/groups"]=list; fixedUsers++; addedLinks+=added; }
+          });
+          if(!fixedUsers){
+            if(msg) msg.textContent="\u2713 Nothing to repair";
+            return;
+          }
+          DB.ref().update(updates, function(err){
+            if(err){ if(msg) msg.textContent="Failed \u2014 "+String(err).slice(0,40); return; }
+            if(msg) msg.textContent="\u2713 Repaired "+fixedUsers+" user"+(fixedUsers!==1?"s":"")+
+                                    " ("+addedLinks+" membership"+(addedLinks!==1?"s":"")+" restored)";
+            _groupsCache=null; _groupsCacheTime=0;
+            loadAdminUsers();
+          });
+        });
+      });
+    });
+  }
+
+
   // Add user
 }
 
@@ -6193,7 +6279,14 @@ function loadAdminUsers(q) {
       var em = u.emoji||"🍺";
       var displayName = u.username || "(unnamed)";
       var isMissing = !u.username;
-      var grpCount = u._orphan ? "in group" : (u.groups||[]).length;
+      // Count from the groups themselves — a user's own index can be stale.
+      var _uid = u._key || u.uid;
+      var _realGroups = {};
+      ((u.groups)||[]).forEach(function(g){ if(g) _realGroups[g]=true; });
+      (_allGroupsCache||[]).forEach(function(g){
+        if(g && g.id && ((g.players)||[]).indexOf(_uid)>=0) _realGroups[g.id]=true;
+      });
+      var grpCount = u._orphan ? "in group" : Object.keys(_realGroups).length;
       var authBadge = u.googleUid
         ? '<span style="font-size:8px;font-weight:700;color:#4285F4;background:rgba(66,133,244,.1);border:1px solid rgba(66,133,244,.3);border-radius:4px;padding:1px 5px">Google</span>'
         : '';
