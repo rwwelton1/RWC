@@ -263,7 +263,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .countdown-bar.expired .countdown-label{color:#4a7c59}
 .countdown-bar.expired .countdown-timer{color:#6ee7b7;font-size:12px}
 /* ── GROUP PICKS TABLE ── */
-.gp-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:16px;min-height:50vh}
+/* overflow-x:auto already makes this the scroll container (overflow-y computes to
+   auto), so sticky positions resolve against IT, not the page. Giving it a height
+   is what lets the header and the pinned row actually freeze — without it the
+   whole table scrolls away with the document and sticky never engages. */
+.gp-wrap{overflow:auto;-webkit-overflow-scrolling:touch;padding-bottom:16px;
+  max-height:calc(100vh - 210px);min-height:50vh;overscroll-behavior:contain}
 .gp-table{border-collapse:separate;border-spacing:0;font-size:11px;white-space:nowrap;background:var(--bg);
   /* Single source of truth for the two frozen columns. The sticky offset below
      is derived from --gp-name-w, so a change here can't misalign them. */
@@ -277,6 +282,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-table td:nth-child(2),.gp-table th:nth-child(2){position:sticky;z-index:2;background:#ffffff;border-right:2px solid var(--border2)}
 .gp-grid td:nth-child(2),.gp-grid th:nth-child(2){left:var(--gp-name-w);width:var(--gp-pts-w);min-width:var(--gp-pts-w)}
 .gp-table th:nth-child(2){background:var(--cream)}
+/* Header sticks to the top so the pinned row below has something to sit under. */
+.gp-table thead th{position:sticky;top:0;z-index:4}
+.gp-table thead th:first-child,.gp-table thead th:nth-child(2){z-index:6}
+/* The viewer's own row, frozen as the second row. --gp-head-h is measured from
+   the real header after render; the fallback only matters for one frame. */
+.gp-grid tbody tr.gp-me-row > td{position:sticky;top:var(--gp-head-h,58px);z-index:3;
+  background:var(--gold-bg);box-shadow:0 2px 0 var(--border2)}
+.gp-grid tbody tr.gp-me-row > td:first-child,
+.gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
+
 /* Header row */
 .gp-table th{padding:7px 9px;background:var(--cream);border-bottom:2px solid var(--border);border-right:1px solid var(--border2);font-weight:900;text-align:center;vertical-align:bottom;font-size:10px}
 /* Data cells */
@@ -3098,6 +3113,12 @@ function renderGroupPicks(){
   if(locked){
     players.sort(function(a,b){ return weekScore(weekId,b).total - weekScore(weekId,a).total; });
   }
+  // Your own row goes first so it can be frozen directly under the header.
+  // Spectators have no row to pin, so the order is left alone for them.
+  if(ST.user){
+    var _meIdx=players.indexOf(ST.user);
+    if(_meIdx>0){ players.splice(_meIdx,1); players.unshift(ST.user); }
+  }
 
   h+='<div class="gp-wrap"><table class="gp-table gp-grid"><thead><tr>';
 
@@ -3160,6 +3181,9 @@ function renderGroupPicks(){
     var isDimmed=ST.compareMode&&hasSelection&&!isSelected;
     var isHidden=ST.compareMode&&ST.compareIsolated&&hasSelection&&!isSelected;
     var rowCls=(ST.compareMode?"gp-row-selectable":"")+(isSelected?" gp-row-selected":isDimmed?" gp-row-dimmed":"")+(isHidden?" gp-row-hidden":"");
+    // Only the viewer's own row is frozen, and not while Compare is filtering the
+    // table — a pinned row that Compare has dimmed or hidden would be confusing.
+    if(isMe && !ST.compareMode) rowCls+=" gp-me-row";
     var rowAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'"';
     // Per-match outcome, so tapping a column header groups everyone who called it right.
     active.forEach(function(gid){
@@ -3251,7 +3275,22 @@ function renderGroupPicks(){
   });
 
   h+='</tbody></table></div>';
+  // The pinned row sits at the header's height. Measure it rather than hardcoding:
+  // the header grows with two-line game cells, crests and league positions.
+  setTimeout(_syncGridHeadHeight, 0);
   return h;
+}
+
+// Set --gp-head-h from the rendered header so the frozen row can't overlap it.
+function _syncGridHeadHeight(){
+  try{
+    var tbl=document.querySelector(".gp-grid");
+    if(!tbl) return;
+    var head=tbl.querySelector("thead");
+    if(!head) return;
+    var hgt=Math.round(head.getBoundingClientRect().height);
+    if(hgt>0) tbl.style.setProperty("--gp-head-h", hgt+"px");
+  }catch(e){}
 }
 
 var _drawPending=false;
