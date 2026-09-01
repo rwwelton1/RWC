@@ -1788,6 +1788,30 @@ function tbReady(weekId){
                                  : !!(tb.away&&tb.home);
 }
 // What players are being asked for.
+// Has the tiebreaker started, i.e. can everyone's guess be shown?
+// Prefers the tiebreaker game's own kickoff; falls back to the week's lock so a
+// prop or an off-slate game still reveals at a sensible moment.
+function tbStarted(weekId){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  if(tb.actual!=null) return true;                 // answer is in — nothing to protect
+  if(ST.locked&&ST.locked[weekId]) return true;    // admin locked the week
+  // If the tiebreaker match is one of this week's games, use its kickoff.
+  var games=(ST.games&&ST.games[weekId])||{};
+  var ids=Object.keys(games);
+  for(var i=0;i<ids.length;i++){
+    var g=games[ids[i]];
+    if(!g) continue;
+    if(tb.away && tb.home &&
+       normalizeTeamName(g.away)===normalizeTeamName(tb.away) &&
+       normalizeTeamName(g.home)===normalizeTeamName(tb.home)){
+      return isGameLocked(weekId, ids[i]);
+    }
+  }
+  // Otherwise: once the week's first game has kicked off, picks are settled.
+  var lt=groupLockTs(weekId);
+  return !!(lt && Date.now()>=lt);
+}
+
 function tbLabel(weekId){
   var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
   return tbMode(weekId)==="prop" ? String(tb.prop||"Prop") : "Total Points";
@@ -3337,6 +3361,19 @@ function renderGroupPicks(){
     h+='</th>';
   });
 
+  // Tiebreaker column, if the week has one.
+  var _tbOn=tbReady(weekId);
+  var _tbShow=_tbOn && tbStarted(weekId);
+  if(_tbOn){
+    var _tbT=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+    h+='<th><div class="gp-game-head" style="min-width:70px">';
+    h+='<div style="font-size:9px;font-weight:900;color:var(--purple)">&#127942; TB</div>';
+    h+='<div class="gp-subline" style="max-width:82px;overflow:hidden;text-overflow:ellipsis">'+
+       x(tbLabel(weekId))+(_tbShow?'':' &#128274;')+'</div>';
+    if(_tbT.actual!=null) h+='<div class="gp-subline" style="color:var(--purple);font-weight:900">'+_tbT.actual+'</div>';
+    h+='</div></th>';
+  }
+
   // Points column header already added as 2nd sticky column above
   h+='</tr></thead><tbody>';
 
@@ -3442,6 +3479,26 @@ function renderGroupPicks(){
       }
       h+='</td>';
     });
+
+    if(_tbOn){
+      var _myRow=(uk===ST.user);
+      var _guess=((ST.picks[weekId]||{})[uk]||{}).tb;
+      var _tbAns=((ST.tiebreaker&&ST.tiebreaker[weekId])||{}).actual;
+      h+='<td style="text-align:center">';
+      if(!_guess){
+        h+='<span class="gp-nopick">&ndash;</span>';
+      } else if(_tbShow||_myRow){
+        // Once the answer is known, show how far off each guess was.
+        var _diff=(_tbAns!=null)?Math.abs(Number(_guess)-Number(_tbAns)):null;
+        var _col=(_diff===0)?'var(--green)':'var(--text)';
+        h+='<div style="font-size:13px;font-weight:900;color:'+_col+'">'+x(String(_guess))+'</div>';
+        if(_diff!==null) h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+(_diff===0?'exact':'off '+_diff)+'</div>';
+      } else {
+        // Guess is in, but hidden until it kicks off — same as a hidden pick.
+        h+='<div style="font-size:12px;color:var(--dim)">&#128274;</div>';
+      }
+      h+='</td>';
+    }
 
     h+='</tr>';
   });
