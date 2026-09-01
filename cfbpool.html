@@ -24,10 +24,10 @@
 }
 html{background:var(--bg)}
 body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font-size:13px;min-height:100vh;-webkit-font-smoothing:antialiased}
-/* Clear the home indicator, and leave a little slack for browsers that fall back
-   to vh (where the floating Safari toolbar isn't excluded). dvh handles the
-   toolbar itself, so this stays small — a bigger inset just adds dead space. */
-body{padding-bottom:calc(20px + env(safe-area-inset-bottom,0px))}
+/* Page-scrolled screens sit under iOS Safari's floating toolbar, so reserve its
+   height (48px) plus the home indicator below it. The Group grid caps its own
+   height separately and doesn't rely on this. */
+body{padding-bottom:calc(48px + env(safe-area-inset-bottom,0px))}
 button,input,select{font-family:'Nunito',sans-serif;touch-action:manipulation}
 button{cursor:pointer;border:none;outline:none}
 a{color:inherit;text-decoration:none;touch-action:manipulation}
@@ -3039,6 +3039,7 @@ function renderStandings(){
 
   h+='</tbody></table></div>';
   h+='</div>';
+  setTimeout(_fitGridToViewport, 0);   // Standings uses the same wrapper
   return h;
 }
 
@@ -3701,17 +3702,52 @@ function renderGroupPicks(){
   return h;
 }
 
-// Set --gp-head-h from the rendered header so the frozen row can't overlap it.
+// Set --gp-head-h from the rendered header so the frozen row can't overlap it,
+// and size the scroll box to end just above the Safari toolbar.
+//
+// A fixed "100dvh minus N" can't serve both tabs: Standings and Group have
+// different chrome above them (week selector vs. the weeks-played strip), so one
+// constant leaves a gap on one and overshoots on the other. Measuring the
+// wrapper's own top position fits both, and any future layout change too.
 function _syncGridHeadHeight(){
   try{
     var tbl=document.querySelector(".gp-grid");
-    if(!tbl) return;
-    var head=tbl.querySelector("thead");
-    if(!head) return;
-    var hgt=Math.round(head.getBoundingClientRect().height);
-    if(hgt>0) tbl.style.setProperty("--gp-head-h", hgt+"px");
+    if(tbl){
+      var head=tbl.querySelector("thead");
+      if(head){
+        var hgt=Math.round(head.getBoundingClientRect().height);
+        if(hgt>0) tbl.style.setProperty("--gp-head-h", hgt+"px");
+      }
+    }
+    _fitGridToViewport();
   }catch(e){}
 }
+
+// Bottom breathing room below the table: enough to read the last row's border
+// without it touching the toolbar.
+var GRID_BOTTOM_GAP = 10;
+
+function _fitGridToViewport(){
+  var wrap=document.querySelector(".gp-wrap");
+  if(!wrap) return;
+  // visualViewport excludes the floating toolbar; innerHeight does not, so prefer
+  // it where available and fall back only on older browsers.
+  var vh=(window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  var top=wrap.getBoundingClientRect().top;
+  var avail=Math.round(vh - top - GRID_BOTTOM_GAP);
+  // Guard against a silly value if this runs mid-transition.
+  if(avail>160) wrap.style.maxHeight=avail+"px";
+}
+
+// Re-fit when the toolbar shows/hides, on rotation, and on tab changes.
+try{
+  window.addEventListener("resize", _fitGridToViewport);
+  window.addEventListener("orientationchange", function(){ setTimeout(_fitGridToViewport,150); });
+  if(window.visualViewport){
+    window.visualViewport.addEventListener("resize", _fitGridToViewport);
+    window.visualViewport.addEventListener("scroll", _fitGridToViewport);
+  }
+}catch(e){}
 
 var _drawPending=false;
 function scheduleDraw(){if(_drawPending)return;_drawPending=true;setTimeout(function(){_drawPending=false;draw();},0);}
