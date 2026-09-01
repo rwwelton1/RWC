@@ -6106,7 +6106,7 @@ function renderAdmin() {
               (should[uid]=should[uid]||{})[gid]=true;
             });
           });
-          var updates={}, fixedUsers=0, addedLinks=0;
+          var updates={}, fixedUsers=0, addedLinks=0, fixedStats=0, addedBadges=0;
           Object.keys(should).forEach(function(uid){
             if(!users[uid]) return;                       // no such account — skip
             var have={}, list=[];
@@ -6117,15 +6117,48 @@ function renderAdmin() {
               have[gid]=true; list.push(gid); added++;
             });
             if(added){ updates["users/"+uid+"/groups"]=list; fixedUsers++; addedLinks+=added; }
+
+            // ── Stats that follow from membership ────────────────────────────
+            // "Drafted" unlocks from stats.groupsJoined, a counter incremented at
+            // join time. Wherever the groups index drifted, that counter drifted
+            // with it — so the badge could never fire however many groups the
+            // person was actually in.
+            var realCount = Object.keys(should[uid]).length;
+            var biggest = 0;
+            Object.keys(should[uid]).forEach(function(gid){
+              var n = (((groups[gid]||{}).players)||[]).length;
+              if(n > biggest) biggest = n;
+            });
+            var st = (users[uid].stats)||{};
+            // Raise only — a counter may legitimately exceed what membership shows,
+            // since a group since deleted still counts as having been joined.
+            if((Number(st.groupsJoined)||0) < realCount){
+              updates["users/"+uid+"/stats/groupsJoined"] = realCount; fixedStats++;
+            }
+            if((Number(st.maxGroupSize)||0) < biggest){
+              updates["users/"+uid+"/stats/maxGroupSize"] = biggest;
+            }
+
+            // ── Badges those stats unlock ───────────────────────────────────
+            var badges = (users[uid].badges)||{};
+            if(realCount >= 1 && !badges.drafted){
+              updates["users/"+uid+"/badges/drafted"] = { earnedAt: Date.now() }; addedBadges++;
+            }
+            if(biggest >= 6 && !badges.circus){
+              updates["users/"+uid+"/badges/circus"] = { earnedAt: Date.now() }; addedBadges++;
+            }
           });
-          if(!fixedUsers){
+          if(!fixedUsers && !fixedStats && !addedBadges){
             if(msg) msg.textContent="\u2713 Nothing to repair";
             return;
           }
           DB.ref().update(updates, function(err){
             if(err){ if(msg) msg.textContent="Failed \u2014 "+String(err).slice(0,40); return; }
-            if(msg) msg.textContent="\u2713 Repaired "+fixedUsers+" user"+(fixedUsers!==1?"s":"")+
-                                    " ("+addedLinks+" membership"+(addedLinks!==1?"s":"")+" restored)";
+            var _bits=[];
+            if(addedLinks)  _bits.push(addedLinks+" membership"+(addedLinks!==1?"s":""));
+            if(fixedStats)  _bits.push(fixedStats+" stat"+(fixedStats!==1?"s":""));
+            if(addedBadges) _bits.push(addedBadges+" badge"+(addedBadges!==1?"s":""));
+            if(msg) msg.textContent="\u2713 Repaired "+_bits.join(", ");
             _groupsCache=null; _groupsCacheTime=0;
             loadAdminUsers();
           });
