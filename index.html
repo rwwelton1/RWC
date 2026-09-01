@@ -830,6 +830,12 @@ var BADGE_LIST = [
   {id:"gm",          icon:"📋", name:"The GM",            rarity:"epic",      desc:"Win a draft pool.",                                                    category:"Draft"},
   {id:"war_room",    icon:"🗺️", name:"War Room",         rarity:"legendary", desc:"Win a draft pool with 3 or more exact picks.",                         category:"Draft"},
 
+  // ── CFB confidence pool ──
+  {id:"cfb_sharp",   icon:"📈", name:"Sharp",            rarity:"rare",      desc:"Finish a CFB season above 60% against the spread.",         category:"CFB"},
+  {id:"cfb_grinder", icon:"⚙️", name:"The Grinder",      rarity:"uncommon",  desc:"Submit a full slate of CFB picks 10 weeks running.",        category:"CFB"},
+  {id:"cold_streak", icon:"🧊", name:"Deep Freeze",      rarity:"rare",      desc:"Score zero in a CFB week. It happens.",                     category:"CFB"},
+  {id:"cfb_wire",    icon:"🏁", name:"Wire to Wire",     rarity:"legendary", desc:"Win the CFB season having also won the opening week.",      category:"CFB"},
+
   // ── Dynasty (CFB Dynasty, single player) ──
   {id:"dyn_hired",   icon:"📋", name:"Fresh Whistle",     rarity:"common",    desc:"Start a coaching career in CFB Dynasty.",                              category:"Dynasty"},
   {id:"dyn_winning", icon:"📈", name:"Winning Season",    rarity:"common",    desc:"Finish a Dynasty season above .500.",                                  category:"Dynasty"},
@@ -852,7 +858,7 @@ var BADGE_LIST = [
   {id:"paperclip",   icon:"🖇️", name:"Barely Holding",  rarity:"rare",      desc:"Win a pool by exactly 1 point.",                                       category:"Margin"},
   {id:"hammer",      icon:"🔨", name:"Hammered",         rarity:"rare",      desc:"Win a pool by 8 or more points.",                                      category:"Margin"},
   {id:"disco",       icon:"🪩", name:"Disco Ball",       rarity:"legendary", desc:"Win a pool on a tiebreaker.",                                          category:"Margin"},
-  {id:"mammoth",     icon:"🦣", name:"Mammoth Upset",    rarity:"legendary", desc:"Win a pool after starting in last place.",                             category:"Margin"},
+  {id:"lockdown",    icon:"🔒", name:"Lockdown",         rarity:"uncommon",  desc:"Hit your 10-confidence lock 5 weeks running.",              category:"CFB"},
   {id:"tissue",      icon:"🧻", name:"Tissue Paper",     rarity:"rare",      desc:"Lose a pool by exactly 1 point.",                                      category:"Margin"},
 
   // ── Streaks ──────────────────────────────────────────────────────────────
@@ -861,10 +867,10 @@ var BADGE_LIST = [
   {id:"fire",        icon:"🔥", name:"On Fire",          rarity:"legendary", desc:"Win 3 pools in a row across any sports.",                              category:"Streak"},
 
   // ── Rounds ───────────────────────────────────────────────────────────────
-  {id:"wings",       icon:"🪽", name:"Wings",            rarity:"epic",      desc:"Go from last place to first across the rounds of a pool.",             category:"Rounds"},
-  {id:"melting",     icon:"🫠", name:"Melting",          rarity:"rare",      desc:"Lead a pool going into the final round then finish outside the top 3.", category:"Rounds"},
-  {id:"ninja",       icon:"🥷", name:"Silent Assassin",  rarity:"epic",      desc:"Overtake 1st place on the final round from within 4 positions.",       category:"Rounds"},
-  {id:"beaver",      icon:"🦫", name:"Dam Good Picks",   rarity:"rare",      desc:"Hold 1st place for 3 or more consecutive rounds in a pool.",           category:"Rounds"},
+  {id:"week_winner", icon:"📅", name:"Week Winner",      rarity:"common",    desc:"Top the CFB pool in any single week.",                      category:"CFB"},
+  {id:"three_peat",  icon:"🔥", name:"Three-Peat",       rarity:"epic",      desc:"Win 3 CFB weeks in a row.",                                 category:"CFB"},
+  {id:"bullseye",    icon:"🎯", name:"Bullseye",         rarity:"legendary", desc:"Nail a CFB tiebreaker exactly on the number.",              category:"CFB"},
+  {id:"big_week",    icon:"💥", name:"Big Week",         rarity:"rare",      desc:"Score 45 or more in a single CFB week.",                    category:"CFB"},
 
   // ── Scorecery Rating ─────────────────────────────────────────────────────
   {id:"hatchling",   icon:"🕯️", name:"Candlelight",      rarity:"common",    desc:"Earn your first Scorecery Rating.",                                    category:"Rating"},
@@ -3176,6 +3182,19 @@ function computeAndWritePoolResults(groups, ukey) {
       var poolData = (g.data&&g.data[_dataKey])||{};
       var scores = poolData.playerscores || poolData.scores || {};
       var pstats = poolData.playerstats || {};
+      // Stash this user's confidence-pool stats for the CFB badges below.
+      if(pool.id==="cfb" && pstats[myUkey]){
+        var _cs = pstats[myUkey];
+        _cs._seasonDone = (st==="complete");
+        // Did they finish the season on top? Highest total wins.
+        var _best=null, _leader=null;
+        Object.keys(scores).forEach(function(u){
+          var v=Number(scores[u])||0;
+          if(_best===null||v>_best){ _best=v; _leader=u; }
+        });
+        _cs._wonSeason = (_leader===myUkey && _best>0);
+        (SC._cfbStats=SC._cfbStats||[]).push(_cs);
+      }
       var picks = poolData.picks || {};
       var liveScores = poolData.livescores || {};
       var adminScores = poolData.scores || {};
@@ -3565,6 +3584,7 @@ function checkAndRenderBadges(ctx) {
     var earned = {};
     Object.keys(existing).forEach(function(k){ earned[k] = existing[k]; });
 
+    SC._cfbStats=[];   // rebuilt each scan
     function unlock(id){ if(!earned[id]){ earned[id]={ earnedAt:Date.now() }; DB.ref("users/"+_uk+"/badges/"+id).set({ earnedAt:Date.now() }); SC._cachedBadges=earned; } }
 
     // ── General ──────────────────────────────────────────────────────────
@@ -3726,6 +3746,25 @@ function checkAndRenderBadges(ctx) {
         applyDynastyBadges(d, unlock);
       }).catch(function(){});
     }
+
+    // ── CFB confidence pool ────────────────────────────────────────────
+    // Awarded from the season stats the pool publishes. Everything here is
+    // cumulative across the season, so a badge can't be lost by a bad week.
+    (SC._cfbStats||[]).forEach(function(st){
+      if(!st) return;
+      if((st.weekWins||0)>=1)      unlock("week_winner");
+      if((st.weekWinStreak||0)>=3) unlock("three_peat");
+      if((st.lockStreak||0)>=5)    unlock("lockdown");
+      if((st.bestWeek||0)>=45)     unlock("big_week");
+      if((st.tbExact||0)>=1)       unlock("bullseye");
+      if((st.zeroWeeks||0)>=1)     unlock("cold_streak");
+      if((st.slateStreak||0)>=10)  unlock("cfb_grinder");
+      // Season-end only: a mid-season percentage isn't a finished record.
+      if(st._seasonDone){
+        if(st.pct!==null && st.pct!==undefined && Number(st.pct)>=0.60) unlock("cfb_sharp");
+        if(st._wonSeason && st.wonOpener) unlock("cfb_wire");
+      }
+    });
 
     // Committed — 10+ pools with picks submitted
     if(_careerEntered>=10) unlock("committed");

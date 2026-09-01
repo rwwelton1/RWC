@@ -903,11 +903,85 @@ function publishSeasonToHub(metaOnly){
           nCorrect+=wCorrect; nResolved+=wResolved;
           if(wResolved===act.length && wCorrect===act.length) nPerfectWeeks++;
         });
+        // ── Confidence-pool specifics ─────────────────────────────────────
+        var nLockHits=0, nLockMisses=0, nWeekWins=0, nBestWeek=0,
+            nTbExact=0, nZeroWeeks=0, nShutouts=0, bestStreak=0, curStreak=0,
+            lockStreak=0, lockCur=0, slateStreak=0, slateCur=0, wonOpener=false,
+            openerSeen=false;
+        scanWeeks.forEach(function(w){
+          var wp=(completed.indexOf(w)>=0) ? (_weekPicksCache[w]||{}) : (ST.picks[w]||{});
+          var picks=wp[p]||{};
+          var results=ST.results[w]||{};
+          var act=activeGames(w);
+          if(!act.length) return;
+          var allIn=act.every(function(gid){ return !!results[gid]; });
+
+          // The lock: the pick carrying the most confidence that week.
+          var lockGid=null, lockConf=-1;
+          act.forEach(function(gid){
+            var c=Number((picks[gid]||{}).conf)||0;
+            if(c>lockConf){ lockConf=c; lockGid=gid; }
+          });
+          if(lockGid && results[lockGid] && lockConf>0){
+            if((picks[lockGid]||{}).side===results[lockGid]){
+              nLockHits++; lockCur++;
+              if(lockCur>lockStreak) lockStreak=lockCur;
+            } else { nLockMisses++; lockCur=0; }
+          }
+
+          // A full slate means every game picked, whether or not they came in.
+          var complete=act.every(function(gid){ return pickComplete(picks[gid]); });
+          if(complete){ slateCur++; if(slateCur>slateStreak) slateStreak=slateCur; }
+          else slateCur=0;
+
+          if(!allIn) return;          // the rest only make sense on a finished week
+
+          // Did they win the week outright, and by how much?
+          var mine=weekScore(w,p).total, best=null, tied=false;
+          PARTS.forEach(function(q){
+            var t=weekScore(w,q).total;
+            if(best===null||t>best){ best=t; tied=false; }
+            else if(t===best && q!==p) tied=true;
+          });
+          var wonThis = (best!==null && mine===best && best>0);
+          if(!openerSeen){ openerSeen=true; wonOpener=wonThis; }   // first finished week
+          if(wonThis){
+            nWeekWins++; curStreak++;
+            if(curStreak>bestStreak) bestStreak=curStreak;
+          } else { curStreak=0; }
+          if(mine>nBestWeek) nBestWeek=mine;
+          if(mine===0) nZeroWeeks++;
+
+          // Every pick wrong — the opposite of a perfect week.
+          var wrongAll=act.every(function(gid){
+            var pk=picks[gid];
+            return pk && pk.side && results[gid] && pk.side!==results[gid];
+          });
+          if(wrongAll) nShutouts++;
+
+          // Tiebreaker called exactly.
+          var tb=(ST.tiebreaker&&ST.tiebreaker[w])||{};
+          var guess=(picks.tb!==undefined&&picks.tb!==null)?Number(picks.tb):null;
+          if(tb.actual!=null && guess!==null && Number(tb.actual)===guess) nTbExact++;
+        });
+
         stats[p]={
           correct:nCorrect,
           total:nResolved,
           pct: nResolved>0 ? (nCorrect/nResolved) : null,
-          perfectWeeks:nPerfectWeeks
+          perfectWeeks:nPerfectWeeks,
+          // Confidence-pool specifics, for the CFB badges.
+          lockHits:nLockHits,
+          lockMisses:nLockMisses,
+          weekWins:nWeekWins,
+          weekWinStreak:bestStreak,
+          bestWeek:nBestWeek,
+          tbExact:nTbExact,
+          zeroWeeks:nZeroWeeks,
+          shutouts:nShutouts,
+          lockStreak:lockStreak,
+          slateStreak:slateStreak,
+          wonOpener:!!wonOpener
         };
       });
       // One atomic write: scores + stats + meta land together, hub never sees a
