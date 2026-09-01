@@ -1520,6 +1520,66 @@ function addGroupToUser(uid, groupId, cb) {
       DB.ref("users/"+uid+"/groups").set(groups, function(){ cb && cb(); });
     } else { cb && cb(); }
     if(SC.currentUser && SC.currentUser.uid === uid) SC.currentUser.groups = groups;
+    // Every join/create funnels through here, so this is the one place that has to
+    // keep the derived records honest.
+    syncMembershipRecords(uid);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Bring one user's derived records in line with the groups they're actually in.
+//
+// This is the per-user version of the admin Repair tool, run automatically on
+// every join and create. It exists because the join path used to INCREMENT
+// stats.groupsJoined — a counter drifts the moment a write is missed or a join
+// runs twice, and "Drafted" reads that counter rather than the membership.
+// Recomputing from the group lists can't drift.
+//
+// Only raises counters and adds badges; nothing is lowered or removed. Safe to
+// call repeatedly, and needs no permissions beyond the user's own record.
+// ══════════════════════════════════════════════════════════════════════════════
+function syncMembershipRecords(uid, cb){
+  if(!DB || !uid){ cb && cb(); return; }
+  DB.ref("groups").once("value", function(gsn){
+    var groups = gsn.val() || {};
+    var mine = [], biggest = 0;
+    Object.keys(groups).forEach(function(gid){
+      var players = ((groups[gid]||{}).players) || [];
+      if(players.indexOf(uid) < 0) return;
+      mine.push(gid);
+      if(players.length > biggest) biggest = players.length;
+    });
+    if(!mine.length){ cb && cb(); return; }
+
+    DB.ref("users/"+uid).once("value", function(usn){
+      var u = usn.val() || {};
+      var updates = {};
+
+      // Membership index — union, never a removal.
+      var have = {}, list = [];
+      ((u.groups)||[]).forEach(function(g){ if(g && !have[g]){ have[g]=true; list.push(g); } });
+      var added = 0;
+      mine.forEach(function(g){ if(!have[g]){ have[g]=true; list.push(g); added++; } });
+      if(added) updates["users/"+uid+"/groups"] = list;
+
+      // Stats the badges read.
+      var st = (u.stats)||{};
+      if((Number(st.groupsJoined)||0) < mine.length) updates["users/"+uid+"/stats/groupsJoined"] = mine.length;
+      if((Number(st.maxGroupSize)||0) < biggest)     updates["users/"+uid+"/stats/maxGroupSize"] = biggest;
+
+      // Badges those stats unlock.
+      var badges = (u.badges)||{};
+      if(mine.length >= 1 && !badges.drafted) updates["users/"+uid+"/badges/drafted"] = { earnedAt: Date.now() };
+      if(biggest >= 6 && !badges.circus)      updates["users/"+uid+"/badges/circus"]  = { earnedAt: Date.now() };
+
+      if(!Object.keys(updates).length){ cb && cb(); return; }
+      DB.ref().update(updates, function(){
+        if(SC.currentUser && SC.currentUser.uid === uid && updates["users/"+uid+"/groups"]){
+          SC.currentUser.groups = list;
+        }
+        cb && cb();
+      });
+    });
   });
 }
 
