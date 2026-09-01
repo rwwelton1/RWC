@@ -3595,17 +3595,73 @@ function _retryFailedSave(){
 // discarded by the OS without warning.
 try{
   window.addEventListener("pagehide", function(){
+    // Anything still queued goes out now. _drainSave is a no-op if a write is
+    // already in the air, and that one carries the latest state anyway.
     var st=ST._saveState;
-    if(ST.save && (!st || st.ok!==true)) { try{ persist(); }catch(_){} }
+    if(ST.save && (_savePending() || !st || st.ok!==true)){
+      try{ _saveDirty=true; _flushSaveNow(); }catch(_){}
+    }
   });
   document.addEventListener("visibilitychange", function(){
     if(document.visibilityState!=="hidden") return;
     var st=ST._saveState;
-    if(ST.save && (!st || st.ok!==true)) { try{ persist(); }catch(_){} }
+    if(ST.save && (_savePending() || !st || st.ok!==true)){
+      try{ _saveDirty=true; _flushSaveNow(); }catch(_){}
+    }
   });
 }catch(e){}
 
+// ══════════════════════════════════════════════════════════════════════════════
+// SAVE QUEUE
+//
+// Every call used to serialise and write the ENTIRE save. Simming a full slate
+// fires one per game, so the writes chained — and leaving for the hub before the
+// chain drained lost whatever hadn't gone out yet.
+//
+// Now they coalesce: at most one write in flight, plus at most one queued behind
+// it. Ten sims in a row produce two writes instead of ten, and the second always
+// carries the LATEST state, so nothing is lost by collapsing them. Callers don't
+// change — persist() still means "make sure this gets saved".
+// ══════════════════════════════════════════════════════════════════════════════
+var _saveInFlight=false, _saveDirty=false, _saveCbs=[];
+
 function persist(cb){
+  if(!ST.save){ if(cb) cb(false); return; }
+  if(cb) _saveCbs.push(cb);
+  _saveDirty=true;
+  if(_saveInFlight) return;        // the in-flight write will pick this up
+  _drainSave();
+}
+
+// Write the current state, then immediately write again if more changes arrived
+// while that was in the air.
+function _drainSave(){
+  if(_saveInFlight || !_saveDirty) return;
+  _saveInFlight=true;
+  _saveDirty=false;
+  var cbs=_saveCbs; _saveCbs=[];
+  _persistNow(function(okNow){
+    _saveInFlight=false;
+    cbs.forEach(function(f){ try{ f(okNow); }catch(_){} });
+    if(_saveDirty) _drainSave();   // changes landed mid-write — send the latest
+  });
+}
+
+// True if anything is still unwritten. Used by the page-exit flush.
+function _savePending(){ return _saveDirty || _saveInFlight; }
+
+// Page is going away. A queued write would normally wait for the in-flight one
+// to land — but there may be no "later" left, so send the newest state now and
+// let last-write-wins sort out the overlap. Only fires when there ARE changes
+// newer than whatever is already in the air.
+function _flushSaveNow(){
+  if(!ST.save || !DB) return;
+  if(!_saveDirty) return;          // in-flight write already carries the latest
+  _saveDirty=false;
+  try{ _persistNow(function(){}); }catch(_){}
+}
+
+function _persistNow(cb){
   if(!ST.save) return;
   if(!DB){
     ST._saveState={ok:false, at:Date.now(), err:"offline — no database connection"};
