@@ -276,7 +276,18 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .ms-backdrop{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.3)}
 .ms-sheet{position:fixed;z-index:90;left:50%;top:50%;transform:translate(-50%,-50%);
   width:min(340px,calc(100vw - 32px));background:#fff;border:3px solid var(--border);
-  border-radius:16px;box-shadow:5px 5px 0 var(--border);padding:16px}
+  border-radius:16px;box-shadow:5px 5px 0 var(--border);padding:16px;
+  /* The sheet outgrew the screen once the extra stats landed. */
+  max-height:calc(100vh - 48px);overflow-y:auto;-webkit-overflow-scrolling:touch}
+/* Full-width rows for splits that need two numbers next to each other. */
+.ms-rows{margin-top:10px;border:2px solid var(--border);border-radius:9px;
+  box-shadow:2px 2px 0 var(--border);background:var(--cream);overflow:hidden}
+.ms-row{padding:7px 9px;border-bottom:1px solid var(--border2)}
+.ms-row:last-child{border-bottom:none}
+.ms-row-lbl{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.05em;margin-bottom:2px}
+.ms-row-val{font-size:10px;font-weight:800;color:var(--text);line-height:1.35}
+.ms-row-val span{display:block;color:var(--muted);font-weight:700}
 .ms-close{position:absolute;top:10px;right:12px;border:none;background:none;
   font-size:17px;color:var(--muted);cursor:pointer;font-family:inherit;padding:0}
 .ms-head{font-size:15px;font-weight:900;color:var(--text)}
@@ -635,16 +646,39 @@ function sortActiveGames(active, weekId, viewerPicks){
 }
 
 var _weekScoreCache={};
+// A week's games in kickoff order. sortActiveGames follows whatever sort the
+// viewer picked, which would make a "streak" depend on a display toggle, so
+// streaks walk this fixed chronological order instead.
+function kickoffOrder(weekId){
+  var games=ST.games[weekId]||{};
+  var active=activeGames(weekId), idx={};
+  active.forEach(function(gid,i){ idx[gid]=i; });
+  return active.slice().sort(function(a,b){
+    var ak=parseKickoffTs(games[a]||{}) || (8640000000000000+idx[a]);
+    var bk=parseKickoffTs(games[b]||{}) || (8640000000000000+idx[b]);
+    if(ak!==bk) return ak-bk;
+    return idx[a]-idx[b];
+  });
+}
 // Season metrics for one player, across completed weeks only.
 function playerMetrics(uid){
   var weeks=(ST.weekIds||[]).filter(function(w){ return weekIsComplete(w); });
   var correct=0, resolved=0, favPicks=0, sideKnown=0;
   var earned=0, available=0, finishes=[];
+  var weekWins=0, podiums=0, bestWeekPts=-1, bestWeekId=null;
+  var topW=0, topL=0;                                  // highest-confidence pick
+  var hiHit=0, hiN=0, loHit=0, loN=0;                  // calibration halves
+  var run=0, bestRun=0, worstRun=0;                    // streaks, + wins / − losses
+  var tbMiss=0, tbN=0, tbClosest=0;                    // tiebreaker accuracy
+  var chalk={w:0,l:0}, dogs={w:0,l:0};
+  var crowdGames=0, contrarian=0, contraW=0, contraL=0;
+  var teamPts={};                                      // net conf points by team
 
   weeks.forEach(function(w){
     var picks=((ST.picks[w]||{})[uid])||{};
     var results=ST.results[w]||{}, games=ST.games[w]||{};
-    activeGames(w).forEach(function(gid){
+    var active=activeGames(w);
+    active.forEach(function(gid){
       var p=picks[gid], g=games[gid], r=results[gid];
       if(!p||!p.side) return;
       var conf=Number(p.conf)||0;
@@ -658,16 +692,107 @@ function playerMetrics(uid){
       if(!r || r==="push") return;      // a push is neither hit nor miss
       resolved++;
       available+=conf;
-      if(p.side===r){ correct++; earned+=conf; }
+      var hit=(p.side===r);
+      if(hit){ correct++; earned+=conf; }
+
+      // Chalk vs dogs — same split as favPct, but by outcome instead of habit.
+      if(g && g.favSide && g.favSide!=="even"){
+        var onFav=(p.side===g.favSide);
+        var rec=onFav?chalk:dogs;
+        if(hit) rec.w++; else rec.l++;
+      }
+      // Which team did this pick ride on, and what did it cost or earn?
+      if(g){
+        var team=(p.side==="away")?g.away:g.home;
+        if(team){
+          if(!teamPts[team]) teamPts[team]={net:0,w:0,l:0};
+          teamPts[team].net += hit?conf:-conf;
+          if(hit) teamPts[team].w++; else teamPts[team].l++;
+        }
+      }
+      // Going against the group. Only counts once enough people have picked the
+      // game for "the crowd" to mean anything.
+      var withMe=0, total=0;
+      (PARTS||[]).forEach(function(q){
+        var qp=((ST.picks[w]||{})[q]||{})[gid];
+        if(!qp||!qp.side) return;
+        total++;
+        if(qp.side===p.side) withMe++;
+      });
+      if(total>=3){
+        crowdGames++;
+        if(withMe*2 < total){        // strictly fewer than half were with you
+          contrarian++;
+          if(hit) contraW++; else contraL++;
+        }
+      }
     });
 
+    // Highest-confidence pick of the week — the one you were surest about.
+    var top=null;
+    active.forEach(function(gid){
+      var p=picks[gid];
+      if(!pickComplete(p)) return;
+      if(!top || Number(p.conf)>Number(picks[top].conf)) top=gid;
+    });
+    if(top){
+      var tr=results[top];
+      if(tr && tr!=="push"){ if(picks[top].side===tr) topW++; else topL++; }
+    }
+
+    // Calibration: split this week's picks at the median confidence and track
+    // each half separately. An odd count drops the middle pick so neither half
+    // is weighted by it.
+    var ranked=active.filter(function(gid){
+      var r=results[gid];
+      return pickComplete(picks[gid]) && r && r!=="push";
+    }).sort(function(a,b){ return Number(picks[b].conf)-Number(picks[a].conf); });
+    var half=Math.floor(ranked.length/2);
+    ranked.forEach(function(gid,i){
+      var hit=(picks[gid].side===results[gid]);
+      if(i<half){ hiN++; if(hit) hiHit++; }
+      else if(i>=ranked.length-half){ loN++; if(hit) loHit++; }
+    });
+
+    // Streak walks picks in kickoff order so the run reads chronologically.
+    kickoffOrder(w).forEach(function(gid){
+      var p=picks[gid], r=results[gid];
+      if(!pickComplete(p) || !r || r==="push") return;
+      if(p.side===r){ run=(run>0?run+1:1); if(run>bestRun) bestRun=run; }
+      else          { run=(run<0?run-1:-1); if(-run>worstRun) worstRun=-run; }
+    });
+
+    // Tiebreaker: how close was the guess, and did it beat everyone else's?
+    var tb=(ST.tiebreaker&&ST.tiebreaker[w])||{};
+    var actual=(tb.actual==null)?null:Number(tb.actual);
+    var myGuess=(picks.tb==null)?null:Number(picks.tb);
+    if(actual!=null && !isNaN(actual) && myGuess!=null && !isNaN(myGuess)){
+      var myMiss=Math.abs(myGuess-actual);
+      tbMiss+=myMiss; tbN++;
+      var bestMiss=myMiss;
+      (PARTS||[]).forEach(function(q){
+        var qg=((ST.picks[w]||{})[q]||{}).tb;
+        if(qg==null||isNaN(Number(qg))) return;
+        var m=Math.abs(Number(qg)-actual);
+        if(m<bestMiss) bestMiss=m;
+      });
+      if(myMiss<=bestMiss) tbClosest++;     // ties count as closest
+    }
+
     // Where they placed that week.
-    var mine=weekScore(w,uid).total, better=0, field=0;
+    var mine=weekScore(w,uid).total, better=0, field=0, wins=0;
     (PARTS||[]).forEach(function(q){
       field++;
-      if(weekScore(w,q).total>mine) better++;
+      var qt=weekScore(w,q).total;
+      if(qt>mine) better++;
+      if(qt===mine) wins++;
     });
-    if(field>1) finishes.push({rank:better+1, field:field});
+    if(field>1){
+      finishes.push({rank:better+1, field:field});
+      if(better===0) weekWins++;            // shared wins count for everyone tied
+      if(better<3 && field>3) podiums++;    // a "top three" needs a real field
+      if(mine>bestWeekPts){ bestWeekPts=mine; bestWeekId=w; }
+    }
   });
 
   var avgFinish=null, avgField=null;
@@ -675,17 +800,39 @@ function playerMetrics(uid){
     avgFinish=finishes.reduce(function(a,f){return a+f.rank;},0)/finishes.length;
     avgField =finishes.reduce(function(a,f){return a+f.field;},0)/finishes.length;
   }
+  // Best and worst team by net confidence points won or lost on them.
+  var nemesis=null, ally=null;
+  Object.keys(teamPts).forEach(function(t){
+    var v=teamPts[t];
+    if(!nemesis || v.net<teamPts[nemesis].net) nemesis=t;
+    if(!ally    || v.net>teamPts[ally].net)    ally=t;
+  });
+  if(nemesis && teamPts[nemesis].net>=0) nemesis=null;   // nobody has burned you yet
+  if(ally    && teamPts[ally].net<=0)    ally=null;
+
+  var hiRate=hiN?hiHit/hiN:null, loRate=loN?loHit/loN:null;
   return {
     weeks:weeks.length,
     hitRate:  resolved  ? correct/resolved   : null,
     favPct:   sideKnown ? favPicks/sideKnown : null,
     ptsPct:   available ? earned/available   : null,
     avgFinish:avgFinish, avgField:avgField,
-    correct:correct, resolved:resolved, earned:earned, available:available
+    correct:correct, resolved:resolved, earned:earned, available:available,
+    weekWins:weekWins, podiums:podiums,
+    bestWeekPts:(bestWeekId?bestWeekPts:null), bestWeekId:bestWeekId,
+    topW:topW, topL:topL,
+    hiRate:hiRate, loRate:loRate,
+    calib:(hiRate===null||loRate===null)?null:(hiRate-loRate),
+    streak:run, bestRun:bestRun, worstRun:worstRun,
+    tbAvgMiss:tbN?tbMiss/tbN:null, tbN:tbN, tbClosest:tbClosest,
+    chalk:chalk, dogs:dogs,
+    contraPct:crowdGames?contrarian/crowdGames:null,
+    contraW:contraW, contraL:contraL,
+    nemesis:nemesis, nemesisNet:nemesis?teamPts[nemesis].net:null,
+    ally:ally, allyNet:ally?teamPts[ally].net:null
   };
 }
 
-// Red → green. 0 is the worst end, 1 the best.
 // Season standings position after each completed week. This is the cumulative
 // table position, not that week's finish, so it only has a point once a week is
 // in the books — there is no preseason entry.
@@ -764,6 +911,7 @@ function rankChartSvg(hist){
   return h+'</div>';
 }
 
+// Red → green. 0 is the worst end, 1 the best.
 function _gradeColor(t){
   if(t===null||t===undefined||isNaN(t)) return "var(--dim)";
   t=Math.max(0,Math.min(1,t));
@@ -813,8 +961,64 @@ function renderMyStatsSheet(){
   h+=box("Finish", (m.avgFinish===null)?"\u2013":("#"+(Math.round(m.avgFinish*10)/10)),
          (m.avgFinish===null)?"var(--dim)":_gradeColor(fin),
          (m.avgFinish===null)?"":("average of "+Math.round(m.avgField)+" players"));
+
+  // Weeks won — shared wins count for everyone tied at the top.
+  h+=box("Weeks won", none?"\u2013":String(m.weekWins),
+         none?"var(--dim)":(m.weekWins?"var(--gold-dark)":"var(--muted)"),
+         none?"":(m.podiums?(m.podiums+" top-three finish"+(m.podiums!==1?"es":""))
+                           :("of "+m.weeks+" week"+(m.weeks!==1?"s":"")+" played")));
+
+  h+=box("Best week", (m.bestWeekPts===null)?"\u2013":String(m.bestWeekPts),
+         (m.bestWeekPts===null)?"var(--dim)":"var(--gold-dark)",
+         (m.bestWeekPts===null)?"":("week "+guessWeekNumber(ST.weekLabels[m.bestWeekId]||m.bestWeekId)));
+
+  var topN=m.topW+m.topL;
+  h+=box("Top pick", topN?(m.topW+"-"+m.topL):"\u2013",
+         topN?_gradeColor(m.topW/topN):"var(--dim)",
+         topN?"your biggest play each week":"");
+
+  // Calibration: are your points on the right games? Positive means your
+  // high-confidence half hits more than your low half, which is the whole job.
+  h+=box("Calibration", (m.calib===null)?"\u2013":((m.calib>=0?"+":"\u2212")+Math.abs(Math.round(m.calib*100))),
+         (m.calib===null)?"var(--dim)":_gradeColor(0.5+m.calib),
+         (m.calib===null)?"":(_pct(m.hiRate)+" high \u00b7 "+_pct(m.loRate)+" low"));
+
+  var stk=m.streak, stkTxt=(!stk)?"\u2013":((stk>0?"W":"L")+Math.abs(stk));
+  h+=box("Streak", stkTxt,
+         (!stk)?"var(--dim)":(stk>0?"var(--green)":"var(--red)"),
+         (!stk)?"":("best W"+m.bestRun+" \u00b7 worst L"+m.worstRun));
+
+  h+=box("Tiebreaker", (m.tbAvgMiss===null)?"\u2013":String(Math.round(m.tbAvgMiss*10)/10),
+         (m.tbAvgMiss===null)?"var(--dim)":"var(--blue)",
+         (m.tbAvgMiss===null)?"":("avg miss \u00b7 closest "+m.tbClosest+"\u00d7"));
   h+='</div>';
+
   h+=rankChartSvg(rankHistory(ST.user));
+
+  // ── Splits ────────────────────────────────────────────────────────────
+  // Wider rows for the stats that need two numbers side by side.
+  function splitRow(label, left, right){
+    return '<div class="ms-row"><div class="ms-row-lbl">'+label+'</div>'+
+           '<div class="ms-row-val">'+left+(right?'<span>'+right+'</span>':'')+'</div></div>';
+  }
+  function rec(r){
+    var n=r.w+r.l;
+    return n ? (r.w+"-"+r.l+" <b style=\"color:"+_gradeColor(r.w/n)+"\">"+Math.round(r.w/n*100)+"%</b>") : "\u2013";
+  }
+  if(!none){
+    h+='<div class="ms-rows">';
+    h+=splitRow("Chalk vs dogs", "Favorites "+rec(m.chalk), "Dogs "+rec(m.dogs));
+    var cn=m.contraW+m.contraL;
+    h+=splitRow("Off the crowd",
+      (m.contraPct===null?"\u2013":_pct(m.contraPct)+" of picks"),
+      cn?(m.contraW+"-"+m.contraL+" when you are"):"");
+    if(m.nemesis||m.ally){
+      h+=splitRow("Teams",
+        m.nemesis?("Nemesis "+x(m.nemesis)+" <b style=\"color:var(--red)\">"+m.nemesisNet+"</b>"):"\u2013",
+        m.ally?("Best "+x(m.ally)+" <b style=\"color:var(--green)\">+"+m.allyNet+"</b>"):"");
+    }
+    h+='</div>';
+  }
   h+='</div>';
   return h;
 }
