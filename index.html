@@ -2306,6 +2306,10 @@ function renderProfile() {
       return bestStatus(a) - bestStatus(b);
     });
 
+    // Split archived groups out before drawing cards.
+    var _archivedGroups = groups.filter(function(g){ return groupArchived(g); });
+    groups = groups.filter(function(g){ return !groupArchived(g); });
+
     var gh = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 10px;align-items:stretch;margin-bottom:24px">';
     groups.forEach(function(g){
       var pools = groupPools(g);
@@ -2635,6 +2639,30 @@ function renderProfile() {
       gh += '</div>'; // end gcard
     });
     gh += '</div>';
+
+    // Archived pools: a compact list, so a finished tournament stops taking a full
+    // card but stays reachable.
+    if(_archivedGroups.length){
+      gh += '<div style="font-size:10px;font-weight:900;color:var(--muted);text-transform:uppercase;'+
+            'letter-spacing:.06em;margin:-10px 0 8px">Archived</div>';
+      gh += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:24px">';
+      _archivedGroups.forEach(function(g){
+        var _p = groupPools(g)[0] || null;
+        var _icon = _p ? (_p.sportIcon || _p.icon || "\uD83C\uDFC6") : "\uD83C\uDFC6";
+        // .gcard so the existing delegation opens it; no new action to wire up.
+        gh += '<div class="gcard" data-gid="'+x(g.id)+'" '+
+              'style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#fff;'+
+              'border:2px solid var(--border2);border-radius:10px;opacity:.8;cursor:pointer;'+
+              'box-shadow:none;min-height:0">';
+        gh += '<span style="font-size:13px">'+_icon+'</span>';
+        gh += '<span style="font-size:12px;font-weight:800;color:var(--text);flex:1;'+
+              'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(g.name||"Group")+'</span>';
+        gh += '<span style="font-size:9px;font-weight:800;color:var(--muted)">Archived</span>';
+        gh += '</div>';
+      });
+      gh += '</div>';
+    }
+
     container.innerHTML = gh;
     startCountdownTicker();
 
@@ -7265,8 +7293,26 @@ function resultFinishFor(r, uid){
   return null;
 }
 
+// Has this pool been archived — stood down after its result was recorded?
+function poolArchived(g, poolId){
+  var d = (g && g.data && g.data[poolId]) || {};
+  if(d.archivedAt) return true;
+  if(d.meta && d.meta.archivedAt) return true;
+  return false;
+}
+// Every pool in the group archived (or none to show) means the card has nothing
+// live left to say.
+function groupArchived(g){
+  var pools = ((g && g.pools) || []).filter(function(pid){ return !!poolById(pid); });
+  if(!pools.length) return false;
+  return pools.every(function(pid){ return poolArchived(g, pid); });
+}
+
 function displayStatusFor(g, pool){
   if(!pool) return "coming-soon";
+  // Archived wins over everything: the result stays in the trophy case and the
+  // history, but the pool is no longer presenting itself.
+  if(poolArchived(g, pool.id)) return "coming-soon";
   // effectiveStatus() is defined inside each render closure, so resolve the
   // stored status here rather than depending on one of those being in scope.
   var base = (g && g.data && g.data.statuses && g.data.statuses[pool.id]) || null;
