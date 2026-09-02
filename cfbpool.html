@@ -932,8 +932,11 @@ function _pct(v){ return v===null?"\u2013":Math.round(v*100)+"%"; }
 // The stats sheet. Rendered at the page level so nothing in the table can clip
 // or scroll it.
 function renderMyStatsSheet(){
-  if(!ST.myStatsOpen || PUBLIC_VIEW || !ST.user) return "";
-  var m=playerMetrics(ST.user);
+  // ST.statsUid names whose sheet is open — your own row or anyone else's.
+  var who=ST.statsUid;
+  if(!who || PUBLIC_VIEW) return "";
+  var mine=(who===ST.user);
+  var m=playerMetrics(who);
   var none=(m.weeks===0);
   function box(label, value, color, sub){
     return '<div class="ms-box">'+
@@ -946,15 +949,15 @@ function renderMyStatsSheet(){
   var h='<div class="ms-backdrop" id="ms-backdrop"></div>';
   h+='<div class="ms-sheet">';
   h+='<button class="ms-close" id="b-mystats-close" aria-label="Close">&#10005;</button>';
-  h+='<div class="ms-head">'+pem(ST.user)+x(nameOf(ST.user))+'</div>';
-  h+='<div class="ms-sub-head">Your season'+(none?"":" &middot; "+m.weeks+" week"+(m.weeks!==1?"s":"")+" played")+'</div>';
+  h+='<div class="ms-head">'+pem(who)+x(nameOf(who))+'</div>';
+  h+='<div class="ms-sub-head">'+(mine?"Your season":"Season")+(none?"":" &middot; "+m.weeks+" week"+(m.weeks!==1?"s":"")+" played")+'</div>';
   h+='<div class="ms-grid">';
   h+=box("Hit rate", none?"\u2013":_pct(m.hitRate),
          none?"var(--dim)":_gradeColor(m.hitRate),
          none?"no weeks played yet":m.correct+"-"+(m.resolved-m.correct)+" against the spread");
   h+=box("Favorites", none?"\u2013":_pct(m.favPct),
          none?"var(--dim)":_leanColor(m.favPct),
-         none?"":(m.favPct===null?"":(m.favPct>=0.5?"you lean chalk":"you lean dogs")));
+         none?"":(m.favPct===null?"":((mine?"you lean ":"leans ")+(m.favPct>=0.5?"chalk":"dogs"))));
   h+=box("Points", none?"\u2013":_pct(m.ptsPct),
          none?"var(--dim)":_gradeColor(m.ptsPct),
          none?"":m.earned+" of "+m.available+" available");
@@ -975,7 +978,7 @@ function renderMyStatsSheet(){
   var topN=m.topW+m.topL;
   h+=box("Top pick", topN?(m.topW+"-"+m.topL):"\u2013",
          topN?_gradeColor(m.topW/topN):"var(--dim)",
-         topN?"your biggest play each week":"");
+         topN?((mine?"your":"their")+" biggest play each week"):"");
 
   // Calibration: are your points on the right games? Positive means your
   // high-confidence half hits more than your low half, which is the whole job.
@@ -993,7 +996,7 @@ function renderMyStatsSheet(){
          (m.tbAvgMiss===null)?"":("avg miss \u00b7 closest "+m.tbClosest+"\u00d7"));
   h+='</div>';
 
-  h+=rankChartSvg(rankHistory(ST.user));
+  h+=rankChartSvg(rankHistory(who));
 
   // ── Splits ────────────────────────────────────────────────────────────
   // Wider rows for the stats that need two numbers side by side.
@@ -1011,7 +1014,7 @@ function renderMyStatsSheet(){
     var cn=m.contraW+m.contraL;
     h+=splitRow("Off the crowd",
       (m.contraPct===null?"\u2013":_pct(m.contraPct)+" of picks"),
-      cn?(m.contraW+"-"+m.contraL+" when you are"):"");
+      cn?(m.contraW+"-"+m.contraL+" when "+(mine?"you are":"they do")):"");
     if(m.nemesis||m.ally){
       h+=splitRow("Teams",
         m.nemesis?("Nemesis "+x(m.nemesis)+" <b style=\"color:var(--red)\">"+m.nemesisNet+"</b>"):"\u2013",
@@ -3638,8 +3641,9 @@ function renderStandings(){
     // Name + best/worst week callout
     // Best/worst week markers removed — the week columns already show every score.
     var _sf=playerForm(r.name);
-    // Your own row opens your stats. No affordance shown — it's a quiet extra.
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px'+(isMe&&!PUBLIC_VIEW?';cursor:pointer':'')+'"'+(isMe&&!PUBLIC_VIEW?' data-mystats="1"':'')+'>'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+'</td>';
+    // Any row opens that player's stats. No affordance shown — it's a quiet extra.
+    var _tap=(!PUBLIC_VIEW);
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px'+(_tap?';cursor:pointer':'')+'"'+(_tap?' data-stats-uid="'+x(r.name)+'"':'')+'>'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+'</td>';
 
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
@@ -4300,7 +4304,7 @@ function renderGroupPicks(){
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+(PUBLIC_VIEW?'':' data-stats-uid="'+x(player)+'"')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
@@ -4703,15 +4707,18 @@ function bind(){
   });
 
   // Compare mode toggle
-  els=document.querySelectorAll('[data-mystats="1"]');
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    ST.myStatsOpen=true; draw();
+  els=document.querySelectorAll('[data-stats-uid]');
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(e){
+    // In the group grid a tap means "select for Compare", so leave it alone there.
+    if(ST.compareMode) return;
+    e.stopPropagation();
+    ST.statsUid=this.getAttribute("data-stats-uid"); draw();
   });
   el=document.getElementById("b-mystats-close"); if(el) el.addEventListener("click",function(){
-    ST.myStatsOpen=false; draw();
+    ST.statsUid=null; draw();
   });
   el=document.getElementById("ms-backdrop"); if(el) el.addEventListener("click",function(){
-    ST.myStatsOpen=false; draw();
+    ST.statsUid=null; draw();
   });
 
   el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
