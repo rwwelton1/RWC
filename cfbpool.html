@@ -266,6 +266,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-grid tbody tr.gp-me-row > td:first-child,
 .gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
 
+/* Your own season metrics, under your standings row. */
+.mm-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border2);
+  border-bottom:2px solid var(--border)}
+.mm-chip{background:var(--gold-bg);padding:6px 4px;text-align:center;min-width:0}
+.mm-val{font-size:14px;font-weight:900;line-height:1.1}
+.mm-lbl{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.05em;margin-top:1px}
+.mm-sub{font-size:8px;font-weight:700;color:var(--dim);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* Hot/cold marker. Deliberately quiet — it's a hint, not a headline. */
 .form-mark{opacity:.85;margin-left:3px;flex-shrink:0}
 
@@ -596,6 +606,104 @@ function sortActiveGames(active, weekId, viewerPicks){
 }
 
 var _weekScoreCache={};
+// Season metrics for one player, across completed weeks only.
+function playerMetrics(uid){
+  var weeks=(ST.weekIds||[]).filter(function(w){ return weekIsComplete(w); });
+  var correct=0, resolved=0, favPicks=0, sideKnown=0;
+  var earned=0, available=0, finishes=[];
+
+  weeks.forEach(function(w){
+    var picks=((ST.picks[w]||{})[uid])||{};
+    var results=ST.results[w]||{}, games=ST.games[w]||{};
+    activeGames(w).forEach(function(gid){
+      var p=picks[gid], g=games[gid], r=results[gid];
+      if(!p||!p.side) return;
+      var conf=Number(p.conf)||0;
+
+      // Favourite share counts every pick with a known favourite, resolved or not
+      // — it describes how you pick, not how it turned out.
+      if(g && g.favSide && g.favSide!=="even"){
+        sideKnown++;
+        if(p.side===g.favSide) favPicks++;
+      }
+      if(!r || r==="push") return;      // a push is neither hit nor miss
+      resolved++;
+      available+=conf;
+      if(p.side===r){ correct++; earned+=conf; }
+    });
+
+    // Where they placed that week.
+    var mine=weekScore(w,uid).total, better=0, field=0;
+    (PARTS||[]).forEach(function(q){
+      field++;
+      if(weekScore(w,q).total>mine) better++;
+    });
+    if(field>1) finishes.push({rank:better+1, field:field});
+  });
+
+  var avgFinish=null, avgField=null;
+  if(finishes.length){
+    avgFinish=finishes.reduce(function(a,f){return a+f.rank;},0)/finishes.length;
+    avgField =finishes.reduce(function(a,f){return a+f.field;},0)/finishes.length;
+  }
+  return {
+    weeks:weeks.length,
+    hitRate:  resolved  ? correct/resolved   : null,
+    favPct:   sideKnown ? favPicks/sideKnown : null,
+    ptsPct:   available ? earned/available   : null,
+    avgFinish:avgFinish, avgField:avgField,
+    correct:correct, resolved:resolved, earned:earned, available:available
+  };
+}
+
+// Red → green. 0 is the worst end, 1 the best.
+function _gradeColor(t){
+  if(t===null||t===undefined||isNaN(t)) return "var(--dim)";
+  t=Math.max(0,Math.min(1,t));
+  var hue=Math.round(t*120);                 // 0 red .. 120 green
+  return "hsl("+hue+",62%,38%)";
+}
+// Blue → amber. Describes a leaning; neither end is "good".
+function _leanColor(t){
+  if(t===null||t===undefined||isNaN(t)) return "var(--dim)";
+  t=Math.max(0,Math.min(1,t));
+  // Teal (dogs) .. purple (chalk). Deliberately avoids the red/green range so it
+  // can't be mistaken for a good/bad score.
+  var hue=Math.round(190+(t*90));
+  return "hsl("+hue+",48%,45%)";
+}
+function _pct(v){ return v===null?"\u2013":Math.round(v*100)+"%"; }
+
+// The strip under your own row. Grey and dashed until a week has finished.
+function renderMyMetrics(uid){
+  var m=playerMetrics(uid);
+  var none=(m.weeks===0);
+  function chip(label, value, color, sub){
+    return '<div class="mm-chip">'+
+           '<div class="mm-val" style="color:'+color+'">'+value+'</div>'+
+           '<div class="mm-lbl">'+label+'</div>'+
+           (sub?'<div class="mm-sub">'+sub+'</div>':'')+
+           '</div>';
+  }
+  var h='<div class="mm-strip">';
+  h+=chip("Hit rate", none?"\u2013":_pct(m.hitRate),
+          none?"var(--dim)":_gradeColor(m.hitRate),
+          none?"":m.correct+"-"+(m.resolved-m.correct));
+  h+=chip("Favorites", none?"\u2013":_pct(m.favPct),
+          none?"var(--dim)":_leanColor(m.favPct),
+          none?"":(m.favPct===null?"":(m.favPct>=0.5?"leans chalk":"leans dogs")));
+  h+=chip("Points", none?"\u2013":_pct(m.ptsPct),
+          none?"var(--dim)":_gradeColor(m.ptsPct),
+          none?"":m.earned+"/"+m.available);
+  // Finish inverts: 1st is the good end, so normalise against the field size.
+  var fin=(m.avgFinish===null)?null:(m.avgField>1 ? (m.avgField-m.avgFinish)/(m.avgField-1) : 1);
+  h+=chip("Finish", (m.avgFinish===null)?"\u2013":("#"+(Math.round(m.avgFinish*10)/10)),
+          (m.avgFinish===null)?"var(--dim)":_gradeColor(fin),
+          (m.avgFinish===null)?"":("of "+Math.round(m.avgField)));
+  h+='</div>';
+  return h;
+}
+
 // How many completed weeks to look back over.
 var FORM_WEEKS = 3;
 var FORM_MIN_PICKS = 6;      // below this it's noise, not form
@@ -3038,6 +3146,9 @@ function renderStandings(){
   })();
 
   var h='<div class="lb-wrap" style="padding:0">';
+  // Your season metrics sit ABOVE the table: inside it they'd scroll sideways
+  // with the week columns and the last chip would be off-screen.
+  if(!PUBLIC_VIEW && ST.user) h+=renderMyMetrics(ST.user);
   if(ST.weekIds.length===0){h+='<div class="lb-note">No weeks yet.</div></div>';return h;}
 
   var completedWeeks=ST.weekIds.filter(function(w){return weekIsComplete(w);});
