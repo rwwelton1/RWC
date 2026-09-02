@@ -103,7 +103,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 /* Optional nickname the admin gives a game. Purely decorative — it sits above the
    kickoff line and never affects picks or scoring. */
 .gc-headL{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.gc-nick{font-size:10px;font-weight:900;color:var(--gold-dark);letter-spacing:.01em;line-height:1.2;
+.gc-nick{font-size:10px;font-weight:900;color:var(--gold-dark);letter-spacing:.03em;line-height:1.2;
+  text-transform:uppercase;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gc-pts{font-size:10px;font-weight:900;color:var(--red2)}
 .gc-pts.earned{color:var(--green)}
@@ -1312,7 +1313,14 @@ function loadData(){
         if(sig!==_lastSig){ invalidateAllWeekCache(); _lastSig=sig; }
         scheduleDraw(); publishSeasonToHub();
       };
-      DB.ref(BASE+"/games").on("value",function(sn){ST.games=sn.val()||{};invalidateAllWeekCache();_lastSig=_completedSig();_onData();});
+      DB.ref(BASE+"/games").on("value",function(sn){
+        var _v=sn.val()||{};
+        // setGameField updates ST.games before it writes, so the snapshot Firebase
+        // echoes back is already on screen. Repainting on it would only rip the
+        // field out from under an admin who is still typing.
+        if(_stableStr(_v)===_stableStr(ST.games)) return;
+        ST.games=_v;invalidateAllWeekCache();_lastSig=_completedSig();_onData();
+      });
       DB.ref(BASE+"/results").on("value",function(sn){ST.results=sn.val()||{};_onData();});
       DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};_onData();});
       DB.ref(BASE+"/spreadsLocked").on("value",function(sn){ST.spreadsLocked=sn.val()||{};scheduleDraw();});
@@ -2699,6 +2707,16 @@ function removeWeek(weekId){
   draw();
   toast("Week removed");
 }
+// Key order from a Firebase snapshot won't match the order of our locally-mutated
+// copy, so compare with sorted keys rather than raw JSON.stringify.
+function _stableStr(v){
+  if(v===null||typeof v!=="object") return JSON.stringify(v);
+  if(Array.isArray(v)) return "["+v.map(_stableStr).join(",")+"]";
+  return "{"+Object.keys(v).sort().map(function(k){
+    return JSON.stringify(k)+":"+_stableStr(v[k]);
+  }).join(",")+"}";
+}
+
 function setGameField(weekId,gid,field,value){
   if(!ST.games[weekId])ST.games[weekId]={};
   if(!ST.games[weekId][gid])ST.games[weekId][gid]={away:"",home:"",favSide:"home",spread:0,kickoff:""};
@@ -3725,7 +3743,7 @@ function renderAdmin(){
     if(adminStep===3 && g.away&&g.home){
       // Read-only matchup summary above the result buttons.
       var spL = g.favSide==="even"?"PK":("-"+g.spread+" "+(g.favSide==="away"?x(g.away):x(g.home)));
-      if(g.nick) h+='<div style="font-size:9px;font-weight:900;color:var(--gold-dark);margin-bottom:1px">'+x(g.nick)+'</div>';
+      if(g.nick) h+='<div style="font-size:9px;font-weight:900;color:var(--gold-dark);text-transform:uppercase;letter-spacing:.03em;margin-bottom:1px">'+x(g.nick)+'</div>';
       h+='<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:4px">'+x(g.away)+' @ '+x(g.home)+' <span style="color:var(--muted);font-weight:700">&middot; '+spL+'</span></div>';
     }
     if(adminStep===3 && g.away&&g.home){
@@ -4138,7 +4156,39 @@ try{
 var _drawPending=false;
 function scheduleDraw(){if(_drawPending)return;_drawPending=true;setTimeout(function(){_drawPending=false;draw();},0);}
 
+// draw() replaces the whole page, so repainting while someone is mid-word in an
+// input tears the field out from under them and drops the keyboard. Any repaint
+// that lands while a field has focus is held until they leave it.
+var _deferredDraw=false;
+function _focusedField(){
+  var el=document.activeElement;
+  if(!el) return null;
+  // Chat is a live feed — holding repaints here would hide incoming messages,
+  // including the one you just sent. It keeps its existing behavior.
+  if(el.id==="chat-input") return null;
+  var tag=(el.tagName||"").toUpperCase();
+  if(tag==="TEXTAREA") return el;
+  if(tag!=="INPUT") return null;
+  var t=(el.type||"text").toLowerCase();
+  if(t==="checkbox"||t==="radio"||t==="button"||t==="submit"||t==="reset") return null;
+  return el;
+}
+function _holdDrawFor(el){
+  if(el._drawHold) return;
+  el._drawHold=true;
+  el.addEventListener("blur",function(){
+    // Wait out the tap that caused the blur. Repainting immediately would delete
+    // the button being pressed before its click ever fires.
+    setTimeout(function(){
+      if(_deferredDraw && !_focusedField()){ _deferredDraw=false; draw(); }
+    },260);
+  });
+}
+
 function draw(){
+  var _typing=_focusedField();
+  if(_typing){ _deferredDraw=true; _holdDrawFor(_typing); return; }
+  _deferredDraw=false;
   var h='';
   if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
