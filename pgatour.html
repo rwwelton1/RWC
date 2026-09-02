@@ -1454,6 +1454,24 @@ function renderAdmin(){
         : "No auto-finalize set \u2014 ESPN completion still finalizes automatically");
   h+='<span style="font-size:9px;font-weight:700;color:'+(ST.finalized?"var(--blue)":(ST.finalizeTs&&Date.now()>=ST.finalizeTs?"var(--red2)":"var(--muted)"))+'">'+_finState+'</span>';
   h+='</div>';
+
+  // Archive time — a day after finalising by default.
+  var _arcTs=effectiveArchiveTs();
+  h+='<div class="adm-row" style="margin-top:8px;flex-direction:column;align-items:stretch;gap:4px">';
+  h+='<span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Archive time (pool stands down at this moment)</span>';
+  h+='<input type="datetime-local" id="b-archivets" value="'+_lockTsToLocalInput(_arcTs)+'" style="font-size:12px;padding:6px 8px;border:2px solid var(--border);border-radius:8px;font-family:Nunito,sans-serif">';
+  var _arcState = ST.archivedAt ? "Archived"
+    : (!_arcTs ? "Set an auto-finalize time first"
+      : (Date.now()>=_arcTs
+          ? (ST.finalized ? "Time passed \u2014 archiving on next refresh"
+                          : "Waiting on the result being finalized")
+          : "Archives "+new Date(_arcTs).toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})
+            +(ST.archivePinned?"":" (1 day after finalize)")));
+  h+='<span style="font-size:9px;font-weight:700;color:'+(ST.archivedAt?"var(--blue)":"var(--muted)")+'">'+_arcState+'</span>';
+  if(ST.archivePinned){
+    h+='<button class="adm-btn" id="b-archive-reset" style="align-self:flex-start;margin-top:2px">Follow finalize time</button>';
+  }
+  h+='</div>';
   h+='</div>';
   h+='<div class="section-label">Player Field</div>';
   h+='<div class="adm-card">';
@@ -2088,6 +2106,36 @@ function importPlayerField() {
 // once, and refuses to finalize a pool with nothing in it — a mis-set time
 // shouldn't freeze an empty leaderboard as the final word.
 var _autoFinalizing=false;
+// A day after finalising, unless an admin has pinned their own time.
+var ARCHIVE_DELAY_MS = 24*60*60*1000;
+function defaultArchiveTs(){
+  return ST.finalizeTs ? (ST.finalizeTs + ARCHIVE_DELAY_MS) : null;
+}
+function effectiveArchiveTs(){
+  // A pinned value wins; otherwise it tracks the finalize time.
+  return (ST.archivePinned && ST.archiveTs) ? ST.archiveTs : defaultArchiveTs();
+}
+
+// Stand the pool down once that moment passes. Only meaningful after finalising —
+// archiving a live tournament would hide it mid-play.
+var _archiving=false;
+function maybeAutoArchive(){
+  if(!DB || _archiving) return;
+  if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) return;
+  if(!ST.finalized) return;                       // nothing to archive yet
+  if(ST.archivedAt) return;                       // already done
+  var ts=effectiveArchiveTs();
+  if(!ts || Date.now() < ts) return;
+  _archiving=true;
+  // The frozen scores and podium already live under events/. This just retires
+  // the pool: it stops being "the current tournament" on the hub.
+  DB.ref("groups/"+GROUP_ID+"/data/statuses/pgatour").set("coming-soon");
+  DB.ref(BASE+"/meta/archivedAt").set(Date.now());
+  ST.archivedAt=Date.now();
+  toast("\u{1F4E6} Tournament archived");
+  draw();
+}
+
 function maybeAutoFinalize(){
   if(!DB) return;
   if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) return;
@@ -2334,6 +2382,25 @@ function bind(){
     draw();
   });
 
+  el=document.getElementById("b-archivets"); if(el) el.addEventListener("change",function(){
+    var ts = this.value ? new Date(this.value).getTime() : null;
+    ST.archiveTs = ts; ST.archivePinned = !!ts;
+    if(DB){
+      DB.ref(BASE+"/meta/archiveTs").set(ts||null);
+      DB.ref(BASE+"/meta/archivePinned").set(!!ts);
+    }
+    toast(ts?"\u{1F4E6} Archive time set":"Archive time cleared");
+    maybeAutoArchive(); draw();
+  });
+  el=document.getElementById("b-archive-reset"); if(el) el.addEventListener("click",function(){
+    ST.archiveTs=null; ST.archivePinned=false;
+    if(DB){
+      DB.ref(BASE+"/meta/archiveTs").set(null);
+      DB.ref(BASE+"/meta/archivePinned").set(false);
+    }
+    toast("Archive time follows the finalize time"); draw();
+  });
+
   el=document.getElementById("b-finalts"); if(el) el.addEventListener("change",function(){
     var ts = this.value ? new Date(this.value).getTime() : null;
     ST.finalizeTs = ts;
@@ -2505,6 +2572,7 @@ function loadData(){
       // Same tick handles the scheduled finalize, so it fires on its own rather
       // than waiting for someone to open the admin tab.
       try{ maybeAutoFinalize(); }catch(e){}
+      try{ maybeAutoArchive(); }catch(e){}
     }, 60*1000);
     DB.ref("globalSettings/masterPw").on("value",function(sn){if(sn.val())MASTER_PW=sn.val();});
     DB.ref(BASE+"/meta/locked").on("value",function(sn){
@@ -2520,6 +2588,9 @@ function loadData(){
       maybeAutoFinalize();
       draw();
     });
+    DB.ref(BASE+"/meta/archiveTs").on("value",function(sn){ ST.archiveTs=sn.val()||null; draw(); });
+    DB.ref(BASE+"/meta/archivePinned").on("value",function(sn){ ST.archivePinned=!!sn.val(); draw(); });
+    DB.ref(BASE+"/meta/archivedAt").on("value",function(sn){ ST.archivedAt=sn.val()||null; draw(); });
     DB.ref(BASE+"/meta/finalizedAt").on("value",function(sn){
       ST.finalized=!!sn.val();
       draw();
