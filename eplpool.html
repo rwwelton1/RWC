@@ -301,20 +301,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
 
 /* ── POOL CHAT ── */
-.chat-fab{position:fixed;right:14px;bottom:calc(58px + env(safe-area-inset-bottom,0px));z-index:60;
-  width:48px;height:48px;border-radius:50%;border:3px solid var(--border);background:var(--gold);
-  box-shadow:3px 3px 0 var(--border);font-size:19px;cursor:pointer;display:flex;
-  align-items:center;justify-content:center;padding:0}
-.chat-fab .chat-dot{position:absolute;top:-2px;right:-2px;width:13px;height:13px;border-radius:50%;
-  background:var(--red2);border:2px solid #fff}
-.chat-sheet{position:fixed;left:0;right:0;bottom:0;z-index:70;background:#fff;
-  border-top:3px solid var(--border);border-radius:14px 14px 0 0;
-  max-height:min(72vh,72dvh);display:flex;flex-direction:column;
-  padding-bottom:env(safe-area-inset-bottom,0px)}
-.chat-backdrop{position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.28)}
-.chat-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:2px solid var(--border2)}
-.chat-title{font-size:13px;font-weight:900;flex:1}
-.chat-log{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:120px}
+/* Unread marker on the tab label. */
+.chat-dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--red2);margin-left:4px;vertical-align:middle}
+/* Chat page. Height is measured like the grid so the composer sits just above
+   the Safari toolbar rather than under it. */
+.chat-page{display:flex;flex-direction:column;background:#fff;
+  border-bottom:3px solid var(--border);
+  max-height:calc(100vh - 182px);max-height:calc(100dvh - 182px)}
+.chat-log{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:140px;
+  overscroll-behavior:contain}
 .chat-msg{max-width:82%;padding:7px 10px;border-radius:11px;background:var(--cream);
   border:2px solid var(--border2);align-self:flex-start}
 .chat-msg.mine{align-self:flex-end;background:var(--gold-bg);border-color:var(--gold)}
@@ -322,7 +318,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .chat-text{font-size:12px;font-weight:600;color:var(--text);line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
 .chat-when{font-size:8px;font-weight:700;color:var(--dim);margin-top:3px}
 .chat-empty{font-size:11px;color:var(--muted);text-align:center;padding:22px 10px}
-.chat-bar{display:flex;gap:8px;padding:10px 12px;border-top:2px solid var(--border2)}
+.chat-bar{display:flex;gap:8px;padding:10px 12px;border-top:2px solid var(--border2);
+  padding-bottom:calc(10px + env(safe-area-inset-bottom,0px))}
 .chat-input{flex:1;border:2px solid var(--border);border-radius:9px;padding:9px 10px;font-size:13px;
   font-family:'Nunito',sans-serif;font-weight:600;background:#fff;min-width:0}
 .chat-send{border:2px solid var(--border);border-radius:9px;background:var(--gold);font-weight:900;
@@ -1731,18 +1728,7 @@ function chatTime(ts){
 }
 function renderChat(){
   if(!chatOn()||PUBLIC_VIEW) return "";
-  var h="";
-  if(!ST.chatOpen){
-    var n=chatUnread();
-    h+='<button class="chat-fab" id="b-chat-open" aria-label="Open chat">&#128172;'+
-       (n>0?'<span class="chat-dot"></span>':'')+'</button>';
-    return h;
-  }
-  h+='<div class="chat-backdrop" id="chat-backdrop"></div>';
-  h+='<div class="chat-sheet">';
-  // No group-name variable in this file; the pool identifies itself well enough.
-  h+='<div class="chat-head"><span class="chat-title">&#128172; Group Chat</span>'+
-     '<button class="btn btn-ghost" id="b-chat-close" style="font-size:14px">&#10005;</button></div>';
+  var h='<div class="chat-page">';
   h+='<div class="chat-log" id="chat-log">';
   var msgs=chatSorted();
   if(!msgs.length){
@@ -3444,6 +3430,22 @@ function _syncGridHeadHeight(){
 // without it touching the toolbar.
 var GRID_BOTTOM_GAP = 10;
 
+// The chat page is measured for the same reason the grid is: a fixed offset
+// can't know how tall the chrome above it is, and the composer must end up above
+// the Safari toolbar rather than under it.
+function _fitChatToViewport(){
+  var page=document.querySelector(".chat-page");
+  if(!page) return;
+  var vh=(window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  var top=page.getBoundingClientRect().top;
+  var avail=Math.round(vh - top - 10);
+  if(avail>160) page.style.maxHeight=avail+"px";
+}
+try{
+  window.addEventListener("resize", _fitChatToViewport);
+  if(window.visualViewport) window.visualViewport.addEventListener("resize", _fitChatToViewport);
+}catch(e){}
+
 function _fitGridToViewport(){
   var wrap=document.querySelector(".gp-wrap");
   if(!wrap) return;
@@ -3512,6 +3514,11 @@ function draw(){
       }
     }
   }
+  // Chat is a destination like any other once the admin enables it. The unread
+  // marker rides on the label rather than a floating badge.
+  if(chatOn()&&!PUBLIC_VIEW){
+    tabs.push({id:"chat", lbl:"&#128172; Chat"+(ST.page!=="chat"&&chatUnread()>0?'<span class="chat-dot"></span>':"")});
+  }
   if(ST.admin&&!PUBLIC_VIEW) tabs.push({id:"admin",lbl:"&#9881; Admin"});
   h+='<div class="page-bar">';
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
@@ -3528,16 +3535,17 @@ function draw(){
   else if(ST.page==="group") h+=renderGroupPicks();
   else if(ST.page==="scores") h+='<div class="scores-wrap" id="scores-wrap"><div class="scores-loading">Loading scores&hellip;</div></div>';
   else if(ST.page==="standings") h+=renderStandings();
+  else if(ST.page==="chat"&&chatOn()&&!PUBLIC_VIEW) h+=renderChat();
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
   else { ST.page="picks"; h+=renderPicks(); }
 
-  h+=renderChat();
   document.getElementById("root").innerHTML=h;
   bind();
-  if(ST.chatOpen){
+  if(ST.page==="chat"){
     var _log=document.getElementById("chat-log");
     if(_log) _log.scrollTop=_log.scrollHeight;   // newest message in view
     chatMarkSeen();
+    setTimeout(_fitChatToViewport, 0);
   }
   if(ST.page==="scores"){
     // Refetch when the cached feed belongs to a different week than the one on screen.
@@ -3832,15 +3840,6 @@ function bind(){
     rows.forEach(function(r){ tbody.appendChild(r); });
   });
 
-  el=document.getElementById("b-chat-open"); if(el) el.addEventListener("click",function(){
-    ST.chatOpen=true; draw();
-  });
-  el=document.getElementById("b-chat-close"); if(el) el.addEventListener("click",function(){
-    ST.chatOpen=false; chatMarkSeen(); draw();
-  });
-  el=document.getElementById("chat-backdrop"); if(el) el.addEventListener("click",function(){
-    ST.chatOpen=false; chatMarkSeen(); draw();
-  });
   el=document.getElementById("b-chat-send"); if(el) el.addEventListener("click",function(){
     var inp=document.getElementById("chat-input");
     if(!inp) return;
@@ -3889,7 +3888,8 @@ function bind(){
     toast("\u{1F4AC} Chat enabled"); draw();
   });
   el=document.getElementById("b-chat-off"); if(el) el.addEventListener("click",function(){
-    ST.chatEnabled=false; ST.chatOpen=false;
+    ST.chatEnabled=false;
+    if(ST.page==="chat") ST.page="group";   // don't strand anyone on a dead tab
     if(DB) DB.ref(BASE+"/meta/chatEnabled").set(false);
     toast("Chat disabled"); draw();
   });
