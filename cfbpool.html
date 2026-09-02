@@ -266,6 +266,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-grid tbody tr.gp-me-row > td:first-child,
 .gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
 
+/* Hot/cold marker. Deliberately quiet — it's a hint, not a headline. */
+.form-mark{opacity:.85;margin-left:3px;flex-shrink:0}
+
 /* ── POOL CHAT ── */
 /* Unread marker on the tab label. */
 .chat-dot{display:inline-block;width:7px;height:7px;border-radius:50%;
@@ -593,6 +596,43 @@ function sortActiveGames(active, weekId, viewerPicks){
 }
 
 var _weekScoreCache={};
+// How many completed weeks to look back over.
+var FORM_WEEKS = 3;
+var FORM_MIN_PICKS = 6;      // below this it's noise, not form
+var FORM_HOT = 0.70, FORM_COLD = 0.35;
+
+// A player's recent form. Returns null when there isn't enough to judge.
+function playerForm(uid){
+  var weeks=(ST.weekIds||[]).filter(function(w){ return weekIsComplete(w); }).slice(-FORM_WEEKS);
+  if(weeks.length<2) return null;                  // one week isn't form
+  var correct=0, total=0;
+  weeks.forEach(function(w){
+    var picks=((ST.picks[w]||{})[uid])||{};
+    var results=ST.results[w]||{};
+    activeGames(w).forEach(function(gid){
+      var p=picks[gid], r=results[gid];
+      if(!r || !p || !p.side) return;
+      total++;
+      if(p.side===r) correct++;
+    });
+  });
+  if(total<FORM_MIN_PICKS) return null;
+  var pct=correct/total;
+  if(pct>=FORM_HOT)  return {state:"hot",  pct:pct, correct:correct, total:total,
+                             label:correct+"-"+(total-correct)+" last "+weeks.length+" weeks"};
+  if(pct<=FORM_COLD) return {state:"cold", pct:pct, correct:correct, total:total,
+                             label:correct+"-"+(total-correct)+" last "+weeks.length+" weeks"};
+  return null;                                      // middling — no badge
+}
+
+// Small marker shown next to a player's name.
+function formIcon(f, size){
+  if(!f) return "";
+  var px=size||10;
+  return '<span class="form-mark" title="'+x(f.label||"")+'" style="font-size:'+px+'px">'+
+         (f.state==="hot" ? "&#128293;" : "&#129482;")+'</span>';
+}
+
 function weekScore(weekId,user){
   var picks=((ST.picks[weekId]||{})[user])||{};
   var results=ST.results[weekId]||{};
@@ -3144,7 +3184,8 @@ function renderStandings(){
 
     // Name + best/worst week callout
     // Best/worst week markers removed — the week columns already show every score.
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+pem(r.name)+x(nameOf(r.name))+'</td>';
+    var _sf=playerForm(r.name);
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px">'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+'</td>';
 
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
@@ -3792,34 +3833,12 @@ function renderGroupPicks(){
     active.forEach(function(gid){ var p=picks[gid]||{}; confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"'; });
     h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(player)+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
 
-    // Compute streak — consecutive correct picks across all resolved games (most recent first)
-    var streak=0;
-    var allResolved=[];
-    ST.weekIds.forEach(function(w){
-      var wGames=ST.games[w]||{};
-      var wResults=ST.results[w]||{};
-      var wPicks=((ST.picks[w]||{})[uk])||{};
-      GAME_IDS.forEach(function(gid){
-        var g=wGames[gid];
-        if(!g||!g.away||!g.home) return;
-        var r=wResults[gid];
-        if(!r||r==="push") return; // only resolved non-push games
-        var p=wPicks[gid]||{};
-        if(!pickComplete(p)) return; // must have picked AND set a confidence
-        var ts=parseKickoffTs(g)||0;
-        allResolved.push({ts:ts,correct:p.side===r});
-      });
-    });
-    allResolved.sort(function(a,b){return b.ts-a.ts;}); // most recent first
-    for(var si=0;si<allResolved.length;si++){
-      if(allResolved[si].correct) streak++;
-      else break;
-    }
-    var onFire=streak>=3;
+    // Recent form across completed weeks, rather than a streak inside this one.
+    var _form=playerForm(player);
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(onFire?' <span style="font-size:11px">&#128293;</span>':'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
