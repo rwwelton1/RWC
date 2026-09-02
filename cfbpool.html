@@ -266,23 +266,24 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-grid tbody tr.gp-me-row > td:first-child,
 .gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
 
-/* Tap target on your own row. */
-.mm-caret{font-size:9px;color:var(--gold-dark);margin-left:4px}
-/* The cell spans the whole table; the STRIP inside it is what gets pinned, so it
-   stays fully on screen however far the week columns are scrolled. */
-.mm-cell{padding:0!important;border-right:none!important;background:var(--gold-bg)}
-.mm-row td{height:auto!important}
-
-/* Your own season metrics, under your standings row. */
-.mm-strip{position:sticky;left:0;width:100vw;max-width:100vw;box-sizing:border-box;
-  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border2);
-  border-bottom:2px solid var(--border)}
-.mm-chip{background:var(--gold-bg);padding:6px 4px;text-align:center;min-width:0}
-.mm-val{font-size:14px;font-weight:900;line-height:1.1}
-.mm-lbl{font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.05em;margin-top:1px}
-.mm-sub{font-size:8px;font-weight:700;color:var(--dim);margin-top:1px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Your season stats — a sheet, matching the account modal's look. */
+.ms-backdrop{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.3)}
+.ms-sheet{position:fixed;z-index:90;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:min(340px,calc(100vw - 32px));background:#fff;border:3px solid var(--border);
+  border-radius:16px;box-shadow:5px 5px 0 var(--border);padding:16px}
+.ms-close{position:absolute;top:10px;right:12px;border:none;background:none;
+  font-size:17px;color:var(--muted);cursor:pointer;font-family:inherit;padding:0}
+.ms-head{font-size:15px;font-weight:900;color:var(--text)}
+.ms-sub-head{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;margin:2px 0 12px}
+.ms-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+/* Cream inset with the offset border, like the username field. */
+.ms-box{background:var(--cream);border:2px solid var(--border);border-radius:9px;
+  box-shadow:2px 2px 0 var(--border);padding:10px 8px;text-align:center;min-width:0}
+.ms-val{font-size:22px;font-weight:900;line-height:1.05}
+.ms-lbl{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.05em;margin-top:3px}
+.ms-sub{font-size:8px;font-weight:700;color:var(--dim);margin-top:3px;line-height:1.25}
 
 /* Hot/cold marker. Deliberately quiet — it's a hint, not a headline. */
 .form-mark{opacity:.85;margin-left:3px;flex-shrink:0}
@@ -682,32 +683,39 @@ function _leanColor(t){
 }
 function _pct(v){ return v===null?"\u2013":Math.round(v*100)+"%"; }
 
-// The strip under your own row. Grey and dashed until a week has finished.
-function renderMyMetrics(uid){
-  var m=playerMetrics(uid);
+// The stats sheet. Rendered at the page level so nothing in the table can clip
+// or scroll it.
+function renderMyStatsSheet(){
+  if(!ST.myStatsOpen || PUBLIC_VIEW || !ST.user) return "";
+  var m=playerMetrics(ST.user);
   var none=(m.weeks===0);
-  function chip(label, value, color, sub){
-    return '<div class="mm-chip">'+
-           '<div class="mm-val" style="color:'+color+'">'+value+'</div>'+
-           '<div class="mm-lbl">'+label+'</div>'+
-           (sub?'<div class="mm-sub">'+sub+'</div>':'')+
+  function box(label, value, color, sub){
+    return '<div class="ms-box">'+
+           '<div class="ms-val" style="color:'+color+'">'+value+'</div>'+
+           '<div class="ms-lbl">'+label+'</div>'+
+           '<div class="ms-sub">'+(sub||"&nbsp;")+'</div>'+
            '</div>';
   }
-  var h='<div class="mm-strip">';
-  h+=chip("Hit rate", none?"\u2013":_pct(m.hitRate),
-          none?"var(--dim)":_gradeColor(m.hitRate),
-          none?"":m.correct+"-"+(m.resolved-m.correct));
-  h+=chip("Favorites", none?"\u2013":_pct(m.favPct),
-          none?"var(--dim)":_leanColor(m.favPct),
-          none?"":(m.favPct===null?"":(m.favPct>=0.5?"leans chalk":"leans dogs")));
-  h+=chip("Points", none?"\u2013":_pct(m.ptsPct),
-          none?"var(--dim)":_gradeColor(m.ptsPct),
-          none?"":m.earned+"/"+m.available);
-  // Finish inverts: 1st is the good end, so normalise against the field size.
   var fin=(m.avgFinish===null)?null:(m.avgField>1 ? (m.avgField-m.avgFinish)/(m.avgField-1) : 1);
-  h+=chip("Finish", (m.avgFinish===null)?"\u2013":("#"+(Math.round(m.avgFinish*10)/10)),
-          (m.avgFinish===null)?"var(--dim)":_gradeColor(fin),
-          (m.avgFinish===null)?"":("of "+Math.round(m.avgField)));
+  var h='<div class="ms-backdrop" id="ms-backdrop"></div>';
+  h+='<div class="ms-sheet">';
+  h+='<button class="ms-close" id="b-mystats-close" aria-label="Close">&#10005;</button>';
+  h+='<div class="ms-head">'+pem(ST.user)+x(nameOf(ST.user))+'</div>';
+  h+='<div class="ms-sub-head">Your season'+(none?"":" &middot; "+m.weeks+" week"+(m.weeks!==1?"s":"")+" played")+'</div>';
+  h+='<div class="ms-grid">';
+  h+=box("Hit rate", none?"\u2013":_pct(m.hitRate),
+         none?"var(--dim)":_gradeColor(m.hitRate),
+         none?"no weeks played yet":m.correct+"-"+(m.resolved-m.correct)+" against the spread");
+  h+=box("Favorites", none?"\u2013":_pct(m.favPct),
+         none?"var(--dim)":_leanColor(m.favPct),
+         none?"":(m.favPct===null?"":(m.favPct>=0.5?"you lean chalk":"you lean dogs")));
+  h+=box("Points", none?"\u2013":_pct(m.ptsPct),
+         none?"var(--dim)":_gradeColor(m.ptsPct),
+         none?"":m.earned+" of "+m.available+" available");
+  h+=box("Finish", (m.avgFinish===null)?"\u2013":("#"+(Math.round(m.avgFinish*10)/10)),
+         (m.avgFinish===null)?"var(--dim)":_gradeColor(fin),
+         (m.avgFinish===null)?"":("average of "+Math.round(m.avgField)+" players"));
+  h+='</div>';
   h+='</div>';
   return h;
 }
@@ -3301,10 +3309,8 @@ function renderStandings(){
     // Name + best/worst week callout
     // Best/worst week markers removed — the week columns already show every score.
     var _sf=playerForm(r.name);
-    // Your own name doubles as the toggle for the metrics strip.
-    var _statsToggle = (isMe && !PUBLIC_VIEW)
-      ? ' <span class="mm-caret" id="b-mystats">'+(ST.myStatsOpen?"&#9652;":"&#9662;")+'</span>' : '';
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px'+(isMe&&!PUBLIC_VIEW?';cursor:pointer':'')+'"'+(isMe&&!PUBLIC_VIEW?' data-mystats="1"':'')+'>'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+_statsToggle+'</td>';
+    // Your own row opens your stats. No affordance shown — it's a quiet extra.
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px'+(isMe&&!PUBLIC_VIEW?';cursor:pointer':'')+'"'+(isMe&&!PUBLIC_VIEW?' data-mystats="1"':'')+'>'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+'</td>';
 
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
     h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
@@ -3379,11 +3385,6 @@ function renderStandings(){
     }
 
     h+='</tr>';
-
-    // Your own metrics, folded under your row until tapped.
-    if(isMe && !PUBLIC_VIEW && ST.myStatsOpen){
-      h+='<tr class="mm-row"><td colspan="99" class="mm-cell">'+renderMyMetrics(r.name)+'</td></tr>';
-    }
   });
 
   h+='</tbody></table></div>';
@@ -4178,6 +4179,7 @@ function draw(){
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
   else { ST.page="picks"; h+=renderPicks(); }
 
+  h+=renderMyStatsSheet();
   document.getElementById("root").innerHTML=h;
   bind();
   if(ST.page==="chat"){
@@ -4334,7 +4336,13 @@ function bind(){
   // Compare mode toggle
   els=document.querySelectorAll('[data-mystats="1"]');
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    ST.myStatsOpen=!ST.myStatsOpen; draw();
+    ST.myStatsOpen=true; draw();
+  });
+  el=document.getElementById("b-mystats-close"); if(el) el.addEventListener("click",function(){
+    ST.myStatsOpen=false; draw();
+  });
+  el=document.getElementById("ms-backdrop"); if(el) el.addEventListener("click",function(){
+    ST.myStatsOpen=false; draw();
   });
 
   el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
