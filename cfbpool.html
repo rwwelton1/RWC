@@ -266,6 +266,34 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-grid tbody tr.gp-me-row > td:first-child,
 .gp-grid tbody tr.gp-me-row > td:nth-child(2){z-index:5;background:var(--gold-bg)}
 
+/* ── POOL CHAT ── */
+.chat-fab{position:fixed;right:14px;bottom:calc(58px + env(safe-area-inset-bottom,0px));z-index:60;
+  width:48px;height:48px;border-radius:50%;border:3px solid var(--border);background:var(--gold);
+  box-shadow:3px 3px 0 var(--border);font-size:19px;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;padding:0}
+.chat-fab .chat-dot{position:absolute;top:-2px;right:-2px;width:13px;height:13px;border-radius:50%;
+  background:var(--red2);border:2px solid #fff}
+.chat-sheet{position:fixed;left:0;right:0;bottom:0;z-index:70;background:#fff;
+  border-top:3px solid var(--border);border-radius:14px 14px 0 0;
+  max-height:min(72vh,72dvh);display:flex;flex-direction:column;
+  padding-bottom:env(safe-area-inset-bottom,0px)}
+.chat-backdrop{position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.28)}
+.chat-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:2px solid var(--border2)}
+.chat-title{font-size:13px;font-weight:900;flex:1}
+.chat-log{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:120px}
+.chat-msg{max-width:82%;padding:7px 10px;border-radius:11px;background:var(--cream);
+  border:2px solid var(--border2);align-self:flex-start}
+.chat-msg.mine{align-self:flex-end;background:var(--gold-bg);border-color:var(--gold)}
+.chat-who{font-size:9px;font-weight:900;color:var(--muted);margin-bottom:2px}
+.chat-text{font-size:12px;font-weight:600;color:var(--text);line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
+.chat-when{font-size:8px;font-weight:700;color:var(--dim);margin-top:3px}
+.chat-empty{font-size:11px;color:var(--muted);text-align:center;padding:22px 10px}
+.chat-bar{display:flex;gap:8px;padding:10px 12px;border-top:2px solid var(--border2)}
+.chat-input{flex:1;border:2px solid var(--border);border-radius:9px;padding:9px 10px;font-size:13px;
+  font-family:'Nunito',sans-serif;font-weight:600;background:#fff;min-width:0}
+.chat-send{border:2px solid var(--border);border-radius:9px;background:var(--gold);font-weight:900;
+  font-size:12px;padding:0 14px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+
 /* Header row */
 .gp-table th{padding:7px 9px;background:var(--cream);border-bottom:2px solid var(--border);border-right:1px solid var(--border2);font-weight:900;text-align:center;vertical-align:bottom;font-size:10px}
 /* Data cells */
@@ -1108,6 +1136,9 @@ function loadData(){
       DB.ref(BASE+"/locked").on("value",function(sn){ST.locked=sn.val()||{};_onData();});
       DB.ref(BASE+"/spreadsLocked").on("value",function(sn){ST.spreadsLocked=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
+      DB.ref(BASE+"/meta/chatEnabled").on("value",function(sn){ ST.chatEnabled=!!sn.val(); scheduleDraw(); });
+      // Only the most recent slice is kept — an old thread shouldn't cost a big read.
+      DB.ref(BASE+"/chat").limitToLast(CHAT_KEEP).on("value",function(sn){ ST.chat=sn.val()||{}; scheduleDraw(); });
       DB.ref(BASE+"/meta/money").on("value",function(sn){ST.money=sn.val()||null;scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
@@ -1750,6 +1781,89 @@ function _tsToKickoffLabel(ts){
 
 // Returns true if this specific game's pick window is closed
 // (either the whole week is locked, or this game's kickoff has passed)
+// ── POOL CHAT ──────────────────────────────────────────────────────────────
+// Enabled per group by an admin. Messages live under the pool's own node so they
+// travel with the group and disappear with it.
+function chatOn(){ return !!ST.chatEnabled; }
+function chatCanPost(){ return !PUBLIC_VIEW && !!ST.user && chatOn(); }
+var CHAT_MAX=400;          // characters per message
+var CHAT_KEEP=200;         // messages retained client-side
+
+function chatSorted(){
+  var all=ST.chat||{};
+  return Object.keys(all).map(function(k){ var m=all[k]||{}; m._id=k; return m; })
+    .filter(function(m){ return m && m.text; })
+    .sort(function(a,b){ return (a.ts||0)-(b.ts||0); })
+    .slice(-CHAT_KEEP);
+}
+function chatUnread(){
+  var msgs=chatSorted();
+  if(!msgs.length) return 0;
+  var seen=0;
+  try{ seen=Number(localStorage.getItem("cfb_chatseen_"+(GROUP_ID||"g")))||0; }catch(e){}
+  return msgs.filter(function(m){ return (m.ts||0)>seen && m.uid!==ST.user; }).length;
+}
+function chatMarkSeen(){
+  var msgs=chatSorted();
+  var last=msgs.length?(msgs[msgs.length-1].ts||0):0;
+  try{ localStorage.setItem("cfb_chatseen_"+(GROUP_ID||"g"), String(last)); }catch(e){}
+}
+function chatSend(text){
+  text=String(text||"").trim();
+  if(!text) return;
+  if(!chatCanPost()) return;
+  if(text.length>CHAT_MAX) text=text.slice(0,CHAT_MAX);
+  if(!DB) { toast("Offline \u2014 message not sent","err"); return; }
+  var ref=DB.ref(BASE+"/chat").push();
+  ref.set({ uid:ST.user, text:text, ts:Date.now() });
+}
+function chatTime(ts){
+  if(!ts) return "";
+  var d=new Date(ts), now=new Date();
+  var sameDay=d.toDateString()===now.toDateString();
+  return sameDay ? d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})
+                 : d.toLocaleDateString("en-US",{month:"numeric",day:"numeric"})+" "+
+                   d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
+}
+function renderChat(){
+  if(!chatOn()||PUBLIC_VIEW) return "";
+  var h="";
+  if(!ST.chatOpen){
+    var n=chatUnread();
+    h+='<button class="chat-fab" id="b-chat-open" aria-label="Open chat">&#128172;'+
+       (n>0?'<span class="chat-dot"></span>':'')+'</button>';
+    return h;
+  }
+  h+='<div class="chat-backdrop" id="chat-backdrop"></div>';
+  h+='<div class="chat-sheet">';
+  // No group-name variable in this file; the pool identifies itself well enough.
+  h+='<div class="chat-head"><span class="chat-title">&#128172; Group Chat</span>'+
+     '<button class="btn btn-ghost" id="b-chat-close" style="font-size:14px">&#10005;</button></div>';
+  h+='<div class="chat-log" id="chat-log">';
+  var msgs=chatSorted();
+  if(!msgs.length){
+    h+='<div class="chat-empty">No messages yet \u2014 say something.</div>';
+  } else {
+    msgs.forEach(function(m){
+      var mine=(m.uid===ST.user);
+      h+='<div class="chat-msg'+(mine?" mine":"")+'">';
+      if(!mine) h+='<div class="chat-who">'+pem(m.uid)+x(nameOf(m.uid)||"Player")+'</div>';
+      h+='<div class="chat-text">'+x(String(m.text))+'</div>';
+      h+='<div class="chat-when">'+x(chatTime(m.ts))+'</div>';
+      h+='</div>';
+    });
+  }
+  h+='</div>';
+  if(chatCanPost()){
+    h+='<div class="chat-bar">';
+    h+='<input class="chat-input" id="chat-input" maxlength="'+CHAT_MAX+'" placeholder="Message the group\u2026" autocomplete="off">';
+    h+='<button class="chat-send" id="b-chat-send">Send</button>';
+    h+='</div>';
+  }
+  h+='</div>';
+  return h;
+}
+
 function isGameLocked(weekId, gid){
   if(ST.locked[weekId]) return true;
   var g=(ST.games[weekId]||{})[gid];
@@ -3247,6 +3361,21 @@ function renderAdmin(){
     }
     h+='</div>';
 
+    // Group chat — off unless an admin turns it on.
+    h+='<div class="adm-game">';
+    h+='<div class="adm-game-title">Group Chat &mdash; a shared thread for everyone in this pool</div>';
+    h+='<div class="adm-btns">';
+    h+='<button class="adm-btn'+(chatOn()?" sel":"")+'" id="b-chat-on">&#128172; On</button>';
+    h+='<button class="adm-btn'+(!chatOn()?" sel":"")+'" id="b-chat-off">Off</button>';
+    h+='</div>';
+    if(chatOn()){
+      h+='<div class="adm-row" style="margin-top:8px">';
+      h+='<span style="font-size:10px;font-weight:700;color:var(--muted);flex:1">'+chatSorted().length+' message'+(chatSorted().length!==1?'s':'')+'</span>';
+      h+='<button class="adm-btn" id="b-chat-clear">Clear all</button>';
+      h+='</div>';
+    }
+    h+='</div>';
+
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Pool Password &mdash; required for new members to join</div>';
     h+='<div class="adm-row">';
@@ -3888,8 +4017,14 @@ function draw(){
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
   else { ST.page="picks"; h+=renderPicks(); }
 
+  h+=renderChat();
   document.getElementById("root").innerHTML=h;
   bind();
+  if(ST.chatOpen){
+    var _log=document.getElementById("chat-log");
+    if(_log) _log.scrollTop=_log.scrollHeight;   // newest message in view
+    chatMarkSeen();
+  }
   if(ST.page==="scores"){
     // Refetch when the cached feed belongs to a different week than the one on screen.
     if(_scData && _scWeek===scoresWeekId()) renderScoresInto(); else startScoreRefresh();
@@ -4217,6 +4352,26 @@ function bind(){
     rows.forEach(function(r){ tbody.appendChild(r); });
   });
 
+  el=document.getElementById("b-chat-open"); if(el) el.addEventListener("click",function(){
+    ST.chatOpen=true; draw();
+  });
+  el=document.getElementById("b-chat-close"); if(el) el.addEventListener("click",function(){
+    ST.chatOpen=false; chatMarkSeen(); draw();
+  });
+  el=document.getElementById("chat-backdrop"); if(el) el.addEventListener("click",function(){
+    ST.chatOpen=false; chatMarkSeen(); draw();
+  });
+  el=document.getElementById("b-chat-send"); if(el) el.addEventListener("click",function(){
+    var inp=document.getElementById("chat-input");
+    if(!inp) return;
+    chatSend(inp.value);
+    inp.value="";
+  });
+  el=document.getElementById("chat-input"); if(el) el.addEventListener("keydown",function(ev){
+    if(ev.key==="Enter"&&!ev.shiftKey){ ev.preventDefault();
+      chatSend(this.value); this.value=""; }
+  });
+
   el=document.getElementById("b-admin"); if(el) el.addEventListener("click",function(){
     if(ST.page==="admin"){
       // Close admin → back to standings; clear admin mode so the Admin tab hides too.
@@ -4297,6 +4452,21 @@ function bind(){
     ST.money={enabled:true, buyIn:amt, weeklyPct:moneyWeeklyPct()};
     if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
     toast("\u{1F4B0} Buy-in set to "+moneyFmt(amt)); draw();
+  });
+
+  el=document.getElementById("b-chat-on"); if(el) el.addEventListener("click",function(){
+    ST.chatEnabled=true; if(DB) DB.ref(BASE+"/meta/chatEnabled").set(true);
+    toast("\u{1F4AC} Chat enabled"); draw();
+  });
+  el=document.getElementById("b-chat-off"); if(el) el.addEventListener("click",function(){
+    ST.chatEnabled=false; ST.chatOpen=false;
+    if(DB) DB.ref(BASE+"/meta/chatEnabled").set(false);
+    toast("Chat disabled"); draw();
+  });
+  el=document.getElementById("b-chat-clear"); if(el) el.addEventListener("click",function(){
+    if(!confirm("Delete every message in this pool's chat? This can't be undone.")) return;
+    if(DB) DB.ref(BASE+"/chat").remove();
+    ST.chat={}; toast("Chat cleared"); draw();
   });
 
   el=document.getElementById("b-change-pw"); if(el) el.addEventListener("click",function(){
