@@ -100,6 +100,11 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .game-card{background:#ffffff;border:2px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:4px 4px 0 var(--border)}
 .gc-head{padding:6px 10px;background:var(--cream);border-bottom:2px solid var(--border2);display:flex;justify-content:space-between;align-items:center;min-height:16px}
 .gc-label{font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+/* Optional nickname the admin gives a game. Purely decorative — it sits above the
+   kickoff line and never affects picks or scoring. */
+.gc-headL{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.gc-nick{font-size:10px;font-weight:900;color:var(--gold-dark);letter-spacing:.01em;line-height:1.2;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gc-pts{font-size:10px;font-weight:900;color:var(--red2)}
 .gc-pts.earned{color:var(--green)}
 .gc-pts.push{color:var(--blue)}
@@ -339,6 +344,11 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
    to two lines so a prop stays readable. */
 .gp-tb-cap{font-size:7px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;
   color:var(--purple);line-height:1}
+/* Admin's fun name for a game, above the crests. Capped at two lines so one long
+   nickname can't stretch every column header. */
+.gp-nick{font-size:7px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--gold-dark);line-height:1.15;white-space:normal;max-width:84px;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .gp-tb-label{font-size:8px;font-weight:800;color:var(--muted);line-height:1.25;
   white-space:normal;max-width:104px;overflow-wrap:anywhere}
 .gp-logos{display:flex;align-items:center;gap:3px;justify-content:center}
@@ -2087,6 +2097,10 @@ function addImportedGames(weekId){
     var gid=GAME_IDS[i];
     if(i<n){
       var g=selected[i];
+      // A slot can be reused by a different matchup on re-import, so a nickname
+      // written for the old game shouldn't ride along with the new one.
+      var _prevG=(ST.games[weekId]||{})[gid]||{};
+      if(_prevG.nick && (_prevG.away!==g.away || _prevG.home!==g.home)) setGameField(weekId,gid,"nick","");
       setGameField(weekId,gid,"away",g.away);
       setGameField(weekId,gid,"home",g.home);
       setGameField(weekId,gid,"awayId",g.awayId||"");
@@ -2661,6 +2675,7 @@ function copyWeekGames(fromWeekId, toWeekId){
     // Copy teams, spread, favSide but clear results and kickoff
     setGameField(toWeekId,gid,"away",g.away||"");
     setGameField(toWeekId,gid,"home",g.home||"");
+    setGameField(toWeekId,gid,"nick",g.nick||"");
     setGameField(toWeekId,gid,"favSide",g.favSide||"home");
     setGameField(toWeekId,gid,"spread",g.spread||0);
     setGameField(toWeekId,gid,"kickoff","");
@@ -2912,7 +2927,11 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   var effectiveCanPick=canPick&&!gameLocked;
   function logoImg(url){ return url?'<img src="'+url+'" style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px" onerror="this.style.display=\'none\'">':""; }
   var h='<div class="game-card">';
-  h+='<div class="gc-head"><div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div><div id="tick-'+gid+'" style="min-width:20px;max-width:20px;overflow:hidden;line-height:1;display:flex;align-items:center;justify-content:center"></div>';
+  h+='<div class="gc-head"><div class="gc-headL">';
+  // Nickname is cosmetic only — the admin names the game for fun.
+  if(g.nick) h+='<div class="gc-nick">'+x(g.nick)+'</div>';
+  h+='<div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div>';
+  h+='</div><div id="tick-'+gid+'" style="min-width:20px;max-width:20px;overflow:hidden;line-height:1;display:flex;align-items:center;justify-content:center"></div>';
   if(effectiveLocked&&result){
     if(result==="push") h+='<div class="gc-pts push">PUSH</div>';
     else if(pick.side){
@@ -3680,7 +3699,13 @@ function renderAdmin(){
     h+='<div class="adm-game-title">Game '+(idx+1)+'</div>';
     if(adminStep===2){
       var _spLk = !!(ST.spreadsLocked && ST.spreadsLocked[weekId]);
-      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Matchup (away @ home)</div>';
+      // Purely cosmetic nickname — shows on the pick card and in the group grid,
+      // and has no effect on spreads, locks or scoring. Leave blank to hide it.
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Game name (just for fun &mdash; optional)</div>';
+      h+='<div class="adm-row">';
+      h+='<input class="adm-input" maxlength="32" placeholder="e.g. The Apple Cup" value="'+x(g.nick||"").replace(/"/g,"&quot;")+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="nick" style="flex:1">';
+      h+='</div>';
+      h+='<div style="font-size:8px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:4px 0 2px">Matchup (away @ home)</div>';
       h+='<div class="adm-row">';
       h+='<input class="adm-input" placeholder="Away team" value="'+x(g.away)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="away">';
       h+='<input class="adm-input" placeholder="Home team" value="'+x(g.home)+'" data-week="'+weekId+'" data-gid="'+gid+'" data-field="home">';
@@ -3700,6 +3725,7 @@ function renderAdmin(){
     if(adminStep===3 && g.away&&g.home){
       // Read-only matchup summary above the result buttons.
       var spL = g.favSide==="even"?"PK":("-"+g.spread+" "+(g.favSide==="away"?x(g.away):x(g.home)));
+      if(g.nick) h+='<div style="font-size:9px;font-weight:900;color:var(--gold-dark);margin-bottom:1px">'+x(g.nick)+'</div>';
       h+='<div style="font-size:11px;font-weight:800;color:var(--text);margin-bottom:4px">'+x(g.away)+' @ '+x(g.home)+' <span style="color:var(--muted);font-weight:700">&middot; '+spL+'</span></div>';
     }
     if(adminStep===3 && g.away&&g.home){
@@ -3876,6 +3902,7 @@ function renderGroupPicks(){
     var gameIsLocked=isGameLocked(weekId,gid);
     h+='<th data-sort-gid="'+gid+'">';
     h+='<div class="gp-game-head">';
+    if(g.nick) h+='<div class="gp-nick">'+x(g.nick)+'</div>';
     h+='<div class="gp-logos">';
     var _aRk=rankFor(g.away,g.awayId), _hRk=rankFor(g.home,g.homeId);
     if(_aRk) h+='<span class="rank-badge sm">#'+_aRk.rank+'</span>';
