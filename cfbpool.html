@@ -4981,6 +4981,11 @@ function renderGroupPicks(){
   var results=ST.results[weekId]||{};
   var locked=!!ST.locked[weekId];
   var active=activeGames(weekId);
+  // Reveal state per game, computed once. A game that hasn't kicked off keeps its
+  // confidence numbers out of the markup entirely and its column unsortable —
+  // sorting a hidden column would rank players by the very values it hides.
+  var revealed={};
+  active.forEach(function(gid){ revealed[gid]=isGameLocked(weekId,gid); });
 
   if(!active.length){
     h+='<div class="lb-note">No games set up for this week yet.</div>';
@@ -5013,7 +5018,7 @@ function renderGroupPicks(){
     var awayLogo=g.awayLogo||"";
     var homeLogo=g.homeLogo||"";
     var gameIsLocked=isGameLocked(weekId,gid);
-    h+='<th data-sort-gid="'+gid+'">';
+    h+='<th'+(revealed[gid]?' data-sort-gid="'+gid+'"':'')+'>';
     h+='<div class="gp-game-head">';
     if(g.nick) h+='<div class="gp-nick">'+x(g.nick)+'</div>';
     h+='<div class="gp-logos">';
@@ -5077,12 +5082,18 @@ function renderGroupPicks(){
     var picks=((ST.picks[weekId]||{})[uk])||{};
     var ws=weekScore(weekId,player);
 
-    // Points still possible = sum of conf values on pending (unresolved) picks
-    var stillPossible=0;
+    // Points still possible = sum of conf values on pending (unresolved) picks.
+    // livePossible is the subset riding on games that have actually kicked off —
+    // that's what the Pts column sorts on, so a game nobody has played yet can't
+    // move anyone up or down the table.
+    var stillPossible=0, livePossible=0;
     active.forEach(function(gid){
       var p=picks[gid]||{};
       var r=results[gid];
-      if(p.side&&p.conf&&!r) stillPossible+=Number(p.conf);
+      if(p.side&&p.conf&&!r){
+        stillPossible+=Number(p.conf);
+        if(revealed[gid]) livePossible+=Number(p.conf);
+      }
     });
 
     var isMe=ST.user&&player===ST.user;
@@ -5094,8 +5105,12 @@ function renderGroupPicks(){
     // Only the viewer's own row is frozen, and not while Compare is filtering the
     // table — a pinned row that Compare has dimmed or hidden would be confusing.
     if(isMe && !ST.compareMode) rowCls+=" gp-me-row";
-    var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'"';
-    active.forEach(function(gid){ var p=picks[gid]||{}; confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"'; });
+    var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'" data-pts-live="'+livePossible+'"';
+    active.forEach(function(gid){
+      if(!revealed[gid]) return;     // hidden picks never reach the DOM
+      var p=picks[gid]||{};
+      confAttrs+=' data-conf-'+gid+'="'+(Number(p.conf)||0)+'"';
+    });
     h+='<tr class="'+rowCls+'" '+confAttrs+' data-compare-player="'+x(player)+'"'+(isMe&&!isSelected?' style="background:var(--gold-bg)"':'')+'>'; 
 
     // Recent form across completed weeks, rather than a streak inside this one.
@@ -5730,15 +5745,17 @@ function bind(){
   });
   el=document.querySelector("th[data-sort-pts]");
   if(el) el.addEventListener("click",function(){
-    // Sort by total possible (earned + possible), then by possible alone
+    // Points banked plus points riding on games already under way. Points from
+    // games that haven't kicked off are excluded — they're not in play yet, and
+    // ranking by them would order people by picks the table is still hiding.
     var tbody=document.querySelector(".gp-table tbody");
     if(!tbody) return;
     var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
     if(_gpSortState.col==="pts"){ _gpSortState.dir*=-1; }
     else{ _gpSortState.col="pts"; _gpSortState.dir=1; }
     rows.sort(function(a,b){
-      var ae=Number(a.getAttribute("data-pts-earned")||0)+Number(a.getAttribute("data-pts")||0);
-      var be=Number(b.getAttribute("data-pts-earned")||0)+Number(b.getAttribute("data-pts")||0);
+      var ae=Number(a.getAttribute("data-pts-earned")||0)+Number(a.getAttribute("data-pts-live")||0);
+      var be=Number(b.getAttribute("data-pts-earned")||0)+Number(b.getAttribute("data-pts-live")||0);
       return (ae>be?-1:ae<be?1:0)*_gpSortState.dir;
     });
     rows.forEach(function(r){ tbody.appendChild(r); });
