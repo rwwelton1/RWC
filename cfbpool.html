@@ -64,10 +64,17 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .ptab.active{color:var(--team-tab-ink);border-bottom-color:var(--border);background:var(--team-tab)}
 
 /* ── TEAM PICKER ── */
-.tp-search{width:100%;box-sizing:border-box;margin-top:10px;padding:8px 10px;font-size:12px;
+.tp-sec{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;margin:12px 0 4px;display:flex;align-items:baseline;gap:6px}
+.tp-sec span{font-size:7px;font-weight:700;color:var(--dim);text-transform:none;letter-spacing:0}
+.tp-badges{display:grid;grid-template-columns:repeat(8,1fr);gap:4px}
+.tp-badge{font-size:16px;line-height:1;padding:5px 0;border:2px solid var(--border2);
+  border-radius:8px;background:var(--cream);cursor:pointer;font-family:inherit}
+.tp-badge.on{border-color:var(--border);background:#fff;box-shadow:2px 2px 0 var(--border)}
+.tp-search{width:100%;box-sizing:border-box;padding:8px 10px;font-size:12px;
   font-weight:700;font-family:'Nunito',sans-serif;border:2px solid var(--border);
   border-radius:9px;background:var(--cream);color:var(--text)}
-.tp-list{margin-top:8px;max-height:46vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+.tp-list{margin-top:6px;max-height:38vh;overflow-y:auto;-webkit-overflow-scrolling:touch;
   border:2px solid var(--border);border-radius:9px;background:var(--cream)}
 .tp-row{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;background:none;
   border:none;border-bottom:1px solid var(--border2);font-family:'Nunito',sans-serif;
@@ -965,7 +972,7 @@ function loadUserDir(cb){
     var all=sn.val()||{};
     // Merge rather than replace: a spectator's read of /users returns nothing, and
     // clearing here would discard the names seeded from the group record.
-    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯"}; });
+    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯",fanTeam:u.fanTeam||""}; });
     cb&&cb();
   }).catch(function(){ cb&&cb(); });
 }
@@ -1364,12 +1371,20 @@ function _pct(v){ return v===null?"\u2013":Math.round(v*100)+"%"; }
 
 // The stats sheet. Rendered at the page level so nothing in the table can clip
 // or scroll it.
-// Team colour picker. Filtering happens directly in the DOM rather than through
-// draw(), because a repaint would tear the search field out from under the
-// keyboard mid-word.
+// Profile sheet: display name, badge, and team colors. Team filtering happens
+// directly in the DOM rather than through draw(), because a repaint would tear
+// the search field out from under the keyboard mid-word.
+var BADGES=["\uD83C\uDFAF","\uD83C\uDFC8","\uD83D\uDD25","\uD83D\uDC80","\uD83E\uDD85","\uD83D\uDC3B",
+            "\uD83D\uDC2F","\uD83E\uDD81","\uD83D\uDC0A","\uD83D\uDC0D","\uD83D\uDC1D","\uD83E\uDD86",
+            "\uD83D\uDC17","\uD83D\uDC0E","\uD83E\uDD8C","\uD83D\uDC02","\uD83D\uDC15","\uD83D\uDC31",
+            "\uD83E\uDD96","\uD83D\uDC79","\uD83E\uDD20","\uD83C\uDF96\uFE0F","\uD83D\uDC51","\uD83C\uDF08",
+            "\u26A1","\uD83C\uDF2A\uFE0F","\uD83C\uDF0A","\uD83C\uDF32","\uD83C\uDF35","\u2693",
+            "\uD83D\uDE80","\uD83C\uDFB2"];
 function renderTeamPicker(){
   if(!ST.teamPickerOpen || !ST.user || PUBLIC_VIEW) return "";
   var cur=fanTeamOf(ST.user);
+  var curEm=emojiOf(ST.user)||"\uD83C\uDFAF";
+  var curName=nameOf(ST.user); if(curName==="(unknown)") curName="";
   function row(val,label,swatch,on){
     return '<button class="tp-row'+(on?" on":"")+'" data-team="'+x(val)+'" data-find="'+x(label.toLowerCase())+'">'+
            '<span class="tp-sw" style="background:'+swatch+'"></span>'+
@@ -1379,8 +1394,24 @@ function renderTeamPicker(){
   var h='<div class="ms-backdrop" id="tp-backdrop"></div>';
   h+='<div class="ms-sheet">';
   h+='<button class="ms-close" id="b-tp-close" aria-label="Close">&#10005;</button>';
-  h+='<div class="ms-head">Team colors</div>';
-  h+='<div class="ms-sub-head">Only changes how the app looks for you</div>';
+  h+='<div class="ms-head">Your profile</div>';
+  h+='<div class="ms-sub-head">Name and badge are visible to the group</div>';
+
+  h+='<div class="tp-sec">Display name</div>';
+  h+='<input class="tp-search" id="tp-name" maxlength="24" placeholder="Your name" autocomplete="off" value="'+x(curName).replace(/"/g,"&quot;")+'">';
+
+  h+='<div class="tp-sec">Badge</div>';
+  h+='<div class="tp-badges">';
+  // Plenty of players already picked a badge from outside this palette. Lead with
+  // theirs so it shows as selected and one stray tap can't lose it.
+  var badgeList=BADGES.slice();
+  if(curEm && badgeList.indexOf(curEm)<0) badgeList.unshift(curEm);
+  badgeList.forEach(function(em){
+    h+='<button class="tp-badge'+(em===curEm?" on":"")+'" data-badge="'+x(em)+'">'+em+'</button>';
+  });
+  h+='</div>';
+
+  h+='<div class="tp-sec">Team colors <span>only you see this</span></div>';
   h+='<input class="tp-search" id="tp-search" placeholder="Search teams\u2026" autocomplete="off">';
   h+='<div class="tp-list">';
   h+=row("","No theme","#ffffff",!cur);
@@ -1388,6 +1419,33 @@ function renderTeamPicker(){
   h+='<div class="tp-empty" id="tp-none" style="display:none">No team by that name</div>';
   h+='</div></div>';
   return h;
+}
+
+// Name and badge live on the same shared /users record as the theme.
+function setMyName(name){
+  if(!ST.user) return;
+  name=String(name||"").trim().slice(0,24);
+  if(!name) return;                                  // never blank someone out
+  if(!USER_DIR[ST.user]) USER_DIR[ST.user]={};
+  if(USER_DIR[ST.user].username===name) return;      // nothing changed
+  USER_DIR[ST.user].username=name;
+  // This fires on blur, so a tap on a badge or team row is already in flight.
+  // Repainting now would delete that element before its click, same reason the
+  // deferred-draw guard waits.
+  setTimeout(draw,260);
+  if(DB) DB.ref("users/"+ST.user+"/username").set(name)
+    .then(function(){ toast("&#10003; Name saved"); })
+    .catch(function(){ toast("Could not save your name"); });
+}
+function setMyBadge(em){
+  if(!ST.user||!em) return;
+  if(!USER_DIR[ST.user]) USER_DIR[ST.user]={};
+  USER_DIR[ST.user].emoji=em;
+  _EM[ST.user]=em;                                   // the pre-directory cache too
+  draw();
+  if(DB) DB.ref("users/"+ST.user+"/emoji").set(em).catch(function(){
+    toast("Could not save your badge");
+  });
 }
 
 function renderMyStatsSheet(){
@@ -5343,6 +5401,15 @@ function bind(){
   });
   el=document.getElementById("tp-backdrop"); if(el) el.addEventListener("click",function(){
     ST.teamPickerOpen=false; draw();
+  });
+  el=document.getElementById("tp-name"); if(el) el.addEventListener("change",function(){
+    // Saved on blur rather than per keystroke — draw() replaces the field, which
+    // would drop the keyboard mid-word.
+    setMyName(this.value);
+  });
+  els=document.querySelectorAll(".tp-badge");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    setMyBadge(this.getAttribute("data-badge"));
   });
   els=document.querySelectorAll(".tp-row");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
