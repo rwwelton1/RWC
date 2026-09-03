@@ -463,6 +463,18 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
 }
+
+/* ── PROFILE MODAL: badge picker ── */
+.pm-sec{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.08em;margin:4px 0 6px;display:flex;align-items:baseline;gap:6px}
+.pm-sec span{font-size:8px;font-weight:700;color:var(--dim);text-transform:none;letter-spacing:0}
+.pm-badges{display:flex;flex-wrap:wrap;gap:6px;max-height:184px;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;padding:2px;margin-bottom:12px}
+.pm-badge{padding:0;border:none;background:none;cursor:pointer;border-radius:12px;line-height:0}
+/* Rarity fills live on .badge-icon-wrap, several of them gradients, so selection
+   has to read as a ring around the cell rather than a background or border. */
+.pm-badge.on{box-shadow:0 0 0 3px var(--border)}
+.pm-badge-note{font-size:10px;font-weight:700;color:var(--dim);padding:10px 2px 14px}
 </style>
 
 </head>
@@ -1923,6 +1935,70 @@ function renderHome() {
   }, 1600);
 }
 
+
+// Badge picker inside the profile modal. Built from the Hub's own BADGE_LIST and
+// .badge-icon-wrap styling, so it matches the Trophy Case exactly and picks up
+// new badges without another list to maintain.
+function _pmRenderBadges(){
+  var grid = document.getElementById("pm-badges");
+  if(!grid) return;
+  var earned = SC._cachedBadges;
+  // The cache is normally warm from sign-in, but the modal can be opened before
+  // that lands — fetch rather than showing an empty grid and implying none.
+  if(earned === undefined || earned === null){
+    grid.innerHTML = '<div class="pm-badge-note">Loading your badges&hellip;</div>';
+    var _uid = ME();
+    if(DB && _uid){
+      DB.ref("users/"+_uid+"/badges").once("value").then(function(sn){
+        SC._cachedBadges = sn.val() || {};
+        _pmRenderBadges();
+      }).catch(function(){ SC._cachedBadges = {}; _pmRenderBadges(); });
+    } else {
+      SC._cachedBadges = {};
+      _pmRenderBadges();
+    }
+    return;
+  }
+  var cur = (SC.currentUser && SC.currentUser.emoji) || "\uD83C\uDFAF";
+  var list = BADGE_LIST.filter(function(b){ return earned[b.id]; });
+  var earnedCount = list.length;   // before the equipped badge is folded in
+  // An equipped badge that isn't in the earned set still belongs here, shown as
+  // selected, so opening this modal can never quietly drop somebody's avatar.
+  if(cur && !list.some(function(b){ return b.icon === cur; })){
+    var known = null;
+    for(var i=0;i<BADGE_LIST.length;i++){ if(BADGE_LIST[i].icon===cur){ known=BADGE_LIST[i]; break; } }
+    list.unshift(known || {id:"_current", icon:cur, name:"Current", rarity:"common"});
+  }
+  grid.innerHTML = "";
+  list.forEach(function(b){
+    var cell = document.createElement("button");
+    cell.className = "pm-badge" + (b.icon===cur ? " on" : "");
+    cell.title = b.name;
+    cell.innerHTML = '<div class="badge-icon-wrap ' + b.rarity + '">' + b.icon + '</div>';
+    cell.addEventListener("click", function(){
+      if(b.icon === cur) return;                 // already equipped
+      saveUserEmoji(b.icon);
+      var hd = document.getElementById("pm-hd");
+      if(hd) hd.innerHTML = b.icon + " " + x((SC.currentUser && SC.currentUser.username) || "");
+      _pmRenderBadges();                         // move the selection ring
+      toast("Badge updated", "ok");
+      draw();                                    // refresh the page behind the
+                                                 // modal; draw() writes #root,
+                                                 // so the modal itself survives
+    });
+    grid.appendChild(cell);
+  });
+  // The avatar always falls back to the starter icon, so the grid is never truly
+  // empty — say so explicitly rather than letting one lone cell imply a
+  // collection. Shown alongside the current badge, not instead of it.
+  if(!earnedCount){
+    var note = document.createElement("div");
+    note.className = "pm-badge-note";
+    note.innerHTML = "No badges earned yet &mdash; they unlock as you play";
+    grid.appendChild(note);
+  }
+}
+
 function showProfileModal() {
   var existing = document.getElementById("profile-modal-overlay");
   if(existing) { existing.remove(); return; }
@@ -1935,15 +2011,18 @@ function showProfileModal() {
   el.innerHTML =
     '<div class="auth-modal-box" style="max-width:320px;padding:20px">' +
       '<button class="auth-modal-close" id="pm-close">&#10005;</button>' +
-      '<div style="font-size:13px;font-weight:900;color:var(--text);margin-bottom:4px">' + (u.emoji||"&#127919;") + " " + x(u.username) + "</div>" +
+      '<div id="pm-hd" style="font-size:13px;font-weight:900;color:var(--text);margin-bottom:4px">' + (u.emoji||"&#127919;") + " " + x(u.username) + "</div>" +
       '<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px">Your Account</div>' +
       '<div class="auth-field"><label class="auth-label">Change Username</label>' +
       '<input class="auth-input" id="pm-username-input" type="text" value="' + x(u.username) + '" autocorrect="off" autocapitalize="off" spellcheck="false" maxlength="30"></div>' +
       '<div class="auth-err" id="pm-err"></div>' +
       '<button class="auth-btn" id="pm-save" style="margin-bottom:10px">Save Username</button>' +
+      '<div class="pm-sec">Badge <span>tap to equip</span></div>' +
+      '<div class="pm-badges" id="pm-badges"></div>' +
       '<button id="pm-signout" style="width:100%;padding:10px;border-radius:10px;font-size:13px;font-weight:800;border:2px solid var(--border);cursor:pointer;background:var(--red-bg);color:var(--red);font-family:Nunito,sans-serif;box-shadow:3px 3px 0 var(--border)">Sign Out</button>' +
     "</div>";
   document.body.appendChild(el);
+  _pmRenderBadges();
 
   el.addEventListener("click", function(e){ if(e.target===el) el.remove(); });
   document.getElementById("pm-close").addEventListener("click", function(){ el.remove(); });
