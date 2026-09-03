@@ -205,6 +205,12 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .scores-empty{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700;line-height:2}
 .scores-loading{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700}
 
+/* Swing footer on a score card. Deliberately tiny — these cards sit 3–5 across. */
+.sc-swing{display:flex;justify-content:space-between;gap:4px;margin-top:3px;padding-top:3px;
+  border-top:1px solid var(--border2);font-size:7px;font-weight:800;color:var(--dim)}
+.sc-swing span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc-swing .best{color:var(--green);font-weight:900}
+
 /* ── CONSENSUS & SWING ── */
 /* Group split on a revealed game. Away is teal, home is purple — deliberately
    outside the red/green range so it can't read as right/wrong. */
@@ -2048,6 +2054,18 @@ function renderScoresInto(){
 
   var dateLabel=_wkLabel||new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
 
+  // Which pool game each event belongs to, so a score card can carry the swing.
+  // The tiebreaker event has no pool gid and simply won't be found here.
+  var _scWk=scoresWeekId(), _scGames=(ST.games&&ST.games[_scWk])||{};
+  function gidForEvent(ev){
+    var ids=activeGames(_scWk);
+    for(var i=0;i<ids.length;i++){
+      var _g=_scGames[ids[i]];
+      if(_g && _eventMatchesGame(ev,_g)) return ids[i];
+    }
+    return null;
+  }
+
   function card(ev){
     var comp=(ev.competitions||[])[0]; if(!comp) return "";
     var status=comp.status||{};
@@ -2107,6 +2125,21 @@ function renderScoresInto(){
         '</div>';
     }
 
+    // Swing footer. gameSwing returns null until the game is revealed and while
+    // it has a result, so pre-game cards never carry one.
+    var swFoot='';
+    var _gid=gidForEvent(ev);
+    if(_gid){
+      var _sw=gameSwing(_scWk,_gid,ST.user);
+      if(_sw && _sw.away!==_sw.home){
+        var _lo=Math.min(_sw.away,_sw.home);
+        swFoot='<div class="sc-swing" title="Your standings position if this side covers">'+
+          '<span'+(_sw.away===_lo?' class="best"':'')+'>'+x(aName)+' #'+_sw.away+'</span>'+
+          '<span'+(_sw.home===_lo?' class="best"':'')+'>'+x(hName)+' #'+_sw.home+'</span>'+
+          '</div>';
+      }
+    }
+
     return '<div class="score-card'+(isLive?" live":isFinal?" final":"")+'">'+
       '<div class="sc-head">'+
         '<span class="sc-status '+(isLive?"live":isFinal?"final":"pre")+'">'+(isLive?"&#9679; LIVE":isFinal?"Final":x(_compactWhen(ev)))+'</span>'+
@@ -2116,6 +2149,7 @@ function renderScoresInto(){
       '</div>'+
       teamRow(aName,tcolor(away),aScore,aWin,aLead,tlogo(away))+
       teamRow(hName,tcolor(home),hScore,hWin,hLead,tlogo(home))+
+      swFoot+
       '</div>';
   }
 
@@ -3311,6 +3345,41 @@ function confOn(weekId,gid,uid,side){
   return Number(p.conf)||0;
 }
 
+// Best and worst position still reachable this week. Brute-forces every outcome
+// of the games that have kicked off but aren't graded — a ten-game slate is 1024
+// combinations, so this is exact rather than an approximation from two extreme
+// scenarios (which can be wrong when a rival has more riding on your own side).
+// Games that haven't kicked off are excluded, same reveal rule as everywhere
+// else, and reported separately so the range isn't mistaken for a final answer.
+function finishRange(weekId,uid){
+  if(!uid || (PARTS||[]).length<2) return null;
+  var me=(PARTS||[]).indexOf(uid);
+  if(me<0) return null;
+  var res=ST.results[weekId]||{}, active=activeGames(weekId);
+  var open=active.filter(function(gid){ return isGameLocked(weekId,gid) && !res[gid]; });
+  var pending=active.filter(function(gid){ return !isGameLocked(weekId,gid); }).length;
+  if(!open.length || open.length>12) return null;   // keep the brute force bounded
+  var base=swingBase(), n=PARTS.length;
+  var start=PARTS.map(function(q){ return base[q]||0; });
+  var add=open.map(function(gid){
+    return { away:PARTS.map(function(q){ return confOn(weekId,gid,q,"away"); }),
+             home:PARTS.map(function(q){ return confOn(weekId,gid,q,"home"); }) };
+  });
+  var best=n, worst=1, combos=1<<open.length;
+  for(var c=0;c<combos;c++){
+    var tot=start.slice();
+    for(var b=0;b<open.length;b++){
+      var arr=((c>>b)&1)?add[b].home:add[b].away;
+      for(var p=0;p<n;p++) tot[p]+=arr[p];
+    }
+    var mine=tot[me], better=0;
+    for(var q2=0;q2<n;q2++) if(q2!==me && tot[q2]>mine) better++;
+    if(better+1<best) best=better+1;
+    if(better+1>worst) worst=better+1;
+  }
+  return {best:best, worst:worst, open:open.length, pending:pending, field:n};
+}
+
 function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs){
   var pick=viewerPicks[gid]||{};
   var gameLocked=isGameLocked(weekId,gid); // per-game kickoff lock
@@ -3680,7 +3749,18 @@ function renderStandings(){
 
   // Controls row above table
   h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--cream);border-bottom:1px solid var(--border2)">';
-  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played &middot; '+weeksRemaining+' remaining</div>';
+  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played &middot; '+weeksRemaining+' remaining';
+  // Where this week can still land you, while games are in play.
+  var _fr=finishRange(displayWeekId(),ST.user);
+  if(_fr){
+    h+='<div style="font-size:9px;font-weight:800;color:var(--gold-dark);margin-top:2px">';
+    h+=_fr.open+' live game'+(_fr.open!==1?'s':'')+' &middot; ';
+    h+=(_fr.best===_fr.worst) ? ('you finish #'+_fr.best+' either way')
+                              : ('you finish #'+_fr.best+'&ndash;#'+_fr.worst);
+    if(_fr.pending) h+=' <span style="color:var(--dim);font-weight:700">&middot; '+_fr.pending+' still to kick off</span>';
+    h+='</div>';
+  }
+  h+='</div>';
   if(completedWeeks.length){
     var _recapWk=completedWeeks[completedWeeks.length-1];
     h+='<button id="b-week-recap" data-wk="'+_recapWk+'" style="font-size:8px;font-weight:800;padding:3px 9px;border-radius:6px;border:1.5px solid var(--gold);background:var(--gold-bg);color:var(--gold-dark);cursor:pointer;font-family:\'Nunito\',sans-serif">&#128241; Recap</button>';
