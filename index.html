@@ -475,6 +475,15 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
    has to read as a ring around the cell rather than a background or border. */
 .pm-badge.on{box-shadow:0 0 0 3px var(--border)}
 .pm-badge-note{font-size:10px;font-weight:700;color:var(--dim);padding:10px 2px 14px}
+
+/* ── FIRST PAINT ── */
+.boot-wrap{display:flex;align-items:center;justify-content:center;min-height:60vh}
+.boot-dots{display:flex;gap:7px}
+.boot-dots span{width:9px;height:9px;border-radius:50%;background:var(--dim,#aaa);
+  animation:bootPulse 1.1s ease-in-out infinite}
+.boot-dots span:nth-child(2){animation-delay:.15s}
+.boot-dots span:nth-child(3){animation-delay:.3s}
+@keyframes bootPulse{0%,80%,100%{opacity:.25;transform:scale(.85)}40%{opacity:1;transform:scale(1)}}
 </style>
 
 </head>
@@ -948,6 +957,7 @@ var CURRENT_LOGO_STYLE = randomLogoStyle();
 
 // ── STATE ────────────────────────────────────────────────────────────────────
 var SC = {
+  booting: false,       // set only when there is no cached session to paint
   screen: "home",       // "auth" | "profile" | "join" | "created" | "hub" | "admin"
   authTab: "login",     // "login" | "signup"
   currentUser: null,    // { username, groups:[], emoji }
@@ -1352,26 +1362,6 @@ function _joinPoolLabel(pid){
   return ((SC.globalStatuses||{})[pid]==="locked") ? "Live" : "Open";
 }
 
-// How long until this pool locks, in ms — null when we can't tell.
-// Season pools (CFB, EPL) publish a per-week lockTs in their seasonMeta; the
-// one-off pools carry a configured lockDate in global settings.
-function _msUntilLock(pool, g){
-  var meta = (g && g.data && g.data[pool.id] && g.data[pool.id].seasonMeta) || null;
-  if(meta && meta.lockTs){
-    if((meta.weekState || "open") !== "open") return null;   // week already shut
-    return meta.lockTs - Date.now();
-  }
-  var ds = (SC._poolDates && SC._poolDates[pool.id]) || {};
-  if(ds.lockDate){
-    // Same parse the status auto-snapper uses: datetime-local or date-only.
-    var d = ds.lockDate.indexOf("T")>=0 ? new Date(ds.lockDate) : new Date(ds.lockDate+"T12:00:00");
-    if(!isNaN(d)) return d.getTime() - Date.now();
-  }
-  return null;
-}
-// Nudge window for the "no picks in yet" warning.
-var PICK_WARN_MS = 6*60*60*1000;
-
 function poolState(pool, g){
   var kind = (pool && pool.kind) || "single";
   if(kind==="season"){
@@ -1460,17 +1450,6 @@ function startCountdownTicker() {
       var s = Math.floor((diff%60000)/1000);
       var str = d>0 ? d+"d "+hr+"h" : hr>0 ? hr+"h "+m+"m" : m>0 ? m+"m "+s+"s" : s+"s";
       el.textContent = label+" "+str;
-    }
-    // Missing-picks nudge rides the same tick: it switches on six hours out and
-    // off the moment the pool locks, even if nobody touches the page.
-    var warnEls = document.querySelectorAll(".sc-name-warn");
-    for(var w=0;w<warnEls.length;w++){
-      var wl = parseInt(warnEls[w].getAttribute("data-lock"));
-      if(!wl) continue;
-      var wd = wl - Date.now();
-      warnEls[w].style.color = (wd > 0 && wd <= PICK_WARN_MS)
-        ? "var(--red2)"
-        : (warnEls[w].getAttribute("data-base") || "var(--text)");
     }
   }, 1000);
 }
@@ -1864,7 +1843,13 @@ function scheduleDraw() {
   setTimeout(function(){ _drawPending = false; draw(); }, 0);
 }
 
+
+function bootScreen(){
+  return '<div class="boot-wrap"><div class="boot-dots"><span></span><span></span><span></span></div></div>';
+}
+
 function draw() {
+  if(SC.booting){ document.getElementById("root").innerHTML=bootScreen(); return; }
   // Handle pending deep-link join after auth
   if(SC._pendingJoin && SC.currentUser){
     var _pj = SC._pendingJoin;
@@ -2611,43 +2596,6 @@ function renderProfile() {
         standings.forEach(function(p,i){ currentRankMapS[p.name]=p.rank||(i+1); });
         saveRankSnapshot(snapshotKeyS, currentRankMapS);
         gh += '<div style="padding:6px 10px 2px;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Standings</div>';
-        // Red names are a last-call nudge, not a scoreboard: they appear only in the
-        // final hours before a pool locks, and clear the moment it does. Only pools
-        // inside that window contribute, so a player who is missing picks for a
-        // different pool entirely isn't flagged here.
-        var _submittedPlayers = {};
-        var _warnLockTs = null;      // soonest open-pool lock we can see
-        pools.forEach(function(pool){
-          var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(st !== "open") return;
-          var _msLeft = _msUntilLock(pool, g);
-          if(_msLeft === null || _msLeft <= 0) return;   // unknown, or already shut
-          var _ts = Date.now() + _msLeft;
-          if(_warnLockTs === null || _ts < _warnLockTs) _warnLockTs = _ts;
-          var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
-          // CFB and EPL Pickem store their data under groups/{gid}/data/<id>pool,
-          // not /<id> — the /<id> node holds only the hub summary (playerscores + seasonMeta).
-          if(pool.id==="cfb"&&g.data&&g.data["cfbpool"]) _dk="cfbpool";
-          if(pool.id==="epl"&&g.data&&g.data["eplpool"]) _dk="eplpool";
-          var _pd = (g.data&&g.data[_dk])||{};
-          // Picks may be stored flat ({ukey:...}) or nested by week/round
-          // ({weekId:{ukey:...}}, as the CFB pool does under its own data node). Walk one
-          // level deep so weekly pools register their submitters too.
-          var _picks = _pd.picks||{};
-          Object.keys(_picks).forEach(function(k){
-            var v = _picks[k];
-            if(v && typeof v === "object" && !Array.isArray(v)){
-              // Could be this player's pick object, or a week bucket of {ukey:...}
-              _submittedPlayers[k]=true;                       // flat case
-              Object.keys(v).forEach(function(uk2){ _submittedPlayers[uk2]=true; }); // nested case
-            } else {
-              _submittedPlayers[k]=true;
-            }
-          });
-          var _locked = _pd.locked||{};
-          Object.keys(_locked).forEach(function(uk){ _submittedPlayers[uk]=true; });
-        });
-
         // Vertical compact list — top 4 + user always shown
         var _isGolf = pools.some(function(pool){ return pool.sport==="Golf"; });
         var _golfPoolId = _isGolf ? (pools.find(function(pool){ return pool.sport==="Golf"; })||{}).id : null;
@@ -2661,15 +2609,8 @@ function renderProfile() {
         _showIdxs.forEach(function(i){
           var p = standings[i]; if(!p) return;
           var isMe = p.uid===ME();
-          // Eligible for the nudge = we know when this pool locks and this player
-          // still has nothing in. Whether it actually shows is purely a function of
-          // the clock, re-evaluated every second by the countdown ticker.
-          var _canWarn = (_warnLockTs !== null) && !_submittedPlayers[p.uid];
-          var _msToLock = _canWarn ? (_warnLockTs - Date.now()) : null;
-          var _missingPicks = _canWarn && _msToLock > 0 && _msToLock <= PICK_WARN_MS;
           var _rowBg = isMe?'var(--blue-bg)':'transparent';
-          var _baseNameColor = isMe?'var(--blue)':'var(--text)';
-          var _nameColor = _missingPicks?'var(--red2)':_baseNameColor;
+          var _nameColor = isMe?'var(--blue)':'var(--text)';
           var _rk = p.rank||(i+1);
           var _rankCol = rankColors2[_rk-1]||'var(--dim)';
           if(_prevShowIdx>=0&&i>_prevShowIdx+1)
@@ -2677,7 +2618,7 @@ function renderProfile() {
           _prevShowIdx=i;
           gh+='<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-bottom:1px solid var(--border2);background:'+_rowBg+'">';
           gh+='<span style="font-size:10px;width:18px;text-align:center;flex-shrink:0">'+(medals2[_rk-1]||'<span style="font-size:8px;font-weight:900;color:var(--dim)">'+_rk+'</span>')+'</span>';
-          gh+='<div'+(_canWarn?' class="sc-name-warn" data-lock="'+_warnLockTs+'" data-base="'+_baseNameColor+'"':'')+' style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
+          gh+='<div style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
           if(isMe) gh+='<span style="font-size:6px;font-weight:800;background:var(--gold);border:1px solid var(--border);border-radius:3px;padding:1px 3px;color:var(--text);flex-shrink:0">YOU</span>';
           var _scoreHtml="";
           if(_isGolf&&_golfPoolId&&p.golfScores&&p.golfScores[_golfPoolId]&&p.golfScores[_golfPoolId][p.uid]){
@@ -7898,6 +7839,11 @@ function autoSnapStatuses() {
     SC.currentUser = { username: savedUser||"", groups: _cachedUserGroups, emoji: _cachedEmoji, uid: uid, _key: uid };
     SC._cachedBadges = _cachedBadges;
     SC.screen = "profile";
+    // A cached session paints a correct screen immediately and is left alone.
+    // With nothing cached the first paint would be an empty profile, so hold it
+    // until the fetch below lands.
+    SC.booting = !(savedUser && _cachedUserGroups.length);
+    if(SC.booting) setTimeout(function(){ if(SC.booting){ SC.booting=false; draw(); } }, 4000);
     if(_joinId) _handleDeepJoin(); else draw();
 
     Promise.all([
@@ -7907,6 +7853,7 @@ function autoSnapStatuses() {
       DB.ref("globalSettings/statuses").once("value")
     ]).then(function(snaps){
       var sn = snaps[0], bsn = snaps[1], fsnap = snaps[2], statusSn = snaps[3];
+      SC.booting = false;          // real data is in; paint for real below
       SC._feedSeenAt = fsnap.val() || 0;
       var _newStatuses = statusSn.val() || {};
       var _statusesChanged = JSON.stringify(_newStatuses) !== JSON.stringify(SC.globalStatuses||{});
@@ -7942,7 +7889,7 @@ function autoSnapStatuses() {
         USER_DIR[uid] = { username:_dn, emoji:"🎯" };
       }
       draw();
-    }).catch(function(){ draw(); });
+    }).catch(function(){ SC.booting = false; draw(); });
   }
 
   if(AUTH){
