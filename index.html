@@ -7827,6 +7827,15 @@ function autoSnapStatuses() {
   var _cachedEmoji = (function(){ try{ return localStorage.getItem("pp_emoji")||"🎯"; }catch(e){ return "🎯"; } })();
   var _cachedBadges = (function(){ try{ var v=localStorage.getItem("pp_badges"); return v?JSON.parse(v):{}; }catch(e){ return {}; } })();
 
+  // A returning signed-in visitor must not see the landing screen first. Several
+  // things draw before auth resolves (loadUserDir's callback among them), and
+  // letting those paint means the page shows one screen and then replaces it —
+  // which reads as the hub reloading itself. Hold from load until auth picks the
+  // screen. A first-time visitor has no session to wait for and paints at once.
+  SC.booting = !!(AUTH && savedUser);
+  // Never strand anyone here if auth or the fetch stalls.
+  setTimeout(function(){ if(SC.booting){ SC.booting=false; draw(); } }, 4000);
+
   // Identity is the Google uid, resolved from the persisted Auth session — NOT the saved
   // username. This makes display-name renames irrelevant to identity/groups. We paint
   // instantly from cache, then load the authoritative record from users/{uid}.
@@ -7843,7 +7852,6 @@ function autoSnapStatuses() {
     // With nothing cached the first paint would be an empty profile, so hold it
     // until the fetch below lands.
     SC.booting = !(savedUser && _cachedUserGroups.length);
-    if(SC.booting) setTimeout(function(){ if(SC.booting){ SC.booting=false; draw(); } }, 4000);
     if(_joinId) _handleDeepJoin(); else draw();
 
     Promise.all([
@@ -7899,6 +7907,7 @@ function autoSnapStatuses() {
       } else if(!savedUser){
         // Signed out and no cached session → show landing/auth
         SC.screen = "landing";
+        SC.booting = false;
         draw();
       }
     });
@@ -7907,6 +7916,7 @@ function autoSnapStatuses() {
   // Not signed in and no persisted session → landing.
   if(!AUTH || (!savedUser && AUTH && !AUTH.currentUser)) {
     if(!savedUser){
+      SC.booting = false;
       SC.currentUser = null;
       if(_joinId){
         SC._pendingJoin = { id: _joinId, pw: _joinPw };
