@@ -205,6 +205,27 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .scores-empty{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700;line-height:2}
 .scores-loading{text-align:center;padding:40px 16px;color:var(--dim);font-size:11px;font-weight:700}
 
+/* ── CONSENSUS & SWING ── */
+/* Group split on a revealed game. Away is teal, home is purple — deliberately
+   outside the red/green range so it can't read as right/wrong. */
+.gc-cons{padding:6px 10px 4px;background:var(--cream);border-top:1px solid var(--border2)}
+.gc-cons-bar{display:flex;height:7px;border:1.5px solid var(--border);border-radius:4px;
+  overflow:hidden;background:#fff}
+.gc-cons-a{background:hsl(190,48%,52%)}
+.gc-cons-h{background:hsl(275,42%,58%)}
+.gc-cons-lbl{display:flex;justify-content:space-between;align-items:baseline;gap:6px;
+  margin-top:3px;font-size:8px;font-weight:800;color:var(--muted)}
+.gc-cons-lbl span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gc-cons-lbl span.on{color:var(--text);font-weight:900}
+.gc-cons-lbl .mid{color:var(--dim);font-weight:700;flex-shrink:0}
+/* What an undecided game would do to your standing. */
+.gc-swing{display:flex;align-items:baseline;gap:7px;padding:2px 10px 6px;background:var(--cream);
+  font-size:8px;font-weight:800;color:var(--muted)}
+.gc-swing span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gc-swing .sw-cap{color:var(--dim);font-weight:900;text-transform:uppercase;
+  letter-spacing:.05em;flex-shrink:0}
+.gc-swing .best{color:var(--green);font-weight:900}
+
 /* ── CONFIDENCE CHIPS ── */
 .conf-row{padding:7px 10px;display:flex;align-items:center;gap:6px;background:var(--cream);flex-wrap:wrap}
 .conf-label{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;flex-shrink:0;margin-right:2px}
@@ -3233,6 +3254,63 @@ function confChips(selected,weekId,gid,N,canPick,usedConfs){
   return h;
 }
 
+// ── Consensus & swing ─────────────────────────────────────
+// Both of these expose information about other people's picks, so both are gated
+// on isGameLocked — the same rule the group grid uses to unhide a pick. Nothing
+// here may be called for a game that hasn't kicked off.
+
+// How the group split on one game. Null until the game is revealed, or if nobody
+// has a complete pick on it.
+function gameConsensus(weekId,gid){
+  if(!isGameLocked(weekId,gid)) return null;
+  var away=0,home=0,awayConf=0,homeConf=0;
+  (PARTS||[]).forEach(function(u){
+    var p=((ST.picks[weekId]||{})[u]||{})[gid];
+    if(!pickComplete(p)) return;
+    if(p.side==="away"){ away++; awayConf+=Number(p.conf)||0; }
+    else if(p.side==="home"){ home++; homeConf+=Number(p.conf)||0; }
+  });
+  var n=away+home;
+  if(!n) return null;
+  return {n:n, away:away, home:home,
+          awayPct:away/n, homePct:home/n,
+          awayAvg:away?awayConf/away:null, homeAvg:home?homeConf/home:null};
+}
+
+// Season totals for everyone. Computed once per draw and cleared at the top of
+// draw(), so a live result can't leave it stale.
+var _swingBase=null;
+function swingBase(){
+  if(_swingBase) return _swingBase;
+  var t={};
+  (PARTS||[]).forEach(function(u){ t[u]=seasonScore(u); });
+  _swingBase=t;
+  return t;
+}
+
+// What one unfinished game does to the viewer's standing. Returns the rank they'd
+// hold if each side covered, holding every other undecided game where it is.
+function gameSwing(weekId,gid,uid){
+  if(!uid || !isGameLocked(weekId,gid)) return null;
+  if((ST.results[weekId]||{})[gid]) return null;      // already decided
+  var base=swingBase();
+  if((PARTS||[]).length<2) return null;
+  function rankIf(side){
+    var mine=(base[uid]||0)+confOn(weekId,gid,uid,side), better=0;
+    (PARTS||[]).forEach(function(q){
+      if(q===uid) return;
+      if((base[q]||0)+confOn(weekId,gid,q,side) > mine) better++;
+    });
+    return better+1;
+  }
+  return {away:rankIf("away"), home:rankIf("home"), field:(PARTS||[]).length};
+}
+function confOn(weekId,gid,uid,side){
+  var p=((ST.picks[weekId]||{})[uid]||{})[gid];
+  if(!pickComplete(p) || p.side!==side) return 0;
+  return Number(p.conf)||0;
+}
+
 function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs){
   var pick=viewerPicks[gid]||{};
   var gameLocked=isGameLocked(weekId,gid); // per-game kickoff lock
@@ -3276,6 +3354,33 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     h+='<div class="tp-spread">'+spreadLabel(g,side)+'</div>';
     h+='</div>';
   });
+  // Consensus + swing. gameConsensus and gameSwing both return null until the
+  // game is revealed, so nothing leaks before kickoff.
+  var cons=gameConsensus(weekId,gid);
+  if(cons){
+    var aw=Math.round(cons.awayPct*100), hm=100-aw;
+    h+='<div class="gc-cons">';
+    h+='<div class="gc-cons-bar">';
+    h+='<div class="gc-cons-a" style="width:'+aw+'%"></div>';
+    h+='<div class="gc-cons-h" style="width:'+hm+'%"></div>';
+    h+='</div>';
+    h+='<div class="gc-cons-lbl">';
+    h+='<span'+(pick.side==="away"?' class="on"':'')+'>'+aw+'% '+x(g.away||"")+'</span>';
+    h+='<span class="mid">'+cons.n+' pick'+(cons.n!==1?'s':'')+'</span>';
+    h+='<span'+(pick.side==="home"?' class="on"':'')+'>'+x(g.home||"")+' '+hm+'%</span>';
+    h+='</div>';
+    h+='</div>';
+  }
+  var sw=gameSwing(weekId,gid,ST.user);
+  if(sw && sw.away!==sw.home){
+    // Only worth showing when the outcome actually moves the viewer.
+    var lo=Math.min(sw.away,sw.home);
+    h+='<div class="gc-swing">';
+    h+='<span class="sw-cap">If it lands</span>';
+    h+='<span'+(sw.away===lo?' class="best"':'')+'>'+x(g.away||"")+' &rarr; #'+sw.away+'</span>';
+    h+='<span'+(sw.home===lo?' class="best"':'')+'>'+x(g.home||"")+' &rarr; #'+sw.home+'</span>';
+    h+='</div>';
+  }
   h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,effectiveCanPick,usedConfs)+'</div>';
   h+='</div>';
   return h;
@@ -4485,6 +4590,7 @@ function draw(){
   var _typing=_focusedField();
   if(_typing){ _deferredDraw=true; _holdDrawFor(_typing); return; }
   _deferredDraw=false;
+  _swingBase=null;              // season totals are recomputed fresh each paint
   var h='';
   if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
