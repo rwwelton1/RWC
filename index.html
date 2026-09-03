@@ -1352,6 +1352,26 @@ function _joinPoolLabel(pid){
   return ((SC.globalStatuses||{})[pid]==="locked") ? "Live" : "Open";
 }
 
+// How long until this pool locks, in ms — null when we can't tell.
+// Season pools (CFB, EPL) publish a per-week lockTs in their seasonMeta; the
+// one-off pools carry a configured lockDate in global settings.
+function _msUntilLock(pool, g){
+  var meta = (g && g.data && g.data[pool.id] && g.data[pool.id].seasonMeta) || null;
+  if(meta && meta.lockTs){
+    if((meta.weekState || "open") !== "open") return null;   // week already shut
+    return meta.lockTs - Date.now();
+  }
+  var ds = (SC._poolDates && SC._poolDates[pool.id]) || {};
+  if(ds.lockDate){
+    // Same parse the status auto-snapper uses: datetime-local or date-only.
+    var d = ds.lockDate.indexOf("T")>=0 ? new Date(ds.lockDate) : new Date(ds.lockDate+"T12:00:00");
+    if(!isNaN(d)) return d.getTime() - Date.now();
+  }
+  return null;
+}
+// Nudge window for the "no picks in yet" warning.
+var PICK_WARN_MS = 6*60*60*1000;
+
 function poolState(pool, g){
   var kind = (pool && pool.kind) || "single";
   if(kind==="season"){
@@ -1440,6 +1460,17 @@ function startCountdownTicker() {
       var s = Math.floor((diff%60000)/1000);
       var str = d>0 ? d+"d "+hr+"h" : hr>0 ? hr+"h "+m+"m" : m>0 ? m+"m "+s+"s" : s+"s";
       el.textContent = label+" "+str;
+    }
+    // Missing-picks nudge rides the same tick: it switches on six hours out and
+    // off the moment the pool locks, even if nobody touches the page.
+    var warnEls = document.querySelectorAll(".sc-name-warn");
+    for(var w=0;w<warnEls.length;w++){
+      var wl = parseInt(warnEls[w].getAttribute("data-lock"));
+      if(!wl) continue;
+      var wd = wl - Date.now();
+      warnEls[w].style.color = (wd > 0 && wd <= PICK_WARN_MS)
+        ? "var(--red2)"
+        : (warnEls[w].getAttribute("data-base") || "var(--text)");
     }
   }, 1000);
 }
@@ -2580,16 +2611,19 @@ function renderProfile() {
         standings.forEach(function(p,i){ currentRankMapS[p.name]=p.rank||(i+1); });
         saveRankSnapshot(snapshotKeyS, currentRankMapS);
         gh += '<div style="padding:6px 10px 2px;font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Standings</div>';
-        // Build a set of players who have submitted picks for any active pool.
-        // _hasLockedPool means "at least one pool's picks are locked" — only then does a
-        // player with no picks get flagged (red). An OPEN pool must not flag anyone: picks
-        // are still allowed, so a blank pick set is normal, not a miss.
+        // Red names are a last-call nudge, not a scoreboard: they appear only in the
+        // final hours before a pool locks, and clear the moment it does. Only pools
+        // inside that window contribute, so a player who is missing picks for a
+        // different pool entirely isn't flagged here.
         var _submittedPlayers = {};
-        var _hasLockedPool = false;
+        var _warnLockTs = null;      // soonest open-pool lock we can see
         pools.forEach(function(pool){
           var st = (SC.globalStatuses||{})[pool.id]||"coming-soon";
-          if(st === "locked" || st === "complete") _hasLockedPool = true;
-          if(st !== "locked" && st !== "complete" && st !== "open") return;
+          if(st !== "open") return;
+          var _msLeft = _msUntilLock(pool, g);
+          if(_msLeft === null || _msLeft <= 0) return;   // unknown, or already shut
+          var _ts = Date.now() + _msLeft;
+          if(_warnLockTs === null || _ts < _warnLockTs) _warnLockTs = _ts;
           var _dk = pool.id; if(pool.id==="cws"&&g.data&&g.data["cws2026"]) _dk="cws2026";
           // CFB and EPL Pickem store their data under groups/{gid}/data/<id>pool,
           // not /<id> — the /<id> node holds only the hub summary (playerscores + seasonMeta).
@@ -2627,9 +2661,15 @@ function renderProfile() {
         _showIdxs.forEach(function(i){
           var p = standings[i]; if(!p) return;
           var isMe = p.uid===ME();
-          var _missingPicks = _hasLockedPool && !_submittedPlayers[p.uid];
+          // Eligible for the nudge = we know when this pool locks and this player
+          // still has nothing in. Whether it actually shows is purely a function of
+          // the clock, re-evaluated every second by the countdown ticker.
+          var _canWarn = (_warnLockTs !== null) && !_submittedPlayers[p.uid];
+          var _msToLock = _canWarn ? (_warnLockTs - Date.now()) : null;
+          var _missingPicks = _canWarn && _msToLock > 0 && _msToLock <= PICK_WARN_MS;
           var _rowBg = isMe?'var(--blue-bg)':'transparent';
-          var _nameColor = _missingPicks?'var(--red2)':isMe?'var(--blue)':'var(--text)';
+          var _baseNameColor = isMe?'var(--blue)':'var(--text)';
+          var _nameColor = _missingPicks?'var(--red2)':_baseNameColor;
           var _rk = p.rank||(i+1);
           var _rankCol = rankColors2[_rk-1]||'var(--dim)';
           if(_prevShowIdx>=0&&i>_prevShowIdx+1)
@@ -2637,7 +2677,7 @@ function renderProfile() {
           _prevShowIdx=i;
           gh+='<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-bottom:1px solid var(--border2);background:'+_rowBg+'">';
           gh+='<span style="font-size:10px;width:18px;text-align:center;flex-shrink:0">'+(medals2[_rk-1]||'<span style="font-size:8px;font-weight:900;color:var(--dim)">'+_rk+'</span>')+'</span>';
-          gh+='<div style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
+          gh+='<div'+(_canWarn?' class="sc-name-warn" data-lock="'+_warnLockTs+'" data-base="'+_baseNameColor+'"':'')+' style="flex:1;min-width:0;font-size:10px;font-weight:'+(isMe?'900':'700')+';color:'+_nameColor+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
           if(isMe) gh+='<span style="font-size:6px;font-weight:800;background:var(--gold);border:1px solid var(--border);border-radius:3px;padding:1px 3px;color:var(--text);flex-shrink:0">YOU</span>';
           var _scoreHtml="";
           if(_isGolf&&_golfPoolId&&p.golfScores&&p.golfScores[_golfPoolId]&&p.golfScores[_golfPoolId][p.uid]){
