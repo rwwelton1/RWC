@@ -474,6 +474,11 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-pts-cell{font-weight:900;text-align:center;line-height:1.25}
 .gp-pts-earned{font-size:13px;font-weight:900;color:var(--text)}
 .gp-pts-possible{font-size:8px;font-weight:700;color:var(--muted);display:block;margin-top:0;line-height:1.2}
+/* Chance to win the week — only rendered near the end of a slate. */
+/* Chance to win the week, shown beside the name only for players still live. */
+.gp-winpct{font-size:8px;font-weight:900;color:var(--accent);background:var(--accent-bg);
+  border-radius:4px;padding:1px 4px;white-space:nowrap;vertical-align:1px}
+.gp-winpct.hot{color:var(--green);background:var(--green-bg)}
 /* No pick */
 .gp-nopick{color:var(--dim);font-size:9px;font-weight:700}
 /* Week selector */
@@ -5044,6 +5049,69 @@ function renderAdmin(){
   h+='</div>';
   return h;
 }
+// ── WEEK WIN CHANCE ───────────────────────────────────────
+// Exact, not simulated: enumerate every outcome of the games still undecided,
+// score the week under each, and count who finishes top. Each game is treated as
+// a coin flip, which is the honest prior — the spread exists to make the cover
+// roughly even, so weighting by it would double-count the number that already
+// balanced the game. Ties split the credit, so the column always totals 100%.
+function winChances(weekId){
+  var res=ST.results[weekId]||{};
+  var open=activeGames(weekId).filter(function(gid){ return !res[gid]; });
+  var n=(PARTS||[]).length;
+  if(!n || open.length>12) return null;
+  var base=PARTS.map(function(u){ return weekScore(weekId,u).total; });
+  var add=open.map(function(gid){
+    return { away:PARTS.map(function(q){ return confOn(weekId,gid,q,"away"); }),
+             home:PARTS.map(function(q){ return confOn(weekId,gid,q,"home"); }) };
+  });
+  var wins=[]; for(var z=0;z<n;z++) wins.push(0);
+  var combos=1<<open.length;
+  for(var c=0;c<combos;c++){
+    var tot=base.slice();
+    for(var b=0;b<open.length;b++){
+      var arr=((c>>b)&1)?add[b].home:add[b].away;
+      for(var p=0;p<n;p++) tot[p]+=arr[p];
+    }
+    var best=-Infinity, cnt=0;
+    for(var q=0;q<n;q++){ if(tot[q]>best){ best=tot[q]; cnt=1; } else if(tot[q]===best) cnt++; }
+    for(var r=0;r<n;r++) if(tot[r]===best) wins[r]+=1/cnt;
+  }
+  var out={};
+  PARTS.forEach(function(u,i){ out[u]=wins[i]/combos; });
+  return out;
+}
+
+// Two gates. First, no leak: every game still in play must already be revealed,
+// because the calculation reads everyone's confidence on it. Second, timing:
+// hold off until the second-to-last kickoff slot has begun. With ten games open
+// this is thirty players sitting at 3% and reads as noise; near the end it turns
+// into a real race. Keying on kickoff slots rather than a game count means
+// simultaneous kickoffs come in together — when the second-to-last game shares a
+// slot with others, the whole slot arrives at once.
+function winChanceReady(weekId){
+  var games=ST.games[weekId]||{}, res=ST.results[weekId]||{};
+  var active=activeGames(weekId);
+  var open=active.filter(function(gid){ return !res[gid]; });
+  if(!open.length || open.length>12) return false;               // nothing left, or too many
+  if(open.some(function(gid){ return !isGameLocked(weekId,gid); })) return false;
+  var slots=[];
+  active.forEach(function(gid){
+    var ts=parseKickoffTs(games[gid]||{});
+    if(ts && slots.indexOf(ts)<0) slots.push(ts);
+  });
+  if(!slots.length) return true;                                  // no kickoff data to wait on
+  slots.sort(function(a,b){ return a-b; });
+  return Date.now() >= slots[Math.max(0, slots.length-2)];
+}
+var _winChanceCache=null;
+function winChanceFor(weekId,uid){
+  if(!_winChanceCache){
+    _winChanceCache = winChanceReady(weekId) ? (winChances(weekId)||{}) : {};
+  }
+  return _winChanceCache[uid];
+}
+
 function renderGroupPicks(){
   var h='';
   if(ST.weekIds.length===0){
@@ -5209,7 +5277,12 @@ function renderGroupPicks(){
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+(PUBLIC_VIEW?'':' data-stats-uid="'+x(player)+'"')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
+    var _wc=winChanceFor(weekId,player);
+    var _wcTag=(_wc!==undefined && _wc>0.05)
+      ? ' <span class="gp-winpct'+(_wc>=0.5?" hot":"")+'" title="Chance to win the week">'+
+        ((_wc>=0.995)?"100%":(Math.round(_wc*100)+"%"))+'</span>'
+      : '';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+(PUBLIC_VIEW?'':' data-stats-uid="'+x(player)+'"')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+_wcTag+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
@@ -5391,6 +5464,7 @@ function draw(){
   if(_typing){ _deferredDraw=true; _holdDrawFor(_typing); return; }
   _deferredDraw=false;
   _swingBase=null;              // season totals are recomputed fresh each paint
+  _winChanceCache=null;         // ditto — results and locks move during a slate
   applyTeamTheme();             // cheap, and keeps the theme right after a user switch
   if(ST.booting){ document.getElementById("root").innerHTML=bootScreen(); return; }
   var h='';
