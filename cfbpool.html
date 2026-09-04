@@ -160,11 +160,18 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .team-pick.clickable:active{background:var(--cream)}
 .team-pick.mypick{background:var(--gold-bg)}
 .team-pick.mypick .tp-name{color:var(--gold-dark)}
-.team-pick.winner{background:var(--green-bg)}
-.team-pick.winner .tp-name{color:var(--green);font-weight:900}
+.team-pick.winner .tp-name{font-weight:900}
 .team-pick.loser .tp-name{color:var(--dim)}
 .team-pick.loser .tp-spread{color:var(--dim)}
 .team-pick.push{background:var(--blue-bg)}
+/* Once a game is graded the highlight follows YOUR pick, not whichever team
+   covered: green when you were right, red when you weren't. Declared after
+   .winner/.loser so it wins on equal specificity. */
+.team-pick.mypick-win{background:var(--green-bg)}
+.team-pick.mypick-win .tp-name{color:var(--green);font-weight:900}
+.team-pick.mypick-loss{background:var(--red-bg)}
+.team-pick.mypick-loss .tp-name{color:var(--red);font-weight:900}
+.team-pick.mypick-loss .tp-spread{color:var(--red)}
 .tp-name{font-size:13px;font-weight:800;color:var(--text)}
 .tp-spread{font-size:11px;font-weight:800;color:var(--muted);flex-shrink:0;padding-left:8px}
 
@@ -262,6 +269,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gc-cons{padding:6px 10px 4px;background:var(--cream);border-top:1px solid var(--border2)}
 .gc-cons-bar{display:flex;height:7px;border:1.5px solid var(--border);border-radius:4px;
   overflow:hidden;background:#fff}
+/* Fallback only — the bar is painted with each team's own colour inline when
+   the colour table knows them. */
 .gc-cons-a{background:hsl(190,48%,52%)}
 .gc-cons-h{background:hsl(275,42%,58%)}
 .gc-cons-lbl{display:flex;justify-content:space-between;align-items:baseline;gap:6px;
@@ -3947,6 +3956,44 @@ function confChips(selected,weekId,gid,N,canPick,usedConfs){
 
 // How the group split on one game. Null until the game is revealed, or if nobody
 // has a complete pick on it.
+// Primary colour for a team name as the pool spells it. The colour table is
+// keyed by full school names ("Boise State") while games are often entered
+// short ("Boise St"), so match on a normalised key and fall back to null rather
+// than guessing wrong.
+var _TEAM_HEX=null;
+// Shorthand the pool uses that the colour table spells out in full.
+var TEAM_ALIAS={
+  cal:"California", wazzu:"Washington State", pitt:"Pittsburgh",
+  uconn:"Connecticut", umass:"Massachusetts", olemiss:"Ole Miss",
+  unc:"North Carolina", ncstate:"NC State", usc:"USC", ucf:"UCF",
+  smu:"SMU", tcu:"TCU", byu:"BYU", lsu:"LSU", unlv:"UNLV", utep:"UTEP",
+  utsa:"UTSA", fau:"Florida Atlantic", fiu:"Florida International",
+  miamifl:"Miami", miamioh:"Miami (OH)", southernmiss:"Southern Miss",
+  appstate:"App State", vatech:"Virginia Tech", gatech:"Georgia Tech"
+};
+function _teamKey(s){ return String(s||"").toLowerCase().replace(/[^a-z]/g,""); }
+function teamHex(name){
+  if(!_TEAM_HEX){
+    _TEAM_HEX={};
+    Object.keys(TEAM_COLORS).forEach(function(k){ _TEAM_HEX[_teamKey(k)]=TEAM_COLORS[k][0]; });
+  }
+  var k=_teamKey(name);
+  if(!k) return null;
+  if(_TEAM_HEX[k]) return _TEAM_HEX[k];
+  if(TEAM_ALIAS[k] && _TEAM_HEX[_teamKey(TEAM_ALIAS[k])]) return _TEAM_HEX[_teamKey(TEAM_ALIAS[k])];
+  if(k.slice(-2)==="st" && _TEAM_HEX[k+"ate"]) return _TEAM_HEX[k+"ate"];   // Boise St
+  if(k.slice(-5)==="state" && _TEAM_HEX[k.slice(0,-3)]) return _TEAM_HEX[k.slice(0,-3)];
+  return null;
+}
+// Two teams can share near-identical colours (Alabama vs Arkansas), which would
+// turn the split bar into one solid block. Nudge the second one until the seam
+// is visible.
+function _barPair(a,h){
+  var A=a||"hsl(190,48%,52%)", H=h||"hsl(275,42%,58%)";
+  if(a&&h&&_contrast(a,h)<1.6) H=_isDark(h)?_lighten(h,0.42):_shade(h,0.42);
+  return [A,H];
+}
+
 function gameConsensus(weekId,gid){
   if(!isGameLocked(weekId,gid)) return null;
   var away=0,home=0,awayConf=0,homeConf=0;
@@ -4062,10 +4109,15 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     var sel=pick.side===side;
     var cls="team-pick";
     if(effectiveLocked&&result){
-      if(result==="push") cls+=" push";
-      else if(result===side) cls+=" winner";
-      else cls+=" loser";
-      if(sel) cls+=" mypick";
+      if(result==="push"){
+        cls+=" push";
+        if(sel) cls+=" mypick";
+      } else {
+        if(result===side) cls+=" winner"; else cls+=" loser";
+        // Colour the row you actually chose, so a glance tells you how you did
+        // rather than which team covered.
+        if(sel) cls+=(result===side)?" mypick-win":" mypick-loss";
+      }
     } else if(sel) cls+=" mypick";
     if(effectiveCanPick) cls+=" clickable";
     h+='<div class="'+cls+'" data-pick-week="'+weekId+'" data-pick-gid="'+gid+'" data-pick-side="'+side+'">';
@@ -4080,10 +4132,11 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   var cons=gameConsensus(weekId,gid);
   if(cons){
     var aw=Math.round(cons.awayPct*100), hm=100-aw;
+    var _pair=_barPair(teamHex(g.away), teamHex(g.home));
     h+='<div class="gc-cons">';
     h+='<div class="gc-cons-bar">';
-    h+='<div class="gc-cons-a" style="width:'+aw+'%"></div>';
-    h+='<div class="gc-cons-h" style="width:'+hm+'%"></div>';
+    h+='<div class="gc-cons-a" style="width:'+aw+'%;background:'+_pair[0]+'"></div>';
+    h+='<div class="gc-cons-h" style="width:'+hm+'%;background:'+_pair[1]+'"></div>';
     h+='</div>';
     h+='<div class="gc-cons-lbl">';
     h+='<span'+(pick.side==="away"?' class="on"':'')+'>'+aw+'% '+x(g.away||"")+'</span>';
@@ -5343,7 +5396,7 @@ function draw(){
   var h='';
   if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
-  h+='<div class="topbar-left"><a href="index.html" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
+  h+='<div class="topbar-left"><a href="index.html" id="b-hub" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
   h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">College Football &middot; Confidence Pool'+(SEASON_YEAR?' &middot; '+SEASON_YEAR:'')+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
@@ -5434,6 +5487,14 @@ function draw(){
 // ── Bindings ─────────────────────────────────────────────
 function bind(){
   var els,i,el;
+  // Leaving for the hub: paint the same loading panel while the browser fetches
+  // it, rather than freezing on the old screen until the new page renders. The
+  // navigation itself is left alone — no preventDefault.
+  el=document.getElementById("b-hub"); if(el) el.addEventListener("click",function(){
+    var r=document.getElementById("root");
+    if(r) r.innerHTML=bootScreen();
+  });
+
   els=document.querySelectorAll(".ptab");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     ST.page=this.getAttribute("data-page");
