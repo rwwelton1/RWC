@@ -4392,6 +4392,29 @@ function renderStandings(){
   })();
   var weeksPlayed=completedWeeks.length;
   var weeksRemaining=Math.max(0, SEASON_WEEKS - weeksPlayed);
+  // A week that has kicked off is no longer worth a full slate: points already
+  // lost in it can't come back. Weeks that haven't started still count for the
+  // full amount, since nobody has forfeited anything yet.
+  var startedWeeks={};
+  ST.weekIds.forEach(function(w){
+    if(weekIsComplete(w)) return;
+    startedWeeks[w]=activeGames(w).some(function(gid){ return isGameLocked(w,gid); });
+  });
+  // Ceiling a player can still reach across the rest of the season.
+  function seasonPossible(uid, banked){
+    var extra=0;
+    ST.weekIds.forEach(function(w){
+      if(weekIsComplete(w)) return;                      // already in `banked`
+      if(!startedWeeks[w]){ extra+=MAX_PTS_PER_WEEK; return; }
+      // Under way — only unresolved picks are still live.
+      var picks=((ST.picks[w]||{})[uid])||{}, res=ST.results[w]||{};
+      activeGames(w).forEach(function(gid){
+        var pk=picks[gid];
+        if(pk&&pk.side&&pk.conf&&!res[gid]) extra+=Number(pk.conf);
+      });
+    });
+    return banked+extra;
+  }
 
   // Split completed weeks: show last 3, collapse the rest into "History"
   var RECENT_COUNT=3;
@@ -4411,7 +4434,7 @@ function renderStandings(){
       // matching the live points total, not only fully-complete weeks.
       seasonCorrect+=ws.correct; seasonWrong+=ws.wrong;
     });
-    var possible=total + (weeksRemaining * MAX_PTS_PER_WEEK);
+    var possible=seasonPossible(p, total);
     // Best/worst week stats
     var bestWk=null, bestPts=-1, worstWk=null, worstPts=999;
     completedWeeks.forEach(function(w){
@@ -4459,7 +4482,14 @@ function renderStandings(){
 
   // Controls row above table
   h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--cream);border-bottom:1px solid var(--border2)">';
-  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played &middot; '+weeksRemaining+' remaining';
+  var _liveWk=ST.weekIds.filter(function(w){ return !weekIsComplete(w) && startedWeeks[w]; })[0];
+  var _toCome=Math.max(0, weeksRemaining - (_liveWk?1:0));
+  h+='<div style="font-size:9px;font-weight:700;color:var(--muted);flex:1">'+weeksPlayed+' week'+(weeksPlayed!==1?'s':'')+' played';
+  // A week that has kicked off is neither played nor simply "remaining" — saying
+  // "0 played · 15 remaining" over a live column reads as though nothing has
+  // happened when points are already on the board.
+  if(_liveWk) h+=' &middot; <span style="color:var(--red2)">'+x(ST.weekLabels[_liveWk]||_liveWk)+' live</span>';
+  h+=' &middot; '+_toCome+' to come';
   // Where this week can still land you, while games are in play.
   var _fr=finishRange(displayWeekId(),ST.user);
   if(_fr){
@@ -4485,7 +4515,7 @@ function renderStandings(){
   h+='<th style="position:sticky;left:0;z-index:3;background:var(--cream);width:28px;min-width:28px;text-align:center;font-size:9px;padding:6px 4px;border-right:1px solid var(--border2)">#</th>';
   h+='<th data-sort-name="1" style="position:sticky;left:28px;z-index:3;background:var(--cream);min-width:100px;cursor:pointer;text-align:left;padding:6px 8px;border-right:2px solid var(--border)">Players</th>';
   h+='<th data-sort-total="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:9px">Pts</th>';
-  h+='<th data-sort-possible="1" style="cursor:pointer;min-width:48px;text-align:center;font-size:9px;color:var(--blue)">Poss</th>';
+  h+='<th data-sort-possible="1" title="Highest season total still reachable" style="cursor:pointer;min-width:48px;text-align:center;font-size:9px;color:var(--blue)">Poss<div style="font-size:7px;font-weight:700;color:var(--dim);letter-spacing:.03em">season</div></th>';
 
   // Money column sits between Poss and the first week, so winnings read next to
   // the points that produced them.
@@ -4541,7 +4571,10 @@ function renderStandings(){
     h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);min-width:100px'+(_tap?';cursor:pointer':'')+'"'+(_tap?' data-stats-uid="'+x(r.name)+'"':'')+'>'+pem(r.name)+x(nameOf(r.name))+(_sf?' '+formIcon(_sf,10):'')+'</td>';
 
     h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
-    h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(r.total||'–')+'</div>';
+    // A dash means "nothing graded yet", not "zero". Once a player has a result
+    // on the board a real 0 is information — and it's what the Group tab shows.
+    var _graded=(r.seasonCorrect>0||r.seasonWrong>0);
+    h+='<div style="font-size:13px;font-weight:900;color:var(--text)">'+(_graded?r.total:(r.total||'–'))+'</div>';
     if(r.seasonCorrect>0||r.seasonWrong>0){
       h+='<div style="font-size:8px;font-weight:700;color:var(--muted)">'+r.seasonCorrect+'-'+r.seasonWrong+'</div>';
     }
