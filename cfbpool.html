@@ -279,6 +279,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gc-cons-lbl span.on{color:var(--text);font-weight:900}
 .gc-cons-lbl .mid{color:var(--dim);font-weight:700;flex-shrink:0}
 /* What-if sandbox on the group grid. */
+.gp-rank{display:inline-block;min-width:13px;text-align:center;font-size:8px;font-weight:900;
+  color:var(--green);background:var(--green-bg);border:1px solid var(--green);
+  border-radius:4px;padding:0 3px;margin-right:4px;vertical-align:1px}
 .gp-wi{cursor:pointer;background:var(--purple-bg) !important}
 .gp-wi.set{background:var(--green-bg) !important}
 .gp-wi-tag{font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.04em;
@@ -5172,6 +5175,63 @@ function projectedWeek(weekId, uid){
   return t;
 }
 
+// Which side is currently covering, judged from the live ESPN score against the
+// pool's own spread. Null when the game hasn't started, has no score yet, or
+// isn't in the feed. A game leading outright can still be failing to cover — a
+// favourite up 7 on a -10 line is not covering — which is the whole point of
+// reading the spread rather than the scoreboard.
+function liveCoverSide(weekId, gid){
+  var g=((ST.games[weekId])||{})[gid];
+  if(!g) return null;
+  var all=(_scData&&_scData.events)||[];
+  var ev=null;
+  for(var i=0;i<all.length;i++){ if(_eventMatchesGame(all[i],g)){ ev=all[i]; break; } }
+  if(!ev) return null;
+  var comp=(ev.competitions||[])[0]||{};
+  var st=((comp.status||ev.status||{}).type)||{};
+  if(st.state==="pre") return null;                       // nothing to read yet
+  var comps=comp.competitors||[];
+  var ac=comps.find(function(c){return c.homeAway==="away";})||{};
+  var hc=comps.find(function(c){return c.homeAway==="home";})||{};
+  if(ac.score==null||hc.score==null) return null;
+  var aS=Number(ac.score), hS=Number(hc.score);
+  if(isNaN(aS)||isNaN(hS)) return null;
+  var sp=Number(g.spread)||0;
+  if(!g.favSide||g.favSide==="even"){                     // pick'em: whoever leads
+    if(aS===hS) return null;
+    return aS>hS?"away":"home";
+  }
+  var favUpBy=(g.favSide==="home") ? (hS-aS) : (aS-hS);
+  if(favUpBy===sp) return null;                           // dead on the number
+  var dog=(g.favSide==="home")?"away":"home";
+  return favUpBy>sp ? g.favSide : dog;
+}
+
+// Fill the sandbox from the live scoreboard. Only games that are under way and
+// ungraded are touched; anything already final keeps its real result.
+function whatIfFromLive(weekId){
+  var res=ST.results[weekId]||{}, set=0, unread=0;
+  if(!ST.whatIf) ST.whatIf={};
+  activeGames(weekId).forEach(function(gid){
+    if(res[gid] || !isGameLocked(weekId,gid)) return;
+    var side=liveCoverSide(weekId,gid);
+    if(side){ ST.whatIf[gid]=side; set++; } else unread++;
+  });
+  return {set:set, unread:unread};
+}
+
+// Where each player sits under the current scenario. Competition ranking, so a
+// tie shares the place rather than being split arbitrarily.
+function whatIfRanks(weekId){
+  var out={}, totals=(PARTS||[]).map(function(u){ return {u:u, p:projectedWeek(weekId,u)}; });
+  totals.forEach(function(t){
+    var better=0;
+    totals.forEach(function(o){ if(o.p>t.p) better++; });
+    out[t.u]=better+1;
+  });
+  return out;
+}
+
 function renderGroupPicks(){
   var h='';
   if(ST.weekIds.length===0){
@@ -5191,6 +5251,9 @@ function renderGroupPicks(){
   if(_wiPlayable.length){
     compareBtnHtml='<button class="gp-compare-btn'+(ST.whatIfMode?" active":"")+'" id="b-whatif-toggle">'+
       (ST.whatIfMode?'&#10005; Done':'&#128302; What if')+'</button>'+compareBtnHtml;
+    if(ST.whatIfMode){
+      compareBtnHtml='<button class="gp-compare-btn" id="b-whatif-live" title="Set every live game to whoever is covering right now">&#128225; Live</button>'+compareBtnHtml;
+    }
   }
   h+=weekDropdown(weekId, compareBtnHtml);
   if(ST.compareMode){
@@ -5222,15 +5285,19 @@ function renderGroupPicks(){
   }
 
   // Sort players by week score descending (if locked), else season score
+  var _wiRank=ST.whatIfMode ? whatIfRanks(weekId) : null;
   var players=PARTS.slice();
-  if(ST.whatIfMode && whatIfCount()){
-    // The point of the sandbox is watching the order change.
+  if(ST.whatIfMode){
+    // Always ranked by points in the sandbox — with no scenario set this is just
+    // the current order, and it re-ranks as you set winners. projectedWeek with
+    // nothing set equals the real week score, so one comparator covers both.
     players.sort(function(a,b){ return projectedWeek(weekId,b) - projectedWeek(weekId,a); });
   } else if(locked){
     players.sort(function(a,b){ return weekScore(weekId,b).total - weekScore(weekId,a).total; });
   }
   // Your own row goes first so it can be frozen directly under the header.
   // Spectators have no row to pin, so the order is left alone for them.
+  // Safe in the sandbox too, because every row carries its rank there.
   if(ST.user){
     var _meIdx=players.indexOf(ST.user);
     if(_meIdx>0){ players.splice(_meIdx,1); players.unshift(ST.user); }
@@ -5366,7 +5433,8 @@ function renderGroupPicks(){
       ? ' <span class="gp-winpct'+(_wc>=0.5?" hot":"")+'" title="Chance to win the week">'+
         ((_wc>=0.995)?"100%":(Math.round(_wc*100)+"%"))+'</span>'
       : '';
-    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+(PUBLIC_VIEW?'':' data-stats-uid="'+x(player)+'"')+'><span class="gp-name-txt">'+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+_wcTag+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
+    var _rkTag=_wiRank ? '<span class="gp-rank" title="Position under this scenario">'+_wiRank[player]+'</span>' : '';
+    h+='<td class="gp-name"'+(nameBg?' style="background:'+nameBg+'"':'')+(PUBLIC_VIEW?'':' data-stats-uid="'+x(player)+'"')+'><span class="gp-name-txt">'+_rkTag+pem(player)+x(nameOf(player))+(_form?' '+formIcon(_form,10):'')+_wcTag+(isSelected?' <span style="font-size:9px;color:var(--blue)">&#10003;</span>':'')+'</span></td>';
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
@@ -5846,6 +5914,14 @@ function bind(){
     if(!ST.whatIfMode) clearWhatIf();      // leaving the sandbox resets it
     ST.compareMode=false;                  // both modes own the header tap
     draw();
+  });
+  el=document.getElementById("b-whatif-live"); if(el) el.addEventListener("click",function(){
+    var r=whatIfFromLive(ST.curWeek||displayWeekId());
+    draw();
+    toast(r.set
+      ? ("&#128225; "+r.set+" game"+(r.set!==1?"s":"")+" set from live scores"+
+         (r.unread?(" &middot; "+r.unread+" with no score yet"):""))
+      : "No live scores to read yet");
   });
   els=document.querySelectorAll("th[data-whatif-gid]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
