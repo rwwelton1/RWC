@@ -2488,6 +2488,7 @@ function stopResultSchedule() {
   _resultScheduleTimer = null;
 }
 var _scTimer=null, _scData=null, _scLoading=false, _scLastFetch=0, _scWeek=null;
+var _scPendingWhatIf=null;  // week whose sandbox is waiting on this feed
 
 // The week whose slate the Scores tab reflects: whatever week the user is on.
 function scoresWeekId(){ return ST.curWeek || displayWeekId(); }
@@ -2510,6 +2511,13 @@ function fetchScoreboard(){
       // Fresh feed — post any finals it reveals before the tab repaints.
       try{ autoPostFinalsFromScoreboard(); }catch(e){}
       if(ST.page==="scores") renderScoresInto();
+      // The what-if sandbox reads this feed too, and it lives on the Group tab.
+      // Finish the job it asked for rather than just repainting, so one tap of
+      // Live actually fills the scenario.
+      else if(_scPendingWhatIf){
+        var _pw=_scPendingWhatIf; _scPendingWhatIf=null;
+        applyWhatIfFromLive(_pw);
+      }
     })
     .catch(function(){
       _scLoading=false;
@@ -5220,6 +5228,16 @@ function whatIfFromLive(weekId){
   return {set:set, unread:unread};
 }
 
+// Fill the sandbox from the feed and report what happened.
+function applyWhatIfFromLive(weekId){
+  var r=whatIfFromLive(weekId);
+  draw();
+  toast(r.set
+    ? ("&#128225; "+r.set+" game"+(r.set!==1?"s":"")+" set from live scores"+
+       (r.unread?(" &middot; "+r.unread+" not started"):""))
+    : "No live scores to read yet");
+}
+
 // Where each player sits under the current scenario. Competition ranking, so a
 // tie shares the place rather than being split arbitrarily.
 function whatIfRanks(weekId){
@@ -5916,12 +5934,18 @@ function bind(){
     draw();
   });
   el=document.getElementById("b-whatif-live"); if(el) el.addEventListener("click",function(){
-    var r=whatIfFromLive(ST.curWeek||displayWeekId());
-    draw();
-    toast(r.set
-      ? ("&#128225; "+r.set+" game"+(r.set!==1?"s":"")+" set from live scores"+
-         (r.unread?(" &middot; "+r.unread+" with no score yet"):""))
-      : "No live scores to read yet");
+    var _wk=ST.curWeek||displayWeekId();
+    // Scores are only fetched while the Scores tab is open, so from here the feed
+    // is usually missing or from another week — and reading a stale one is how
+    // this ends up seeing finals instead of games in progress. Always refresh
+    // first when it isn't current, then apply.
+    if(!_scData || _scWeek!==scoresWeekId() || (Date.now()-_scLastFetch)>60000){
+      _scPendingWhatIf=_wk;
+      toast("&#128225; Fetching live scores\u2026");
+      fetchScoreboard();
+      return;
+    }
+    applyWhatIfFromLive(_wk);
   });
   els=document.querySelectorAll("th[data-whatif-gid]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
