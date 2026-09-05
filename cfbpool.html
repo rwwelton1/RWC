@@ -278,13 +278,13 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gc-cons-lbl span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gc-cons-lbl span.on{color:var(--text);font-weight:900}
 .gc-cons-lbl .mid{color:var(--dim);font-weight:700;flex-shrink:0}
-/* What an undecided game would do to your standing. */
-.gc-swing{display:flex;align-items:baseline;gap:7px;padding:2px 10px 6px;background:var(--cream);
-  font-size:8px;font-weight:800;color:var(--muted)}
-.gc-swing span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.gc-swing .sw-cap{color:var(--dim);font-weight:900;text-transform:uppercase;
-  letter-spacing:.05em;flex-shrink:0}
-.gc-swing .best{color:var(--green);font-weight:900}
+/* What-if sandbox on the group grid. */
+.gp-wi{cursor:pointer;background:var(--purple-bg) !important}
+.gp-wi.set{background:var(--green-bg) !important}
+.gp-wi-tag{font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--purple);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gp-wi.set .gp-wi-tag{color:var(--green)}
+.gp-proj{color:var(--green) !important}
 
 /* ── CONFIDENCE CHIPS ── */
 .conf-row{padding:7px 10px;display:flex;align-items:center;gap:6px;background:var(--cream);flex-wrap:wrap}
@@ -4158,16 +4158,6 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     h+='</div>';
     h+='</div>';
   }
-  var sw=gameSwing(weekId,gid,ST.user);
-  if(sw && sw.away!==sw.home){
-    // Only worth showing when the outcome actually moves the viewer.
-    var lo=Math.min(sw.away,sw.home);
-    h+='<div class="gc-swing">';
-    h+='<span class="sw-cap">If it lands</span>';
-    h+='<span'+(sw.away===lo?' class="best"':'')+'>'+x(g.away||"")+' &rarr; #'+sw.away+'</span>';
-    h+='<span'+(sw.home===lo?' class="best"':'')+'>'+x(g.home||"")+' &rarr; #'+sw.home+'</span>';
-    h+='</div>';
-  }
   h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,effectiveCanPick,usedConfs)+'</div>';
   h+='</div>';
   return h;
@@ -5154,6 +5144,26 @@ function winChanceFor(weekId,uid){
   return _winChanceCache[uid];
 }
 
+// ── WHAT-IF ───────────────────────────────────────────────
+// A sandbox on the Group grid: pick a winner for any game that's under way and
+// the whole table re-scores and re-sorts. Only games that have kicked off can be
+// set — the same reveal rule as everywhere else, so nothing leaks.
+// ST.whatIf maps gid -> "away" | "home", scoped to one week.
+function whatIfSide(gid){ return (ST.whatIf||{})[gid]||null; }
+function whatIfCount(){ return Object.keys(ST.whatIf||{}).length; }
+function clearWhatIf(){ ST.whatIf={}; }
+// A player's week total with the hypothetical results folded in.
+function projectedWeek(weekId, uid){
+  var t=weekScore(weekId,uid).total;
+  var picks=((ST.picks[weekId]||{})[uid])||{}, res=ST.results[weekId]||{};
+  Object.keys(ST.whatIf||{}).forEach(function(gid){
+    if(res[gid]) return;                       // a real result always wins
+    var p=picks[gid];
+    if(p&&p.side===ST.whatIf[gid]&&p.conf) t+=Number(p.conf);
+  });
+  return t;
+}
+
 function renderGroupPicks(){
   var h='';
   if(ST.weekIds.length===0){
@@ -5164,6 +5174,12 @@ function renderGroupPicks(){
   // Week selector — dropdown with Compare button
   var weekId=ST.curWeek||displayWeekId();
   var compareBtnHtml='<button class="gp-compare-btn'+(ST.compareMode?" active":"")+'" id="b-compare-toggle">'+(ST.compareMode?'&#10005; Clear':'&#9878; Compare')+'</button>';
+  // Only offer the sandbox when there is something undecided to play with.
+  var _wiPlayable=active.filter(function(gid){ return revealed[gid] && !results[gid]; });
+  if(_wiPlayable.length){
+    compareBtnHtml='<button class="gp-compare-btn'+(ST.whatIfMode?" active":"")+'" id="b-whatif-toggle">'+
+      (ST.whatIfMode?'&#10005; Done':'&#128302; What if')+'</button>'+compareBtnHtml;
+  }
   h+=weekDropdown(weekId, compareBtnHtml);
   if(ST.compareMode){
     var selCount=Object.keys(ST.compareSelected).length;
@@ -5195,7 +5211,10 @@ function renderGroupPicks(){
 
   // Sort players by week score descending (if locked), else season score
   var players=PARTS.slice();
-  if(locked){
+  if(ST.whatIfMode && whatIfCount()){
+    // The point of the sandbox is watching the order change.
+    players.sort(function(a,b){ return projectedWeek(weekId,b) - projectedWeek(weekId,a); });
+  } else if(locked){
     players.sort(function(a,b){ return weekScore(weekId,b).total - weekScore(weekId,a).total; });
   }
   // Your own row goes first so it can be frozen directly under the header.
@@ -5219,8 +5238,18 @@ function renderGroupPicks(){
     var awayLogo=g.awayLogo||"";
     var homeLogo=g.homeLogo||"";
     var gameIsLocked=isGameLocked(weekId,gid);
-    h+='<th'+(revealed[gid]?' data-sort-gid="'+gid+'"':'')+'>';
+    var _wiOn=ST.whatIfMode && revealed[gid] && !results[gid];
+    var _wiPick=whatIfSide(gid);
+    // In what-if mode the header stops sorting and starts toggling, so a tap
+    // can't mean two things at once.
+    h+='<th'+(_wiOn?' data-whatif-gid="'+gid+'" class="gp-wi'+(_wiPick?" set":"")+'"'
+             :(revealed[gid]?' data-sort-gid="'+gid+'"':''))+'>';
     h+='<div class="gp-game-head">';
+    if(_wiOn){
+      h+='<div class="gp-wi-tag">'+(_wiPick
+        ? x((_wiPick==="away"?g.away:g.home)||"")+' wins'
+        : 'tap to set')+'</div>';
+    }
     if(g.nick) h+='<div class="gp-nick">'+x(g.nick)+'</div>';
     h+='<div class="gp-logos">';
     var _aRk=rankFor(g.away,g.awayId), _hRk=rankFor(g.home,g.homeId);
@@ -5319,6 +5348,7 @@ function renderGroupPicks(){
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
+    var _proj=(ST.whatIfMode && whatIfCount()) ? projectedWeek(weekId,player) : null;
     var _wc=winChanceFor(weekId,player);
     var _wcTag=(_wc!==undefined && _wc>0.05)
       ? ' <span class="gp-winpct'+(_wc>=0.5?" hot":"")+'" title="Chance to win the week">'+
@@ -5328,7 +5358,12 @@ function renderGroupPicks(){
 
     // Points cell — second column (sticky)
     h+='<td class="gp-pts-cell">';
-    if(locked&&stillPossible===0){
+    if(_proj!==null){
+      // Scenario total, with the real banked figure underneath so it's obvious
+      // which number is hypothetical.
+      h+='<div class="gp-pts-earned gp-proj">'+_proj+'</div>';
+      h+='<div class="gp-pts-possible">now '+ws.total+'</div>';
+    } else if(locked&&stillPossible===0){
       h+='<div class="gp-pts-earned">'+ws.total+'</div>';
     } else if(ws.total>0||stillPossible>0){
       h+='<div class="gp-pts-earned">'+ws.total+'</div>';
@@ -5792,6 +5827,24 @@ function bind(){
   });
   el=document.getElementById("ms-backdrop"); if(el) el.addEventListener("click",function(){
     ST.statsUid=null; draw();
+  });
+
+  el=document.getElementById("b-whatif-toggle"); if(el) el.addEventListener("click",function(){
+    ST.whatIfMode=!ST.whatIfMode;
+    if(!ST.whatIfMode) clearWhatIf();      // leaving the sandbox resets it
+    ST.compareMode=false;                  // both modes own the header tap
+    draw();
+  });
+  els=document.querySelectorAll("th[data-whatif-gid]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    var gid=this.getAttribute("data-whatif-gid");
+    if(!ST.whatIf) ST.whatIf={};
+    // away -> home -> clear, so a column can be cycled without hunting for undo.
+    var cur=ST.whatIf[gid];
+    if(!cur) ST.whatIf[gid]="away";
+    else if(cur==="away") ST.whatIf[gid]="home";
+    else delete ST.whatIf[gid];
+    draw();
   });
 
   el=document.getElementById("b-compare-toggle"); if(el) el.addEventListener("click",function(){
