@@ -475,6 +475,10 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-pick.push{opacity:.5}
 /* Points column */
 .gp-pts-cell{font-weight:900;text-align:center;line-height:1.25}
+.gp-poss-cell{text-align:center;line-height:1.25;padding:6px 4px}
+.gp-poss-val{font-size:12px;font-weight:900;color:var(--blue)}
+/* Nothing left to play for — the ceiling is the final score. */
+.gp-poss-val.done{color:var(--muted)}
 .gp-pts-earned{font-size:13px;font-weight:900;color:var(--text)}
 .gp-pts-possible{font-size:8px;font-weight:700;color:var(--muted);display:block;margin-top:0;line-height:1.2}
 /* Chance to win the week — only rendered near the end of a slate. */
@@ -502,8 +506,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-isolate-btn{padding:3px 10px;border-radius:6px;border:2px solid var(--border);background:var(--green-bg);color:var(--green);font-size:9px;font-weight:800;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:1px 1px 0 var(--border);white-space:nowrap;flex-shrink:0}
 .gp-isolate-btn:active{transform:translate(1px,1px);box-shadow:none}
 .gp-isolate-btn.active{background:var(--red-bg);color:var(--red2);border-color:var(--border)}
-.gp-table th[data-sort-gid],.gp-table th[data-sort-pts]{cursor:pointer;-webkit-tap-highlight-color:transparent}
-.gp-table th[data-sort-gid]:active,.gp-table th[data-sort-pts]:active{background:var(--border2)}
+.gp-table th[data-sort-gid],.gp-table th[data-sort-pts],.gp-table th[data-sort-poss]{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.gp-table th[data-sort-gid]:active,.gp-table th[data-sort-pts]:active,.gp-table th[data-sort-poss]:active{background:var(--border2)}
 
 /* ── ACCESSIBILITY ── */
 /* Visible keyboard focus (does not affect touch/mouse users) */
@@ -5328,6 +5332,9 @@ function renderGroupPicks(){
 
   // Sticky Pts column — second column
   h+='<th class="gp-pts-cell" data-sort-pts="1" style="cursor:pointer">Pts</th>';
+  // Ceiling for the week, in its own column rather than crammed under the score.
+  h+='<th data-sort-poss="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:9px;padding:6px 4px">Poss'+
+     '<div style="font-size:7px;font-weight:700;color:var(--dim);letter-spacing:.03em">max</div></th>';
 
   // Game columns
   active.forEach(function(gid){
@@ -5432,7 +5439,8 @@ function renderGroupPicks(){
     // Only the viewer's own row is frozen, and not while Compare is filtering the
     // table — a pinned row that Compare has dimmed or hidden would be confusing.
     if(isMe && !ST.compareMode) rowCls+=" gp-me-row";
-    var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'" data-pts-live="'+livePossible+'"';
+    var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'" data-pts-live="'+livePossible+'"'+
+                  ' data-poss="'+(ws.total+stillPossible)+'"';
     active.forEach(function(gid){
       if(!revealed[gid]) return;     // hidden picks never reach the DOM
       var p=picks[gid]||{};
@@ -5461,14 +5469,19 @@ function renderGroupPicks(){
       // which number is hypothetical.
       h+='<div class="gp-pts-earned gp-proj">'+_proj+'</div>';
       h+='<div class="gp-pts-possible">now '+ws.total+'</div>';
-    } else if(locked&&stillPossible===0){
-      h+='<div class="gp-pts-earned">'+ws.total+'</div>';
     } else if(ws.total>0||stillPossible>0){
       h+='<div class="gp-pts-earned">'+ws.total+'</div>';
-      if(stillPossible>0) h+='<div class="gp-pts-possible" title="Points still possible">+'+stillPossible+' poss</div>';
     } else {
-      h+='<span class="gp-nopick">–</span>';
+      h+='<span class="gp-nopick">&ndash;</span>';
     }
+    h+='</td>';
+
+    // Highest total this week can still reach: banked plus everything still live.
+    var _ceiling=ws.total+stillPossible;
+    h+='<td class="gp-poss-cell" title="Most points still reachable this week">';
+    h+=(ws.total>0||stillPossible>0)
+       ? '<div class="gp-poss-val'+(stillPossible===0?" done":"")+'">'+_ceiling+'</div>'
+       : '<span class="gp-nopick">&ndash;</span>';
     h+='</td>';
 
     // Pick cells
@@ -6126,17 +6139,29 @@ function bind(){
   });
   el=document.querySelector("th[data-sort-pts]");
   if(el) el.addEventListener("click",function(){
-    // Points banked plus points riding on games already under way. Points from
-    // games that haven't kicked off are excluded — they're not in play yet, and
-    // ranking by them would order people by picks the table is still hiding.
+    // Sorts on the number in the column: points actually banked. The ceiling has
+    // its own column now, so this no longer has to double as both.
     var tbody=document.querySelector(".gp-table tbody");
     if(!tbody) return;
     var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
     if(_gpSortState.col==="pts"){ _gpSortState.dir*=-1; }
     else{ _gpSortState.col="pts"; _gpSortState.dir=1; }
     rows.sort(function(a,b){
-      var ae=Number(a.getAttribute("data-pts-earned")||0)+Number(a.getAttribute("data-pts-live")||0);
-      var be=Number(b.getAttribute("data-pts-earned")||0)+Number(b.getAttribute("data-pts-live")||0);
+      var ae=Number(a.getAttribute("data-pts-earned")||0);
+      var be=Number(b.getAttribute("data-pts-earned")||0);
+      return (ae>be?-1:ae<be?1:0)*_gpSortState.dir;
+    });
+    rows.forEach(function(r){ tbody.appendChild(r); });
+  });
+  el=document.querySelector("th[data-sort-poss]");
+  if(el) el.addEventListener("click",function(){
+    var tbody=document.querySelector(".gp-table tbody");
+    if(!tbody) return;
+    var rows=Array.prototype.slice.call(tbody.querySelectorAll("tr[data-compare-player]"));
+    if(_gpSortState.col==="poss"){ _gpSortState.dir*=-1; }
+    else{ _gpSortState.col="poss"; _gpSortState.dir=1; }
+    rows.sort(function(a,b){
+      var ae=Number(a.getAttribute("data-poss")||0), be=Number(b.getAttribute("data-poss")||0);
       return (ae>be?-1:ae<be?1:0)*_gpSortState.dir;
     });
     rows.forEach(function(r){ tbody.appendChild(r); });
