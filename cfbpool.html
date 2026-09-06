@@ -479,6 +479,8 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .gp-poss-val{font-size:12px;font-weight:900;color:var(--blue)}
 /* Nothing left to play for — the ceiling is the final score. */
 .gp-poss-val.done{color:var(--muted)}
+/* Ceiling under a scenario rather than the real one. */
+.gp-poss-val.gp-proj-poss{color:var(--green)}
 .gp-pts-earned{font-size:13px;font-weight:900;color:var(--text)}
 .gp-pts-possible{font-size:8px;font-weight:700;color:var(--muted);display:block;margin-top:0;line-height:1.2}
 /* Chance to win the week — only rendered near the end of a slate. */
@@ -5420,15 +5422,27 @@ function renderGroupPicks(){
     // livePossible is the subset riding on games that have actually kicked off —
     // that's what the Pts column sorts on, so a game nobody has played yet can't
     // move anyone up or down the table.
-    var stillPossible=0, livePossible=0;
+    var stillPossible=0, livePossible=0, openPossible=0;
     active.forEach(function(gid){
       var p=picks[gid]||{};
       var r=results[gid];
       if(p.side&&p.conf&&!r){
         stillPossible+=Number(p.conf);
         if(revealed[gid]) livePossible+=Number(p.conf);
+        // A game you've called in the sandbox is settled as far as the scenario
+        // is concerned, so its points belong in the projected score rather than
+        // in what's still up for grabs.
+        if(!whatIfSide(gid)) openPossible+=Number(p.conf);
       }
     });
+
+    // Scenario score, and the highest total still reachable. Under a scenario
+    // both halves shift: the projected score absorbs the games you've called,
+    // and only the ones you haven't are still open. Declared here because
+    // confAttrs below serialises the ceiling for sorting.
+    var _proj=(ST.whatIfMode && whatIfCount()) ? projectedWeek(weekId,player) : null;
+    var _ceiling=(_proj!==null) ? (_proj+openPossible) : (ws.total+stillPossible);
+    var _ceilOpen=(_proj!==null) ? openPossible : stillPossible;
 
     var isMe=ST.user&&player===ST.user;
     var isSelected=ST.compareMode&&ST.compareSelected[player];
@@ -5440,7 +5454,7 @@ function renderGroupPicks(){
     // table — a pinned row that Compare has dimmed or hidden would be confusing.
     if(isMe && !ST.compareMode) rowCls+=" gp-me-row";
     var confAttrs='data-pts="'+stillPossible+'" data-pts-earned="'+ws.total+'" data-pts-live="'+livePossible+'"'+
-                  ' data-poss="'+(ws.total+stillPossible)+'"';
+                  ' data-poss="'+_ceiling+'"';   // sorts on the number shown
     active.forEach(function(gid){
       if(!revealed[gid]) return;     // hidden picks never reach the DOM
       var p=picks[gid]||{};
@@ -5453,7 +5467,6 @@ function renderGroupPicks(){
 
     // Name cell
     var nameBg=isSelected?'var(--blue-bg)':isMe?'var(--gold-bg)':'';
-    var _proj=(ST.whatIfMode && whatIfCount()) ? projectedWeek(weekId,player) : null;
     var _wc=winChanceFor(weekId,player);
     var _wcTag=(_wc!==undefined && _wc>0.05)
       ? ' <span class="gp-winpct'+(_wc>=0.5?" hot":"")+'" title="Chance to win the week">'+
@@ -5476,11 +5489,9 @@ function renderGroupPicks(){
     }
     h+='</td>';
 
-    // Highest total this week can still reach: banked plus everything still live.
-    var _ceiling=ws.total+stillPossible;
     h+='<td class="gp-poss-cell" title="Most points still reachable this week">';
     h+=(ws.total>0||stillPossible>0)
-       ? '<div class="gp-poss-val'+(stillPossible===0?" done":"")+'">'+_ceiling+'</div>'
+       ? '<div class="gp-poss-val'+(_ceilOpen===0?" done":"")+((_proj!==null)?" gp-proj-poss":"")+'">'+_ceiling+'</div>'
        : '<span class="gp-nopick">&ndash;</span>';
     h+='</td>';
 
