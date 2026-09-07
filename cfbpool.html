@@ -1756,17 +1756,24 @@ function weekScore(weekId,user){
   // Cache key: stringify only the relevant parts
   var ck=weekId+"_"+user+"_"+JSON.stringify(picks)+"_"+JSON.stringify(results);
   if(_weekScoreCache[ck]) return _weekScoreCache[ck];
-  var total=0,correct=0,wrong=0,pending=0;
+  var total=0,correct=0,wrong=0,pending=0,pushed=0;
   GAME_IDS.forEach(function(gid){
     var p=picks[gid],r=results[gid];
     if(!pickComplete(p))return;   // no confidence = no pick, so neither correct nor wrong
-    if(r==="push")return;
+    if(r==="push"){
+      // Half the confidence back. The game landed exactly on the number, so
+      // nobody beat it and nobody missed it — losing the whole stake would
+      // punish a pick that was never wrong.
+      total+=(Number(p.conf)||0)/2;
+      pushed++;
+      return;                     // still neither a win nor a loss on the record
+    }
     if(r){
       if(p.side===r){total+=Number(p.conf)||0;correct++;}
       else wrong++;
     } else pending++;
   });
-  var res={total:total,correct:correct,wrong:wrong,pending:pending};
+  var res={total:total,correct:correct,wrong:wrong,pending:pending,pushed:pushed};
   _weekScoreCache[ck]=res;
   // Prune cache if it grows large
   var keys=Object.keys(_weekScoreCache);
@@ -4144,7 +4151,10 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   h+='<div class="gc-label">'+x(g.kickoff||"")+(g.tv?' <span style="font-size:8px;font-weight:800;color:var(--blue);background:var(--blue-bg);border-radius:3px;padding:0 4px;margin-left:4px;letter-spacing:.02em">'+x(g.tv)+'</span>':'')+'</div>';
   h+='</div><div id="tick-'+gid+'" style="min-width:20px;max-width:20px;overflow:hidden;line-height:1;display:flex;align-items:center;justify-content:center"></div>';
   if(effectiveLocked&&result){
-    if(result==="push") h+='<div class="gc-pts push">PUSH</div>';
+    if(result==="push"){
+      // Half the stake comes back, so say so rather than leaving it looking void.
+      h+='<div class="gc-pts push">'+(pick.side&&pick.conf ? ("PUSH +"+(Number(pick.conf)/2)) : "PUSH")+'</div>';
+    }
     else if(pick.side){
       var won=pick.side===result;
       h+='<div class="gc-pts'+(won?" earned":"")+'">'+(won?("&#10003; +"+(pick.conf||0)):"&#10007;")+'</div>';
