@@ -5,7 +5,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="/poolplay-icon.png">
 <link rel="icon" type="image/png" href="/poolplay-icon.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
-<title>Scorecery – NFL Confidence Pool</title>
+<title>Scorecery – NFL Pickem</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
@@ -593,8 +593,7 @@ var ST={
   importSelected:{},
   importLoading:false,
   importError:"",
-  importConf:null,
-  importTop25:false,
+
   compareMode:false,
   compareSelected:{},
   compareIsolated:false
@@ -916,13 +915,12 @@ function spreadLabel(g,side){
 // ── Scoring ──────────────────────────────────────────────
 // A pick only counts once it has a side AND a confidence value — a side on its
 // own can never score, so it isn't a completed pick.
-function pickComplete(p){ return !!(p && p.side && Number(p.conf)); }
+function pickComplete(p){ return !!(p && p.side); }
 
 // Card order on the Picks tab. Persisted per browser so it sticks between visits.
 var PICK_SORTS=[
   {id:"time", label:"Game time"},
-  {id:"spread", label:"Spread"},
-  {id:"conf", label:"Confidence"}
+  {id:"spread", label:"Spread"}
 ];
 function pickSortMode(){
   if(!ST._pickSort){
@@ -1005,7 +1003,7 @@ function playerMetrics(uid){
     active.forEach(function(gid){
       var p=picks[gid], g=games[gid], r=results[gid];
       if(!p||!p.side) return;
-      var conf=Number(p.conf)||0;
+      var conf=Number(p.conf)||1;
 
       // Favourite share counts every pick with a known favourite, resolved or not
       // — it describes how you pick, not how it turned out.
@@ -1597,12 +1595,12 @@ function weekScore(weekId,user){
       // Half the confidence back. The game landed exactly on the number, so
       // nobody beat it and nobody missed it — losing the whole stake would
       // punish a pick that was never wrong.
-      total+=(Number(p.conf)||0)/2;
+      total+=(Number(p.conf)||1)/2;
       pushed++;
       return;                     // still neither a win nor a loss on the record
     }
     if(r){
-      if(p.side===r){total+=Number(p.conf)||0;correct++;}
+      if(p.side===r){total+=Number(p.conf)||1;correct++;}
       else wrong++;
     } else pending++;
   });
@@ -1898,7 +1896,7 @@ function publishSeasonToHub(metaOnly){
           var results=ST.results[w]||{};
           activeGames(w).forEach(function(gid){
             var pk=picks[gid], r=results[gid];
-            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
+            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||1;
           });
         });
         // Live scoring: add the current (in-progress) week's earned points from live picks,
@@ -1908,7 +1906,7 @@ function publishSeasonToHub(metaOnly){
           var liveResults=ST.results[curW]||{};
           activeGames(curW).forEach(function(gid){
             var pk=livePicks[gid], r=liveResults[gid];
-            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||0;
+            if(pk&&pk.side&&r&&pk.side===r) total+=Number(pk.conf)||1;
           });
         }
         totals[p]=total;
@@ -2729,8 +2727,7 @@ function fetchEspnSchedule(year,week,seasontype){
           if(existingSet[_gameKey(g.away, g.home)]) ST.importSelected[i] = true;
         });
       })();
-      ST.importConf=null;
-      ST.importTop25=false;
+      // no conference / ranking filters in this pool
       if(!ST.importGames.length) ST.importError="No games found. Try a different week or year.";
       draw();
     })
@@ -3210,8 +3207,8 @@ function setPickSide(weekId,gid,side){
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var cur=ST.picks[weekId][uk][gid]||{};
   var prevSide=cur.side;
-  if(cur.side===side) delete cur.side;
-  else cur.side=side;
+  if(cur.side===side){ delete cur.side; delete cur.conf; }
+  else { cur.side=side; cur.conf=1; }
   ST.picks[weekId][uk][gid]=cur;
   _savePickCache(weekId, uk, cur);
   // Update pick highlight in-place — no full redraw
@@ -4677,7 +4674,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     h+='</div>';
     h+='</div>';
   }
-  h+='<div class="conf-row"><span class="conf-label">Confidence</span>'+confChips(pick.conf,weekId,gid,N,effectiveCanPick,usedConfs)+'</div>';
+  // No confidence row — every game is worth the same, so the side is the whole pick.
   h+='</div>';
   return h;
 }
@@ -4889,9 +4886,9 @@ function renderStandings(){
   ensureHistoricPicks();
   var SEASON_WEEKS=ST.weekIds.length||SEASON_WEEK_DEFS.length;
   var MAX_PTS_PER_WEEK=(function(){
-    // Floor is a full slate of this pool's size; weeks with byes simply use fewer.
-    var full=GAME_IDS.length, max=full*(full+1)/2;
-    ST.weekIds.forEach(function(w){ var n=activeGames(w).length; if(n>0) max=Math.max(max,n*(n+1)/2); });
+    // One point per game in a flat pick'em, so a perfect week equals the slate size.
+    var max=GAME_IDS.length;
+    ST.weekIds.forEach(function(w){ var n=activeGames(w).length; if(n>0) max=Math.max(max,n); });
     return max;
   })();
 
@@ -4928,7 +4925,7 @@ function renderStandings(){
       var picks=((ST.picks[w]||{})[uid])||{}, res=ST.results[w]||{};
       activeGames(w).forEach(function(gid){
         var pk=picks[gid];
-        if(pk&&pk.side&&pk.conf&&!res[gid]) extra+=Number(pk.conf);
+        if(pk&&pk.side&&!res[gid]) extra+=Number(pk.conf)||1;
       });
     });
     return banked+extra;
@@ -5193,34 +5190,20 @@ function renderImportResults(weekId){
     return '';
   }
   // ESPN group IDs — do not renumber these without re-verifying against the API.
-  var CONFS=[
-    {v:"1",l:"ACC"},{v:"5",l:"Big Ten"},{v:"4",l:"Big 12"},{v:"8",l:"SEC"},
-    {v:"9",l:"Pac-12"},{v:"151",l:"AAC"},{v:"17",l:"MWC"},{v:"37",l:"Sun Belt"},
-    {v:"12",l:"CUSA"},{v:"15",l:"MAC"},{v:"18",l:"Ind"}
-  ];
+  // Conference list removed with the filters — one league here.
   var h='';
   var selCount=Object.keys(ST.importSelected).length;
-  var filteredGames=ST.importGames.filter(function(g){
-    var confOk=!ST.importConf||(g.awayConf===ST.importConf||g.homeConf===ST.importConf);
-    var rankOk=!ST.importTop25||(rankFor(g.away,g.awayId)||rankFor(g.home,g.homeId));
-    return confOk&&rankOk;
-  });
+  // Every game in the week is a candidate; nothing to filter by.
+  var filteredGames=ST.importGames.slice();
 
-  h+='<div style="padding:6px 10px;border-top:1px solid var(--border2);display:flex;gap:5px;flex-wrap:wrap">';
-  var _haveRanks=!!(Object.keys(RANKINGS_BY_ID||{}).length||Object.keys(RANKINGS||{}).length);
-  h+='<button id="b-imp-top25"'+(_haveRanks?'':' disabled title="Rankings not loaded yet"')+' style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(_haveRanks?'':'opacity:.45;cursor:not-allowed;')+(ST.importTop25?'background:var(--gold);color:var(--text)':'background:#fff;color:var(--muted)')+'"># '+x(_haveRanks?RANKINGS_SOURCE:"Top 25")+'</button>';
-  CONFS.forEach(function(c){
-    var active=ST.importConf===c.v;
-    h+='<button class="imp-conf-pill" data-conf="'+c.v+'" style="padding:3px 8px;border-radius:6px;border:2px solid var(--border);font-size:9px;font-weight:800;font-family:\'Nunito\',sans-serif;cursor:pointer;'+(active?'background:var(--blue-bg);color:var(--blue)':'background:#fff;color:var(--muted)')+'">'+(active?'✕ ':'')+c.l+'</button>';
-  });
-  h+='</div>';
-
+  // No conference or ranking filters — the NFL is 32 teams and one league.
   h+='<div style="padding:6px 10px;border-top:1px solid var(--border2)">';
   h+='<div style="display:flex;justify-content:space-between;align-items:center">';
   h+='<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Tap a game to add it</div>';
-  h+='<span style="font-size:12px;font-weight:900;color:'+(selCount===10?"var(--green)":selCount>10?"var(--red2)":"var(--gold-dark)")+'">'+selCount+' / 10 selected</span>';
+  var _need=GAME_IDS.length;
+  h+='<span style="font-size:12px;font-weight:900;color:'+(selCount===_need?"var(--green)":selCount>_need?"var(--red2)":"var(--gold-dark)")+'">'+selCount+' / '+_need+' selected</span>';
   h+='</div>';
-  h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:2px;line-height:1.3">Pick exactly 10. Press &amp; hold a game to mark it the tiebreaker (total points guess).</div>';
+  h+='<div style="font-size:8.5px;font-weight:700;color:var(--muted);margin-top:2px;line-height:1.3">Pick up to '+_need+'. Press &amp; hold a game to mark it the tiebreaker (total points guess).</div>';
   h+='</div>';
 
   var curTb=ST.tiebreaker[weekId]||{};
@@ -5981,13 +5964,14 @@ function renderGroupPicks(){
     active.forEach(function(gid){
       var p=picks[gid]||{};
       var r=results[gid];
-      if(p.side&&p.conf&&!r){
-        stillPossible+=Number(p.conf);
-        if(revealed[gid]) livePossible+=Number(p.conf);
+      if(p.side&&!r){
+        var _w=Number(p.conf)||1;
+        stillPossible+=_w;
+        if(revealed[gid]) livePossible+=_w;
         // A game you've called in the sandbox is settled as far as the scenario
         // is concerned, so its points belong in the projected score rather than
         // in what's still up for grabs.
-        if(!whatIfSide(gid)) openPossible+=Number(p.conf);
+        if(!whatIfSide(gid)) openPossible+=_w;
       }
     });
 
@@ -6083,7 +6067,7 @@ function renderGroupPicks(){
         } else {
           h+='<div style="font-size:8px;font-weight:700;color:var(--muted);max-width:52px;overflow:hidden;text-overflow:ellipsis">'+x(pickedName)+'</div>';
         }
-        h+='<div class="gp-pick-conf"'+(outcome==="correct"?' style="color:var(--green)"':outcome==="wrong"?' style="color:var(--red2)"':'')+'>'+( p.conf||'–')+'</div>';
+        // No confidence to show — the crest is the whole pick.
         h+='</div>';
       }
       h+='</td>';
@@ -6226,7 +6210,7 @@ function draw(){
   if(PUBLIC_VIEW)h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--blue-bg);border-bottom:2px solid var(--border);font-size:10px;font-weight:800;color:var(--blue)">&#128065; Public View &mdash; read only</div>';
   h+='<div class="topbar">';
   h+='<div class="topbar-left"><a href="index.html" id="b-hub" style="display:flex;align-items:center;gap:3px;text-decoration:none;color:var(--muted);font-size:9px;font-weight:600;padding:4px 8px;border:1px solid var(--border);border-radius:6px;white-space:nowrap">&#8592; Hub</a></div>';
-  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">NFL &middot; Confidence Pool'+(SEASON_YEAR?' &middot; '+SEASON_YEAR:'')+'</div></div>';
+  h+='<div class="topbar-center"><div class="app-name"><span class="scorecery-logo">SCORECERY</span></div><div class="app-sub">NFL &middot; Pick\'em'+(SEASON_YEAR?' &middot; '+SEASON_YEAR:'')+'</div></div>';
   h+='<div class="topbar-right">';
   if(ST.user){
     var _dispName = nameOf(ST.user);
@@ -6912,11 +6896,6 @@ function bind(){
       DB.ref(BASE+"/meta/weekMeta/"+ST.curWeek).set(ST._weekMeta[ST.curWeek]);
     }
     fetchEspnSchedule(year, espnWeek, seasontype);
-  });
-  el=document.getElementById("b-imp-top25"); if(el) el.addEventListener("click",function(){ ST.importTop25=!ST.importTop25; draw(); });
-  els=document.querySelectorAll(".imp-conf-pill[data-conf]");
-  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    ST.importConf=(ST.importConf===this.getAttribute("data-conf"))?null:this.getAttribute("data-conf"); draw();
   });
   els=document.querySelectorAll("[data-imp-idx]");
   for(i=0;i<els.length;i++) els[i].addEventListener("change",function(){
