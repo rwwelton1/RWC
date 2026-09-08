@@ -3641,14 +3641,32 @@ function _topPickCarnage(weekId, active){
   return n ? {hit:hit, miss:miss, n:n, missShare:miss/n} : null;
 }
 
-// Shape of the field: what a typical score looked like and how tight it was.
+// How tight the week was at the top.
 function _fieldShape(scored, winnerScore){
   if(scored.length<4) return null;
-  var tot=0; scored.forEach(function(r){ tot+=r.total; });
-  var avg=tot/scored.length;
-  var beat=scored.filter(function(r){ return r.total>avg; }).length;
   var within5=scored.filter(function(r){ return winnerScore-r.total<=5; }).length;
-  return {avg:Math.round(avg*10)/10, beat:beat, n:scored.length, within5:within5};
+  return {n:scored.length, within5:within5};
+}
+
+// Best and worst records against the spread. Worth its own line because a
+// confidence pool scores by weight, not by hit count — the best record often
+// isn't the week winner, and that gap is the interesting part.
+function _recordExtremes(scored, winnerName){
+  if(scored.length<4) return null;
+  var byRec=scored.slice().sort(function(a,b){
+    return (b.correct-b.wrong)-(a.correct-a.wrong) || b.correct-a.correct;
+  });
+  var top=byRec[0], bot=byRec[byRec.length-1];
+  var bestNames=byRec.filter(function(r){ return r.correct===top.correct && r.wrong===top.wrong; })
+                     .map(function(r){ return nameOf(r.name); });
+  var worstNames=byRec.filter(function(r){ return r.correct===bot.correct && r.wrong===bot.wrong; })
+                      .map(function(r){ return nameOf(r.name); });
+  return {
+    best:{names:bestNames, correct:top.correct, wrong:top.wrong, pts:top.total},
+    worst:{names:worstNames, correct:bot.correct, wrong:bot.wrong, pts:bot.total},
+    // Did the best record actually win the week?
+    bestWon: bestNames.indexOf(winnerName)>=0
+  };
 }
 // An unbeaten card, or the fact that nobody managed one.
 function _cleanSheets(scored){
@@ -3784,8 +3802,12 @@ function buildWeekRecap(weekId, mode){
     if(_sp.trap && _sp.trap.share>=0.6 && _sp.trap.wrong>=3){
       lines.push("Trap game — "+_sp.trap.team+", "+_sp.trap.wrong+" of "+_sp.trap.tot+" missed it");
     }
-    var _fs=_fieldShape(scored, winnerScore);
-    if(_fs) lines.push("Average — "+_fs.avg+", beaten by "+_fs.beat+" of "+_fs.n);
+    var _re=_recordExtremes(scored, scored[0].name);
+    if(_re){
+      lines.push("Best record — "+_joinNames(_re.best.names)+", "+_re.best.correct+"-"+_re.best.wrong+
+                 (_re.bestWon?"":" ("+_re.best.pts+" pts)"));
+      lines.push("Worst record — "+_joinNames(_re.worst.names)+", "+_re.worst.correct+"-"+_re.worst.wrong);
+    }
     var _pu=_pushCount(weekId, active);
     if(_pu) lines.push("Pushes — "+_pu+", half points each");
     var _cl=_cleanSheets(scored);
@@ -3934,21 +3956,34 @@ function buildWeekRecap(weekId, mode){
       }
     }
 
-    // How the field looked as a whole.
+    // Tightness at the top, when it's actually tight.
     var shape=_fieldShape(scored, winnerScore);
-    if(shape){
-      if(shape.within5>=3 && shape.within5<=Math.max(4,Math.round(shape.n*0.25))){
+    if(shape && shape.within5>=3 && shape.within5<=Math.max(4,Math.round(shape.n*0.25))){
+      addColour(null, _pick(rnd,[
+        "Tight at the top: "+shape.within5+" finished within 5 of the lead.",
+        shape.within5+" players were within a touchdown of winning it."
+      ]));
+    }
+    // Records against the spread, which don't have to match the points.
+    var rec=_recordExtremes(scored, scored[0].name);
+    if(rec){
+      var bn=_joinNames(rec.best.names), br=rec.best.correct+"-"+rec.best.wrong;
+      if(!rec.bestWon){
         addColour(null, _pick(rnd,[
-          "Tight at the top: "+shape.within5+" finished within 5 of the lead.",
-          shape.within5+" players were within a touchdown of winning it."
+          bn+" had the best record at "+br+" and still didn't win it \u2014 "+rec.best.pts+" points.",
+          "Best card of the week belonged to "+bn+" ("+br+"), worth only "+rec.best.pts+".",
+          bn+" went "+br+", the best in the pool, and finished with "+rec.best.pts+"."
         ]));
       } else {
         addColour(null, _pick(rnd,[
-          "The group averaged "+shape.avg+"; "+shape.beat+" of "+shape.n+" beat that.",
-          "Par for the week was "+shape.avg+", cleared by "+shape.beat+" of "+shape.n+".",
-          shape.beat+" of "+shape.n+" finished above the "+shape.avg+" average."
+          bn+" also had the best record at "+br+".",
+          "Points and record agreed for once: "+bn+" on "+br+"."
         ]));
       }
+      addColour(null, _pick(rnd,[
+        "Worst card went to "+_joinNames(rec.worst.names)+" at "+rec.worst.correct+"-"+rec.worst.wrong+".",
+        _joinNames(rec.worst.names)+" finished "+rec.worst.correct+"-"+rec.worst.wrong+", the worst of the lot."
+      ]));
     }
     // Unbeaten cards are worth a line either way.
     var clean=_cleanSheets(scored);
