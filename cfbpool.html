@@ -3085,6 +3085,62 @@ function hoursToLock(weekId){
   return (lt-Date.now())/3600000;
 }
 
+// The week's slate as plain text, for the opening email.
+function slateText(weekId, compact){
+  var games=ST.games[weekId]||{}, active=activeGames(weekId);
+  if(!active.length) return "";
+  var label=ST.weekLabels[weekId]||weekId;
+  var lines=[label+" \u2014 "+active.length+" game"+(active.length!==1?"s":""), ""];
+  active.forEach(function(gid){
+    var g=games[gid]||{};
+    var fav=(g.favSide==="away")?g.away:g.home;
+    var line=(g.away||"?")+" @ "+(g.home||"?");
+    if(g.favSide==="even"||!g.spread) line+="  (pick'em)";
+    else line+="  ("+fav+" -"+g.spread+")";
+    // Compact drops the kickoff time and the game name — the matchup and number
+    // are what people need, and the rest is what pushes a mailto over the edge.
+    if(!compact){
+      if(g.kickoff) line+="  \u2014 "+g.kickoff;
+      if(g.nick) line="["+g.nick+"] "+line;
+    }
+    lines.push(line);
+  });
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  if(tb.away&&tb.home) lines.push("", "Tiebreaker: "+tb.away+" @ "+tb.home+" \u2014 "+tbLabel(weekId));
+  return lines.join("\n");
+}
+
+// Opening email: the full slate to everyone, not just whoever is outstanding.
+// Returns {href, overflow, pasted} — overflow means the slate wouldn't survive
+// a mailto and has been put on the clipboard instead.
+function slateMailto(weekId){
+  var to=[];
+  (PARTS||[]).forEach(function(p){ var e=emailOf(p); if(e) to.push(e); });
+  if(!to.length) return null;
+  var label=ST.weekLabels[weekId]||weekId;
+  var link=location.origin+location.pathname+(GROUP_ID?("?group="+encodeURIComponent(GROUP_ID)):"");
+  var lt=groupLockTs(weekId);
+  var closes=lt ? new Date(lt).toLocaleString(undefined,
+      {weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
+  var bcc=encodeURIComponent(to.join(","));
+  var subj=encodeURIComponent(label+" is up \u2014 get your picks in");
+  function wrap(slate){
+    return slate+"\n\n"+(closes?("Picks close "+closes+".\n\n"):"")+
+           "Submit here: "+link+"\n\n\u2014 Scorecery";
+  }
+  function build(b){ return "mailto:?bcc="+bcc+"&subject="+subj+"&body="+encodeURIComponent(b); }
+  var full=wrap(slateText(weekId,false));
+  var href=build(full);
+  if(href.length<=1900) return {href:href, overflow:false, body:full};
+  // Try again without kickoff times and game names before giving up on the link.
+  var lean=wrap(slateText(weekId,true));
+  href=build(lean);
+  if(href.length<=1900) return {href:href, overflow:false, body:lean};
+  // Still too long. The addresses can't be retyped, so they stay in the link and
+  // the slate goes to the clipboard to be pasted.
+  return {href:"mailto:?bcc="+bcc+"&subject="+subj, overflow:true, body:full};
+}
+
 // Prefilled message. BCC keeps the list private and stops 40 reply-alls.
 function remindMailto(weekId){
   var m=missingPickers(weekId);
@@ -5446,7 +5502,8 @@ function renderAdmin(){
         if(_hrs!=null) h+=' &middot; locks in '+(_hrs<1?"under an hour":Math.round(_hrs)+"h");
       }
       h+='</span>';
-      if(_mp.list.length) h+='<button class="adm-btn" id="b-remind-send">Compose</button>';
+      h+='<button class="adm-btn" id="b-slate-send">Slate</button>';
+      if(_mp.list.length) h+='<button class="adm-btn" id="b-remind-send">Nudge</button>';
       h+='</div>';
       // A day out is the moment worth acting on, so say so plainly.
       if(_mp.list.length && _hrs!=null && _hrs<=24 && _hrs>0){
@@ -6940,6 +6997,17 @@ function bind(){
   el=document.getElementById("b-remind-off"); if(el) el.addEventListener("click",function(){
     ST.remindersOn=false; if(DB) DB.ref(BASE+"/meta/remindersOn").set(false); draw();
   });
+  el=document.getElementById("b-slate-send"); if(el) el.addEventListener("click",function(){
+    var r=slateMailto(ST.curWeek||displayWeekId());
+    if(!r){ toast("No email addresses on file"); return; }
+    if(r.overflow){
+      // Too long to survive the link — clipboard, then an empty draft to paste into.
+      try{ navigator.clipboard.writeText(r.body); toast("Slate copied \u2014 paste it into the draft"); }
+      catch(e){ toast("Slate too long for a link \u2014 copy it from the Picks tab"); }
+    }
+    location.href=r.href;
+  });
+
   el=document.getElementById("b-remind-send"); if(el) el.addEventListener("click",function(){
     var href=remindMailto(ST.curWeek||displayWeekId());
     if(!href){ toast("Everyone is already in"); return; }
