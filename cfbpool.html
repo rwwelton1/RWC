@@ -1046,7 +1046,7 @@ function loadUserDir(cb){
     var all=sn.val()||{};
     // Merge rather than replace: a spectator's read of /users returns nothing, and
     // clearing here would discard the names seeded from the group record.
-    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯",fanTeam:u.fanTeam||""}; });
+    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯",fanTeam:u.fanTeam||"",email:u.googleEmail||""}; });
     cb&&cb();
   }).catch(function(){ cb&&cb(); });
 }
@@ -2338,6 +2338,7 @@ function loadData(){
       DB.ref(BASE+"/spreadsLocked").on("value",function(sn){ST.spreadsLocked=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/meta/chatEnabled").on("value",function(sn){ ST.chatEnabled=!!sn.val(); scheduleDraw(); });
+      DB.ref(BASE+"/meta/remindersOn").on("value",function(sn){ ST.remindersOn=!!sn.val(); scheduleDraw(); });
       // Only the most recent slice is kept — an old thread shouldn't cost a big read.
       DB.ref(BASE+"/chat").limitToLast(CHAT_KEEP).on("value",function(sn){ ST.chat=sn.val()||{}; scheduleDraw(); });
       DB.ref(BASE+"/meta/money").on("value",function(sn){ST.money=sn.val()||null;scheduleDraw();});
@@ -2379,6 +2380,7 @@ function loadData(){
         // Seeded here as well as by its own listener, so the tab row is correct
         // on the first paint instead of gaining a Chat tab a tick later.
         ST.chatEnabled=!!meta.chatEnabled;
+        ST.remindersOn=!!meta.remindersOn;
         ST.weekIds=meta.weekIds||[];
         ST.weekLabels=meta.weekLabels||{};
         ST._weekMeta=meta.weekMeta||{};
@@ -3054,6 +3056,66 @@ function bootScreen(){
 }
 
 function chatOn(){ return !!ST.chatEnabled; }
+
+// ── PICKS REMINDER ────────────────────────────────────────
+// A static page can't send mail on a schedule, so this prepares the message and
+// the admin taps send. The app decides who needs it and when to prompt.
+function remindersOn(){ return !!ST.remindersOn; }
+function emailOf(uid){ var e=USER_DIR[uid]; return (e&&e.email)||""; }
+
+// Anyone without a full slate in. Missing an email is reported separately so a
+// gap in the address list can't silently drop someone.
+function missingPickers(weekId){
+  var active=activeGames(weekId), need=active.length, out=[], noEmail=[];
+  (PARTS||[]).forEach(function(p){
+    var picks=((ST.picks[weekId]||{})[p])||{}, made=0;
+    active.forEach(function(gid){ if(pickComplete(picks[gid])) made++; });
+    if(made>=need) return;
+    var em=emailOf(p);
+    if(em) out.push({uid:p, name:nameOf(p), made:made, email:em});
+    else noEmail.push(nameOf(p));
+  });
+  return {list:out, need:need, noEmail:noEmail};
+}
+
+// Hours until the week's first kickoff; null when unknown.
+function hoursToLock(weekId){
+  var lt=groupLockTs(weekId);
+  if(!lt) return null;
+  return (lt-Date.now())/3600000;
+}
+
+// Prefilled message. BCC keeps the list private and stops 40 reply-alls.
+function remindMailto(weekId){
+  var m=missingPickers(weekId);
+  if(!m.list.length) return null;
+  var label=ST.weekLabels[weekId]||weekId;
+  var hrs=hoursToLock(weekId);
+  var when = (hrs==null) ? "before kickoff"
+           : hrs<1       ? "within the hour"
+           : hrs<24      ? ("in "+Math.round(hrs)+" hours")
+           : ("in "+Math.round(hrs/24)+" day"+(Math.round(hrs/24)!==1?"s":""));
+  var link=location.origin+location.pathname+(GROUP_ID?("?group="+encodeURIComponent(GROUP_ID)):"");
+  var body=[
+    "Picks for "+label+" close "+when+".",
+    "",
+    "Submit here: "+link,
+    "",
+    "— Scorecery"
+  ].join("\n");
+  var bcc=m.list.map(function(r){return r.email;}).join(",");
+  function build(b){
+    return "mailto:?bcc="+encodeURIComponent(bcc)+
+           "&subject="+encodeURIComponent("Reminder: "+label+" picks due")+
+           "&body="+encodeURIComponent(b);
+  }
+  var href=build(body);
+  // Mail clients start truncating a mailto somewhere around 2000 characters, and
+  // a long BCC list eats most of that. Recipients matter more than prose, so
+  // shed the body rather than risk losing addresses.
+  if(href.length>1900) href=build("Picks for "+label+" close "+when+". Submit here: "+link);
+  return href;
+}
 function chatCanPost(){ return !PUBLIC_VIEW && !!ST.user && chatOn(); }
 var CHAT_MAX=400;          // characters per message
 var CHAT_KEEP=200;         // messages retained client-side
@@ -5363,6 +5425,41 @@ function renderAdmin(){
     }
     h+='</div>';
 
+    // Picks reminder. The app works out who and when; sending is one tap,
+    // because a page with no server can't post mail on a timer.
+    h+='<div class="adm-game">';
+    h+='<div class="adm-game-title">Picks Reminder &mdash; email whoever hasn\'t submitted</div>';
+    h+='<div class="adm-btns">';
+    h+='<button class="adm-btn'+(remindersOn()?" sel":"")+'" id="b-remind-on">&#128231; On</button>';
+    h+='<button class="adm-btn'+(!remindersOn()?" sel":"")+'" id="b-remind-off">Off</button>';
+    h+='</div>';
+    if(remindersOn()){
+      var _rw=ST.curWeek||displayWeekId();
+      var _mp=missingPickers(_rw);
+      var _hrs=hoursToLock(_rw);
+      h+='<div class="adm-row" style="margin-top:8px">';
+      h+='<span style="font-size:10px;font-weight:700;color:var(--muted);flex:1">';
+      if(!_mp.list.length && !_mp.noEmail.length){
+        h+='Everyone is in for '+x(ST.weekLabels[_rw]||_rw)+'.';
+      } else {
+        h+=_mp.list.length+' still to submit';
+        if(_hrs!=null) h+=' &middot; locks in '+(_hrs<1?"under an hour":Math.round(_hrs)+"h");
+      }
+      h+='</span>';
+      if(_mp.list.length) h+='<button class="adm-btn" id="b-remind-send">Compose</button>';
+      h+='</div>';
+      // A day out is the moment worth acting on, so say so plainly.
+      if(_mp.list.length && _hrs!=null && _hrs<=24 && _hrs>0){
+        h+='<div style="margin-top:6px;font-size:10px;font-weight:800;color:var(--red2)">'+
+           'Under a day to kickoff &mdash; good time to send.</div>';
+      }
+      if(_mp.noEmail.length){
+        h+='<div style="margin-top:6px;font-size:9px;font-weight:700;color:var(--muted)">'+
+           'No address on file for '+x(_joinNames(_mp.noEmail))+' &mdash; they won\'t be emailed.</div>';
+      }
+    }
+    h+='</div>';
+
     // Group chat — off unless an admin turns it on.
     h+='<div class="adm-game">';
     h+='<div class="adm-game-title">Group Chat &mdash; a shared thread for everyone in this pool</div>';
@@ -6835,6 +6932,18 @@ function bind(){
     ST.money={enabled:true, buyIn:amt, weeklyPct:moneyWeeklyPct()};
     if(DB) DB.ref(BASE+"/meta/money").set(ST.money);
     toast("\u{1F4B0} Buy-in set to "+moneyFmt(amt)); draw();
+  });
+
+  el=document.getElementById("b-remind-on"); if(el) el.addEventListener("click",function(){
+    ST.remindersOn=true; if(DB) DB.ref(BASE+"/meta/remindersOn").set(true); draw();
+  });
+  el=document.getElementById("b-remind-off"); if(el) el.addEventListener("click",function(){
+    ST.remindersOn=false; if(DB) DB.ref(BASE+"/meta/remindersOn").set(false); draw();
+  });
+  el=document.getElementById("b-remind-send"); if(el) el.addEventListener("click",function(){
+    var href=remindMailto(ST.curWeek||displayWeekId());
+    if(!href){ toast("Everyone is already in"); return; }
+    location.href=href;
   });
 
   el=document.getElementById("b-chat-on"); if(el) el.addEventListener("click",function(){
