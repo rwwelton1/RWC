@@ -424,6 +424,10 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .chat-msg{max-width:82%;padding:7px 10px;border-radius:11px;background:var(--cream);
   border:2px solid var(--border2);align-self:flex-start}
 .chat-msg.mine{align-self:flex-end;background:var(--gold-bg);border-color:var(--gold)}
+/* Posts from the pool itself, so they read as announcements not chatter. */
+.chat-msg.bot{align-self:center;max-width:92%;background:var(--purple-bg);
+  border-color:var(--purple);text-align:left}
+.chat-msg.bot .chat-who{color:var(--purple)}
 .chat-who{font-size:9px;font-weight:900;color:var(--muted);margin-bottom:2px}
 .chat-text{font-size:12px;font-weight:600;color:var(--text);line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
 .chat-when{font-size:8px;font-weight:700;color:var(--dim);margin-top:3px}
@@ -625,8 +629,10 @@ function toast(m){var el=document.getElementById("toast");el.innerHTML=m;el.clas
 // ── IDENTITY LAYER (mirrors index.html) ──────────────────────────────────────
 // PARTS holds uids; ST.user is a uid; pick keys are uids. Display via USER_DIR.
 var USER_DIR = {};   // { uid: { username, emoji } }
+var BOT_UID="__scorecery";
 function nameOf(uid){
   if(!uid) return "";
+  if(uid===BOT_UID) return "Scorecery";
   var e=USER_DIR[uid];
   if(e&&e.username) return e.username;
   if(typeof uid==="string" && uid.indexOf(" ")>=0) return uid;  // legacy tolerance
@@ -634,7 +640,24 @@ function nameOf(uid){
   if(!USER_DIR || Object.keys(USER_DIR).length===0) return "";
   return "(unknown)";
 }
-function emojiOf(uid){ var e=USER_DIR[uid]; return (e&&e.emoji)||_EM[uid]||""; }
+function emojiOf(uid){
+  if(uid===BOT_UID) return "\uD83D\uDD2E";
+  var e=USER_DIR[uid]; return (e&&e.emoji)||_EM[uid]||"";
+}
+
+// Auto-posts to chat. The key makes each one once-only: the write is a
+// transaction, so two admins with the app open can't both post it, and a
+// rescored game can't repost an old line.
+function botPost(key, text){
+  if(!DB || PUBLIC_VIEW || !text) return;
+  if(!(typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) return;
+  DB.ref(BASE+"/autoposts/"+key).transaction(
+    function(cur){ return cur ? undefined : Date.now(); },
+    function(err, committed){
+      if(err || !committed) return;                 // someone else got there first
+      DB.ref(BASE+"/chat").push().set({uid:BOT_UID, text:text, ts:Date.now(), bot:true});
+    });
+}
 
 // ── TEAM THEMES ───────────────────────────────────────────
 // A player can dress the app in their team's colors. Ported from the dynasty app,
@@ -2700,12 +2723,17 @@ function autoPostFinalsFromScoreboard(){
       setResult(wk,gid,_r);
       setGameField(wk,gid,"awayScore",as);
       setGameField(wk,gid,"homeScore",hs);
+      // Needle anyone whose big number just died on this game.
+      botPost("bust_"+wk+"_"+gid, bustNeedle(wk,gid,_r));
       posted++;
       return;
     }
   });
   if(posted){
     toast("\u2713 "+posted+" result"+(posted!==1?"s":"")+" posted automatically");
+    // Week just finished? Drop the recap in chat rather than waiting for someone
+    // to remember to share it.
+    if(weekIsComplete(wk)) botPost("recap_"+wk, buildWeekRecap(wk,"prose"));
   }
   return posted;
 }
@@ -3076,9 +3104,12 @@ function renderChat(){
   } else {
     msgs.forEach(function(m){
       var mine=(m.uid===ST.user);
-      h+='<div class="chat-msg'+(mine?" mine":"")+'">';
+      var isBot=(m.uid===BOT_UID||m.bot);
+      h+='<div class="chat-msg'+(mine?" mine":"")+(isBot?" bot":"")+'">';
       if(!mine) h+='<div class="chat-who">'+pem(m.uid)+x(nameOf(m.uid)||"Player")+'</div>';
-      h+='<div class="chat-text">'+x(String(m.text))+'</div>';
+      // Auto-posts arrive with newlines; keep them rather than running the whole
+      // recap into one paragraph.
+      h+='<div class="chat-text">'+x(String(m.text)).replace(/\n/g,"<br>")+'</div>';
       h+='<div class="chat-when">'+x(chatTime(m.ts))+'</div>';
       h+='</div>';
     });
@@ -3545,17 +3576,175 @@ function _joinNames(arr){
 
 // Weekly recap. mode "prose" (default) = narrative paragraph like a commissioner email;
 // mode "card" = compact stat card with medals.
+// ── RECAP COLOUR ──────────────────────────────────────────
+// Seeded off the week id, so a given week always reads the same however many
+// times it's shared, while different weeks pick different phrasings.
+function _recapRand(weekId){
+  // FNV-1a then xorshift. The obvious version — h*31 seeded into a linear
+  // congruential step — barely diverges for adjacent ids, so "w1" and "w2" drew
+  // almost the same first number and every week picked the same phrasing.
+  var h=2166136261>>>0, str=String(weekId||"w");
+  for(var i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619)>>>0; }
+  return function(){
+    h^=h<<13; h>>>=0;
+    h^=h>>>17;
+    h^=h<<5;  h>>>=0;
+    return h/4294967296;
+  };
+}
+function _pick(rnd, arr){ return arr[Math.floor(rnd()*arr.length)]; }
+
+// Season table through this week — the recap's biggest gap was that it only
+// ever talked about the week in isolation.
+function _seasonTop(weekId, n){
+  var ids=(ST.weekIds||[]), idx=ids.indexOf(weekId);
+  if(idx<0) return null;
+  var tot=(PARTS||[]).map(function(p){
+    var t=0; for(var i=0;i<=idx;i++) t+=weekScore(ids[i],p).total;
+    return {name:nameOf(p), total:t};
+  }).filter(function(r){ return r.total>0; });
+  if(tot.length<3) return null;
+  tot.sort(function(a,b){ return b.total-a.total; });
+  return tot.slice(0, n||3);
+}
+// Is this the best single week anyone has posted so far?
+function _seasonHigh(weekId, winnerScore){
+  var ids=(ST.weekIds||[]), idx=ids.indexOf(weekId);
+  if(idx<1) return false;                       // week 1 is trivially the high
+  var best=0;
+  for(var i=0;i<idx;i++){
+    (PARTS||[]).forEach(function(p){
+      var t=weekScore(ids[i],p).total;
+      if(t>best) best=t;
+    });
+  }
+  return winnerScore>best;
+}
+
+// How the group's biggest calls fared. Each player's top confidence for the
+// week, win or lose — at any size this is the number people actually feel.
+function _topPickCarnage(weekId, active){
+  var results=ST.results[weekId]||{}, hit=0, miss=0;
+  (PARTS||[]).forEach(function(p){
+    var picks=((ST.picks[weekId]||{})[p])||{}, top=null;
+    active.forEach(function(gid){
+      var pk=picks[gid];
+      if(!pk||!pk.side||!pk.conf) return;
+      if(!top || Number(pk.conf)>Number(picks[top].conf)) top=gid;
+    });
+    if(!top) return;
+    var r=results[top];
+    if(!r||r==="push") return;                 // undecided or void, no verdict
+    if(picks[top].side===r) hit++; else miss++;
+  });
+  var n=hit+miss;
+  return n ? {hit:hit, miss:miss, n:n, missShare:miss/n} : null;
+}
+
+// Shape of the field: what a typical score looked like and how tight it was.
+function _fieldShape(scored, winnerScore){
+  if(scored.length<4) return null;
+  var tot=0; scored.forEach(function(r){ tot+=r.total; });
+  var avg=tot/scored.length;
+  var beat=scored.filter(function(r){ return r.total>avg; }).length;
+  var within5=scored.filter(function(r){ return winnerScore-r.total<=5; }).length;
+  return {avg:Math.round(avg*10)/10, beat:beat, n:scored.length, within5:within5};
+}
+// An unbeaten card, or the fact that nobody managed one.
+function _cleanSheets(scored){
+  return scored.filter(function(r){ return r.wrong===0 && r.correct>=5; })
+               .map(function(r){ return nameOf(r.name); });
+}
+// Who moved most in the season table this week.
+function _biggestMover(weekId){
+  var ids=(ST.weekIds||[]), idx=ids.indexOf(weekId);
+  if(idx<1) return null;                       // no prior week to move from
+  function ranksThrough(upto){
+    var tot=(PARTS||[]).map(function(p){
+      var t=0;
+      for(var i=0;i<=upto;i++) t+=weekScore(ids[i],p).total;
+      return {p:p,t:t};
+    });
+    var out={};
+    tot.forEach(function(a){
+      out[a.p]=1+tot.filter(function(b){ return b.t>a.t; }).length;
+    });
+    return out;
+  }
+  var before=ranksThrough(idx-1), after=ranksThrough(idx), best=null;
+  (PARTS||[]).forEach(function(p){
+    var gain=before[p]-after[p];
+    if(gain>0 && (!best||gain>best.gain)) best={name:nameOf(p), gain:gain, to:after[p]};
+  });
+  return (best && best.gain>=3) ? best : null;
+}
+
+// The biggest confidence that went down — the mirror of the gutsiest hit.
+function _biggestBust(weekId, active){
+  var games=ST.games[weekId]||{}, results=ST.results[weekId]||{}, worst=null;
+  (PARTS||[]).forEach(function(p){
+    var picks=((ST.picks[weekId]||{})[p])||{};
+    active.forEach(function(gid){
+      var pk=picks[gid], r=results[gid], g=games[gid];
+      if(!pk||!pk.side||!r||r==="push"||pk.side===r||!g) return;
+      var conf=Number(pk.conf)||0;
+      if(!worst||conf>worst.conf){
+        worst={name:p, conf:conf, team:(pk.side==="away"?g.away:g.home)};
+      }
+    });
+  });
+  return worst;
+}
+// The game that caught the most people out, and the one the group nailed.
+function _groupSplits(weekId, active){
+  var games=ST.games[weekId]||{}, results=ST.results[weekId]||{};
+  var trap=null, chalk=null;
+  active.forEach(function(gid){
+    var r=results[gid], g=games[gid];
+    if(!r||r==="push"||!g) return;
+    var wrong=0, tot=0;
+    (PARTS||[]).forEach(function(p){
+      var pk=((ST.picks[weekId]||{})[p]||{})[gid];
+      if(!pk||!pk.side) return;
+      tot++; if(pk.side!==r) wrong++;
+    });
+    if(tot<3) return;                       // too few picks to call it a trend
+    var team=(r==="away"?g.away:g.home);
+    if(!trap||wrong/tot>trap.share) trap={team:team, wrong:wrong, tot:tot, share:wrong/tot};
+    if(!chalk||(tot-wrong)/tot>chalk.share) chalk={team:team, right:tot-wrong, tot:tot, share:(tot-wrong)/tot};
+  });
+  return {trap:trap, chalk:chalk};
+}
+// How many pushes landed, since half-points are a talking point of their own.
+function _pushCount(weekId, active){
+  var results=ST.results[weekId]||{}, n=0;
+  active.forEach(function(gid){ if(results[gid]==="push") n++; });
+  return n;
+}
+
 function shareWeekRecap(weekId, mode){
+  var text=buildWeekRecap(weekId, mode);
+  if(!text){ toast("No results yet for this week"); return; }
+  if(navigator.share){
+    navigator.share({text:text}).catch(function(){});
+  } else {
+    try{ navigator.clipboard.writeText(text); toast("Recap copied ✓"); }
+    catch(e){ toast("Recap ready"); }
+  }
+}
+
+// Text only, so the same words can be auto-posted to chat.
+function buildWeekRecap(weekId, mode){
   mode = mode || "prose";
   var label=ST.weekLabels[weekId]||weekId;
   var active=activeGames(weekId);
-  if(!active.length){ toast("No games this week yet"); return; }
+  if(!active.length) return "";
 
   var scored=PARTS.map(function(p){
     var ws=weekScore(weekId,p);
     return {name:p, total:ws.total, correct:ws.correct, wrong:ws.wrong};
   }).filter(function(r){ return (r.correct+r.wrong)>0; });
-  if(!scored.length){ toast("No results yet for "+label); return; }
+  if(!scored.length) return "";
   scored.sort(function(a,b){ return b.total-a.total; });
 
   // Group into placement tiers (handles ties).
@@ -3564,6 +3753,12 @@ function shareWeekRecap(weekId, mode){
   var secondScore=null, seconds=[];
   for(var i=0;i<scored.length;i++){ if(scored[i].total<winnerScore){ secondScore=scored[i].total; break; } }
   if(secondScore!=null) seconds=scored.filter(function(r){return r.total===secondScore;}).map(function(r){return nameOf(r.name);});
+  // Third tier, so the podium can be named the way the pool emails do.
+  var thirdScore=null, thirds=[];
+  if(secondScore!=null){
+    for(var t=0;t<scored.length;t++){ if(scored[t].total<secondScore){ thirdScore=scored[t].total; break; } }
+    if(thirdScore!=null) thirds=scored.filter(function(r){return r.total===thirdScore;}).map(function(r){return nameOf(r.name);});
+  }
   var lastScore=scored[scored.length-1].total;
   var lasts=scored.filter(function(r){return r.total===lastScore;}).map(function(r){return nameOf(r.name);});
 
@@ -3582,44 +3777,327 @@ function shareWeekRecap(weekId, mode){
       lines.push("🥄 Last: "+_joinNames(lasts)+" ("+lastScore+" pts)");
     }
     if(gutsy) lines.push("💪 Gutsiest: "+nameOf(gutsy.name)+" — "+gutsy.team+" for "+gutsy.conf);
+    var _bust=_biggestBust(weekId, active);
+    if(_bust) lines.push("💀 Costliest: "+nameOf(_bust.name)+" — "+_bust.team+" for "+_bust.conf);
+    var _sp=_groupSplits(weekId, active);
+    if(_sp.trap && _sp.trap.share>=0.6 && _sp.trap.wrong>=3){
+      lines.push("🪤 Trap game: "+_sp.trap.team+" ("+_sp.trap.wrong+"/"+_sp.trap.tot+" missed)");
+    }
+    var _pu=_pushCount(weekId, active);
+    if(_pu) lines.push("🤝 "+_pu+" push"+(_pu!==1?"es":"")+" — half points");
+    var _tp=_topPickCarnage(weekId, active);
+    if(_tp && _tp.n>=4) lines.push("🎯 Top picks: "+_tp.hit+"-"+_tp.miss+" across the group");
+    var _st=_seasonTop(weekId,3);
+    if(_st){
+      lines.push("");
+      lines.push("📊 Season: "+_st.map(function(r,i){
+        return (i+1)+". "+r.name+" "+r.total;
+      }).join("  ·  "));
+    }
     lines.push("");
     lines.push("— via Scorecery");
     text=lines.join("\n");
   } else {
-    // Narrative prose.
+    // Narrative prose. Every beat has a few phrasings; the seed is the week id,
+    // so a week always reads the same however often it's shared.
+    var rnd=_recapRand(weekId);
     var parts=[];
-    // Winner sentence with win-count context.
     var wc = winCounts[scored[0].name]||1;
-    var winnerPhrase;
+    var margin = (secondScore!=null) ? (winnerScore-secondScore) : null;
+
+    // Winner.
     if(winners.length>1){
-      winnerPhrase=_joinNames(winners)+" tied to win "+label+" with "+winnerScore+" points";
+      parts.push(_pick(rnd,[
+        _joinNames(winners)+" couldn't be separated atop "+label+", all on "+winnerScore+".",
+        "Dead heat in "+label+": "+_joinNames(winners)+" all finished on "+winnerScore+".",
+        _joinNames(winners)+" tied for the "+label+" win with "+winnerScore+" points."
+      ]));
     } else {
-      winnerPhrase=winners[0]+" won "+label+" with "+winnerScore+" points"
-        + (wc>1 ? " — their "+_ordinal(wc)+" weekly win of the season" : "");
+      var w=winners[0];
+      // "our first two-time winner" only holds if nobody has got there already.
+      var firstMulti = wc>1 && !Object.keys(winCounts).some(function(k){
+        return k!==scored[0].name && (winCounts[k]||0)>=wc;
+      });
+      var tag = firstMulti ? (" \u2014 our first "+(wc===2?"two":wc===3?"three":wc)+"-time winner")
+              : wc>1       ? (" \u2014 win number "+wc+" this season")
+              : "";
+      parts.push(_pick(rnd,[
+        w+" won "+label+" with "+winnerScore+" points"+tag+".",
+        w+" takes "+label+", "+winnerScore+" points"+tag+".",
+        label+" belongs to "+w+" \u2014 "+winnerScore+" points"+tag+".",
+        w+" is your "+label+" winner on "+winnerScore+tag+"."
+      ]));
+      if(_seasonHigh(weekId, winnerScore)){
+        parts.push(_pick(rnd,[
+          "That's the highest score anyone has posted this season.",
+          "Best single week of the season so far.",
+          "No one has scored more in a week all year."
+        ]));
+      }
     }
-    parts.push(winnerPhrase+".");
-    // Second place.
+
+    // Runner-up, with the margin where it's interesting.
     if(seconds.length){
-      parts.push((seconds.length>1?_joinNames(seconds)+" tied for 2nd":seconds[0]+" took 2nd")+" with "+secondScore+".");
+      var runner=(seconds.length>1?_joinNames(seconds):seconds[0]);
+      if(margin!==null && margin<=1){
+        parts.push(_pick(rnd,[
+          runner+" fell "+margin+" short on "+secondScore+" — agonising.",
+          "Just "+margin+" point"+(margin!==1?"s":"")+" back: "+runner+" on "+secondScore+".",
+          runner+" came up "+margin+" light with "+secondScore+"."
+        ]));
+      } else if(margin!==null && margin>=10){
+        parts.push(_pick(rnd,[
+          runner+" was next on "+secondScore+", a distant "+margin+" adrift.",
+          runner+" led the chasing pack on "+secondScore+", never really close.",
+          "Nobody laid a glove on them — "+runner+" second on "+secondScore+"."
+        ]));
+      } else {
+        parts.push(_pick(rnd,[
+          runner+" took second on "+secondScore+".",
+          runner+" finished runner-up with "+secondScore+".",
+          "Second place to "+runner+", "+secondScore+" points."
+        ]));
+      }
     }
-    // Last place (wooden spoon) — only if more than a couple players.
+
+    // Third place, so the podium is complete.
+    if(scored.length>=6 && thirds && thirds.length){
+      parts.push(_pick(rnd,[
+        _joinNames(thirds)+" rounded out the podium on "+thirdScore+".",
+        "Third went to "+_joinNames(thirds)+" with "+thirdScore+".",
+        _joinNames(thirds)+" completed the top three on "+thirdScore+"."
+      ]));
+    }
+
+    // Wooden spoon.
     if(scored.length>2 && lastScore<winnerScore){
-      parts.push(_joinNames(lasts)+" brought up the rear with "+(lastScore===0?"just ":"a total of ")+lastScore+" point"+(lastScore!==1?"s":"")+" 🥄.");
+      var l=_joinNames(lasts);
+      parts.push(_pick(rnd,[
+        l+" propped up the table on "+lastScore+".",
+        l+" will want this one back \u2014 "+lastScore+" points.",
+        "Somebody has to finish last, and this week it's "+l+" on "+lastScore+".",
+        l+" brought up the rear with "+lastScore+".",
+        "Bottom of the pile: "+l+" on "+lastScore+"."
+      ]));
     }
-    // Gutsiest pick as color.
+
+    // Colour: gather what's available, then use a couple of them.
+    var colour=[];
+    function addColour(team, line){ colour.push({team:team||null, line:line}); }
     if(gutsy){
-      parts.push("Gutsiest call of the week: "+nameOf(gutsy.name)+" put "+gutsy.conf+" on "+gutsy.team+" and it cashed.");
+      addColour(gutsy.team, _pick(rnd,[
+        nameOf(gutsy.name)+" put "+gutsy.conf+" on "+gutsy.team+" and it cashed.",
+        "Biggest swing that landed: "+gutsy.conf+" on "+gutsy.team+" from "+nameOf(gutsy.name)+".",
+        nameOf(gutsy.name)+" backed "+gutsy.team+" for "+gutsy.conf+" and got paid."
+      ]));
     }
-    text="🏈 "+label+" Recap\n\n"+parts.join(" ")+"\n\n— via Scorecery";
+    var bust=_biggestBust(weekId, active);
+    if(bust){
+      addColour(bust.team, _pick(rnd,[
+        nameOf(bust.name)+" had "+bust.conf+" riding on "+bust.team+", which did not go to plan.",
+        "Costliest miss: "+nameOf(bust.name)+"'s "+bust.conf+" on "+bust.team+".",
+        nameOf(bust.name)+" will not be discussing the "+bust.conf+" on "+bust.team+"."
+      ]));
+    }
+    var sp=_groupSplits(weekId, active);
+    if(sp.trap && sp.trap.share>=0.6 && sp.trap.wrong>=3){
+      // A clean sweep deserves stronger words than a mere majority.
+      addColour(sp.trap.team, sp.trap.share===1
+        ? _pick(rnd,[
+            "Not one person had "+sp.trap.team+" — a full house of nil.",
+            sp.trap.team+" beat the entire group. All "+sp.trap.tot+" of them.",
+            "Nobody, and I mean nobody, had "+sp.trap.team+"."
+          ])
+        : _pick(rnd,[
+            sp.trap.wrong+" of "+sp.trap.tot+" got "+sp.trap.team+" wrong — the week's great leveller.",
+            "Almost nobody saw "+sp.trap.team+" coming ("+sp.trap.wrong+" of "+sp.trap.tot+" missed it).",
+            sp.trap.team+" quietly wrecked "+sp.trap.wrong+" scorecards."
+          ]));
+    }
+    if(sp.chalk && sp.chalk.share===1 && sp.chalk.tot>=3){
+      addColour(sp.chalk.team, _pick(rnd,[
+        "Everyone had "+sp.chalk.team+", so no separation there.",
+        "The whole group took "+sp.chalk.team+" — free points all round."
+      ]));
+    }
+    var _tbLine=_tiebreakNote(weekId, rnd, winners.length>1);
+    if(_tbLine) addColour(null, _tbLine);
+
+    // The biggest calls. Worth a line whichever way it broke.
+    var tp=_topPickCarnage(weekId, active);
+    if(tp && tp.n>=4){
+      if(tp.missShare>=0.5){
+        addColour(null, _pick(rnd,[
+          tp.miss+" of "+tp.n+" missed their biggest pick of the week.",
+          "Brutal at the top of the cards: "+tp.miss+" of "+tp.n+" saw their best number go down.",
+          "Only "+tp.hit+" of "+tp.n+" cashed their biggest call."
+        ]));
+      } else if(tp.missShare<=0.2){
+        addColour(null, _pick(rnd,[
+          "The big numbers held \u2014 "+tp.hit+" of "+tp.n+" landed their top pick.",
+          tp.hit+" of "+tp.n+" got their biggest call right, so the chalk did its job."
+        ]));
+      } else {
+        addColour(null, _pick(rnd,[
+          tp.miss+" of "+tp.n+" lost their top pick.",
+          "Top picks went "+tp.hit+"-"+tp.miss+" across the group."
+        ]));
+      }
+    }
+
+    // How the field looked as a whole.
+    var shape=_fieldShape(scored, winnerScore);
+    if(shape){
+      if(shape.within5>=3 && shape.within5<=Math.max(4,Math.round(shape.n*0.25))){
+        addColour(null, _pick(rnd,[
+          "Tight at the top: "+shape.within5+" finished within 5 of the lead.",
+          shape.within5+" players were within a touchdown of winning it."
+        ]));
+      } else {
+        addColour(null, _pick(rnd,[
+          "The group averaged "+shape.avg+"; "+shape.beat+" of "+shape.n+" beat that.",
+          "Par for the week was "+shape.avg+", cleared by "+shape.beat+" of "+shape.n+".",
+          shape.beat+" of "+shape.n+" finished above the "+shape.avg+" average."
+        ]));
+      }
+    }
+    // Unbeaten cards are worth a line either way.
+    var clean=_cleanSheets(scored);
+    if(clean.length){
+      addColour(null, _pick(rnd,[
+        _joinNames(clean)+" got through the week unbeaten.",
+        "Not a single miss for "+_joinNames(clean)+"."
+      ]));
+    }
+    // Season movement, once there's a previous week to move from.
+    var mover=_biggestMover(weekId);
+    if(mover){
+      addColour(null, _pick(rnd,[
+        mover.name+" climbed "+mover.gain+" places to "+_ordinal(mover.to)+" overall.",
+        "Biggest riser was "+mover.name+", up "+mover.gain+" to "+_ordinal(mover.to)+".",
+        mover.name+" is the week's big mover, "+mover.gain+" spots up to "+_ordinal(mover.to)+"."
+      ]));
+    }
+    var pushes=_pushCount(weekId, active);
+    if(pushes){
+      addColour(null, _pick(rnd,[
+        pushes+" game"+(pushes!==1?"s":"")+" landed on the number, so half-points all round.",
+        "The bookmakers earned their money: "+pushes+" push"+(pushes!==1?"es":"")+"."
+      ]));
+    }
+    // Two beats at most — a recap that lists everything stops being a recap —
+    // and never two about the same game, which reads as the recap arguing with
+    // itself ("X's 6 on BC cashed" next to "everyone had BC").
+    var usedTeams={};
+    for(var c=0; c<3 && colour.length; ){
+      var pickIdx=Math.floor(rnd()*colour.length);
+      var beat=colour.splice(pickIdx,1)[0];
+      if(beat.team && usedTeams[beat.team]) continue;   // already covered
+      if(beat.team) usedTeams[beat.team]=true;
+      parts.push(beat.line);
+      c++;
+    }
+
+    // Season table always closes the recap — a week means little without it.
+    var top=_seasonTop(weekId,3);
+    if(top){
+      var lead=top[0], chase=top.slice(1);
+      var gap=lead.total-top[1].total;
+      if(gap===0){
+        parts.push(_joinNames(top.filter(function(r){return r.total===lead.total;})
+                     .map(function(r){return r.name;}))+" are level at the top of the season on "+lead.total+".");
+      } else {
+        parts.push(_pick(rnd,[
+          lead.name+" leads the season on "+lead.total+", with "+
+            chase[0].name+" and "+chase[1].name+" on "+chase[0].total+" and "+chase[1].total+".",
+          "Season standings: "+lead.name+" "+lead.total+", "+chase[0].name+" "+chase[0].total+
+            ", "+chase[1].name+" "+chase[1].total+".",
+          lead.name+" still leads overall with "+lead.total+" \u2014 "+gap+
+            " clear of "+chase[0].name+"."
+        ]));
+      }
+    }
+
+    var signoff=_pick(rnd,["— via Scorecery","— Scorecery","— via Scorecery 🔮"]);
+    text="🏈 "+label+" Recap\n\n"+parts.join(" ")+"\n\n"+signoff;
   }
 
-  if(navigator.share){
-    navigator.share({text:text}).catch(function(){});
-  } else {
-    try{ navigator.clipboard.writeText(text); toast("Recap copied ✓"); }
-    catch(e){ toast("Recap ready"); }
-  }
+  return text;
 }
+// The tiebreaker only earns its keep when the top is actually tied. The rest of
+// the time somebody nails it for nothing, which is funnier than it working.
+function _tiebreakNote(weekId, rnd, tiedAtTop){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  var actual=(tb.actual==null)?null:Number(tb.actual);
+  if(actual===null||isNaN(actual)) return "";
+  var best=null, exact=[];
+  (PARTS||[]).forEach(function(p){
+    var g=((ST.picks[weekId]||{})[p]||{}).tb;
+    if(g==null||g==="") return;
+    var miss=Math.abs(Number(g)-actual);
+    if(isNaN(miss)) return;
+    if(miss===0) exact.push(nameOf(p));
+    if(best===null||miss<best.miss) best={name:nameOf(p), miss:miss, guess:Number(g)};
+  });
+  if(!best) return "";
+  if(tiedAtTop){
+    // It actually mattered — say so, that's the rarer event.
+    return _pick(rnd,[
+      "The tiebreaker finally earned its keep: "+(exact.length?_joinNames(exact)+" nailed "+actual+" exactly."
+        : best.name+" was closest at "+best.guess+", "+best.miss+" off "+actual+"."),
+      "Settled on the tiebreaker \u2014 "+(exact.length?_joinNames(exact)+" had "+actual+" on the nose."
+        : best.name+" came within "+best.miss+" of "+actual+".")
+    ]);
+  }
+  if(exact.length){
+    return _pick(rnd,[
+      _joinNames(exact)+" called the tiebreaker exactly \u2014 "+actual+" \u2014 and it counted for precisely nothing.",
+      "Spare a thought for "+_joinNames(exact)+", who nailed the tiebreaker on "+actual+" in a week nobody needed it.",
+      _joinNames(exact)+" hit "+actual+" on the nose. No prizes, the top wasn't tied."
+    ]);
+  }
+  if(best.miss<=2){
+    return _pick(rnd,[
+      best.name+" was "+best.miss+" off the tiebreaker ("+actual+"), for all the good it did.",
+      "Closest on the tiebreaker was "+best.name+" at "+best.guess+" against "+actual+" \u2014 academic, as it turned out."
+    ]);
+  }
+  return "";
+}
+
+// When a game grades, anyone who had a big number on the wrong side deserves a
+// mention. Only fires for genuinely large calls — needling a lost 3 is noise.
+function bustNeedle(weekId, gid, result){
+  if(!result || result==="push") return "";
+  var g=((ST.games[weekId])||{})[gid];
+  if(!g) return "";
+  var hit=[];
+  (PARTS||[]).forEach(function(p){
+    var pk=((ST.picks[weekId]||{})[p]||{})[gid];
+    if(!pk||!pk.side||pk.side===result) return;
+    var conf=Number(pk.conf)||0;
+    if(conf>=8) hit.push({name:nameOf(p), conf:conf, team:(pk.side==="away"?g.away:g.home)});
+  });
+  if(!hit.length) return "";
+  hit.sort(function(a,b){ return b.conf-a.conf; });
+  var rnd=_recapRand(weekId+gid), top=hit[0];
+  var winner=(result==="away"?g.away:g.home);
+  if(hit.length===1){
+    return _pick(rnd,[
+      "\uD83D\uDC80 "+top.name+" had "+top.conf+" on "+top.team+". "+winner+" had other ideas.",
+      "\uD83D\uDC80 "+top.conf+" points down the drain for "+top.name+" on "+top.team+".",
+      "\uD83D\uDC80 Tough one for "+top.name+" \u2014 "+top.conf+" on "+top.team+", gone."
+    ]);
+  }
+  var names=hit.map(function(h){ return h.name; });
+  return _pick(rnd,[
+    "\uD83D\uDC80 "+winner+" just cost "+_joinNames(names)+" a combined "+
+      hit.reduce(function(a,h){return a+h.conf;},0)+" points.",
+    "\uD83D\uDC80 "+_joinNames(names)+" "+(names.length===2?"both":"all")+
+      " had big numbers on "+top.team+". All gone."
+  ]);
+}
+
 // Highest-confidence correct pick across all players for a week.
 function _gutsiestHit(weekId, active){
   var games=ST.games[weekId]||{}, results=ST.results[weekId]||{}, gutsy=null;
@@ -3900,7 +4378,11 @@ function fetchAllResults(weekId){
               if(Math.abs(margin-sp)<0.01) result="push";
               else result=margin>sp?g.favSide:(g.favSide==="away"?"home":"away");
             }
-            if(!(ST.results[weekId]||{})[gid]){ setResult(weekId,gid,result); found++; }
+            if(!(ST.results[weekId]||{})[gid]){
+              setResult(weekId,gid,result);
+              botPost("bust_"+weekId+"_"+gid, bustNeedle(weekId,gid,result));
+              found++;
+            }
           });
         });
         // Tiebreaker
@@ -6476,7 +6958,12 @@ var _fieldDebounce={};
 
   els=document.querySelectorAll(".adm-btn[data-result]");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
-    setResult(this.getAttribute("data-week"),this.getAttribute("data-gid"),this.getAttribute("data-result"));
+    var _rw=this.getAttribute("data-week"), _rg=this.getAttribute("data-gid"), _rr=this.getAttribute("data-result");
+    setResult(_rw,_rg,_rr);
+    // Same two posts as the automatic path, so it doesn't matter how a result
+    // got entered.
+    botPost("bust_"+_rw+"_"+_rg, bustNeedle(_rw,_rg,_rr));
+    if(weekIsComplete(_rw)) botPost("recap_"+_rw, buildWeekRecap(_rw,"prose"));
   });
 }
 
