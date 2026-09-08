@@ -2733,7 +2733,7 @@ function autoPostFinalsFromScoreboard(){
     toast("\u2713 "+posted+" result"+(posted!==1?"s":"")+" posted automatically");
     // Week just finished? Drop the recap in chat rather than waiting for someone
     // to remember to share it.
-    if(weekIsComplete(wk)) botPost("recap_"+wk, buildWeekRecap(wk,"prose"));
+    postWeekWrap(wk);
   }
   return posted;
 }
@@ -3763,7 +3763,6 @@ function buildWeekRecap(weekId, mode){
   var lasts=scored.filter(function(r){return r.total===lastScore;}).map(function(r){return nameOf(r.name);});
 
   var winCounts=_weeklyWinCounts(weekId);
-  var gutsy=_gutsiestHit(weekId, active);
 
   var text;
   if(mode==="card"){
@@ -3772,27 +3771,32 @@ function buildWeekRecap(weekId, mode){
     scored.slice(0,3).forEach(function(r,i){
       lines.push(medals[i]+" "+nameOf(r.name)+" — "+r.total+" pts ("+r.correct+"-"+r.wrong+")");
     });
+    if(_seasonHigh(weekId, winnerScore)) lines.push("   season high");
     if(scored.length>3){
       lines.push("");
-      lines.push("🥄 Last: "+_joinNames(lasts)+" ("+lastScore+" pts)");
+      // No spoon — the label already says last.
+      lines.push("Last: "+_joinNames(lasts)+" ("+lastScore+" pts)");
     }
-    if(gutsy) lines.push("💪 Gutsiest: "+nameOf(gutsy.name)+" — "+gutsy.team+" for "+gutsy.conf);
-    var _bust=_biggestBust(weekId, active);
-    if(_bust) lines.push("💀 Costliest: "+nameOf(_bust.name)+" — "+_bust.team+" for "+_bust.conf);
+    lines.push("");
+    var _tp=_topPickCarnage(weekId, active);
+    if(_tp && _tp.n>=4) lines.push("Top picks — "+_tp.hit+"-"+_tp.miss+" across the group");
     var _sp=_groupSplits(weekId, active);
     if(_sp.trap && _sp.trap.share>=0.6 && _sp.trap.wrong>=3){
-      lines.push("🪤 Trap game: "+_sp.trap.team+" ("+_sp.trap.wrong+"/"+_sp.trap.tot+" missed)");
+      lines.push("Trap game — "+_sp.trap.team+", "+_sp.trap.wrong+" of "+_sp.trap.tot+" missed it");
     }
+    var _fs=_fieldShape(scored, winnerScore);
+    if(_fs) lines.push("Average — "+_fs.avg+", beaten by "+_fs.beat+" of "+_fs.n);
     var _pu=_pushCount(weekId, active);
-    if(_pu) lines.push("🤝 "+_pu+" push"+(_pu!==1?"es":"")+" — half points");
-    var _tp=_topPickCarnage(weekId, active);
-    if(_tp && _tp.n>=4) lines.push("🎯 Top picks: "+_tp.hit+"-"+_tp.miss+" across the group");
+    if(_pu) lines.push("Pushes — "+_pu+", half points each");
+    var _cl=_cleanSheets(scored);
+    if(_cl.length) lines.push("Unbeaten — "+_joinNames(_cl));
+    var _mv=_biggestMover(weekId);
+    if(_mv) lines.push("Big mover — "+_mv.name+", up "+_mv.gain+" to "+_ordinal(_mv.to));
     var _st=_seasonTop(weekId,3);
     if(_st){
       lines.push("");
-      lines.push("📊 Season: "+_st.map(function(r,i){
-        return (i+1)+". "+r.name+" "+r.total;
-      }).join("  ·  "));
+      lines.push("Season");
+      _st.forEach(function(r,i){ lines.push("  "+(i+1)+". "+r.name+" — "+r.total); });
     }
     lines.push("");
     lines.push("— via Scorecery");
@@ -3884,21 +3888,6 @@ function buildWeekRecap(weekId, mode){
     // Colour: gather what's available, then use a couple of them.
     var colour=[];
     function addColour(team, line){ colour.push({team:team||null, line:line}); }
-    if(gutsy){
-      addColour(gutsy.team, _pick(rnd,[
-        nameOf(gutsy.name)+" put "+gutsy.conf+" on "+gutsy.team+" and it cashed.",
-        "Biggest swing that landed: "+gutsy.conf+" on "+gutsy.team+" from "+nameOf(gutsy.name)+".",
-        nameOf(gutsy.name)+" backed "+gutsy.team+" for "+gutsy.conf+" and got paid."
-      ]));
-    }
-    var bust=_biggestBust(weekId, active);
-    if(bust){
-      addColour(bust.team, _pick(rnd,[
-        nameOf(bust.name)+" had "+bust.conf+" riding on "+bust.team+", which did not go to plan.",
-        "Costliest miss: "+nameOf(bust.name)+"'s "+bust.conf+" on "+bust.team+".",
-        nameOf(bust.name)+" will not be discussing the "+bust.conf+" on "+bust.team+"."
-      ]));
-    }
     var sp=_groupSplits(weekId, active);
     if(sp.trap && sp.trap.share>=0.6 && sp.trap.wrong>=3){
       // A clean sweep deserves stronger words than a mere majority.
@@ -4063,6 +4052,15 @@ function _tiebreakNote(weekId, rnd, tiedAtTop){
     ]);
   }
   return "";
+}
+
+// Everything a finished week posts to chat. Prose first as the readable story,
+// then the card with the numbers — separate keys so each lands exactly once and
+// one can be dropped without affecting the other.
+function postWeekWrap(weekId){
+  if(!weekIsComplete(weekId)) return;
+  botPost("recap_"+weekId,      buildWeekRecap(weekId,"prose"));
+  botPost("recapcard_"+weekId,  buildWeekRecap(weekId,"card"));
 }
 
 // When a game grades, anyone who had a big number on the wrong side deserves a
@@ -6963,7 +6961,7 @@ var _fieldDebounce={};
     // Same two posts as the automatic path, so it doesn't matter how a result
     // got entered.
     botPost("bust_"+_rw+"_"+_rg, bustNeedle(_rw,_rg,_rr));
-    if(weekIsComplete(_rw)) botPost("recap_"+_rw, buildWeekRecap(_rw,"prose"));
+    postWeekWrap(_rw);
   });
 }
 
