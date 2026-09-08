@@ -1493,16 +1493,8 @@ function renderMyStatsSheet(){
          (m.bestWeekPts===null)?"var(--dim)":"var(--gold-dark)",
          (m.bestWeekPts===null)?"":("week "+guessWeekNumber(ST.weekLabels[m.bestWeekId]||m.bestWeekId)));
 
-  var topN=m.topW+m.topL;
-  h+=box("Top pick", topN?(m.topW+"-"+m.topL):"\u2013",
-         topN?_gradeColor(m.topW/topN):"var(--dim)",
-         topN?((mine?"your":"their")+" biggest play each week"):"");
-
-  // Calibration: are your points on the right games? Positive means your
-  // high-confidence half hits more than your low half, which is the whole job.
-  h+=box("Calibration", (m.calib===null)?"\u2013":((m.calib>=0?"+":"\u2212")+Math.abs(Math.round(m.calib*100))),
-         (m.calib===null)?"var(--dim)":_gradeColor(0.5+m.calib),
-         (m.calib===null)?"":(_pct(m.hiRate)+" high \u00b7 "+_pct(m.loRate)+" low"));
+  // "Top pick" and "Calibration" both measured how well confidence was allocated.
+  // With every game worth the same they have nothing to measure, so they're out.
 
   var stk=m.streak, stkTxt=(!stk)?"\u2013":((stk>0?"W":"L")+Math.abs(stk));
   h+=box("Streak", stkTxt,
@@ -3147,7 +3139,7 @@ function addImportedGames(weekId){
     DB.ref("globalSettings/poolDates/nfl/lockDate").once("value",function(sn){
       var existing=sn.val()||"";
       if(existing!==_kdStr){
-        if(confirm("First game is "+_kdStr+" — update CFB lock date to match?")){
+        if(confirm("First game is "+_kdStr+" — update NFL lock date to match?")){
           DB.ref("globalSettings/poolDates/nfl/lockDate").set(_kdStr);
           toast("&#10003; Lock date updated to "+_kdStr);
         }
@@ -3719,7 +3711,7 @@ function buildWeekRecap(weekId, mode){
     }
     lines.push("");
     var _tp=_topPickCarnage(weekId, active);
-    if(_tp && _tp.n>=4) lines.push("Top picks — "+_tp.hit+"-"+_tp.miss+" across the group");
+
     var _sp=_groupSplits(weekId, active);
     if(_sp.trap && _sp.trap.share>=0.6 && _sp.trap.wrong>=3){
       lines.push("Trap game — "+_sp.trap.team+", "+_sp.trap.wrong+" of "+_sp.trap.tot+" missed it");
@@ -3856,27 +3848,7 @@ function buildWeekRecap(weekId, mode){
     var _tbLine=_tiebreakNote(weekId, rnd, winners.length>1);
     if(_tbLine) addColour(null, _tbLine);
 
-    // The biggest calls. Worth a line whichever way it broke.
-    var tp=_topPickCarnage(weekId, active);
-    if(tp && tp.n>=4){
-      if(tp.missShare>=0.5){
-        addColour(null, _pick(rnd,[
-          tp.miss+" of "+tp.n+" missed their biggest pick of the week.",
-          "Brutal at the top of the cards: "+tp.miss+" of "+tp.n+" saw their best number go down.",
-          "Only "+tp.hit+" of "+tp.n+" cashed their biggest call."
-        ]));
-      } else if(tp.missShare<=0.2){
-        addColour(null, _pick(rnd,[
-          "The big numbers held \u2014 "+tp.hit+" of "+tp.n+" landed their top pick.",
-          tp.hit+" of "+tp.n+" got their biggest call right, so the chalk did its job."
-        ]));
-      } else {
-        addColour(null, _pick(rnd,[
-          tp.miss+" of "+tp.n+" lost their top pick.",
-          "Top picks went "+tp.hit+"-"+tp.miss+" across the group."
-        ]));
-      }
-    }
+    // No "biggest call" in a flat pick'em — every game weighs the same.
 
     // Tightness at the top, when it's actually tight.
     var shape=_fieldShape(scored, winnerScore);
@@ -4165,7 +4137,7 @@ function _updateProgressBar(weekId){
   if(bars[1]){ bars[1].style.width=pickPct+'%'; bars[1].style.background=barColor; }
   // Update text
   var info=document.querySelector('.lock-bar .lock-info');
-  if(info) info.innerHTML='&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'');
+  if(info) info.innerHTML='&#9998; '+made+'/'+N+' picks';
 }
 
 // ── Admin actions ────────────────────────────────────────
@@ -4732,7 +4704,7 @@ function renderPicks(){
     var barColor=allDone?'var(--green)':made===N?'var(--gold)':'var(--blue)';
     h+='<div style="flex:1;min-width:0">';
     h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
-    h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
+    h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
     // Sort button
     // Always visible (not just once picks exist) — the order matters most while picking.
     h+='<button id="b-sort-picks" title="Change the order games are listed in" style="font-size:8px;font-weight:800;padding:2px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap">&#8645; '+x(pickSortLabel())+'</button>';
@@ -4772,7 +4744,7 @@ function renderPicks(){
     if(!_tipSeen){
       h+='<div id="cfb-tip-banner" style="background:var(--blue-bg);border-bottom:2px solid var(--border2);padding:8px 12px;display:flex;align-items:flex-start;gap:8px">';
       h+='<span style="font-size:14px;flex-shrink:0">&#128218;</span>';
-      h+='<div style="flex:1;font-size:10px;font-weight:700;color:var(--blue);line-height:1.6">Tap a team to pick it. Then assign a <strong>confidence</strong> number (1–'+N+') — higher = more confident. If correct, you earn that many points. Each number can only be used once.</div>';
+      h+='<div style="flex:1;font-size:10px;font-weight:700;color:var(--blue);line-height:1.6">Tap a team to pick it against the spread. Every game is worth <strong>one point</strong>, and a push pays half. Make all '+N+' before the first kickoff.</div>';
       h+='<button id="b-dismiss-tip" style="font-size:11px;font-weight:800;color:var(--muted);background:none;border:none;cursor:pointer;flex-shrink:0;padding:0 0 0 4px">&#10005;</button>';
       h+='</div>';
     }
