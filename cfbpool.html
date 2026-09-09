@@ -1048,6 +1048,7 @@ function setFanTeam(school){
 function setLogoEra(era){
   if(!isLogoEra(era)) return;
   ST.logoEra=era;
+  loadLogoIndex(era);
   if(ST.user && USER_DIR[ST.user]) USER_DIR[ST.user].logoEra=era;
   draw();
   if(DB && ST.user){
@@ -4726,11 +4727,102 @@ function logoKey(teamName){
   if(/st$/.test(k) && !/state$/.test(k)) k=k+"ate";
   return k;
 }
+// ── LOGO INDEX ────────────────────────────────────────────
+// Files can keep whatever name they were downloaded with. GitHub's contents API
+// lists a directory, so the app reads the listing once and works out which file
+// belongs to which team, rather than requiring 128 renames by hand.
+var LOGO_REPO="rwwelton1/RWC";           // owner/repo the site is served from
+var _logoIndex={};                        // era -> {teamKey: filename}
+var _logoIndexState={};                   // era -> "loading" | "done" | "failed"
+
+// Words that appear in downloaded filenames and say nothing about the team.
+var _LOGO_NOISE=/(logos?|primary|alternate|alt|secondary|wordmark|script|helmet|mark|athletics|university|college|ncaa|football|\d{4})/g;
+function _fileKey(name){
+  return String(name||"").replace(/\.[a-z]+$/i,"")      // drop extension
+    .toLowerCase().replace(/[^a-z0-9]/g,"")
+    .replace(_LOGO_NOISE,"");
+}
+
+// Match every known team against a filename and keep the longest key that fits.
+// Longest wins so "utahstate" beats "utah" on utah_state_logo.png, which is the
+// failure mode a naive "contains" check would hit.
+function _matchTeamToFile(fileKey, matchers){
+  var best=null, bestLen=0;
+  for(var i=0;i<matchers.length;i++){
+    var m=matchers[i];
+    for(var j=0;j<m.alts.length;j++){
+      var a=m.alts[j];
+      if(a.length<3) continue;
+      if(fileKey.indexOf(a)>=0 && a.length>bestLen){ best=m.key; bestLen=a.length; }
+    }
+  }
+  return best;
+}
+
+// Each team with every spelling a downloaded file might use. The canonical key
+// isn't always the obvious one — "Ole Miss" files are named olemiss while the
+// key is mississippi — so the display name and any aliases go in too.
+function _allTeamKeys(){
+  var byKey={};
+  Object.keys(TEAM_COLORS).forEach(function(n){
+    var k=logoKey(n);
+    if(!byKey[k]) byKey[k]={key:k, alts:[k]};
+    var raw=_teamKey(n);
+    if(byKey[k].alts.indexOf(raw)<0) byKey[k].alts.push(raw);
+  });
+  Object.keys(TEAM_ALIAS).forEach(function(alias){
+    var k=logoKey(TEAM_ALIAS[alias]);
+    if(byKey[k] && byKey[k].alts.indexOf(alias)<0) byKey[k].alts.push(alias);
+  });
+  return Object.keys(byKey).map(function(k){ return byKey[k]; });
+}
+
+function loadLogoIndex(era, cb){
+  if(era==="espn"){ cb&&cb(); return; }
+  if(_logoIndexState[era]==="done"||_logoIndexState[era]==="loading"){ cb&&cb(); return; }
+  // A cached listing avoids hammering the API, which allows 60 calls an hour.
+  try{
+    var raw=localStorage.getItem("logoidx_"+era);
+    if(raw){
+      var c=JSON.parse(raw);
+      if(c && c.ts && (Date.now()-c.ts)<6*3600*1000 && c.map){
+        _logoIndex[era]=c.map; _logoIndexState[era]="done"; cb&&cb(); return;
+      }
+    }
+  }catch(e){}
+  _logoIndexState[era]="loading";
+  fetch("https://api.github.com/repos/"+LOGO_REPO+"/contents/logos/"+era)
+    .then(function(r){ return r.ok?r.json():Promise.reject(); })
+    .then(function(files){
+      var keys=_allTeamKeys(), map={};
+      (files||[]).forEach(function(f){
+        if(!f||f.type!=="file") return;
+        if(!/\.(png|svg|jpg|jpeg|webp)$/i.test(f.name)) return;
+        var team=_matchTeamToFile(_fileKey(f.name), keys);
+        // First file wins for a team, so a stray second variant can't displace it.
+        if(team && !map[team]) map[team]=f.name;
+      });
+      _logoIndex[era]=map; _logoIndexState[era]="done";
+      try{ localStorage.setItem("logoidx_"+era, JSON.stringify({ts:Date.now(),map:map})); }catch(e){}
+      cb&&cb();
+      draw();
+    })
+    .catch(function(){
+      // Fall back to exact filenames; missing ones just show the ESPN logo.
+      _logoIndex[era]={}; _logoIndexState[era]="failed"; cb&&cb();
+    });
+}
+
 function eraLogo(teamName, espnUrl){
   var era=logoEra();
   if(era==="espn") return espnUrl||"";
   var key=logoKey(teamName);
   if(!key) return espnUrl||"";
+  var idx=_logoIndex[era];
+  if(idx && idx[key]) return LOGO_BASE+era+"/"+encodeURIComponent(idx[key]);
+  // Index not back yet, or this team isn't in it: try the tidy name anyway, and
+  // let the ESPN fallback cover it if that 404s too.
+  if(_logoIndexState[era]!=="done") loadLogoIndex(era);
   return LOGO_BASE+era+"/"+key+".png";
 }
 // An <img> that walks the chain: era file → ESPN → whatever the caller wants
@@ -4739,17 +4831,25 @@ function eraLogo(teamName, espnUrl){
 function eraImg(teamName, espnUrl, attrs, finalFallback){
   var src=eraLogo(teamName, espnUrl);
   if(!src) return finalFallback||"";
-  var chain="";
+  // Single-quoted JS strings only. x() escapes < & > and ' but NOT double quotes,
+  // so a JSON.stringify'd value here would close the onerror=" attribute and
+  // silently destroy the tag — which is exactly how the fallback stopped firing.
+  function js(v){ return "'"+String(v==null?"":v).replace(/\\/g,"\\\\").replace(/'/g,"\\'")+"'"; }
+  var giveUp = finalFallback ? ("this.outerHTML="+js(finalFallback))
+                             : "this.style.display='none'";
+  var chain;
   if(logoEra()!=="espn" && espnUrl){
-    // One retry against ESPN, then give up — no loops if both are missing.
-    chain="this.onerror=function(){"+(finalFallback
-        ? "this.outerHTML="+JSON.stringify(finalFallback)
-        : "this.style.display='none'")+"};this.src="+JSON.stringify(espnUrl)+";";
+    // One retry against ESPN, then give up. Clearing onerror first stops a loop
+    // if the ESPN URL is dead too.
+    chain="this.onerror=function(){"+giveUp+"};this.src="+js(espnUrl)+";";
   } else {
-    chain=finalFallback ? ("this.outerHTML="+JSON.stringify(finalFallback))
-                        : "this.style.display='none'";
+    chain=giveUp;
   }
-  return '<img '+(attrs||'')+' src="'+x(src)+'" onerror="'+x(chain)+'">';
+  // x() leaves double quotes alone, which is fine for text but fatal inside an
+  // attribute: the fallback markup contains class="..." and would close the
+  // onerror early. Escape them here rather than changing x() everywhere.
+  function attr(v){ return x(v).replace(/"/g,"&quot;"); }
+  return '<img '+(attrs||'')+' src="'+attr(src)+'" onerror="'+attr(chain)+'">';
 }
 function teamHex(name){
   if(!_TEAM_HEX){
