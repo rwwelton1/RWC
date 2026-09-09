@@ -2828,6 +2828,13 @@ function renderScoresInto(){
     var away=comps.find(function(c){return c.homeAway==="away";})||comps[0]||{};
     var home=comps.find(function(c){return c.homeAway==="home";})||comps[1]||{};
 
+    // The row displays an abbreviation (ECU, ALA), which won't resolve against
+    // the logo tables. `location` is the school itself — "Alabama", "Boise
+    // State", "Miami (OH)" — which is what the era lookup needs.
+    function tfull(c){
+      var t=(c&&c.team)||{};
+      return String(t.location||t.shortDisplayName||t.displayName||"").trim();
+    }
     function tname(c){
       var t=(c&&c.team)||{};
       var ab=String(t.abbreviation||"").trim();
@@ -2858,16 +2865,15 @@ function renderScoresInto(){
     var aLead=isLive&&aNum>hNum, hLead=isLive&&hNum>aNum;
     var tied=isLive&&aNum===hNum&&aScore!=="";
 
-    function teamRow(name,color,score,wins,leads,logo){
+    function teamRow(name,color,score,wins,leads,logo,fullName){
       var cls="sc-team";
       if(wins||leads) cls+=" winner";
       else if(isFinal&&!wins) cls+=" loser";
       else if(isLive&&!leads&&!tied&&score!=="") cls+=" loser";
-      // Crest when the feed has one; the coloured dot is the fallback, and also
-      // takes over if the image 404s.
-      var mark = logo
-        ? '<img class="sc-logo" src="'+logo+'" alt="" onerror="this.outerHTML=\'<div class=&quot;sc-dot&quot; style=&quot;background:'+color+'&quot;></div>\'">'
-        : '<div class="sc-dot" style="background:'+color+'"></div>';
+      // Crest in the chosen era; the coloured dot is the last resort, used when
+      // the era file and the ESPN one both fail.
+      var dot='<div class="sc-dot" style="background:'+color+'"></div>';
+      var mark = logo ? eraImg(fullName||name, logo, 'class="sc-logo" alt=""', dot) : dot;
       return '<div class="'+cls+'">'+
         mark+
         '<div class="sc-name">'+x(name)+'</div>'+
@@ -2897,8 +2903,8 @@ function renderScoresInto(){
           ? '<span class="sc-detail">'+x(detail)+'</span>'
           : (tvNet ? '<span class="sc-tv">'+x(tvNet)+'</span>' : '<span class="sc-detail"></span>'))+
       '</div>'+
-      teamRow(aName,tcolor(away),aScore,aWin,aLead,tlogo(away))+
-      teamRow(hName,tcolor(home),hScore,hWin,hLead,tlogo(home))+
+      teamRow(aName,tcolor(away),aScore,aWin,aLead,tlogo(away),tfull(away))+
+      teamRow(hName,tcolor(home),hScore,hWin,hLead,tlogo(home),tfull(home))+
       swFoot+
       '</div>';
   }
@@ -4728,12 +4734,12 @@ function logoKey(teamName){
   // and the Miami pair together. Without it "Boise St" and "Boise State" would
   // want two different files for one team.
   var display=TEAM_ALIAS[_teamKey(teamName)]||teamName;
-  var k=normalizeTeamName(display);
-  // ESPN sends "Boise St" where the tables hold "Boise State". No FBS team's
-  // name genuinely ends in "st", so expanding it is safe and saves keeping a
-  // list of every State school.
-  if(/st$/.test(k) && !/state$/.test(k)) k=k+"ate";
-  return k;
+  // ESPN sends "Boise St" where the tables hold "Boise State". Expand it as a
+  // trailing WORD, before punctuation is stripped — doing it on the flattened
+  // key turned "Wake Forest" into "wakeforestate", because that ends in "st"
+  // too.
+  display=String(display).replace(/\s+st\.?\s*$/i, " State");
+  return normalizeTeamName(display);
 }
 // ── LOGO INDEX ────────────────────────────────────────────
 // Files can keep whatever name they were downloaded with. GitHub's contents API
