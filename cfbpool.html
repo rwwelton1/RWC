@@ -64,6 +64,11 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .ptab.active{color:var(--team-tab-ink);border-bottom-color:var(--border);background:var(--team-tab)}
 
 /* ── TEAM PICKER ── */
+.tp-eras{display:flex;gap:6px;padding:0 12px 4px}
+.tp-era{flex:1;padding:7px 4px;border:2px solid var(--border2);border-radius:9px;background:#fff;
+  font-family:inherit;font-size:10px;font-weight:900;color:var(--text);cursor:pointer;line-height:1.2}
+.tp-era span{display:block;font-size:7.5px;font-weight:700;color:var(--muted);margin-top:2px}
+.tp-era.sel{border-color:var(--gold);background:var(--gold-bg)}
 .tp-sec{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;
   letter-spacing:.06em;margin:12px 0 4px;display:flex;align-items:baseline;gap:6px}
 .tp-sec span{font-size:7px;font-weight:700;color:var(--dim);text-transform:none;letter-spacing:0}
@@ -1040,13 +1045,25 @@ function setFanTeam(school){
   }
 }
 
+function setLogoEra(era){
+  if(!isLogoEra(era)) return;
+  ST.logoEra=era;
+  if(ST.user && USER_DIR[ST.user]) USER_DIR[ST.user].logoEra=era;
+  draw();
+  if(DB && ST.user){
+    DB.ref("users/"+ST.user+"/logoEra").set(era==="espn"?null:era).catch(function(){
+      toast("Could not save your logo choice");
+    });
+  }
+}
+
 function loadUserDir(cb){
   if(!DB){ cb&&cb(); return; }
   DB.ref("users").once("value",function(sn){
     var all=sn.val()||{};
     // Merge rather than replace: a spectator's read of /users returns nothing, and
     // clearing here would discard the names seeded from the group record.
-    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯",fanTeam:u.fanTeam||"",email:u.googleEmail||""}; });
+    Object.keys(all).forEach(function(uid){ var u=all[uid]||{}; USER_DIR[uid]={username:u.username||"",emoji:u.emoji||"🎯",fanTeam:u.fanTeam||"",email:u.googleEmail||"",logoEra:u.logoEra||"espn"}; });
     cb&&cb();
   }).catch(function(){ cb&&cb(); });
 }
@@ -1595,6 +1612,14 @@ function renderTeamPicker(){
       h+='</div>';
     }
   }
+
+  h+='<div class="tp-sec">Logos <span>only you see this</span></div>';
+  h+='<div class="tp-eras">';
+  LOGO_ERAS.forEach(function(e){
+    h+='<button class="tp-era'+(logoEra()===e.id?" sel":"")+'" data-logo-era="'+e.id+'">'+
+       x(e.label)+'<span>'+x(e.note)+'</span></button>';
+  });
+  h+='</div>';
 
   h+='<div class="tp-sec">Team colors <span>only you see this</span></div>';
   h+='<input class="tp-search" id="tp-search" placeholder="Search teams\u2026" autocomplete="off">';
@@ -2290,7 +2315,11 @@ function loadData(){
     // so the user never sits on a blank "Loading…" screen.
     draw();
     // Load the display directory (uid → name/emoji) once, then redraw with names.
-    return new Promise(function(res){ loadUserDir(function(){ bootReady("dir"); draw(); res(); }); });
+    return new Promise(function(res){ loadUserDir(function(){
+      // Personal logo era, remembered between sessions.
+      if(ST.user && USER_DIR[ST.user] && USER_DIR[ST.user].logoEra) ST.logoEra=USER_DIR[ST.user].logoEra;
+      bootReady("dir"); draw(); res();
+    }); });
   }).then(function(){
     // Now load emojis and pool data in parallel (PARTS are uids)
     var emojiPromises=PARTS.map(function(p){
@@ -4661,6 +4690,64 @@ var TEAM_ALIAS={
   appstate:"App State", vatech:"Virginia Tech", gatech:"Georgia Tech"
 };
 function _teamKey(s){ return String(s||"").toLowerCase().replace(/[^a-z]/g,""); }
+
+// ── LOGO ERAS ─────────────────────────────────────────────
+// Current logos come from ESPN on import and are stored on each game. The older
+// sets are files we host, named by the same key the colour lookup uses, so no
+// per-team mapping has to be maintained: logos/<era>/<key>.png
+var LOGO_BASE="https://cdn.jsdelivr.net/gh/YOURUSER/scorecery-logos@main/logos/";
+var LOGO_ERAS=[
+  {id:"espn",  label:"Current",  note:"Live from ESPN"},
+  {id:"2000s", label:"2000s",    note:"Turn of the century"},
+  {id:"retro", label:"Retro",    note:"Classic marks"}
+];
+function logoEra(){ return ST.logoEra||"espn"; }
+function isLogoEra(id){ return LOGO_ERAS.some(function(e){ return e.id===id; }); }
+
+// Resolve a team's logo for the chosen era. Falls back to the stored ESPN URL
+// when we don't host that team, so a half-finished set still looks right.
+// Canonical file key for a team. Resolves through the same table the colours
+// use, so "BYU", "Brigham Young" and "byu" all land on one file rather than
+// three — otherwise the naming depends on whatever string ESPN happened to send.
+function logoKey(teamName){
+  if(!teamName) return "";
+  // Run the display alias first ("Wazzu" → "Washington State"), then the same
+  // normaliser the results matcher uses, which folds "St"/"State", "Ole Miss"
+  // and the Miami pair together. Without it "Boise St" and "Boise State" would
+  // want two different files for one team.
+  var display=TEAM_ALIAS[_teamKey(teamName)]||teamName;
+  var k=normalizeTeamName(display);
+  // ESPN sends "Boise St" where the tables hold "Boise State". No FBS team's
+  // name genuinely ends in "st", so expanding it is safe and saves keeping a
+  // list of every State school.
+  if(/st$/.test(k) && !/state$/.test(k)) k=k+"ate";
+  return k;
+}
+function eraLogo(teamName, espnUrl){
+  var era=logoEra();
+  if(era==="espn") return espnUrl||"";
+  var key=logoKey(teamName);
+  if(!key) return espnUrl||"";
+  return LOGO_BASE+era+"/"+key+".png";
+}
+// An <img> that walks the chain: era file → ESPN → whatever the caller wants
+// when there's no image at all. Written as an attribute so it survives the
+// innerHTML rendering this app uses throughout.
+function eraImg(teamName, espnUrl, attrs, finalFallback){
+  var src=eraLogo(teamName, espnUrl);
+  if(!src) return finalFallback||"";
+  var chain="";
+  if(logoEra()!=="espn" && espnUrl){
+    // One retry against ESPN, then give up — no loops if both are missing.
+    chain="this.onerror=function(){"+(finalFallback
+        ? "this.outerHTML="+JSON.stringify(finalFallback)
+        : "this.style.display='none'")+"};this.src="+JSON.stringify(espnUrl)+";";
+  } else {
+    chain=finalFallback ? ("this.outerHTML="+JSON.stringify(finalFallback))
+                        : "this.style.display='none'";
+  }
+  return '<img '+(attrs||'')+' src="'+x(src)+'" onerror="'+x(chain)+'">';
+}
 function teamHex(name){
   if(!_TEAM_HEX){
     _TEAM_HEX={};
@@ -4776,7 +4863,10 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   var gameLocked=isGameLocked(weekId,gid); // per-game kickoff lock
   var effectiveLocked=locked||gameLocked;
   var effectiveCanPick=canPick&&!gameLocked;
-  function logoImg(url){ return url?'<img src="'+url+'" style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px" onerror="this.style.display=\'none\'">':""; }
+  function logoImg(url, teamName){
+    return eraImg(teamName, url,
+      'style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px"');
+  }
   var h='<div class="game-card">';
   h+='<div class="gc-head"><div class="gc-headL">';
   // Nickname is cosmetic only — the admin names the game for fun.
@@ -4818,7 +4908,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
     h+='<div class="'+cls+'" data-pick-week="'+weekId+'" data-pick-gid="'+gid+'" data-pick-side="'+side+'">';
     var teamRank=rankFor(team, side==="away"?g.awayId:g.homeId);
     var rankBadge=teamRank?'<span class="rank-badge" title="'+x(teamRank.source||"Top 25")+' rank">#'+teamRank.rank+'</span>':'';
-    h+='<div style="display:flex;align-items:center;flex:1;min-width:0">'+logoImg(logo)+rankBadge+'<div class="tp-name">'+x(team)+'</div></div>';
+    h+='<div style="display:flex;align-items:center;flex:1;min-width:0">'+logoImg(logo, team)+rankBadge+'<div class="tp-name">'+x(team)+'</div></div>';
     h+='<div class="tp-spread">'+spreadLabel(g,side)+'</div>';
     h+='</div>';
   });
@@ -6079,11 +6169,11 @@ function renderGroupPicks(){
     h+='<div class="gp-logos">';
     var _aRk=rankFor(g.away,g.awayId), _hRk=rankFor(g.home,g.homeId);
     if(_aRk) h+='<span class="rank-badge sm">#'+_aRk.rank+'</span>';
-    h+=awayLogo?'<img class="gp-logo" src="'+awayLogo+'" onerror="this.style.display=\'none\'">'
+    h+=awayLogo?eraImg(g.away, awayLogo, 'class="gp-logo"', '<span class="gp-logo-fallback"></span>')
                :'<span class="gp-logo-fallback"></span>';
     h+='<span class="gp-vs">@</span>';
     if(_hRk) h+='<span class="rank-badge sm">#'+_hRk.rank+'</span>';
-    h+=homeLogo?'<img class="gp-logo" src="'+homeLogo+'" onerror="this.style.display=\'none\'">'
+    h+=homeLogo?eraImg(g.home, homeLogo, 'class="gp-logo"', '<span class="gp-logo-fallback"></span>')
                :'<span class="gp-logo-fallback"></span>';
     h+='</div>';
     // Spread line with optional rank badge next to favorite name
@@ -6243,7 +6333,8 @@ function renderGroupPicks(){
         }
         h+='<div class="gp-pick'+(outcome!=="pending"?" "+outcome:"")+'">';
         if(pickedLogo){
-          h+='<img class="gp-pick-logo" src="'+pickedLogo+'" title="'+x(pickedName)+'" onerror="this.outerHTML=\'<div class=gp-logo-fallback></div>\'">';
+          h+=eraImg(pickedName, pickedLogo, 'class="gp-pick-logo" title="'+x(pickedName)+'"',
+                    '<div class="gp-logo-fallback"></div>');
         } else {
           h+='<div style="font-size:8px;font-weight:700;color:var(--muted);max-width:52px;overflow:hidden;text-overflow:ellipsis">'+x(pickedName)+'</div>';
         }
@@ -6644,6 +6735,10 @@ function bind(){
   els=document.querySelectorAll(".tp-badge");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
     setMyBadge(this.getAttribute("data-badge"));
+  });
+  els=document.querySelectorAll("[data-logo-era]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    setLogoEra(this.getAttribute("data-logo-era"));
   });
   els=document.querySelectorAll(".tp-row");
   for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
