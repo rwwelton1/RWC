@@ -308,6 +308,11 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .conf-chip.used{background:var(--cream);color:var(--dim);border-color:var(--border2);border-style:dashed;box-shadow:none;cursor:not-allowed;text-decoration:line-through;text-decoration-thickness:2px}
 /* ── SAVE FLASH ── */
 @keyframes saveFlash{0%{opacity:0;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}100%{opacity:0;transform:scale(1)}}
+.save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
+  white-space:nowrap;vertical-align:1px}
+.save-state.ok{color:var(--green);background:var(--green-bg)}
+.save-state.busy{color:var(--muted);background:var(--cream)}
+.save-state.bad{color:var(--red2);background:var(--red-bg);border:1px solid var(--red2)}
 .save-tick{font-size:10px;font-weight:900;color:var(--green);animation:saveFlash .9s ease forwards;pointer-events:none;line-height:1;display:block}
 /* ── PLAYER ACCORDION ── */
 .plyr-accordion{background:#ffffff;border:2px solid var(--border);border-radius:12px;margin-bottom:8px;overflow:hidden;box-shadow:4px 4px 0 var(--border)}
@@ -3420,6 +3425,23 @@ function _pendKey(weekId,uk,gid){ return weekId+"|"+uk+"|"+gid; }
 // slate can read 10/10 on a phone and not exist in the database at all.
 // Everything below exists to make that state visible and recoverable.
 var _saveFailed=0, _saveOnline=true, _lastSaveErr="";
+var _saveInFlight=0;          // writes started but not yet acknowledged
+var _saveOkAt=0;              // when the last write was confirmed
+function _saveStart(){ _saveInFlight++; scheduleDraw(); }
+function _saveEnd(err){
+  _saveInFlight=Math.max(0,_saveInFlight-1);
+  if(!err) _saveOkAt=Date.now();
+  _noteSave(err);
+  scheduleDraw();
+}
+// One short phrase describing where the picks actually are.
+function saveStatus(){
+  if(!_saveOnline) return {txt:"Offline \u2014 not saved", cls:"bad"};
+  if(_saveFailed>0) return {txt:"Not saved", cls:"bad"};
+  if(_saveInFlight>0) return {txt:"Saving\u2026", cls:"busy"};
+  if(_saveOkAt) return {txt:"Saved", cls:"ok"};
+  return null;                // nothing written yet this session
+}
 function _noteSave(err){
   if(err){ _saveFailed++; _lastSaveErr=String(err&&err.message||err||"write rejected"); }
   else if(_saveFailed>0){ _saveFailed=0; _lastSaveErr=""; }
@@ -3459,15 +3481,15 @@ function _flushPick(key){
   if(!p) return;
   delete _pendingPicks[key];
   if(!DB) return;
+  _saveStart();
   DB.ref(BASE+"/picks/"+p.weekId+"/"+p.uk+"/"+p.gid).set(p.cur,function(err){
+    _saveEnd(err);
     if(!err){
       var t=document.getElementById("tick-"+p.gid);
       if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
-      _noteSave(null);
     } else {
       // Put it back so a later flush retries rather than silently dropping it.
       _pendingPicks[key]=p;
-      _noteSave(err);
     }
   });
 }
@@ -3753,10 +3775,11 @@ function setConf(weekId,gid,confRaw){
   if(DB){
     var _confCb=function(err){
       if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
-      _noteSave(err);
+      _saveEnd(err);
     };
+    _saveStart();
     if(conf)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").set(conf,_confCb);
-    else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
+    else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove(_confCb);
   }
 }
 
@@ -5196,7 +5219,12 @@ function renderPicks(){
       h+='<button class="btn btn-ghost" id="b-resend-banner" style="font-size:10px;padding:4px 10px;flex-shrink:0">Retry</button>';
       h+='</div>';
     }
-    h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
+    // Sits with the pick counter, which is where people already look after each
+    // tap. Quiet when everything is fine, loud only when it isn't.
+    var _ss=saveStatus();
+    var _ssHtml=_ss?('<span class="save-state '+_ss.cls+'">'+
+        (_ss.cls==="ok"?"&#10003; ":_ss.cls==="bad"?"&#9888; ":"")+_ss.txt+'</span>'):"";
+    h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+_ssHtml+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
     // Sort button
     // Always visible (not just once picks exist) — the order matters most while picking.
     h+='<button id="b-sort-picks" title="Change the order games are listed in" style="font-size:8px;font-weight:800;padding:2px 8px;border-radius:6px;border:1.5px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer;font-family:\'Nunito\',sans-serif;white-space:nowrap">&#8645; '+x(pickSortLabel())+'</button>';
