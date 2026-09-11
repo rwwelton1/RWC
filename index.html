@@ -809,9 +809,27 @@ var MASTER_PW = "Sloop";
 // Identity-based master admin. Keep these UIDs in sync with database.rules.json and
 // cfbpool.html. The password path above is retained only as a legacy fallback.
 var MASTER_UIDS = { "SJr0tv9puDcNZLAcNy1ErOUGijg1": true };
+// Granted masters live at globalSettings/masters/<uid> so access can be handed
+// out and taken back without a deploy. The hardcoded UID above is the root
+// owner and is deliberately NOT revocable — otherwise a bad write could lock
+// everyone out of the admin screen permanently.
+var GRANTED_MASTERS = {};
+function isRootMaster(uid){ return !!(uid && MASTER_UIDS[uid]); }
 function isMasterUid(){
   var uid = ME();
-  return !!(uid && MASTER_UIDS[uid]);
+  if(!uid) return false;
+  return !!(MASTER_UIDS[uid] || GRANTED_MASTERS[uid]);
+}
+function grantMaster(uid, on, cb){
+  if(!uid) return;
+  if(isRootMaster(uid)){ toast("That account is the owner and always has access","warn"); return; }
+  DB.ref("globalSettings/masters/"+uid).set(on?true:null)
+    .then(function(){
+      if(on) GRANTED_MASTERS[uid]=true; else delete GRANTED_MASTERS[uid];
+      toast(on?"Master access granted":"Master access revoked","ok");
+      cb&&cb();
+    })
+    .catch(function(){ toast("Could not change access","err"); });
 }
 
 // ── BADGE DEFINITIONS ────────────────────────────────────────────────────────
@@ -6561,7 +6579,24 @@ function loadAdminUsers(q) {
       h+='<button data-rename-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid #2d3f52;background:#fff;color:var(--muted);cursor:pointer;font-family:inherit">Rename</button>';
       h+='<button data-merge-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(16,185,129,.3);background:#fff;color:var(--green);cursor:pointer;font-family:inherit">Merge</button>';
       h+='<button data-history-user="'+x(displayName)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:2px 7px;border-radius:5px;border:1px solid rgba(96,165,250,.35);background:#fff;color:var(--blue);cursor:pointer;font-family:inherit">History</button>';
+      // Master access. The owner account shows a locked badge instead of a
+      // button, since revoking it would leave nobody able to grant it back.
+      var _mUid = u.googleUid || u._key;
+      if(isRootMaster(_mUid)){
+        h+='<span title="Owner account" style="font-size:9px;font-weight:800;padding:2px 7px;border-radius:5px;border:1px solid var(--gold);background:var(--gold-bg);color:var(--gold-dark)">&#128081; Owner</span>';
+      } else if(u.googleUid){
+        var _isM = !!GRANTED_MASTERS[_mUid];
+        h+='<button data-master-uid="'+x(_mUid)+'" data-master-on="'+(_isM?"0":"1")+'" data-master-name="'+x(displayName)+'" '+
+           'style="font-size:9px;padding:2px 7px;border-radius:5px;font-weight:800;cursor:pointer;font-family:inherit;border:1px solid '+
+           (_isM?'rgba(239,68,68,.4);background:rgba(239,68,68,.1);color:var(--red)':'rgba(139,92,246,.35);background:#fff;color:#7c3aed')+'">'+
+           (_isM?'&#10005; Revoke master':'&#128273; Make master')+'</button>';
+      }
       h+='</div>';
+      // The address is already stored on Google sign-ups; showing it makes it
+      // possible to tell two accounts with the same display name apart.
+      if(u.googleEmail){
+        h+='<div style="font-size:9px;font-weight:600;color:var(--muted);margin-top:3px;word-break:break-all">'+x(u.googleEmail)+'</div>';
+      }
       h+='<div id="rename-area-'+safeKey+'" style="display:none;margin-top:5px">';
       h+='<div style="display:flex;gap:4px"><input class="form-input" style="font-size:11px;padding:4px 8px;height:auto" placeholder="New username" maxlength="30" id="rename-input-'+safeKey+'" value="'+x(displayName)+'"><button data-confirm-rename="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(99,102,241,.4);background:rgba(99,102,241,.15);color:#a5b4fc;cursor:pointer;font-family:inherit;white-space:nowrap">Save</button></div>';
       h+='</div>';
@@ -6636,6 +6671,22 @@ function loadAdminUsers(q) {
         var targetName = (_opt && _opt.getAttribute("data-uname")) || targetKey;
         if(!await scConfirm("Guest groups will be added to "+targetName+". Guest account deleted.\n\nThis cannot be undone.", {title:"Merge \""+guestName+"\" into \""+targetName+"\"?", okLabel:"Merge", danger:true})) return;
         mergeGuestIntoUser(guestName, key, targetName, targetKey);
+      });
+    });
+    list.querySelectorAll("[data-master-uid]").forEach(function(btn){
+      btn.addEventListener("click", async function(){
+        var uid=this.getAttribute("data-master-uid");
+        var on=this.getAttribute("data-master-on")==="1";
+        var who=this.getAttribute("data-master-name")||"this user";
+        var msg = on
+          ? ("Master access lets "+who+" edit every group, pool and user, including removing your own access. Only grant it to someone you trust completely.")
+          : ("Remove master access from "+who+"? They keep their account and groups.");
+        if(!await scConfirm(msg, {title:(on?"Grant master access?":"Revoke master access?"),
+                                  okLabel:(on?"Grant":"Revoke"), danger:true})) return;
+        // Re-render so the button flips, preserving whatever search is typed.
+        grantMaster(uid, on, function(){
+          loadAdminUsers((document.getElementById("user-search")||{}).value||"");
+        });
       });
     });
     list.querySelectorAll("[data-history-user]").forEach(function(btn){
@@ -7583,6 +7634,17 @@ function renderGroupsTable(groups, query) { renderGroupsTableTo("groups-tbody", 
 // ── GLOBAL STATUSES ───────────────────────────────────────────────────────────
 function subscribeGlobalStatuses() {
   if(!DB) return;
+  // Keep the granted-master list live, so a revoke takes effect without a reload.
+  DB.ref("globalSettings/masters").on("value", function(sn){
+    GRANTED_MASTERS = sn.val() || {};
+    if(SC.screen==="admin" && !isMasterUid()){
+      // Access was just taken away while the admin screen was open.
+      SC.isMaster=false; SC.isAdmin=false; SC.screen="profile";
+      toast("Master access was revoked","warn");
+    }
+    scheduleDraw();
+  });
+
   var _firstStatusFire = true;
   var _firstPublicFire = true;
   DB.ref("globalSettings/statuses").on("value", function(sn){
