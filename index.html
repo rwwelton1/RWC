@@ -6611,11 +6611,14 @@ function loadAdminUsers(q) {
       // Google accounts are keyed by a sanitized display name (e.g. "ryanwelton"), which
       // is NOT what userKey("Ryan Welton") produces ("ryan_welton"). Passing the true key
       // avoids a "user not found" on merge.
-      var _mergeOpts='<option value="">Select Google user to merge into…</option>';
+      var _mergeOpts='<option value="">Select account to merge into…</option>';
       users.forEach(function(t){
         if(t._key===u._key) return;          // not into itself
         if(!t.username) return;              // skip orphans / missing-username records
-        if(!t.googleUid) return;             // targets must be Google accounts
+        if(t._orphan) return;
+        // Records are keyed by Firebase uid; googleUid is a legacy field that most
+        // accounts don't carry, and filtering on it left this list empty.
+        if(!/^[A-Za-z0-9_-]{20,}$/.test(String(t._key||""))) return;
         _mergeOpts+='<option value="'+x(t._key)+'" data-uname="'+x(t.username)+'">'+x(t.username)+'</option>';
       });
       h+='<div style="display:flex;gap:4px"><select class="form-input" style="font-size:11px;padding:4px 8px;height:auto;flex:1" id="merge-input-'+safeKey+'">'+_mergeOpts+'</select><button data-confirm-merge="'+x(u.username||u._key)+'" data-user-key="'+safeKey+'" style="font-size:9px;padding:3px 9px;border-radius:6px;border:1px solid rgba(16,185,129,.3);background:rgba(16,185,129,.08);color:#6ee7b7;cursor:pointer;font-family:inherit;white-space:nowrap">Merge ✓</button></div>';
@@ -6870,19 +6873,30 @@ function mergeGuestIntoUser(guestName, guestFbKey, targetUsername, targetKeyOver
               updates["groups/"+g.id+"/adminUids"] = _au;
             }
           }
-          // Transfer picks/scores under group data — remap guest uid → target uid
-          if(g.data) {
-            (g.pools||[]).forEach(function(pid){
-              var poolData = (g.data[pid]||{});
-              if(poolData.picks && poolData.picks[guestUid] !== undefined && !poolData.picks[targetUid]){
-                updates["groups/"+g.id+"/data/"+pid+"/picks/"+targetUid] = poolData.picks[guestUid];
-                updates["groups/"+g.id+"/data/"+pid+"/picks/"+guestUid] = null;
+          // Move every trace of the old uid inside this group's data.
+          //
+          // The previous version only looked at data/<pool>/picks and /scores,
+          // one level down. The real pools nest far deeper — cfbpool keeps picks
+          // at data/cfbpool/seasons/<year>/picks/<week>/<uid>, and the hub's
+          // summary lives at data/cfb/playerscores/<uid> — so a merge moved the
+          // player across but left their entire record behind.
+          //
+          // Walking the subtree finds the uid wherever it is used as a key.
+          if(g.data){
+            (function walk(node, path, depth){
+              if(!node || typeof node!=="object" || depth>8) return;
+              Object.keys(node).forEach(function(k){
+                if(k===guestUid){
+                  // Only move it if the target has nothing there already; the
+                  // surviving account's own record always wins.
+                  var targetHas = node[targetUid]!==undefined && node[targetUid]!==null;
+                  if(!targetHas) updates[path+"/"+targetUid] = node[k];
+                  updates[path+"/"+guestUid] = null;
+                  return;                       // don't descend into the moved blob
                 }
-                if(poolData.scores && poolData.scores[guestUid] !== undefined && !poolData.scores[targetUid]){
-                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+targetUid] = poolData.scores[guestUid];
-                  updates["groups/"+g.id+"/data/"+pid+"/scores/"+guestUid] = null;
-                }
-            });
+                walk(node[k], path+"/"+k, depth+1);
+              });
+            })(g.data, "groups/"+g.id+"/data", 0);
           }
         });
 
