@@ -2377,6 +2377,13 @@ function loadData(){
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/meta/chatEnabled").on("value",function(sn){ ST.chatEnabled=!!sn.val(); scheduleDraw(); });
       DB.ref(BASE+"/meta/remindersOn").on("value",function(sn){ ST.remindersOn=!!sn.val(); scheduleDraw(); });
+      // Firebase reports its own connection state here. Without this a phone on
+      // a dead network shows every pick as saved.
+      DB.ref(".info/connected").on("value",function(sn){
+        var was=_saveOnline;
+        _saveOnline=!!sn.val();
+        if(was!==_saveOnline) scheduleDraw();
+      });
       // Only the most recent slice is kept — an old thread shouldn't cost a big read.
       DB.ref(BASE+"/chat").limitToLast(CHAT_KEEP).on("value",function(sn){ ST.chat=sn.val()||{}; scheduleDraw(); });
       DB.ref(BASE+"/meta/money").on("value",function(sn){ST.money=sn.val()||null;scheduleDraw();});
@@ -3406,6 +3413,46 @@ var _undoTimer=null, _undoPick=null;
 var _pendingPicks={};
 function _pendKey(weekId,uk,gid){ return weekId+"|"+uk+"|"+gid; }
 
+// ── SAVE STATE ────────────────────────────────────────────
+// Firebase applies a .set() to its local cache immediately, so the UI shows the
+// pick whether or not the server ever accepts it. A rejected write or a dead
+// connection therefore looks identical to a saved one — which is how a full
+// slate can read 10/10 on a phone and not exist in the database at all.
+// Everything below exists to make that state visible and recoverable.
+var _saveFailed=0, _saveOnline=true, _lastSaveErr="";
+function _noteSave(err){
+  if(err){ _saveFailed++; _lastSaveErr=String(err&&err.message||err||"write rejected"); }
+  else if(_saveFailed>0){ _saveFailed=0; _lastSaveErr=""; }
+  else return;
+  scheduleDraw();
+}
+function saveTrouble(){ return (!_saveOnline) || _saveFailed>0; }
+
+// Re-write every local pick for the week in one go and report honestly.
+function resyncPicks(weekId){
+  if(!DB){ toast("No database connection"); return; }
+  if(!ST.user){ toast("Select your name first"); return; }
+  var mine=((ST.picks[weekId]||{})[ST.user])||{};
+  if(!Object.keys(mine).length){ toast("Nothing to send"); return; }
+  toast("Sending picks\u2026");
+  DB.ref(BASE+"/picks/"+weekId+"/"+ST.user).set(mine)
+    .then(function(){
+      _saveFailed=0; _lastSaveErr="";
+      // Read it straight back: the point of this button is proof, not optimism.
+      return DB.ref(BASE+"/picks/"+weekId+"/"+ST.user).once("value");
+    })
+    .then(function(sn){
+      var n=Object.keys(sn.val()||{}).filter(function(k){ return k!=="tb"; }).length;
+      toast("\u2713 "+n+" pick"+(n!==1?"s":"")+" confirmed saved");
+      scheduleDraw();
+    })
+    .catch(function(e){
+      _saveFailed++; _lastSaveErr=String(e&&e.message||e);
+      toast("\u26a0 Could not save \u2014 "+_lastSaveErr);
+      scheduleDraw();
+    });
+}
+
 // Commit one pending pick. Safe to call twice — the entry is removed first.
 function _flushPick(key){
   var p=_pendingPicks[key];
@@ -3416,9 +3463,11 @@ function _flushPick(key){
     if(!err){
       var t=document.getElementById("tick-"+p.gid);
       if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); }
+      _noteSave(null);
     } else {
       // Put it back so a later flush retries rather than silently dropping it.
       _pendingPicks[key]=p;
+      _noteSave(err);
     }
   });
 }
@@ -3702,7 +3751,10 @@ function setConf(weekId,gid,confRaw){
   // Update progress bar pick/conf counts
   _updateProgressBar(weekId);
   if(DB){
-    var _confCb=function(err){ if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } } };
+    var _confCb=function(err){
+      if(!err){ var t=document.getElementById("tick-"+gid); if(t){ t.innerHTML='<span class="save-tick">&#10003;</span>'; setTimeout(function(){t.innerHTML="";},1000); } }
+      _noteSave(err);
+    };
     if(conf)DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").set(conf,_confCb);
     else DB.ref(BASE+"/picks/"+weekId+"/"+uk+"/"+gid+"/conf").remove();
   }
@@ -5135,6 +5187,15 @@ function renderPicks(){
     var barColor=allDone?'var(--green)':made===N?'var(--gold)':'var(--blue)';
     h+='<div style="flex:1;min-width:0">';
     h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
+    if(saveTrouble()){
+      h+='<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--red-bg);'+
+         'border-top:2px solid var(--red2);border-bottom:2px solid var(--red2);font-size:10px;font-weight:800;color:var(--red2)">';
+      h+='<span style="flex:1">&#9888; '+(!_saveOnline
+          ? "You appear to be offline. Picks on this phone have NOT been saved."
+          : "Some picks did not save"+(_lastSaveErr?(" ("+x(_lastSaveErr)+")"):"")+".")+'</span>';
+      h+='<button class="btn btn-ghost" id="b-resend-banner" style="font-size:10px;padding:4px 10px;flex-shrink:0">Retry</button>';
+      h+='</div>';
+    }
     h+='<div class="lock-info" style="font-size:10px">&#9998; '+made+'/'+N+' picks'+(confsMade<N?' &middot; <span style="color:var(--muted)">'+confsMade+'/'+N+' conf</span>':'')+(dupes?' &middot; <span style="color:var(--red2)">&#9888; dup conf</span>':'')+(gamesLocked>0?' &middot; <span style="color:var(--red2)">&#128274;'+gamesLocked+'</span>':'')+'</div>';
     // Sort button
     // Always visible (not just once picks exist) — the order matters most while picking.
@@ -5157,6 +5218,7 @@ function renderPicks(){
       }
     }
     if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:11px;padding:3px 9px;flex-shrink:0" title="Clear all picks and confidence">&#129529;</button>';
+    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-resend-picks" title="Re-send picks to the server" aria-label="Re-send picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#128260;</button>';
     if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" title="Share your picks" aria-label="Share your picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#11014;&#65039;</button>';
     if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
@@ -6811,6 +6873,8 @@ function bind(){
     draw();
   });
   el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
+  el=document.getElementById("b-resend-picks"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
+  el=document.getElementById("b-resend-banner"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
 
   // Tiebreaker guess input (picks tab)
