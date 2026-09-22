@@ -387,6 +387,9 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .bx-chip.on{border-color:var(--gold);background:var(--gold-bg)}
 .bx-day{padding:12px 12px 2px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .bx-rk{font-size:8.5px;font-weight:800;color:var(--muted);margin-right:3px}
+.bx-live{margin-left:auto;color:#dc2626;font-weight:900;letter-spacing:.04em;animation:bxPulse 1.6s ease-in-out infinite}
+@keyframes bxPulse{0%,100%{opacity:1}50%{opacity:.45}}
+.bx-game:has(.bx-live){border-color:#dc2626}
 .save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
   white-space:nowrap;vertical-align:1px}
 .save-state.ok{color:var(--green);background:var(--green-bg)}
@@ -683,11 +686,13 @@ function legOdds(g, market, side){
   if(!g) return null;
   if(market==="spread"){
     if(!g.favSide || g.spread==null || g.spread==="") return null;
-    return SPREAD_JUICE;
+    var sj = side==="away" ? g.spOddsAway : g.spOddsHome;
+    return (sj!=null && !isNaN(Number(sj))) ? Number(sj) : SPREAD_JUICE;
   }
   if(market==="total"){
     if(g.total==null || g.total==="") return null;
-    return SPREAD_JUICE;
+    var tj = side==="over" ? g.overOdds : g.underOdds;
+    return (tj!=null && !isNaN(Number(tj))) ? Number(tj) : SPREAD_JUICE;
   }
   if(market==="ml"){
     var ml = side==="away" ? g.mlAway : g.mlHome;
@@ -2105,6 +2110,7 @@ function betsOf(weekId, user, includeVoid){
   return Object.keys(m).map(function(id){
     var b=m[id]; b._id=id;
     b._void=(b.legs||[]).some(function(l){
+      if(l.live) return !l.liveAt || (Number(b.placedAt)-Number(l.liveAt))>LIVE_TTL_MS;
       var ko=Number((games[l.gid]||{}).kickoffTs)||0;
       return ko && Number(b.placedAt)>ko;
     });
@@ -3362,11 +3368,39 @@ function parseEspnSchedule(data){
     // doesn't populate them for every college game, so each is optional — a
     // game missing one simply won't offer that market.
     var mlAway=null, mlHome=null, total=null;
+    var spOddsAway=null, spOddsHome=null, overOdds=null, underOdds=null;
     if(odds){
-      function _num(v){ var n=Number(v); return (v==null||v===""||isNaN(n))?null:n; }
-      mlAway=_num(odds.awayTeamOdds&&odds.awayTeamOdds.moneyLine);
-      mlHome=_num(odds.homeTeamOdds&&odds.homeTeamOdds.moneyLine);
+      // Prices arrive as numbers in some layouts and as strings ("+1000",
+      // "-3000", "EVEN") in others.
+      function _num(v){
+        if(v==null||v==="") return null;
+        if(/^even$/i.test(String(v).trim())) return 100;
+        var n=Number(String(v).replace(/[^0-9.+-]/g,""));
+        return isNaN(n)?null:n;
+      }
+      // Try each place a price can live; the current scoreboard keeps them in
+      // separate moneyline / pointSpread / total blocks, split into close /
+      // current / open, rather than on awayTeamOdds.
+      function _pick(){
+        for(var i=0;i<arguments.length;i++){ var v=_num(arguments[i]); if(v!=null) return v; }
+        return null;
+      }
+      function _g(o,path){ for(var i=0;i<path.length;i++){ if(o==null) return null; o=o[path[i]]; } return o; }
+      function _stages(o,side,field){
+        return [_g(o,[side,"current",field]),_g(o,[side,"close",field]),_g(o,[side,"open",field])];
+      }
+      var ml=odds.moneyline||odds.moneyLine||{};
+      mlAway=_pick.apply(null,[_g(odds,["awayTeamOdds","moneyLine"])].concat(_stages(ml,"away","odds")));
+      mlHome=_pick.apply(null,[_g(odds,["homeTeamOdds","moneyLine"])].concat(_stages(ml,"home","odds")));
       total =_num(odds.overUnder);
+      // Real juice where the feed carries it, so -112 shows as -112.
+      var ps=odds.pointSpread||{}, tt=odds.total||{};
+      spOddsAway=_pick.apply(null,[_g(odds,["awayTeamOdds","spreadOdds"])].concat(_stages(ps,"away","odds")));
+      spOddsHome=_pick.apply(null,[_g(odds,["homeTeamOdds","spreadOdds"])].concat(_stages(ps,"home","odds")));
+      overOdds =_pick.apply(null,[odds.overOdds].concat(_stages(tt,"over","odds")));
+      underOdds=_pick.apply(null,[odds.underOdds].concat(_stages(tt,"under","odds")));
+      // A total line can sit in the block too ("o49.5") if overUnder is absent.
+      if(total==null) total=_pick.apply(null,_stages(tt,"over","line"));
     }
     if(odds){
       // 1) Preferred: explicit favorite flags + numeric spread from the odds object.
@@ -3389,7 +3423,8 @@ function parseEspnSchedule(data){
         }
       }
     }
-    return {eventId:String(ev.id||""),away:awayName,home:homeName,awayId:awayId,homeId:homeId,awayAbbrev:awayAbbrev,homeAbbrev:homeAbbrev,awayLogo:awayLogo,homeLogo:homeLogo,awayConf:awayConf,homeConf:homeConf,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide,mlAway:mlAway,mlHome:mlHome,total:total};
+    return {eventId:String(ev.id||""),away:awayName,home:homeName,awayId:awayId,homeId:homeId,awayAbbrev:awayAbbrev,homeAbbrev:homeAbbrev,awayLogo:awayLogo,homeLogo:homeLogo,awayConf:awayConf,homeConf:homeConf,kickoff:kickoff,kickoffTs:kickoffTs,venue:venue,tv:tv,spread:spread,favSide:favSide,mlAway:mlAway,mlHome:mlHome,total:total,
+            spOddsAway:spOddsAway,spOddsHome:spOddsHome,overOdds:overOdds,underOdds:underOdds};
   });
 }
 function guessWeekNumber(label){
@@ -3732,14 +3767,19 @@ function addImportedGames(weekId){
       kickoff:g.kickoff||"", kickoffTs:g.kickoffTs||"", tv:g.tv||"", venue:g.venue||"",
       favSide:g.favSide||"home", spread:g.spread!=null?g.spread:0,
       mlAway:g.mlAway!=null?g.mlAway:null, mlHome:g.mlHome!=null?g.mlHome:null,
-      total:g.total!=null?g.total:null
+      total:g.total!=null?g.total:null,
+      spOddsAway:g.spOddsAway!=null?g.spOddsAway:null, spOddsHome:g.spOddsHome!=null?g.spOddsHome:null,
+      overOdds:g.overOdds!=null?g.overOdds:null, underOdds:g.underOdds!=null?g.underOdds:null
     };
     // Keep anything the admin added by hand (a game name, a hand-typed price
     // ESPN didn't supply) rather than blanking it on refresh.
     var prev=have[gid]||{};
     if(have[gid] && ST.spreadsLocked && ST.spreadsLocked[weekId]){
-      ["favSide","spread","mlAway","mlHome","total"].forEach(function(k){
-        if(prev[k]!==undefined) rec[k]=prev[k];
+      // Locked lines don't move — but a market that was simply MISSING (ESPN
+      // hadn't posted a moneyline yet, say) still fills in on the next fetch.
+      ["favSide","spread","mlAway","mlHome","total",
+       "spOddsAway","spOddsHome","overOdds","underOdds"].forEach(function(k){
+        if(prev[k]!=null && prev[k]!=="") rec[k]=prev[k];
       });
     }
     if(prev.nick) rec.nick=prev.nick;
@@ -5558,6 +5598,156 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
 // ── BETS SCREEN ───────────────────────────────────────────
 // Replaces the confidence picks page. Tap prices to build a slip, choose
 // straight or parlay, stake it, place it.
+// ── LIVE LINES ────────────────────────────────────────────
+// The scoreboard feed drops odds once a game starts. Live prices come from
+// ESPN's core API, provider 200 ("DraftKings - Live Odds"), which exists only
+// while a game is running. Everything here degrades to "no live line" on any
+// failure, which leaves in-progress games closed — the behaviour before this.
+var LIVE_PROVIDER_ID="200";
+var LIVE_TTL_MS=60000;          // a live price older than this can't be bet
+var LIVE_ODDS={};               // gid -> parsed live line + fetchedAt
+var LIVE_LAST_ERR="";
+
+function coreOddsUrl(eventId){
+  return "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/events/"+
+         eventId+"/competitions/"+eventId+"/odds";
+}
+function _n(v){ var x=Number(v); return (v==null||v===""||isNaN(x))?null:x; }
+// Pick the first path that yields a number. Field names differ between
+// documented examples, so every read tries each known location.
+function _first(obj, paths){
+  for(var i=0;i<paths.length;i++){
+    var cur=obj, ok=true;
+    for(var j=0;j<paths[i].length;j++){ if(cur==null){ ok=false; break; } cur=cur[paths[i][j]]; }
+    var v=ok?_n(cur):null;
+    if(v!==null) return v;
+  }
+  return null;
+}
+// Turn one core-API odds item into the shape the betting screen uses.
+function parseLiveItem(item){
+  if(!item) return null;
+  var a=item.awayTeamOdds||{}, h=item.homeTeamOdds||{};
+  // ESPN's `spread` is from the home team's view: -20.5 means home gives 20.5.
+  var sp=_first(item,[["spread"],["current","spread"]]);
+  var favSide=null;
+  if(a.favorite===true) favSide="away";
+  else if(h.favorite===true) favSide="home";
+  else if(sp!=null) favSide = sp<0 ? "home" : sp>0 ? "away" : "even";
+  var res={
+    spread: sp==null?null:Math.abs(sp),
+    favSide: favSide,
+    total: _first(item,[["overUnder"],["current","total","value"]]),
+    mlAway: _first(a,[["moneyLine"],["current","moneyLine","american"],["current","moneyLine","value"]]),
+    mlHome: _first(h,[["moneyLine"],["current","moneyLine","american"],["current","moneyLine","value"]]),
+    // Live spreads and totals carry real juice, not a flat -110.
+    spreadOddsAway: _first(a,[["spreadOdds"],["current","spread","american"],["current","pointSpread","american"]]),
+    spreadOddsHome: _first(h,[["spreadOdds"],["current","spread","american"],["current","pointSpread","american"]]),
+    overOdds:  _first(item,[["overOdds"],["current","over","american"]]),
+    underOdds: _first(item,[["underOdds"],["current","under","american"]])
+  };
+  // Nothing usable at all -> treat as no line.
+  if(res.spread==null && res.total==null && res.mlAway==null && res.mlHome==null) return null;
+  return res;
+}
+function pickLiveItem(json){
+  var items=(json&&json.items)||[];
+  for(var i=0;i<items.length;i++){
+    var p=items[i]&&items[i].provider||{};
+    if(String(p.id)===LIVE_PROVIDER_ID || /live/i.test(String(p.name||""))) return items[i];
+  }
+  return null;
+}
+// The price a live leg would be taken at, or null if that market is closed.
+function liveLegOdds(L, market, side){
+  if(!L) return null;
+  if(market==="spread"){
+    if(L.spread==null||!L.favSide) return null;
+    return side==="away" ? (L.spreadOddsAway!=null?L.spreadOddsAway:SPREAD_JUICE)
+                         : (L.spreadOddsHome!=null?L.spreadOddsHome:SPREAD_JUICE);
+  }
+  if(market==="total"){
+    if(L.total==null) return null;
+    return side==="over" ? (L.overOdds!=null?L.overOdds:SPREAD_JUICE)
+                         : (L.underOdds!=null?L.underOdds:SPREAD_JUICE);
+  }
+  if(market==="ml"){ var m=side==="away"?L.mlAway:L.mlHome; return m==null?null:m; }
+  return null;
+}
+function liveLegLine(L, market, side){
+  if(market==="spread") return legLine({spread:L.spread,favSide:L.favSide},"spread",side);
+  if(market==="total") return L.total;
+  return null;
+}
+function liveFresh(gid){
+  var L=LIVE_ODDS[gid]; return !!(L && (Date.now()-L.fetchedAt)<LIVE_TTL_MS);
+}
+
+// Admin diagnostic. Reports exactly what ESPN returned for one game, so a
+// live-line problem can be told apart: blocked by the browser, no live provider
+// for that game, or a provider whose fields don't parse.
+function testLiveOdds(){
+  var w=ST.curWeek||displayWeekId(), games=ST.games[w]||{};
+  var ids=activeGames(w);
+  var target=ids.filter(function(gid){ return gameInProgress(w,gid); })[0] || ids[0];
+  var g=games[target];
+  if(!g||!g.eventId){ window.alert("No game with an ESPN event id yet \u2014 Fetch the slate first."); return; }
+  var label=(g.away||"?")+" @ "+(g.home||"?")+(gameInProgress(w,target)?" (in progress)":" (not live yet)");
+  toast("Testing live odds\u2026");
+  fetch(coreOddsUrl(g.eventId))
+    .then(function(r){ if(!r.ok) throw new Error("ESPN answered HTTP "+r.status); return r.json(); })
+    .then(function(j){
+      var items=(j&&j.items)||[];
+      var prov=items.map(function(it){ var p=it.provider||{}; return (p.id||"?")+" "+(p.name||""); });
+      var live=pickLiveItem(j), L=parseLiveItem(live);
+      var lines=["Game: "+label, "Request reached ESPN \u2713", "Providers: "+(prov.length?prov.join(" | "):"none")];
+      if(!live) lines.push("No live provider (id 200) for this game. Normal before kickoff or after the final.");
+      else if(!L) lines.push("Live provider found but no usable fields. Keys: "+Object.keys(live).join(", "));
+      else lines.push("Live line parsed \u2713  spread "+L.spread+" ("+L.favSide+" fav)  total "+L.total+
+                      "  ML "+L.mlAway+" / "+L.mlHome);
+      window.alert(lines.join("\n"));
+    })
+    .catch(function(e){
+      window.alert("Game: "+label+"\n\nCould not read the core API: "+(e&&e.message||e)+
+        "\n\n\"Failed to fetch\" here usually means the browser blocked the request (CORS)."+
+        " In that case live lines need a small proxy, and in-progress games simply stay closed.");
+    });
+}
+
+function gameInProgress(weekId, gid){
+  return isGameLocked(weekId,gid) && !((ST.results[weekId]||{})[gid]);
+}
+// Fetch one game's live line. Resolves to the parsed line or null; never throws.
+function fetchLiveOdds(weekId, gid){
+  var g=(ST.games[weekId]||{})[gid];
+  if(!g||!g.eventId) return Promise.resolve(null);
+  return fetch(coreOddsUrl(g.eventId))
+    .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+    .then(function(j){
+      var L=parseLiveItem(pickLiveItem(j));
+      if(L){ L.fetchedAt=Date.now(); LIVE_ODDS[gid]=L; }
+      else delete LIVE_ODDS[gid];
+      LIVE_LAST_ERR="";
+      return L;
+    })
+    .catch(function(e){ LIVE_LAST_ERR=String(e&&e.message||e); delete LIVE_ODDS[gid]; return null; });
+}
+// Poll every in-progress game while someone is looking at the Bets tab.
+var _liveTimer=null;
+function refreshAllLive(){
+  if(ST.page!=="picks") return;
+  var w=ST.curWeek||displayWeekId();
+  var live=activeGames(w).filter(function(gid){ return gameInProgress(w,gid); });
+  if(!live.length) return;
+  Promise.all(live.map(function(gid){ return fetchLiveOdds(w,gid); })).then(function(){ scheduleDraw(); });
+}
+function startLivePolling(){
+  if(_liveTimer) return;
+  refreshAllLive();
+  _liveTimer=setInterval(refreshAllLive, 30000);
+}
+function stopLivePolling(){ clearInterval(_liveTimer); _liveTimer=null; }
+
 var SLIP=[];                 // legs being built: {gid, market, side, line, odds}
 var SLIP_MODE="straight";    // "straight" = one bet per leg; "parlay" = one combined bet
 var SLIP_STAKE="";           // dollars, as typed
@@ -5585,17 +5775,28 @@ function slipHas(gid,market,side){
   return SLIP.some(function(l){ return slipKey(l.gid,l.market,l.side)===slipKey(gid,market,side); });
 }
 function toggleSlip(weekId,gid,market,side){
-  if(isGameLocked(weekId,gid)){ toast("That game has kicked off"); return; }
   var k=slipKey(gid,market,side);
   var idx=SLIP.findIndex(function(l){ return slipKey(l.gid,l.market,l.side)===k; });
   if(idx>=0){ SLIP.splice(idx,1); draw(); return; }
   var g=(ST.games[weekId]||{})[gid];
-  var odds=legOdds(g,market,side);
-  if(odds==null){ toast("No price on that market"); return; }
+  var leg;
+  if(isGameLocked(weekId,gid)){
+    // Under way: only a fresh live price will do.
+    if(!gameInProgress(weekId,gid)){ toast("That game is final"); return; }
+    if(!liveFresh(gid)){ toast("No live line right now"); return; }
+    var L=LIVE_ODDS[gid], lo=liveLegOdds(L,market,side);
+    if(lo==null){ toast("That market is closed live"); return; }
+    leg={gid:gid, market:market, side:side, odds:lo, line:liveLegLine(L,market,side),
+         live:true, liveAt:L.fetchedAt};
+  } else {
+    var odds=legOdds(g,market,side);
+    if(odds==null){ toast("No price on that market"); return; }
+    leg={gid:gid, market:market, side:side, odds:odds, line:legLine(g,market,side)};
+  }
   // One pick per market per game: tapping the other side swaps rather than
   // stacking two opposing legs on the slip.
   SLIP=SLIP.filter(function(l){ return !(l.gid===gid && l.market===market); });
-  SLIP.push({gid:gid, market:market, side:side, odds:odds, line:legLine(g,market,side)});
+  SLIP.push(leg);
   draw();
 }
 function legLabel(g, leg){
@@ -5623,7 +5824,27 @@ function placeSlip(weekId){
   var st=slipStakeCents();
   var bank=weekScore(weekId,ST.user).bank;
   var gameOf=function(gid){ return (ST.games[weekId]||{})[gid]; };
-  var locked=function(gid){ return isGameLocked(weekId,gid); };
+  for(var li=0; li<SLIP.length; li++){
+    var lg=SLIP[li];
+    if(lg.live){
+      if(!gameInProgress(weekId,lg.gid)){ toast("A live game on your slip has finished"); return; }
+      if(!liveFresh(lg.gid)){ toast("Live line expired \u2014 refreshing"); refreshAllLive(); return; }
+      var L=LIVE_ODDS[lg.gid], nowOdds=liveLegOdds(L,lg.market,lg.side), nowLine=liveLegLine(L,lg.market,lg.side);
+      if(nowOdds!==lg.odds || nowLine!==lg.line){
+        // Moved since it went on the slip. Show the new price rather than
+        // silently taking a different bet.
+        lg.odds=nowOdds; lg.line=nowLine; lg.liveAt=L.fetchedAt;
+        if(nowOdds==null){ SLIP.splice(li,1); toast("A live market closed \u2014 removed from your slip"); }
+        else toast("Line moved \u2014 check the new price and place again");
+        draw(); return;
+      }
+    } else if(isGameLocked(weekId,lg.gid)){
+      toast("A game on your slip has kicked off \u2014 remove it or re-add at the live price");
+      return;
+    }
+  }
+  // Timing was checked above per leg, so validateSlip only checks the rest.
+  var locked=function(){ return false; };
   // Straight mode turns an N-leg slip into N single bets at the same stake.
   var toPlace = (SLIP_MODE==="parlay" && SLIP.length>1) ? [SLIP.slice()]
               : SLIP.map(function(l){ return [l]; });
@@ -5643,8 +5864,10 @@ function placeSlip(weekId){
       // rewrite what was actually taken.
       legs:legs.map(function(l){
         var g=gameOf(l.gid)||{};
-        return {gid:l.gid, market:l.market, side:l.side, odds:l.odds,
-                line:(l.line==null?null:l.line), label:legLabel(g,l)};
+        var rec={gid:l.gid, market:l.market, side:l.side, odds:l.odds,
+                line:(l.line==null?null:l.line), label:legLabel(g,l)+(l.live?" (live)":"")};
+        if(l.live){ rec.live=true; rec.liveAt=l.liveAt; }
+        return rec;
       })
     };
     _saveStart();
@@ -5665,7 +5888,7 @@ function placeSlip(weekId){
 function cancelBet(weekId, betId){
   var b=(((ST.bets||{})[weekId]||{})[ST.user]||{})[betId];
   if(!b) return;
-  if((b.legs||[]).some(function(l){ return isGameLocked(weekId,l.gid); })){
+  if((b.legs||[]).some(function(l){ return l.live || isGameLocked(weekId,l.gid); })){
     toast("A game on that bet has started"); return;
   }
   _saveStart();
@@ -5733,30 +5956,41 @@ function renderBets(){
     if(_day!==lastDay){ h+='<div class="bx-day">'+x(_day)+'</div>'; lastDay=_day; }
     var locked=isGameLocked(weekId,gid);
     var res=(ST.results[weekId]||{})[gid];
+    // Live: in progress, with a price fetched in the last minute.
+    var inProg=locked && !res;
+    var LV=(inProg && liveFresh(gid)) ? LIVE_ODDS[gid] : null;
+    // A market is open pregame, or live when a fresh live price exists.
+    var closed = locked && !LV;
     h+='<div class="bx-game'+(locked?' locked':'')+'" data-bx-teams="'+
        x([g.away,g.home,g.awayAbbrev,g.homeAbbrev].join(" ").toLowerCase())+'">';
     h+='<div class="bx-ghead"><span>'+x(g.kickoff||"")+'</span>'+
        (g.tv?'<span class="bx-tv">'+x(g.tv)+'</span>':'')+
-       (locked?'<span class="bx-lock">'+(res?'FINAL '+x(g.awayScore!=null?g.awayScore:"")+'-'+x(g.homeScore!=null?g.homeScore:""):'&#128274; Live')+'</span>':'')+
+       (res ? '<span class="bx-lock">FINAL '+x(g.awayScore!=null?g.awayScore:"")+'-'+x(g.homeScore!=null?g.homeScore:"")+'</span>'
+        : LV ? '<span class="bx-live">&#9679; LIVE</span>'
+        : inProg ? '<span class="bx-lock">In progress &middot; no live line</span>' : '')+
        '</div>';
     h+='<div class="bx-grid">';
-    h+='<div class="bx-col-h"></div><div class="bx-col-h">Spread</div><div class="bx-col-h">Money</div><div class="bx-col-h">Total</div>';
+    h+='<div class="bx-col-h">'+(LV?'Live':'')+'</div><div class="bx-col-h">Spread</div><div class="bx-col-h">Money</div><div class="bx-col-h">Total</div>';
     ["away","home"].forEach(function(side){
       var name=side==="away"?g.away:g.home;
-      var _rk=rankFor(name, side==="away"?g.awayId:g.homeId);
-      h+='<div class="bx-team">'+(_rk?'<small class="bx-rk">'+_rk+'</small>':'')+x(name||"TBD")+'</div>';
+      var _rkO=rankFor(name, side==="away"?g.awayId:g.homeId);
+      var _rk=_rkO && (typeof _rkO==="object" ? _rkO.rank : _rkO);
+      h+='<div class="bx-team">'+(_rk?'<small class="bx-rk">#'+x(_rk)+'</small>':'')+x(name||"TBD")+'</div>';
       // spread
-      var so=legOdds(g,"spread",side), sl=(so!=null)?legLine(g,"spread",side):null;
-      h+= so!=null ? priceBtn(weekId,gid,"spread",side,(sl>0?"+":"")+sl,fmtAmerican(so),locked)
+      // Prices come from the live line when one is running, otherwise pregame.
+      function _odds(m,sd){ return LV ? liveLegOdds(LV,m,sd) : legOdds(g,m,sd); }
+      function _line(m,sd){ return LV ? liveLegLine(LV,m,sd) : legLine(g,m,sd); }
+      var so=_odds("spread",side), sl=(so!=null)?_line("spread",side):null;
+      h+= so!=null ? priceBtn(weekId,gid,"spread",side,(sl>0?"+":"")+sl,fmtAmerican(so),closed)
                    : '<div class="bx-na">&ndash;</div>';
       // moneyline
-      var mo=legOdds(g,"ml",side);
-      h+= mo!=null ? priceBtn(weekId,gid,"ml",side,"ML",fmtAmerican(mo),locked)
+      var mo=_odds("ml",side);
+      h+= mo!=null ? priceBtn(weekId,gid,"ml",side,"ML",fmtAmerican(mo),closed)
                    : '<div class="bx-na">&ndash;</div>';
       // total: over on the away row, under on the home row
       var tside = side==="away" ? "over" : "under";
-      var to=legOdds(g,"total",tside);
-      h+= to!=null ? priceBtn(weekId,gid,"total",tside,(tside==="over"?"O ":"U ")+g.total,fmtAmerican(to),locked)
+      var to=_odds("total",tside), tl=(to!=null)?_line("total",tside):null;
+      h+= to!=null ? priceBtn(weekId,gid,"total",tside,(tside==="over"?"O ":"U ")+tl,fmtAmerican(to),closed)
                    : '<div class="bx-na">&ndash;</div>';
     });
     h+='</div></div>';
@@ -6667,6 +6901,7 @@ function renderAdmin(){
     h+='<option value="'+_w+'"'+(_w===_selW?' selected':'')+'>CFB Week '+_w+'</option>';
   }
   h+='</select>';
+  h+='<button class="btn btn-ghost" id="b-live-test" title="Check ESPN live odds for this slate" style="font-size:10px;padding:5px 9px;flex-shrink:0">&#128225; Test live</button>';
   h+='<button class="btn btn-ghost" id="b-espn-current" title="Use the hub\'s CFB calendar" style="font-size:10px;padding:5px 9px;flex-shrink:0">&#128197; Set current</button>';
   h+='<button class="btn btn-gold" id="b-fetch-espn" style="font-size:10px;padding:5px 12px;flex-shrink:0">'+(ST.importLoading?"…":"&#128229; Fetch")+'</button>';
   h+='</div>';
@@ -7705,7 +7940,7 @@ function bind(){
     draw();
   });
   el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
-  if(ST.page==="picks") wireBets();
+  if(ST.page==="picks"){ wireBets(); startLivePolling(); } else stopLivePolling();
   el=document.getElementById("b-resend-picks"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-resend-banner"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
@@ -8217,6 +8452,7 @@ function bind(){
   });
   el=document.getElementById("b-import-toggle"); if(el) el.addEventListener("click",function(){ ST.showImport=!ST.showImport; draw(); });
   el=document.getElementById("b-espn-current"); if(el) el.addEventListener("click",setWeekFromCalendar);
+  el=document.getElementById("b-live-test"); if(el) el.addEventListener("click",testLiveOdds);
   el=document.getElementById("b-fetch-espn"); if(el) el.addEventListener("click",function(){
     if(!ST.curWeek) return;
     var meta=(ST._weekMeta&&ST._weekMeta[ST.curWeek])||{};
