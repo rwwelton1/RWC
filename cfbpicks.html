@@ -430,6 +430,20 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .py-out{border:2px solid var(--gold);background:var(--gold-bg)}
 .py-out:disabled{opacity:.45;cursor:default}
 .py-done{border:2px solid var(--border2);background:#fff}
+.py-each{display:flex;flex-wrap:wrap;gap:4px 10px;padding:0 12px 6px;font-size:9.5px;font-weight:700;color:var(--dim)}
+.py-each span{white-space:nowrap}
+.py-each span.has{color:var(--muted)}
+.py-each span.has b{color:var(--green)}
+.py-each span.me{text-decoration:underline}
+.py-market{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:0 12px}
+.py-tile{display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 4px 6px;border:2px solid var(--border);
+  border-radius:10px;background:#fff;font-family:inherit;cursor:pointer;box-shadow:2px 2px 0 var(--border);min-width:0}
+.py-tile .py-emoji{font-size:22px;line-height:1.1}
+.py-tile b{font-size:10.5px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.py-tile .py-price{font-size:12px;font-weight:900;color:var(--green)}
+.py-tile small{font-size:8.5px;font-weight:800;color:var(--muted)}
+.py-tile:disabled{opacity:.5;cursor:default}
+.py-tile.ro{opacity:1;cursor:default;box-shadow:none;border-color:var(--border2)}
 .save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
   white-space:nowrap;vertical-align:1px}
 .save-state.ok{color:var(--green);background:var(--green-bg)}
@@ -1061,12 +1075,21 @@ function gradePropLeg(leg, value){
 // which starts the two sides level at any group size.
 var PARTY_DEFAULT_HEADCOUNT=14;
 var PARTY_DEFAULT_MENU=[
-  {id:"beer",     name:"Beer",                     priceCents:1000},
-  {id:"shot",     name:"Shot",                     priceCents:1500},
-  {id:"shotgun",  name:"Shotgun a beer",           priceCents:2000},
-  {id:"waterfall",name:"Waterfall (buyer says stop)",priceCents:2500},
-  {id:"dare",     name:"Dare (group's choice)",    priceCents:3000}
+  {id:"beer",     emoji:"\uD83C\uDF7A", name:"Beer",           priceCents:1000},
+  {id:"shot",     emoji:"\uD83E\uDD43", name:"Shot",           priceCents:1500},
+  {id:"shotgun",  emoji:"\uD83D\uDCA5", name:"Shotgun a beer", priceCents:2000},
+  {id:"waterfall",emoji:"\uD83C\uDF0A", name:"Waterfall",      priceCents:2500},
+  {id:"dare",     emoji:"\uD83C\uDFB2", name:"Dare",           priceCents:3000}
 ];
+// Anything the admin adds without choosing one still gets a drink.
+// A menu saved before emojis existed still gets the right one for the original
+// items, matched by id; anything else gets a drink.
+function partyEmoji(m){
+  if(!m) return "\uD83C\uDF79";
+  if(m.emoji) return m.emoji;
+  var d=PARTY_DEFAULT_MENU.filter(function(x){ return x.id===m.id; })[0];
+  return (d && d.emoji) || "\uD83C\uDF79";
+}
 
 // Profit above the starting bankroll, counting open bets at stake (so money
 // still riding isn't treated as won yet).
@@ -1209,6 +1232,15 @@ function renderPartyTab(){
      '</div>';
   h+='<div class="bx-sub">'+N+' players + the bachelor &middot; buyouts cost 1/'+N+' of the price &middot; '+
      'spent from winnings only, never your standings</div>';
+  // Who's holding what, biggest first.
+  var _pw=(PARTS||[]).filter(function(u){ return u!==bach; })
+    .map(function(u){ return {u:u, c:partyAvailableCents(banks[u]||{}, u, buys)}; })
+    .sort(function(a,b){ return b.c-a.c || String(nameOf(a.u)).localeCompare(nameOf(b.u)); });
+  if(_pw.length){
+    h+='<div class="py-each">'+_pw.map(function(r){
+      return '<span class="'+(r.c>0?'has':'')+(r.u===me?' me':'')+'">'+x(nameOf(r.u))+' <b>'+fmtMoney(r.c)+'</b></span>';
+    }).join('')+'</div>';
+  }
 
   // Your wallet.
   if(me){
@@ -1217,19 +1249,21 @@ function renderPartyTab(){
        (mine<=0?'<span> &middot; comes from winnings above $100</span>':'')+'</div>';
   }
 
-  // The menu — for everyone except the bachelor.
-  if(!isBach){
-    h+='<div class="bx-section">Send '+x(nameOf(bach))+' something</div>';
-    h+='<div class="py-menu">';
-    var avail=me?partyWallet(me):0;
-    menu.forEach(function(m){
-      var can=me && avail>=m.priceCents;
-      h+='<button class="py-item"'+(can?'':' disabled')+' data-py-buy="'+x(m.id)+'">'+
-         '<b>'+x(m.name)+'</b><span>'+fmtMoney(m.priceCents)+'</span>'+
-         '<small>buyout '+fmtMoney(partyBuyoutCents(m.priceCents,N))+'</small></button>';
-    });
-    h+='</div>';
-  }
+  // The market. Players buy; the bachelor sees the same shelf, read-only, with
+  // what each item would cost him to buy off.
+  var _avail=me?partyWallet(me):0;
+  h+='<div class="bx-section">'+(isBach?'What they can send you':'Send '+x(nameOf(bach))+' something')+'</div>';
+  h+='<div class="py-market">';
+  menu.forEach(function(m){
+    var bo=partyBuyoutCents(m.priceCents,N);
+    var can=!isBach && me && _avail>=m.priceCents;
+    h+='<button class="py-tile'+(isBach?' ro':'')+'"'+(can?'':' disabled')+(isBach?'':' data-py-buy="'+x(m.id)+'"')+'>'+
+       '<span class="py-emoji">'+x(partyEmoji(m))+'</span>'+
+       '<b>'+x(m.name)+'</b>'+
+       '<span class="py-price">'+fmtMoney(m.priceCents)+'</span>'+
+       '<small>'+(isBach?('you: '+fmtMoney(bo)):('buyout '+fmtMoney(bo)))+'</small></button>';
+  });
+  h+='</div>';
 
   // The queue: what's owed, bought off, and done.
   var list=Object.keys(buys).map(function(id){ var b=buys[id]; b._id=id; return b; })
@@ -1284,6 +1318,7 @@ function renderPartyAdmin(){
     h+='<div class="adm-label">Menu</div>';
     partyMenu().forEach(function(m,i){
       h+='<div class="adm-row" style="gap:6px">'+
+         '<input class="adm-input" data-py-emoji="'+i+'" value="'+x(partyEmoji(m))+'" maxlength="4" style="flex:0 0 44px;text-align:center">'+
          '<input class="adm-input" data-py-name="'+i+'" value="'+x(m.name)+'" style="flex:2">'+
          '<input class="adm-input" data-py-price="'+i+'" type="number" min="1" step="1" value="'+(m.priceCents/100)+'" style="flex:1">'+
          '<button class="btn btn-ghost" data-py-del="'+i+'" style="flex:0 0 auto;padding:4px 8px">&times;</button></div>';
@@ -1294,7 +1329,7 @@ function renderPartyAdmin(){
   return h;
 }
 function _menuEdit(fn){
-  var m=partyMenu().map(function(x){ return {id:x.id,name:x.name,priceCents:x.priceCents}; });
+  var m=partyMenu().map(function(x){ return {id:x.id,emoji:partyEmoji(x),name:x.name,priceCents:x.priceCents}; });
   fn(m);
   savePartyCfg({menu:m});
 }
@@ -1325,6 +1360,10 @@ function wireParty(){
     inp.addEventListener("change",function(){ var ix=Number(this.getAttribute("data-py-name")), v=this.value.trim();
       if(!v) return; _menuEdit(function(m){ m[ix].name=v; }); });
   });
+  document.querySelectorAll("[data-py-emoji]").forEach(function(inp){
+    inp.addEventListener("change",function(){ var ix=Number(this.getAttribute("data-py-emoji")), v=this.value.trim();
+      if(!v) return; _menuEdit(function(m){ m[ix].emoji=v; }); });
+  });
   document.querySelectorAll("[data-py-price]").forEach(function(inp){
     inp.addEventListener("change",function(){ var ix=Number(this.getAttribute("data-py-price")), v=Math.round(Number(this.value)*100);
       if(!(v>0)){ toast("Price must be above $0"); return; } _menuEdit(function(m){ m[ix].priceCents=v; }); });
@@ -1335,7 +1374,7 @@ function wireParty(){
       _menuEdit(function(m){ m.splice(ix,1); }); });
   });
   el=document.getElementById("py-add"); if(el) el.addEventListener("click",function(){
-    _menuEdit(function(m){ m.push({id:"i"+Date.now().toString(36), name:"New punishment", priceCents:1000}); });
+    _menuEdit(function(m){ m.push({id:"i"+Date.now().toString(36), emoji:"\uD83C\uDF79", name:"New punishment", priceCents:1000}); });
   });
 }
 
