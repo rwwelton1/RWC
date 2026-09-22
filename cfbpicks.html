@@ -404,6 +404,32 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .pp-btns{display:grid;grid-template-columns:1fr 1fr;gap:5px;flex:0 0 58%}
 .pp-btns.one{grid-template-columns:1fr}
 .pp-game .pp-row{padding:6px 10px}
+.py-vs{display:flex;align-items:stretch;gap:6px;padding:10px 12px 4px}
+.py-side{flex:1;background:#fff;border:2px solid var(--border);border-radius:10px;padding:8px;text-align:center;box-shadow:2px 2px 0 var(--border)}
+.py-side span{display:block;font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.py-side b{display:block;font-size:17px;font-weight:900}
+.py-side small{font-size:9px;font-weight:800;color:var(--muted)}
+.py-mid{align-self:center;font-size:11px;font-weight:900;color:var(--red2)}
+.py-wallet{margin:6px 12px;padding:8px 10px;background:var(--gold-bg);border:2px solid var(--gold);border-radius:10px;font-size:11px;font-weight:800}
+.py-wallet span{color:var(--muted);font-weight:700}
+.py-menu{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:0 12px}
+.py-item{display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:8px 10px;border:2px solid var(--border);
+  border-radius:10px;background:#fff;font-family:inherit;text-align:left;cursor:pointer;box-shadow:2px 2px 0 var(--border)}
+.py-item b{font-size:11.5px;font-weight:900}
+.py-item span{font-size:13px;font-weight:900;color:var(--green)}
+.py-item small{font-size:8.5px;font-weight:800;color:var(--muted)}
+.py-item:disabled{opacity:.45;cursor:default}
+.py-row{display:flex;align-items:center;gap:8px;margin:5px 12px;padding:7px 10px;background:#fff;border:2px solid var(--border2);border-radius:10px}
+.py-row.pending{border-color:var(--red2)}
+.py-row.out,.py-row.done{opacity:.65}
+.py-what{flex:1;min-width:0;display:flex;flex-direction:column}
+.py-what b{font-size:12px;font-weight:900}
+.py-what span{font-size:9.5px;font-weight:700;color:var(--muted)}
+.py-tag{font-size:9.5px;font-weight:800;color:var(--muted);white-space:nowrap}
+.py-out,.py-done{font-family:inherit;font-size:10px;font-weight:900;padding:5px 9px;border-radius:8px;cursor:pointer;white-space:nowrap}
+.py-out{border:2px solid var(--gold);background:var(--gold-bg)}
+.py-out:disabled{opacity:.45;cursor:default}
+.py-done{border:2px solid var(--border2);background:#fff}
 .save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
   white-space:nowrap;vertical-align:1px}
 .save-state.ok{color:var(--green);background:var(--green-bg)}
@@ -1023,6 +1049,294 @@ function gradePropLeg(leg, value){
   if(Math.abs(v-line)<1e-9) return "push";
   if(leg.side==="over") return v>line ? "win" : "loss";
   return v<line ? "win" : "loss";
+}
+
+// ── BACHELOR PARTY MODE ───────────────────────────────────
+// Fourteen players spend their WINNINGS on punishments for the bachelor; he
+// spends his on buying them off. The money is a separate wallet: it never
+// touches bankrolls or standings.
+//
+// Fairness: the group out-spends one man roughly N to 1, so a buyout costs the
+// punishment's price divided by the headcount. His dollar is worth N of theirs,
+// which starts the two sides level at any group size.
+var PARTY_DEFAULT_HEADCOUNT=14;
+var PARTY_DEFAULT_MENU=[
+  {id:"beer",     name:"Beer",                     priceCents:1000},
+  {id:"shot",     name:"Shot",                     priceCents:1500},
+  {id:"shotgun",  name:"Shotgun a beer",           priceCents:2000},
+  {id:"waterfall",name:"Waterfall (buyer says stop)",priceCents:2500},
+  {id:"dare",     name:"Dare (group's choice)",    priceCents:3000}
+];
+
+// Profit above the starting bankroll, counting open bets at stake (so money
+// still riding isn't treated as won yet).
+function partyProfitCents(bank){ return Math.max(0, (bank.bankCents||0)-(bank.startCents||0)); }
+
+// Everything a player has spent from the party wallet.
+function partySpentCents(uid, buys){
+  var t=0;
+  Object.keys(buys||{}).forEach(function(id){
+    var b=buys[id]; if(!b) return;
+    if(b.by===uid) t+=Number(b.priceCents)||0;                    // punishments they bought
+    if(b.status==="out" && b.outBy===uid) t+=Number(b.outCents)||0; // punishments they bought off
+  });
+  return t;
+}
+// What's left to spend. Past purchases stand even if later losses dip below
+// them; you just can't buy more until you're back in profit.
+function partyAvailableCents(bank, uid, buys){
+  return Math.max(0, partyProfitCents(bank) - partySpentCents(uid, buys));
+}
+// The bachelor's price to cancel a punishment.
+function partyBuyoutCents(priceCents, headcount){
+  var n=Math.max(1, Math.round(Number(headcount)||PARTY_DEFAULT_HEADCOUNT));
+  return Math.max(1, Math.round((Number(priceCents)||0)/n));
+}
+// A snapshot of the fight: how many punishments the group can afford versus
+// how many the bachelor can cancel, at average prices.
+function partyBalance(players, bachelor, banks, buys, menu, headcount){
+  var avg=(menu||[]).reduce(function(a,m){ return a+(Number(m.priceCents)||0); },0)/Math.max(1,(menu||[]).length);
+  var team=0, bach=0;
+  players.forEach(function(uid){
+    var av=partyAvailableCents(banks[uid]||{}, uid, buys);
+    if(uid===bachelor) bach+=av; else team+=av;
+  });
+  var pending=Object.keys(buys||{}).filter(function(id){ return buys[id]&&buys[id].status==="pending"; }).length;
+  var buyout=partyBuyoutCents(avg, headcount);
+  return {
+    teamCents:team, bachelorCents:bach,
+    teamCanBuy: avg ? Math.floor(team/avg) : 0,
+    bachelorCanCancel: buyout ? Math.floor(bach/buyout) : 0,
+    pending:pending
+  };
+}
+
+// ── Party state & actions ─────────────────────────────────
+function partyCfg(){ return ST.party||{}; }
+function partyOn(){ return !!partyCfg().on; }
+function partyHeadcount(){ var n=Number(partyCfg().headcount); return (n>=1)?n:PARTY_DEFAULT_HEADCOUNT; }
+function partyMenu(){ var m=partyCfg().menu; return (m&&m.length)?m:PARTY_DEFAULT_MENU; }
+function partyBachelor(){ return partyCfg().bachelor||null; }
+function partyBuys(){ return ST.partyBuys||{}; }
+function partyWallet(uid){
+  var w=ST.curWeek||displayWeekId();
+  return partyAvailableCents(weekScore(w,uid).bank, uid, partyBuys());
+}
+function savePartyCfg(patch){
+  var next=Object.assign({}, partyCfg(), patch);
+  ST.party=next;
+  if(DB) DB.ref(BASE+"/meta/party").update(patch);
+  draw();
+}
+// Party events go in the group chat when it's on, which is half the fun.
+function partyAnnounce(text){
+  if(!DB || !chatOn()) return;
+  DB.ref(BASE+"/chat").push().set({uid:BOT_UID, text:text, ts:Date.now(), bot:true});
+}
+
+// A player buys a punishment for the bachelor with their winnings.
+function buyPunishment(itemId){
+  var me=ST.user, bach=partyBachelor();
+  if(!me){ toast("Select your name first"); return; }
+  if(me===bach){ toast("The bachelor can't buy his own punishments \u2014 nice try"); return; }
+  var item=partyMenu().filter(function(m){ return m.id===itemId; })[0];
+  if(!item){ toast("That item is gone"); return; }
+  var avail=partyWallet(me);
+  if(avail<item.priceCents){
+    toast(avail>0 ? ("You have "+fmtMoney(avail)+" in winnings to spend")
+                  : "Party money comes from winnings \u2014 win a bet first");
+    return;
+  }
+  var rec={by:me, item:item.id, name:item.name, priceCents:item.priceCents, at:Date.now(), status:"pending"};
+  _saveStart();
+  DB.ref(BASE+"/party/buys").push().set(rec, function(e){
+    _saveEnd(e);
+    if(e){ toast("\u26a0 Didn't go through"); return; }
+    toast("\uD83C\uDF7A "+item.name+" sent to "+nameOf(bach));
+    partyAnnounce("\uD83C\uDF7A "+nameOf(me)+" \u2192 "+nameOf(bach)+": "+item.name+
+                  " (buyout "+fmtMoney(partyBuyoutCents(item.priceCents, partyHeadcount()))+")");
+  });
+}
+// The bachelor cancels one. A transaction, so two taps (or two phones) can't
+// buy the same punishment out twice or buy out one that's already been done.
+function buyOut(buyId){
+  var me=ST.user, bach=partyBachelor();
+  if(me!==bach){ toast("Only the bachelor can buy out"); return; }
+  var b=partyBuys()[buyId];
+  if(!b||b.status!=="pending"){ toast("That one's already settled"); return; }
+  var cost=partyBuyoutCents(b.priceCents, partyHeadcount());
+  if(partyWallet(me)<cost){ toast("Buyout is "+fmtMoney(cost)+" \u2014 you have "+fmtMoney(partyWallet(me))); return; }
+  _saveStart();
+  DB.ref(BASE+"/party/buys/"+buyId).transaction(function(cur){
+    if(!cur||cur.status!=="pending") return;                 // someone got there first: abort
+    cur.status="out"; cur.outBy=me; cur.outCents=cost; cur.outAt=Date.now();
+    return cur;
+  }, function(e, committed){
+    _saveEnd(e);
+    if(e){ toast("\u26a0 Didn't go through"); return; }
+    if(!committed){ toast("That one's already settled"); return; }
+    toast("\uD83D\uDCB8 Bought out for "+fmtMoney(cost));
+    partyAnnounce("\uD83D\uDCB8 "+nameOf(me)+" bought out "+nameOf(b.by)+"\u2019s "+b.name+" for "+fmtMoney(cost));
+  });
+}
+// Mark a punishment done. The bachelor or an admin can do it.
+function markDone(buyId){
+  var b=partyBuys()[buyId];
+  if(!b||b.status!=="pending") return;
+  DB.ref(BASE+"/party/buys/"+buyId).transaction(function(cur){
+    if(!cur||cur.status!=="pending") return;
+    cur.status="done"; cur.doneAt=Date.now(); return cur;
+  }, function(e,c){
+    if(!e&&c) partyAnnounce("\u2705 "+nameOf(partyBachelor())+" did "+nameOf(b.by)+"\u2019s "+b.name);
+  });
+}
+
+// ── Party tab ─────────────────────────────────────────────
+function renderPartyTab(){
+  var w=ST.curWeek||displayWeekId();
+  var h=weekDropdown(w);
+  var bach=partyBachelor(), me=ST.user, isBach=(me&&me===bach);
+  if(!bach){ return h+'<div class="lb-note">An admin needs to choose the bachelor first.</div>'; }
+  var N=partyHeadcount(), menu=partyMenu(), buys=partyBuys();
+  var banks={}; (PARTS||[]).forEach(function(u){ banks[u]=weekScore(w,u).bank; });
+  var bal=partyBalance(PARTS||[], bach, banks, buys, menu, N);
+
+  // The fight, at a glance.
+  h+='<div class="py-vs">'+
+     '<div class="py-side"><span>The group</span><b>'+fmtMoney(bal.teamCents)+'</b><small>can buy ~'+bal.teamCanBuy+'</small></div>'+
+     '<div class="py-mid">VS</div>'+
+     '<div class="py-side"><span>'+x(nameOf(bach))+'</span><b>'+fmtMoney(bal.bachelorCents)+'</b><small>can cancel ~'+bal.bachelorCanCancel+'</small></div>'+
+     '</div>';
+  h+='<div class="bx-sub">'+N+' players + the bachelor &middot; buyouts cost 1/'+N+' of the price &middot; '+
+     'spent from winnings only, never your standings</div>';
+
+  // Your wallet.
+  if(me){
+    var mine=partyWallet(me);
+    h+='<div class="py-wallet">'+(isBach?'Your buyout money':'Your party money')+': <b>'+fmtMoney(mine)+'</b>'+
+       (mine<=0?'<span> &middot; comes from winnings above $100</span>':'')+'</div>';
+  }
+
+  // The menu — for everyone except the bachelor.
+  if(!isBach){
+    h+='<div class="bx-section">Send '+x(nameOf(bach))+' something</div>';
+    h+='<div class="py-menu">';
+    var avail=me?partyWallet(me):0;
+    menu.forEach(function(m){
+      var can=me && avail>=m.priceCents;
+      h+='<button class="py-item"'+(can?'':' disabled')+' data-py-buy="'+x(m.id)+'">'+
+         '<b>'+x(m.name)+'</b><span>'+fmtMoney(m.priceCents)+'</span>'+
+         '<small>buyout '+fmtMoney(partyBuyoutCents(m.priceCents,N))+'</small></button>';
+    });
+    h+='</div>';
+  }
+
+  // The queue: what's owed, bought off, and done.
+  var list=Object.keys(buys).map(function(id){ var b=buys[id]; b._id=id; return b; })
+    .sort(function(a,b){ return (b.at||0)-(a.at||0); });
+  var pend=list.filter(function(b){ return b.status==="pending"; });
+  h+='<div class="bx-section">'+(pend.length?('Owed &middot; '+pend.length):'Nothing owed right now')+'</div>';
+  pend.forEach(function(b){
+    var cost=partyBuyoutCents(b.priceCents,N);
+    h+='<div class="py-row pending"><div class="py-what"><b>'+x(b.name)+'</b><span>from '+x(nameOf(b.by))+'</span></div>';
+    if(isBach){
+      h+='<button class="py-out" data-py-out="'+b._id+'"'+(partyWallet(me)>=cost?'':' disabled')+'>Buy out '+fmtMoney(cost)+'</button>';
+    }
+    if(isBach || (typeof isGroupAdminByUid==="function" && isGroupAdminByUid())){
+      h+='<button class="py-done" data-py-done="'+b._id+'">Done</button>';
+    }
+    h+='</div>';
+  });
+  var hist=list.filter(function(b){ return b.status!=="pending"; }).slice(0,30);
+  if(hist.length){
+    h+='<div class="bx-section">History</div>';
+    hist.forEach(function(b){
+      h+='<div class="py-row '+b.status+'"><div class="py-what"><b>'+x(b.name)+'</b><span>from '+x(nameOf(b.by))+'</span></div>'+
+         '<span class="py-tag">'+(b.status==="out"?('bought out '+fmtMoney(b.outCents)):'&#10003; done')+'</span></div>';
+    });
+  }
+
+  // Leaderboard of chaos: who's sent the most.
+  var sent={}; list.forEach(function(b){ sent[b.by]=(sent[b.by]||0)+1; });
+  var top=Object.keys(sent).sort(function(a,b){ return sent[b]-sent[a]; }).slice(0,5);
+  if(top.length){
+    h+='<div class="bx-section">Most generous</div>';
+    top.forEach(function(u){ h+='<div class="py-row"><div class="py-what"><b>'+x(nameOf(u))+'</b></div><span class="py-tag">'+sent[u]+' sent</span></div>'; });
+  }
+  return h;
+}
+
+// ── Admin controls ────────────────────────────────────────
+function renderPartyAdmin(){
+  var c=partyCfg(), h='';
+  h+='<div class="adm-game">';
+  h+='<div class="adm-game-title">Bachelor Party Mode &mdash; winnings buy punishments</div>';
+  h+='<div class="adm-btns">'+
+     '<button class="adm-btn'+(c.on?' sel':'')+'" id="py-on">&#127867; On</button>'+
+     '<button class="adm-btn'+(!c.on?' sel':'')+'" id="py-off">Off</button></div>';
+  if(c.on){
+    h+='<div class="adm-label">Bachelor</div><select class="adm-input" id="py-bach"><option value="">Choose\u2026</option>';
+    (PARTS||[]).forEach(function(u){ h+='<option value="'+x(u)+'"'+(c.bachelor===u?' selected':'')+'>'+x(nameOf(u))+'</option>'; });
+    h+='</select>';
+    h+='<div class="adm-label">Players present, not counting the bachelor</div>'+
+       '<input class="adm-input" id="py-count" type="number" min="1" max="100" value="'+partyHeadcount()+'">'+
+       '<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin-top:3px">Buyouts cost the price divided by this, which keeps it an even fight.</div>';
+    h+='<div class="adm-label">Menu</div>';
+    partyMenu().forEach(function(m,i){
+      h+='<div class="adm-row" style="gap:6px">'+
+         '<input class="adm-input" data-py-name="'+i+'" value="'+x(m.name)+'" style="flex:2">'+
+         '<input class="adm-input" data-py-price="'+i+'" type="number" min="1" step="1" value="'+(m.priceCents/100)+'" style="flex:1">'+
+         '<button class="btn btn-ghost" data-py-del="'+i+'" style="flex:0 0 auto;padding:4px 8px">&times;</button></div>';
+    });
+    h+='<button class="btn btn-ghost" id="py-add" style="margin-top:6px;font-size:10px">+ Add item</button>';
+  }
+  h+='</div>';
+  return h;
+}
+function _menuEdit(fn){
+  var m=partyMenu().map(function(x){ return {id:x.id,name:x.name,priceCents:x.priceCents}; });
+  fn(m);
+  savePartyCfg({menu:m});
+}
+function wireParty(){
+  var el, els, i;
+  document.querySelectorAll("[data-py-buy]").forEach(function(b){
+    b.addEventListener("click",function(){ buyPunishment(this.getAttribute("data-py-buy")); });
+  });
+  document.querySelectorAll("[data-py-out]").forEach(function(b){
+    b.addEventListener("click",function(){ buyOut(this.getAttribute("data-py-out")); });
+  });
+  document.querySelectorAll("[data-py-done]").forEach(function(b){
+    b.addEventListener("click",function(){ markDone(this.getAttribute("data-py-done")); });
+  });
+  el=document.getElementById("py-on");  if(el) el.addEventListener("click",function(){
+    var patch={on:true};
+    if(!partyCfg().headcount) patch.headcount=PARTY_DEFAULT_HEADCOUNT;
+    if(!partyCfg().menu) patch.menu=PARTY_DEFAULT_MENU;
+    savePartyCfg(patch);
+  });
+  el=document.getElementById("py-off"); if(el) el.addEventListener("click",function(){ savePartyCfg({on:false}); });
+  el=document.getElementById("py-bach"); if(el) el.addEventListener("change",function(){ savePartyCfg({bachelor:this.value||null}); });
+  el=document.getElementById("py-count"); if(el) el.addEventListener("change",function(){
+    var n=Math.round(Number(this.value)); if(!(n>=1)){ toast("At least 1"); return; }
+    savePartyCfg({headcount:n});
+  });
+  document.querySelectorAll("[data-py-name]").forEach(function(inp){
+    inp.addEventListener("change",function(){ var ix=Number(this.getAttribute("data-py-name")), v=this.value.trim();
+      if(!v) return; _menuEdit(function(m){ m[ix].name=v; }); });
+  });
+  document.querySelectorAll("[data-py-price]").forEach(function(inp){
+    inp.addEventListener("change",function(){ var ix=Number(this.getAttribute("data-py-price")), v=Math.round(Number(this.value)*100);
+      if(!(v>0)){ toast("Price must be above $0"); return; } _menuEdit(function(m){ m[ix].priceCents=v; }); });
+  });
+  document.querySelectorAll("[data-py-del]").forEach(function(b){
+    b.addEventListener("click",function(){ var ix=Number(this.getAttribute("data-py-del"));
+      if(partyMenu().length<=1){ toast("Keep at least one item"); return; }
+      _menuEdit(function(m){ m.splice(ix,1); }); });
+  });
+  el=document.getElementById("py-add"); if(el) el.addEventListener("click",function(){
+    _menuEdit(function(m){ m.push({id:"i"+Date.now().toString(36), name:"New punishment", priceCents:1000}); });
+  });
 }
 
 var GAME_IDS=[];
@@ -2877,6 +3191,8 @@ function loadData(){
       DB.ref(BASE+"/tiebreaker").on("value",function(sn){ST.tiebreaker=sn.val()||{};scheduleDraw();});
       DB.ref(BASE+"/meta/chatEnabled").on("value",function(sn){ ST.chatEnabled=!!sn.val(); scheduleDraw(); });
       DB.ref(BASE+"/meta/remindersOn").on("value",function(sn){ ST.remindersOn=!!sn.val(); scheduleDraw(); });
+      DB.ref(BASE+"/meta/party").on("value",function(sn){ ST.party=sn.val()||{}; scheduleDraw(); });
+      DB.ref(BASE+"/party/buys").on("value",function(sn){ ST.partyBuys=sn.val()||{}; scheduleDraw(); });
       // Firebase reports its own connection state here. Without this a phone on
       // a dead network shows every pick as saved.
       DB.ref(".info/connected").on("value",function(sn){
@@ -7171,6 +7487,7 @@ function renderAdmin(){
     }
     h+='</div>';
 
+    h+=renderPartyAdmin();
     // Picks reminder. The app works out who and when; sending is one tap,
     // because a page with no server can't post mail on a timer.
     h+='<div class="adm-game">';
@@ -8182,6 +8499,7 @@ function draw(){
   h+='</div></div>';
 
   var tabs=[{id:"standings",lbl:"&#128202; Standings"},{id:"picks",lbl:"&#128176; Bets"},{id:"props",lbl:"&#127919; Props"},{id:"scores",lbl:"&#128308; Scores"}];
+  if(partyOn()) tabs.splice(3,0,{id:"party",lbl:"&#127867; Party"});
   // Missing picks badge — only show to the current user if THEY haven't finished, within 4h of kickoff
   if(ST.weekIds.length&&ST.user){
     var _cw=displayWeekId();
@@ -8220,6 +8538,7 @@ function draw(){
   else if(ST.page==="scores") h+='<div class="scores-wrap" id="scores-wrap"><div class="scores-loading">Loading scores&hellip;</div></div>';
   else if(ST.page==="standings") h+=renderBetsBoard();   // one weekend: the board is the standings
   else if(ST.page==="props") h+=renderPropsTab();
+  else if(ST.page==="party") h+=(partyOn()?renderPartyTab():renderBetsBoard());
   else if(ST.page==="chat"&&chatOn()&&!PUBLIC_VIEW) h+=renderChat();
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
   else { ST.page="picks"; h+=renderBets(); }
@@ -8349,6 +8668,7 @@ function bind(){
   el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
   if(ST.page==="picks"){ wireBets(); startLivePolling(); } else stopLivePolling();
   if(ST.page==="props") wireBets();         // the slip and its controls are shared
+  wireParty();
   (function(){
     var w=ST.curWeek||displayWeekId();
     document.querySelectorAll("[data-prop-id]").forEach(function(b){
