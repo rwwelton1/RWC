@@ -393,6 +393,17 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .bx-live{margin-left:auto;color:#dc2626;font-weight:900;letter-spacing:.04em;animation:bxPulse 1.6s ease-in-out infinite}
 @keyframes bxPulse{0%,100%{opacity:1}50%{opacity:.45}}
 .bx-game:has(.bx-live){border-color:#dc2626}
+.pp-toggle{display:block;width:100%;padding:7px;border:none;border-top:1px solid var(--border2);background:var(--cream);
+  font-family:inherit;font-size:10px;font-weight:800;color:var(--muted);cursor:pointer;letter-spacing:.02em}
+.pp-list{padding:4px 10px 8px;border-top:1px solid var(--border2)}
+.pp-row{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--border2)}
+.pp-row:last-child{border-bottom:none}
+.pp-name{flex:1;min-width:0;display:flex;flex-direction:column}
+.pp-name b{font-size:12px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp-name span{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.pp-btns{display:grid;grid-template-columns:1fr 1fr;gap:5px;flex:0 0 58%}
+.pp-btns.one{grid-template-columns:1fr}
+.pp-game .pp-row{padding:6px 10px}
 .save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
   white-space:nowrap;vertical-align:1px}
 .save-state.ok{color:var(--green);background:var(--green-bg)}
@@ -758,6 +769,7 @@ function settleBet(bet, scoreOf){
     // A result keyed in by hand in admin carries no score. The spread can still
     // be graded from it; moneylines and totals genuinely need the numbers and
     // wait until a score arrives.
+    if(lg.market==="prop") r=gradePropLeg(lg, sc.propVal ? sc.propVal(lg.propId) : undefined);
     if(r===null && lg.market==="spread" && sc.result){
       r = sc.result==="push" ? "push" : (sc.result===lg.side ? "win" : "loss");
     }
@@ -826,6 +838,191 @@ function validateSlip(legs, stakeCents, cashCents, gameOf, isLocked){
     seen[lg.gid]=true;
   }
   return null;
+}
+
+// ── PLAYER PROPS ──────────────────────────────────────────
+// Pasted in bulk like the PGA field, graded from ESPN's box score. The parser
+// is deliberately forgiving about format; the grader is deliberately strict
+// about which player a line belongs to, because it pays out real bankroll.
+
+// Stat phrases people actually type, longest first so "rec yds" wins over "rec".
+var PROP_ALIASES=[
+  ["any_td",  ["anytime touchdown scorer","anytime touchdown","anytime td scorer","anytime scorer","anytime td","any td","to score a td","to score","atd"]],
+  ["pass_yds",["passing yards","passing yds","pass yards","pass yds","pyds"]],
+  ["pass_td", ["passing touchdowns","passing tds","passing td","pass tds","pass td"]],
+  ["pass_int",["interceptions thrown","interceptions","ints","int"]],
+  ["rush_yds",["rushing yards","rushing yds","rush yards","rush yds","ryds"]],
+  ["rush_td", ["rushing touchdowns","rushing tds","rushing td","rush tds","rush td"]],
+  ["rush_car",["rushing attempts","rush attempts","carries"]],
+  ["rec_yds", ["receiving yards","receiving yds","rec yards","rec yds","recyds"]],
+  ["rec_rec", ["receptions","catches","recs"]],
+  ["rec_td",  ["receiving touchdowns","receiving tds","receiving td","rec tds","rec td"]],
+  ["tackles", ["total tackles","tackles"]],
+  ["sacks",   ["sacks"]]
+];
+var PROP_STAT_NAMES={any_td:"Anytime TD",pass_yds:"Pass yds",pass_td:"Pass TDs",pass_int:"INTs",
+  rush_yds:"Rush yds",rush_td:"Rush TDs",rush_car:"Carries",rec_yds:"Rec yds",rec_rec:"Receptions",
+  rec_td:"Rec TDs",tackles:"Tackles",sacks:"Sacks"};
+
+// A player's matching key: suffixes dropped, so "Omar Cooper" (how books list
+// him) matches "Omar Cooper Jr." (how the box score lists him).
+function _playerKey(s){
+  var w=String(s||"").toLowerCase().replace(/[^a-z0-9 ]/g," ").split(/\s+/).filter(Boolean);
+  while(w.length>1 && /^(jr|sr|ii|iii|iv|v)$/.test(w[w.length-1])) w.pop();
+  return w;
+}
+function _pnorm(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9.+\- ]/g," ").replace(/\s+/g," ").trim(); }
+function _pkey(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+
+// Find the stat phrase in a line. Returns {stat, start, end} in the normalised text.
+function findPropStat(norm){
+  var best=null;
+  PROP_ALIASES.forEach(function(row){
+    row[1].forEach(function(alias){
+      var re=new RegExp("(^|\\s)"+alias.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(?=\\s|$|\\d|[+\\-])");
+      var m=re.exec(norm);
+      if(m){
+        var start=m.index+m[1].length;
+        if(!best || alias.length>best.len) best={stat:row[0], start:start, end:start+alias.length, len:alias.length};
+      }
+    });
+  });
+  return best;
+}
+function _price(tok){
+  if(/^even$/i.test(tok)) return 100;
+  if(!/^[+\-]\d+$/.test(tok)) return null;
+  var n=Number(tok); return (Math.abs(n)>=100)?n:null;     // -110, +140; "-3" isn't a price
+}
+
+// Which game a piece of text refers to. Matches whole team names or
+// abbreviations; the game matching the most (and longest) names wins.
+function matchGame(text, games){
+  var t=" "+_pnorm(text)+" ", best=null, bestScore=0, tie=false;
+  Object.keys(games||{}).forEach(function(gid){
+    var g=games[gid]; if(!g||!g.away||!g.home) return;
+    var score=0;
+    [g.away,g.home,g.awayAbbrev,g.homeAbbrev].forEach(function(n){
+      var k=_pnorm(n); if(!k || k.length<2) return;
+      if(t.indexOf(" "+k+" ")>=0) score+=k.length;
+    });
+    if(score>bestScore){ best=gid; bestScore=score; tie=false; }
+    else if(score && score===bestScore) tie=true;
+  });
+  return (best && !tie) ? best : null;
+}
+function propIdFor(gid, player, stat){ return (gid+"_"+_pkey(player)+"_"+stat).slice(0,90); }
+
+// Parse a pasted block. A line naming a matchup sets the game for the lines
+// under it; a prop line can also name its team and stand alone.
+function parsePropText(text, games){
+  var out=[], errors=[], curGid=null;
+  String(text||"").split(/\r?\n/).forEach(function(raw, i){
+    var line=raw.trim();
+    if(!line || /^#/.test(line)) return;
+    var norm=_pnorm(line);
+    var st=findPropStat(norm);
+    if(!st){
+      var g=matchGame(line, games);
+      if(g){ curGid=g; return; }
+      errors.push({line:i+1, text:line, reason:"No stat recognised, and it isn't a matchup on the board"});
+      return;
+    }
+    var before=norm.slice(0, st.start).replace(/^\d+[.)]\s*/,"").trim();
+    var after=norm.slice(st.end).trim();
+    // A team named on the line overrides the current matchup header.
+    var gid=matchGame(before, games) || curGid;
+    // Strip a leading or trailing team name from the player portion.
+    var player=before;
+    if(gid){
+      var G=games[gid];
+      [G.away,G.home,G.awayAbbrev,G.homeAbbrev].forEach(function(n){
+        var k=_pnorm(n); if(!k) return;
+        player=(" "+player+" ").replace(" "+k+" "," ").trim();
+      });
+    }
+    player=player.replace(/[,\-:|]+$/,"").replace(/^[,\-:|]+/,"").trim();
+    if(!gid){ errors.push({line:i+1, text:line, reason:"Which game? Add a matchup line above it"}); return; }
+    if(!player){ errors.push({line:i+1, text:line, reason:"No player name"}); return; }
+    // Name back in its original capitalisation.
+    var m=new RegExp(player.split(" ").map(function(w){return w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}).join("[^A-Za-z0-9]+"),"i").exec(raw);
+    var display=m?m[0]:player;
+    var toks=after.replace(/[\/,]/g," ").split(/\s+/).filter(Boolean);
+    var lineVal=null, prices=[];
+    toks.forEach(function(tk){
+      var ou=/^[ou](\d+(\.\d+)?)$/.exec(tk);                // o245.5 / u245.5
+      if(ou){ if(lineVal==null) lineVal=Number(ou[1]); return; }
+      var p=_price(tk); if(p!=null){ prices.push(p); return; }
+      if(/^\d+(\.\d+)?$/.test(tk) && lineVal==null) lineVal=Number(tk);
+    });
+    if(st.stat==="any_td"){
+      if(!prices.length){ errors.push({line:i+1, text:line, reason:"Anytime TD needs a price, e.g. +140"}); return; }
+      out.push({id:propIdFor(gid,display,"any_td"), gid:gid, player:display, stat:"any_td", kind:"yes", yesOdds:prices[0]});
+      return;
+    }
+    if(lineVal==null){ errors.push({line:i+1, text:line, reason:"No line found, e.g. 245.5"}); return; }
+    out.push({id:propIdFor(gid,display,st.stat), gid:gid, player:display, stat:st.stat, kind:"ou",
+              line:lineVal, overOdds:prices[0]!=null?prices[0]:-110, underOdds:prices[1]!=null?prices[1]:-110});
+  });
+  return {props:out, errors:errors};
+}
+
+// ── Grading from a box score ──
+// One pass over the box score for a game: every player's stats by group.
+function boxIndex(boxPlayers){
+  var byName={};     // normalised full name -> {groups:{passing:{YDS:..}}, display}
+  (boxPlayers||[]).forEach(function(team){
+    (team.statistics||[]).forEach(function(grp){
+      var gname=String(grp.name||"").toLowerCase();
+      var labels=(grp.labels||[]).map(function(l){ return String(l).toUpperCase(); });
+      (grp.athletes||[]).forEach(function(row){
+        var a=row.athlete||{}, disp=a.displayName||a.fullName||a.shortName||"";
+        var w=_playerKey(disp); if(!w.length) return;
+        var k=w.join("");
+        if(!byName[k]) byName[k]={display:disp, last:w[w.length-1], groups:{}};
+        var g=byName[k].groups[gname]={};
+        labels.forEach(function(lb,ix){
+          var v=parseFloat(String((row.stats||[])[ix]).replace(/[^0-9.\-]/g,""));
+          if(!isNaN(v)) g[lb]=v;
+        });
+      });
+    });
+  });
+  return byName;
+}
+// Find a player strictly: exact full name, or a surname that only one player in
+// the whole game carries. Anything ambiguous returns null rather than guessing.
+function findBoxPlayer(idx, name){
+  var w=_playerKey(name); if(!w.length) return null;
+  var k=w.join("");
+  if(idx[k]) return idx[k];
+  var last=w[w.length-1];
+  var hits=Object.keys(idx).filter(function(n){ return idx[n].last===last; });
+  return hits.length===1 ? idx[hits[0]] : null;
+}
+var PROP_COLS={pass_yds:["passing","YDS"],pass_td:["passing","TD"],pass_int:["passing","INT"],
+  rush_yds:["rushing","YDS"],rush_td:["rushing","TD"],rush_car:["rushing","CAR"],
+  rec_yds:["receiving","YDS"],rec_rec:["receiving","REC"],rec_td:["receiving","TD"],
+  tackles:["defensive","TOT"],sacks:["defensive","SACKS"]};
+// The graded value for one prop: a number, or "dnp" if the player never appears.
+function propValue(idx, prop){
+  var p=findBoxPlayer(idx, prop.player);
+  if(!p) return "dnp";
+  function col(stat){ var c=PROP_COLS[stat]; var g=p.groups[c[0]]; return (g && g[c[1]]!=null)?g[c[1]]:0; }
+  // In the box score but missing from this table means he played and got none.
+  if(prop.stat==="any_td") return col("rush_td")+col("rec_td");
+  return col(prop.stat);
+}
+// Win / loss / push for a prop leg against a graded value.
+function gradePropLeg(leg, value){
+  if(value===undefined || value===null) return null;        // not graded yet
+  if(value==="dnp") return "push";                           // void, stake back
+  var v=Number(value);
+  if(leg.side==="yes") return v>=1 ? "win" : "loss";
+  var line=Number(leg.line);
+  if(Math.abs(v-line)<1e-9) return "push";
+  if(leg.side==="over") return v>line ? "win" : "loss";
+  return v<line ? "win" : "loss";
 }
 
 var GAME_IDS=[];
@@ -2105,7 +2302,9 @@ function scoreOfWeek(weekId){
     var g=games[gid], res=results[gid];
     if(!g || !res) return null;
     var has=(g.awayScore!=null && g.awayScore!=="" && g.homeScore!=null && g.homeScore!=="");
-    return {a:has?Number(g.awayScore):null, h:has?Number(g.homeScore):null, final:true, result:res};
+    var pr=((ST.propResults||{})[weekId])||{};
+    return {a:has?Number(g.awayScore):null, h:has?Number(g.homeScore):null, final:true, result:res,
+            propVal:function(pid){ return pr[pid]; }};
   };
 }
 function betsOf(weekId, user, includeVoid){
@@ -2694,6 +2893,13 @@ function loadData(){
         if(_picksRef){ _picksRef.off(); _picksRef=null; }
         if(_betsRef){ _betsRef.off(); _betsRef=null; }
         if(wId){
+          DB.ref(BASE+"/props/"+wId).on("value",function(sn){
+            if(!ST.props) ST.props={}; ST.props[wId]=sn.val()||{}; scheduleDraw();
+          });
+          DB.ref(BASE+"/propResults/"+wId).on("value",function(sn){
+            if(!ST.propResults) ST.propResults={}; ST.propResults[wId]=sn.val()||{};
+            _weekScoreCache={}; scheduleDraw();
+          });
           _betsRef=DB.ref(BASE+"/bets/"+wId);
           _betsRef.on("value",function(sn){
             if(!ST.bets) ST.bets={};
@@ -3116,6 +3322,8 @@ function autoPostFinalsFromScoreboard(){
         else _r = _margin>_sp ? g.favSide : (g.favSide==="away" ? "home" : "away");
       }
       setResult(wk,gid,_r);
+      // Its props settle from the box score, which is final at the same moment.
+      if(typeof gradePropsForGame==="function" && propsForGame(wk,gid).length) gradePropsForGame(wk,gid);
       setGameField(wk,gid,"awayScore",as);
       setGameField(wk,gid,"homeScore",hs);
       // Needle anyone whose big number just died on this game.
@@ -5768,6 +5976,7 @@ var BX_CONFS=[
   {v:"12",l:"CUSA"},{v:"15",l:"MAC"},{v:"18",l:"Ind"}
 ];
 var BX_FILTER={conf:null, top25:false, mine:false, q:""};
+var BX_OPEN_PROPS={};          // gid -> props panel expanded on the Bets tab
 function bxGameVisible(weekId, gid, g, myGids){
   if(BX_FILTER.mine && !myGids[gid]) return false;
   if(BX_FILTER.conf && g.awayConf!==BX_FILTER.conf && g.homeConf!==BX_FILTER.conf) return false;
@@ -5875,7 +6084,9 @@ function placeSlip(weekId){
       legs:legs.map(function(l){
         var g=gameOf(l.gid)||{};
         var rec={gid:l.gid, market:l.market, side:l.side, odds:l.odds,
-                line:(l.line==null?null:l.line), label:legLabel(g,l)+(l.live?" (live)":"")};
+                line:(l.line==null?null:l.line),
+                label:(l.market==="prop"?l._label:legLabel(g,l))+(l.live?" (live)":"")};
+        if(l.market==="prop"){ rec.propId=l.propId; rec.player=l.player; rec.stat=l.stat; }
         if(l.live){ rec.live=true; rec.liveAt=l.liveAt; }
         return rec;
       })
@@ -5912,6 +6123,204 @@ function priceBtn(weekId, gid, market, side, top, bottom, disabled){
   return '<button class="bx-price'+(sel?' sel':'')+'" '+(disabled?'disabled ':'')+
     'data-bet-gid="'+gid+'" data-bet-mkt="'+market+'" data-bet-side="'+side+'">'+
     '<span class="bx-top">'+top+'</span>'+(bottom?'<span class="bx-odds">'+bottom+'</span>':'')+'</button>';
+}
+
+// ── PROPS: slip, grading, admin import ─────────────────────
+function propsOfWeek(weekId){ return (ST.props||{})[weekId]||{}; }
+function propsForGame(weekId, gid){
+  var all=propsOfWeek(weekId);
+  return Object.keys(all).map(function(id){ var p=all[id]; p.id=id; return p; })
+    .filter(function(p){ return p.gid===gid; })
+    .sort(function(a,b){ return String(a.player).localeCompare(b.player) || String(a.stat).localeCompare(b.stat); });
+}
+function propLabel(p, side){
+  var st=PROP_STAT_NAMES[p.stat]||p.stat;
+  if(p.kind==="yes") return p.player+" "+st;
+  return p.player+" "+(side==="over"?"o":"u")+p.line+" "+st;
+}
+// Add or remove a prop from the slip. Props are pregame only.
+function togglePropSlip(weekId, propId, side){
+  var p=propsOfWeek(weekId)[propId];
+  if(!p){ toast("That prop is gone"); return; }
+  var k=propId+"|"+side;
+  var idx=SLIP.findIndex(function(l){ return l.market==="prop" && (l.propId+"|"+l.side)===k; });
+  if(idx>=0){ SLIP.splice(idx,1); draw(); return; }
+  if(isGameLocked(weekId,p.gid)){ toast("Props close at kickoff"); return; }
+  var odds = p.kind==="yes" ? p.yesOdds : (side==="over" ? p.overOdds : p.underOdds);
+  if(odds==null){ toast("No price on that prop"); return; }
+  // One side of a prop at a time.
+  SLIP=SLIP.filter(function(l){ return !(l.market==="prop" && l.propId===propId); });
+  SLIP.push({gid:p.gid, market:"prop", propId:propId, side:side, odds:Number(odds),
+             line:(p.kind==="yes"?null:Number(p.line)), player:p.player, stat:p.stat,
+             _label:propLabel(p,side)});
+  draw();
+}
+function propPriceBtn(weekId, p, side, top, odds){
+  var sel=SLIP.some(function(l){ return l.market==="prop" && l.propId===p.id && l.side===side; });
+  var closed=isGameLocked(weekId,p.gid);
+  return '<button class="bx-price'+(sel?' sel':'')+'" '+(closed?'disabled ':'')+
+    'data-prop-id="'+x(p.id)+'" data-prop-side="'+side+'">'+
+    '<span class="bx-top">'+top+'</span><span class="bx-odds">'+fmtAmerican(odds)+'</span></button>';
+}
+// One prop as a row: name and stat, then its buttons.
+function propRow(weekId, p){
+  var h='<div class="pp-row"><div class="pp-name"><b>'+x(p.player)+'</b><span>'+x(PROP_STAT_NAMES[p.stat]||p.stat)+'</span></div>';
+  if(p.kind==="yes"){
+    h+='<div class="pp-btns one">'+propPriceBtn(weekId,p,"yes","Yes",p.yesOdds)+'</div>';
+  } else {
+    h+='<div class="pp-btns">'+propPriceBtn(weekId,p,"over","O "+p.line,p.overOdds)+
+                               propPriceBtn(weekId,p,"under","U "+p.line,p.underOdds)+'</div>';
+  }
+  return h+'</div>';
+}
+
+// ── Grading: pull each final game's box score and store every prop's value ──
+function gradePropsForGame(weekId, gid){
+  var g=(ST.games[weekId]||{})[gid], props=propsForGame(weekId,gid);
+  if(!g||!g.eventId||!props.length) return Promise.resolve(0);
+  return fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event="+encodeURIComponent(g.eventId))
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var box=(data&&data.boxscore&&data.boxscore.players)||[];
+      if(!box.length) return 0;                      // no box score yet: leave ungraded
+      var idx=boxIndex(box), upd={}, n=0;
+      props.forEach(function(p){
+        upd[BASE+"/propResults/"+weekId+"/"+p.id]=propValue(idx,p); n++;
+      });
+      if(DB) DB.ref().update(upd);
+      return n;
+    })
+    .catch(function(){ return 0; });
+}
+// Every game that's final and has props.
+function gradeAllProps(weekId){
+  var res=ST.results[weekId]||{};
+  var todo=activeGames(weekId).filter(function(gid){ return res[gid] && propsForGame(weekId,gid).length; });
+  if(!todo.length){ toast("No finished games with props yet"); return; }
+  toast("Grading props for "+todo.length+" game"+(todo.length!==1?"s":"")+"\u2026");
+  Promise.all(todo.map(function(gid){ return gradePropsForGame(weekId,gid); })).then(function(ns){
+    var n=ns.reduce(function(a,b){ return a+b; },0);
+    toast("\u2713 "+n+" prop"+(n!==1?"s":"")+" graded");
+  });
+}
+
+// ── Admin: paste, preview, import ──
+var PROP_PREVIEW=null;
+function importProps(weekId){
+  if(!PROP_PREVIEW||!PROP_PREVIEW.props.length){ toast("Nothing to import"); return; }
+  var have=propsOfWeek(weekId), upd={}, added=0, updated=0;
+  PROP_PREVIEW.props.forEach(function(p){
+    var rec={gid:p.gid, player:p.player, stat:p.stat, kind:p.kind};
+    if(p.kind==="yes") rec.yesOdds=p.yesOdds;
+    else { rec.line=p.line; rec.overOdds=p.overOdds; rec.underOdds=p.underOdds; }
+    if(have[p.id]) updated++; else added++;
+    upd[BASE+"/props/"+weekId+"/"+p.id]=rec;
+    if(!ST.props) ST.props={}; if(!ST.props[weekId]) ST.props[weekId]={};
+    ST.props[weekId][p.id]=rec;
+  });
+  // Merge, never replace: bets point at prop ids, so a prop someone has bet on
+  // must survive a re-paste. Updated lines apply to new bets only.
+  if(DB) DB.ref().update(upd);
+  PROP_PREVIEW=null;
+  var ta=document.getElementById("pp-import"); if(ta) ta.value="";
+  toast("\u2713 "+added+" added"+(updated?(", "+updated+" updated"):""));
+  draw();
+}
+function renderPropAdmin(weekId){
+  var total=Object.keys(propsOfWeek(weekId)).length;
+  var h='<div class="section-label" style="margin-top:14px">Player Props</div>';
+  h+='<div class="adm-game">';
+  h+='<div class="adm-game-title">Paste props &mdash; one per line. A matchup line sets the game for the lines under it.</div>';
+  h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);line-height:1.5;margin:4px 0 6px">'+
+     'Northwestern @ Indiana<br>Fernando Mendoza pass yds 245.5 -115 -105<br>'+
+     'Elijah Sarratt rec yds o64.5 -110 u64.5 -110<br>Elijah Sarratt anytime TD +140<br>'+
+     'A line with only a number gets -110 both sides.</div>';
+  h+='<textarea id="pp-import" rows="6" style="width:100%;box-sizing:border-box;padding:8px;border:2px solid var(--border);'+
+     'border-radius:8px;font-size:11px;font-family:inherit;resize:vertical" placeholder="Paste props here"></textarea>';
+  h+='<div style="display:flex;gap:8px;margin-top:8px">'+
+     '<button class="btn btn-ghost" id="pp-preview" style="flex:1">Preview</button>'+
+     '<button class="btn btn-gold" id="pp-do-import" style="flex:1"'+(PROP_PREVIEW&&PROP_PREVIEW.props.length?'':' disabled')+'>Import'+
+     (PROP_PREVIEW&&PROP_PREVIEW.props.length?(' '+PROP_PREVIEW.props.length):'')+'</button></div>';
+  if(PROP_PREVIEW){
+    h+='<div style="font-size:10px;font-weight:800;margin-top:8px;color:var(--green)">'+PROP_PREVIEW.props.length+' props recognised</div>';
+    if(PROP_PREVIEW.errors.length){
+      h+='<div style="font-size:9.5px;font-weight:700;color:var(--red2);margin-top:4px">'+
+         PROP_PREVIEW.errors.map(function(e){ return 'Line '+e.line+': '+x(e.text)+' &mdash; '+x(e.reason); }).join('<br>')+'</div>';
+    }
+  }
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:10px;font-weight:800;color:var(--muted)">'+
+     '<span style="flex:1">'+total+' prop'+(total!==1?'s':'')+' on the board</span>'+
+     '<button class="btn btn-ghost" id="pp-grade" style="font-size:10px;padding:5px 10px">&#128202; Grade props</button></div>';
+  h+='</div>';
+  return h;
+}
+
+// ── The Props tab: every prop on the board, with search and a stat filter ──
+var PP_FILTER={q:"", stat:null};
+function renderPropsTab(){
+  var weekId=ST.curWeek||displayWeekId();
+  var h=weekDropdown(weekId);
+  var all=propsOfWeek(weekId), games=ST.games[weekId]||{};
+  var ids=Object.keys(all);
+  if(!ids.length){ return h+'<div class="lb-note">No props posted yet for this weekend.</div>'+renderSlip(weekId); }
+  var stats={}; ids.forEach(function(id){ stats[all[id].stat]=true; });
+  h+='<div class="bx-filters"><input id="pp-search" class="bx-search" placeholder="Search players or teams" autocomplete="off" value="'+x(PP_FILTER.q)+'">';
+  h+='<div class="bx-chips"><button class="bx-chip'+(!PP_FILTER.stat?' on':'')+'" data-pp-stat="">All</button>';
+  Object.keys(PROP_STAT_NAMES).forEach(function(st){
+    if(stats[st]) h+='<button class="bx-chip'+(PP_FILTER.stat===st?' on':'')+'" data-pp-stat="'+st+'">'+PROP_STAT_NAMES[st]+'</button>';
+  });
+  h+='</div></div>';
+  // Grouped by game, in kickoff order.
+  var gids=activeGames(weekId).slice().sort(function(a,b){
+    return (Number((games[a]||{}).kickoffTs)||0)-(Number((games[b]||{}).kickoffTs)||0);
+  });
+  var shown=0;
+  gids.forEach(function(gid){
+    var g=games[gid]||{};
+    var list=propsForGame(weekId,gid).filter(function(p){ return !PP_FILTER.stat || p.stat===PP_FILTER.stat; });
+    if(!list.length) return;
+    var teams=[g.away,g.home,g.awayAbbrev,g.homeAbbrev].join(" ").toLowerCase();
+    h+='<div class="bx-game pp-game" data-pp-hay="'+x(teams+" "+list.map(function(p){return p.player;}).join(" ").toLowerCase())+'">';
+    h+='<div class="bx-ghead"><span>'+x(g.away||"")+' @ '+x(g.home||"")+'</span><span>'+x(g.kickoff||"")+'</span>'+
+       (isGameLocked(weekId,gid)?'<span class="bx-lock">&#128274; Closed</span>':'')+'</div>';
+    list.forEach(function(p){
+      h+='<div data-pp-player="'+x(String(p.player).toLowerCase()+" "+teams)+'">'+propRow(weekId,p)+'</div>';
+      shown++;
+    });
+    h+='</div>';
+  });
+  if(!shown) h+='<div class="lb-note">No props match that filter.</div>';
+  return h+renderSlip(weekId);
+}
+
+// The bet slip, shared by the Bets and Props tabs.
+function renderSlip(weekId){
+  var h='';
+  var games=ST.games[weekId]||{};
+  // ── betslip, pinned to the bottom while it has anything in it ──
+  if(SLIP.length){
+    var q=slipQuote();
+    h+='<div class="bx-slip">';
+    h+='<div class="bx-slip-h"><b>Bet slip &middot; '+SLIP.length+'</b>'+
+       '<button class="bx-clear" id="bx-clear">Clear</button></div>';
+    SLIP.forEach(function(l,i){
+      h+='<div class="bx-slip-leg"><span>'+x(l.market==="prop"?l._label:legLabel(games[l.gid]||{},l))+'</span>'+
+         '<span class="bx-odds">'+fmtAmerican(l.odds)+'</span>'+
+         '<button class="bx-x" data-slip-rm="'+i+'">&times;</button></div>';
+    });
+    if(SLIP.length>1){
+      h+='<div class="bx-mode">'+
+         '<button class="'+(SLIP_MODE==="straight"?'sel':'')+'" data-slip-mode="straight">'+SLIP.length+' straight bets</button>'+
+         '<button class="'+(SLIP_MODE==="parlay"?'sel':'')+'" data-slip-mode="parlay">'+SLIP.length+'-leg parlay</button></div>';
+    }
+    h+='<div class="bx-stake"><span>$</span><input id="bx-stake" type="number" inputmode="decimal" min="1" step="1" '+
+       'placeholder="Stake'+(SLIP_MODE==="straight"&&SLIP.length>1?' each':'')+'" value="'+x(SLIP_STAKE)+'">'+
+       '<div class="bx-quote">'+(q.risk?('Risk '+fmtMoney(q.risk)+' &middot; returns '+fmtMoney(q.pays)):'Enter a stake')+'</div></div>';
+    h+='<button class="bx-place" id="bx-place"'+(q.risk?'':' disabled')+'>Place '+
+       (SLIP_MODE==="parlay"&&SLIP.length>1?'parlay':(SLIP.length>1?SLIP.length+' bets':'bet'))+'</button>';
+    h+='</div>';
+  }
+  return h;
 }
 
 function renderBets(){
@@ -6003,7 +6412,14 @@ function renderBets(){
       h+= to!=null ? priceBtn(weekId,gid,"total",tside,(tside==="over"?"O ":"U ")+tl,fmtAmerican(to),closed)
                    : '<div class="bx-na">&ndash;</div>';
     });
-    h+='</div></div>';
+    h+='</div>';
+    var _pl=propsForGame(weekId,gid);
+    if(_pl.length){
+      var _open=!!BX_OPEN_PROPS[gid];
+      h+='<button class="pp-toggle" data-pp-toggle="'+gid+'">'+(_open?'&#9650; Hide':'&#9660; Show')+' player props ('+_pl.length+')</button>';
+      if(_open){ h+='<div class="pp-list">'; _pl.forEach(function(p){ h+=propRow(weekId,p); }); h+='</div>'; }
+    }
+    h+='</div>';
   });
 
   // ── my bets ──
@@ -6031,29 +6447,7 @@ function renderBets(){
     });
   }
 
-  // ── betslip, pinned to the bottom while it has anything in it ──
-  if(SLIP.length){
-    var q=slipQuote();
-    h+='<div class="bx-slip">';
-    h+='<div class="bx-slip-h"><b>Bet slip &middot; '+SLIP.length+'</b>'+
-       '<button class="bx-clear" id="bx-clear">Clear</button></div>';
-    SLIP.forEach(function(l,i){
-      h+='<div class="bx-slip-leg"><span>'+x(legLabel(games[l.gid]||{},l))+'</span>'+
-         '<span class="bx-odds">'+fmtAmerican(l.odds)+'</span>'+
-         '<button class="bx-x" data-slip-rm="'+i+'">&times;</button></div>';
-    });
-    if(SLIP.length>1){
-      h+='<div class="bx-mode">'+
-         '<button class="'+(SLIP_MODE==="straight"?'sel':'')+'" data-slip-mode="straight">'+SLIP.length+' straight bets</button>'+
-         '<button class="'+(SLIP_MODE==="parlay"?'sel':'')+'" data-slip-mode="parlay">'+SLIP.length+'-leg parlay</button></div>';
-    }
-    h+='<div class="bx-stake"><span>$</span><input id="bx-stake" type="number" inputmode="decimal" min="1" step="1" '+
-       'placeholder="Stake'+(SLIP_MODE==="straight"&&SLIP.length>1?' each':'')+'" value="'+x(SLIP_STAKE)+'">'+
-       '<div class="bx-quote">'+(q.risk?('Risk '+fmtMoney(q.risk)+' &middot; returns '+fmtMoney(q.pays)):'Enter a stake')+'</div></div>';
-    h+='<button class="bx-place" id="bx-place"'+(q.risk?'':' disabled')+'>Place '+
-       (SLIP_MODE==="parlay"&&SLIP.length>1?'parlay':(SLIP.length>1?SLIP.length+' bets':'bet'))+'</button>';
-    h+='</div>';
-  }
+  h+=renderSlip(weekId);
   return h;
 }
 
@@ -6967,6 +7361,8 @@ function renderAdmin(){
   // ── STEP 1: Add games (ESPN import list) ──
   if(adminStep===1){
     h+=renderImportResults(weekId);
+    // Props sit with the slate: paste them once the games are on the board.
+    if(activeGames(weekId).length) h+=renderPropAdmin(weekId);
   }
 
   // ── STEP 2 & 3: per-game cards. Step 2 shows the editor (matchup/spread/kickoff),
@@ -7785,7 +8181,7 @@ function draw(){
   }
   h+='</div></div>';
 
-  var tabs=[{id:"standings",lbl:"&#128202; Standings"},{id:"picks",lbl:"&#128176; Bets"},{id:"scores",lbl:"&#128308; Scores"}];
+  var tabs=[{id:"standings",lbl:"&#128202; Standings"},{id:"picks",lbl:"&#128176; Bets"},{id:"props",lbl:"&#127919; Props"},{id:"scores",lbl:"&#128308; Scores"}];
   // Missing picks badge — only show to the current user if THEY haven't finished, within 4h of kickoff
   if(ST.weekIds.length&&ST.user){
     var _cw=displayWeekId();
@@ -7823,6 +8219,7 @@ function draw(){
   else if(ST.page==="group") h+=renderBetsBoard();
   else if(ST.page==="scores") h+='<div class="scores-wrap" id="scores-wrap"><div class="scores-loading">Loading scores&hellip;</div></div>';
   else if(ST.page==="standings") h+=renderBetsBoard();   // one weekend: the board is the standings
+  else if(ST.page==="props") h+=renderPropsTab();
   else if(ST.page==="chat"&&chatOn()&&!PUBLIC_VIEW) h+=renderChat();
   else if(ST.page==="admin"&&ST.admin) h+=renderAdmin();
   else { ST.page="picks"; h+=renderBets(); }
@@ -7951,6 +8348,43 @@ function bind(){
   });
   el=document.getElementById("b-share-picks"); if(el) el.addEventListener("click",function(){ shareMyPicks(ST.curWeek||displayWeekId()); });
   if(ST.page==="picks"){ wireBets(); startLivePolling(); } else stopLivePolling();
+  if(ST.page==="props") wireBets();         // the slip and its controls are shared
+  (function(){
+    var w=ST.curWeek||displayWeekId();
+    document.querySelectorAll("[data-prop-id]").forEach(function(b){
+      b.addEventListener("click",function(){ togglePropSlip(w,this.getAttribute("data-prop-id"),this.getAttribute("data-prop-side")); });
+    });
+    document.querySelectorAll("[data-pp-toggle]").forEach(function(b){
+      b.addEventListener("click",function(){ var g=this.getAttribute("data-pp-toggle"); BX_OPEN_PROPS[g]=!BX_OPEN_PROPS[g]; draw(); });
+    });
+    document.querySelectorAll("[data-pp-stat]").forEach(function(b){
+      b.addEventListener("click",function(){ PP_FILTER.stat=this.getAttribute("data-pp-stat")||null; draw(); });
+    });
+    var ps=document.getElementById("pp-search");
+    if(ps){
+      // Filter rows in place so the keyboard stays up while typing.
+      ps.addEventListener("input",function(){
+        PP_FILTER.q=this.value; var q=this.value.trim().toLowerCase();
+        document.querySelectorAll("[data-pp-player]").forEach(function(r){
+          r.style.display=(!q||r.getAttribute("data-pp-player").indexOf(q)>=0)?"":"none";
+        });
+        document.querySelectorAll(".pp-game").forEach(function(c){
+          var any=Array.prototype.some.call(c.querySelectorAll("[data-pp-player]"),function(r){ return r.style.display!=="none"; });
+          c.style.display=any?"":"none";
+        });
+      });
+    }
+    var pv=document.getElementById("pp-preview");
+    if(pv) pv.addEventListener("click",function(){
+      var ta=document.getElementById("pp-import");
+      PROP_PREVIEW=parsePropText(ta?ta.value:"", ST.games[w]||{});
+      var keep=ta?ta.value:"";
+      draw();
+      var ta2=document.getElementById("pp-import"); if(ta2) ta2.value=keep;   // survive the repaint
+    });
+    var pi=document.getElementById("pp-do-import"); if(pi) pi.addEventListener("click",function(){ importProps(w); });
+    var pg=document.getElementById("pp-grade"); if(pg) pg.addEventListener("click",function(){ gradeAllProps(w); });
+  })();
   el=document.getElementById("b-resend-picks"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-resend-banner"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
