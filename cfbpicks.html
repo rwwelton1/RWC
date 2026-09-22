@@ -444,6 +444,30 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .py-tile small{font-size:8.5px;font-weight:800;color:var(--muted)}
 .py-tile:disabled{opacity:.5;cursor:default}
 .py-tile.ro{opacity:1;cursor:default;box-shadow:none;border-color:var(--border2)}
+.py-track{display:flex;gap:6px;padding:0 12px}
+.py-tstat{flex:1;background:#fff;border:2px solid var(--border);border-radius:10px;padding:7px;text-align:center;box-shadow:2px 2px 0 var(--border)}
+.py-tstat b{display:block;font-size:19px;font-weight:900;line-height:1.1}
+.py-tstat span{font-size:8.5px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.py-log{margin:6px 12px 0;border:2px solid var(--border2);border-radius:10px;background:#fff;overflow:hidden}
+.py-logrow{display:flex;align-items:center;gap:7px;padding:6px 9px;border-bottom:1px dashed var(--border2);font-size:11px}
+.py-logrow:last-child{border-bottom:none}
+.py-lt{font-size:9.5px;font-weight:900;color:var(--muted);white-space:nowrap;min-width:52px}
+.py-le{font-size:14px;line-height:1}
+.py-ln{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.py-ln i{font-style:normal;font-size:9.5px;color:var(--muted)}
+.py-undo{font-family:inherit;font-size:9px;font-weight:800;padding:2px 7px;border-radius:6px;border:1px solid var(--border2);background:#fff;color:var(--muted);cursor:pointer}
+.py-tile.grp{border-style:dashed}
+.py-tile.grp small{color:var(--blue)}
+.py-pot{margin:6px 12px;padding:8px 10px;background:#fff;border:2px solid var(--blue);border-radius:10px}
+.py-pothead{display:flex;align-items:center;gap:7px;font-size:12px}
+.py-pothead b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.py-bar{height:7px;border-radius:4px;background:var(--cream);border:1px solid var(--border2);overflow:hidden;margin:5px 0 3px}
+.py-bar i{display:block;height:100%;background:var(--green)}
+.py-potwho{font-size:9.5px;font-weight:700;color:var(--muted)}
+.py-potbtns{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.py-potbtns button{font-family:inherit;font-size:10px;font-weight:800;padding:5px 9px;border-radius:8px;
+  border:2px solid var(--border2);background:#fff;cursor:pointer}
+.py-potbtns .py-pull{border-color:var(--red2);color:var(--red2)}
 .save-state{margin-left:7px;font-size:9px;font-weight:800;padding:1px 6px;border-radius:6px;
   white-space:nowrap;vertical-align:1px}
 .save-state.ok{color:var(--green);background:var(--green-bg)}
@@ -1096,11 +1120,21 @@ function partyEmoji(m){
 function partyProfitCents(bank){ return Math.max(0, (bank.bankCents||0)-(bank.startCents||0)); }
 
 // Everything a player has spent from the party wallet.
+function potTotal(b){
+  var t=0, p=(b&&b.pledges)||{};
+  Object.keys(p).forEach(function(u){ t+=Number(p[u])||0; });
+  return t;
+}
+function potRemaining(b){ return Math.max(0, (Number(b.priceCents)||0)-potTotal(b)); }
 function partySpentCents(uid, buys){
   var t=0;
   Object.keys(buys||{}).forEach(function(id){
     var b=buys[id]; if(!b) return;
-    if(b.by===uid) t+=Number(b.priceCents)||0;                    // punishments they bought
+    if(b.pledges){                                                  // a group buy: only your share
+      t+=Number(b.pledges[uid])||0;
+    } else if(b.by===uid){
+      t+=Number(b.priceCents)||0;                                   // punishments they bought alone
+    }
     if(b.status==="out" && b.outBy===uid) t+=Number(b.outCents)||0; // punishments they bought off
   });
   return t;
@@ -1125,6 +1159,7 @@ function partyBalance(players, bachelor, banks, buys, menu, headcount){
     if(uid===bachelor) bach+=av; else team+=av;
   });
   var pending=Object.keys(buys||{}).filter(function(id){ return buys[id]&&buys[id].status==="pending"; }).length;
+  // (records still at "pot" are collecting pledges and aren't owed yet)
   var buyout=partyBuyoutCents(avg, headcount);
   return {
     teamCents:team, bachelorCents:bach,
@@ -1208,10 +1243,165 @@ function markDone(buyId){
   if(!b||b.status!=="pending") return;
   DB.ref(BASE+"/party/buys/"+buyId).transaction(function(cur){
     if(!cur||cur.status!=="pending") return;
-    cur.status="done"; cur.doneAt=Date.now(); return cur;
+    cur.status="done"; cur.doneAt=Date.now(); cur.doneBy=ST.user||null; return cur;
   }, function(e,c){
-    if(!e&&c) partyAnnounce("\u2705 "+nameOf(partyBachelor())+" did "+nameOf(b.by)+"\u2019s "+b.name);
+    if(!e&&c){
+      toast("\u2705 Logged at "+partyTime(Date.now()));
+      partyAnnounce("\u2705 "+nameOf(partyBachelor())+" finished "+nameOf(b.by)+"\u2019s "+b.name+
+                    " at "+partyTime(Date.now()));
+    }
   });
+}
+// A mistap can be taken back for a few minutes; after that the log stands.
+var PARTY_UNDO_MS=10*60*1000;
+function undoDone(buyId){
+  var b=partyBuys()[buyId];
+  if(!b||b.status!=="done") return;
+  if(Date.now()-Number(b.doneAt||0)>PARTY_UNDO_MS){ toast("Too late to undo that one"); return; }
+  DB.ref(BASE+"/party/buys/"+buyId).transaction(function(cur){
+    if(!cur||cur.status!=="done") return;
+    cur.status="pending"; delete cur.doneAt; delete cur.doneBy; return cur;
+  }, function(e,c){ if(!e&&c) toast("Put back on the list"); });
+}
+function partyTime(ts){
+  if(!ts) return "";
+  try{ return new Date(Number(ts)).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}); }
+  catch(e){ return ""; }
+}
+// How the night is going: what's been finished, when, and how fast.
+function partyTracker(buys){
+  var done=Object.keys(buys||{}).map(function(id){ var b=buys[id]; b._id=id; return b; })
+    .filter(function(b){ return b.status==="done"; })
+    .sort(function(a,b){ return (b.doneAt||0)-(a.doneAt||0); });
+  var pending=0, out=0;
+  Object.keys(buys||{}).forEach(function(id){
+    if(buys[id].status==="pending") pending++; else if(buys[id].status==="out") out++;
+  });
+  var first=done.length?Math.min.apply(null,done.map(function(b){ return b.doneAt||0; })):0;
+  var last=done.length?(done[0].doneAt||0):0;
+  var hours=(first&&last>first)?((last-first)/3600000):0;
+  return {done:done, doneCount:done.length, pending:pending, out:out, first:first, last:last,
+          perHour: (hours>0.25)?(done.length/hours):null};
+}
+
+// ── BET FEED ──────────────────────────────────────────────
+// Bets post to chat, but only once one of their games has kicked off, so the
+// feed can never tip anyone off about a slip that's still live to copy.
+// Every client checks; a transaction decides which one actually posts.
+function feedOn(){ return !!(ST.party&&ST.party.feed) || !!ST.feedOn; }
+function feedFrom(){ return Number(ST.feedFrom)||0; }
+function betFeedLine(uid, b){
+  var legs=b.legs||[];
+  var head=legs.length>1 ? (legs.length+"-leg parlay") : "bet";
+  var win=potentialReturn(b)-(Number(b.stakeCents)||0);
+  var body=legs.slice(0,4).map(function(l){ return l.label||""; }).join(" + ")+
+           (legs.length>4?(" +"+(legs.length-4)+" more"):"");
+  return "\uD83C\uDFAB "+nameOf(uid)+" \u00b7 "+fmtMoney(b.stakeCents)+" "+head+
+         " to win "+fmtMoney(win)+"\n"+body;
+}
+var _feedBusy=false;
+function runBetFeed(){
+  if(_feedBusy || !DB || !chatOn() || !feedOn()) return;
+  var w=ST.curWeek||displayWeekId(); if(!w) return;
+  var all=((ST.bets||{})[w])||{}, from=feedFrom();
+  var jobs=[];
+  Object.keys(all).forEach(function(uid){
+    Object.keys(all[uid]||{}).forEach(function(bid){
+      var b=all[uid][bid];
+      if(!b || !b.legs || !b.legs.length) return;
+      if(Number(b.placedAt||0) < from) return;            // placed before the feed existed
+      if(!betRevealed(w,b)) return;                        // nothing kicked off yet: stays secret
+      jobs.push({uid:uid, bid:bid, b:b});
+    });
+  });
+  if(!jobs.length) return;
+  _feedBusy=true;
+  var i=0;
+  (function next(){
+    if(i>=jobs.length){ _feedBusy=false; return; }
+    var j=jobs[i++];
+    // One claim per bet decides the poster, so five phones don't post it five times.
+    DB.ref(BASE+"/feedPosted/"+j.bid).transaction(function(cur){
+      if(cur) return;                 // already claimed
+      return {at:Date.now()};
+    }, function(e, committed){
+      if(!e && committed) DB.ref(BASE+"/chat").push().set({uid:BOT_UID, text:betFeedLine(j.uid,j.b), ts:Date.now(), bot:true});
+      next();
+    });
+  })();
+}
+
+// ── Group buys ────────────────────────────────────────────
+// Start a pot for something nobody can afford alone. It sits at status "pot"
+// until the pledges cover the price, then becomes an ordinary owed punishment.
+function startPot(itemId){
+  var me=ST.user, bach=partyBachelor();
+  if(!me || me===bach){ toast(me?"The bachelor can't chip in":"Select your name first"); return; }
+  var item=partyMenu().filter(function(m){ return m.id===itemId; })[0];
+  if(!item) return;
+  var avail=partyWallet(me);
+  if(avail<=0){ toast("Party money comes from winnings \u2014 win a bet first"); return; }
+  var give=Math.min(avail, item.priceCents);
+  var pledges={}; pledges[me]=give;
+  var rec={by:me, item:item.id, name:item.name, priceCents:item.priceCents, at:Date.now(),
+           status:(give>=item.priceCents?"pending":"pot"), pledges:pledges};
+  _saveStart();
+  DB.ref(BASE+"/party/buys").push().set(rec, function(e){
+    _saveEnd(e);
+    if(e){ toast("\u26a0 Didn't go through"); return; }
+    if(rec.status==="pending"){ toast("Sent"); partyAnnounce("\uD83C\uDF7A "+nameOf(me)+" \u2192 "+nameOf(bach)+": "+item.name); }
+    else{
+      toast("Group buy started \u2014 "+fmtMoney(item.priceCents-give)+" to go");
+      partyAnnounce("\uD83E\uDD1D "+nameOf(me)+" started a group buy for "+item.name+
+                    " \u2014 "+fmtMoney(item.priceCents-give)+" still needed");
+    }
+  });
+}
+// Add to a pot. A transaction, so two people pledging at once can't overfill it
+// or both think they were the one who completed it.
+function pledgePot(potId, cents){
+  var me=ST.user, bach=partyBachelor();
+  if(!me || me===bach){ toast(me?"The bachelor can't chip in":"Select your name first"); return; }
+  var b=partyBuys()[potId];
+  if(!b || b.status!=="pot"){ toast("That group buy is closed"); return; }
+  var give=Math.min(Number(cents)||0, partyWallet(me), potRemaining(b));
+  if(give<=0){ toast(partyWallet(me)<=0?"No winnings to spend yet":"That one's already covered"); return; }
+  var filled=false;
+  _saveStart();
+  DB.ref(BASE+"/party/buys/"+potId).transaction(function(cur){
+    if(!cur || cur.status!=="pot") return;
+    cur.pledges=cur.pledges||{};
+    var left=Math.max(0,(Number(cur.priceCents)||0)-potTotal(cur));
+    var add=Math.min(give, left);
+    if(add<=0) return;
+    cur.pledges[me]=(Number(cur.pledges[me])||0)+add;
+    if(potTotal(cur)>=cur.priceCents){ cur.status="pending"; cur.filledAt=Date.now(); filled=true; }
+    return cur;
+  }, function(e, committed){
+    _saveEnd(e);
+    if(e||!committed){ toast(e?"\u26a0 Didn't go through":"That group buy is closed"); return; }
+    if(filled){
+      toast("\uD83C\uDF7A Funded!");
+      partyAnnounce("\uD83E\uDD1D The group funded "+b.name+" for "+nameOf(bach)+
+                    " \u2014 "+potContributors(potId)+" chipped in");
+    } else {
+      toast("Chipped in "+fmtMoney(give));
+    }
+  });
+}
+function potContributors(potId){
+  var b=partyBuys()[potId]||{}, p=b.pledges||{};
+  return Object.keys(p).map(function(u){ return nameOf(u); }).join(", ");
+}
+// Pull your pledge back while the pot is still open.
+function unpledgePot(potId){
+  var me=ST.user;
+  DB.ref(BASE+"/party/buys/"+potId).transaction(function(cur){
+    if(!cur || cur.status!=="pot" || !cur.pledges || !cur.pledges[me]) return;
+    delete cur.pledges[me];
+    if(!Object.keys(cur.pledges).length) return null;     // nobody left: the pot disappears
+    return cur;
+  }, function(e,c){ if(!e&&c) toast("Pledge withdrawn"); });
 }
 
 // ── Party tab ─────────────────────────────────────────────
@@ -1257,13 +1447,70 @@ function renderPartyTab(){
   menu.forEach(function(m){
     var bo=partyBuyoutCents(m.priceCents,N);
     var can=!isBach && me && _avail>=m.priceCents;
-    h+='<button class="py-tile'+(isBach?' ro':'')+'"'+(can?'':' disabled')+(isBach?'':' data-py-buy="'+x(m.id)+'"')+'>'+
+    var group=!isBach && me && !can && _avail>0;      // short of the price: start a pot instead
+    var attr=isBach?'' : can?(' data-py-buy="'+x(m.id)+'"') : group?(' data-py-pot="'+x(m.id)+'"') : '';
+    h+='<button class="py-tile'+(isBach?' ro':'')+(group?' grp':'')+'"'+((can||group)?'':' disabled')+attr+'>'+
        '<span class="py-emoji">'+x(partyEmoji(m))+'</span>'+
        '<b>'+x(m.name)+'</b>'+
        '<span class="py-price">'+fmtMoney(m.priceCents)+'</span>'+
-       '<small>'+(isBach?('you: '+fmtMoney(bo)):('buyout '+fmtMoney(bo)))+'</small></button>';
+       '<small>'+(isBach?('you: '+fmtMoney(bo)) : group?'chip in' : ('buyout '+fmtMoney(bo)))+'</small></button>';
   });
   h+='</div>';
+
+  // ── Group buys still collecting ──
+  var pots=Object.keys(buys).map(function(id){ var b=buys[id]; b._id=id; return b; })
+    .filter(function(b){ return b.status==="pot"; })
+    .sort(function(a,b){ return potRemaining(a)-potRemaining(b); });
+  if(pots.length){
+    h+='<div class="bx-section">Group buys</div>';
+    pots.forEach(function(b){
+      var left=potRemaining(b), pct=Math.min(100, Math.round(potTotal(b)/b.priceCents*100));
+      var names=Object.keys(b.pledges||{}).map(function(u){
+        return x(nameOf(u))+' '+fmtMoney(b.pledges[u]);
+      }).join(' &middot; ');
+      h+='<div class="py-pot">';
+      h+='<div class="py-pothead"><span class="py-le">'+x(partyEmoji(menu.filter(function(m){return m.id===b.item;})[0]||{}))+'</span>'+
+         '<b>'+x(b.name)+'</b><span class="py-tag">'+fmtMoney(left)+' to go</span></div>';
+      h+='<div class="py-bar"><i style="width:'+pct+'%"></i></div>';
+      h+='<div class="py-potwho">'+names+'</div>';
+      if(!isBach && me){
+        var mine=Number((b.pledges||{})[me])||0;
+        h+='<div class="py-potbtns">';
+        [500,1000].forEach(function(c){
+          if(c<=left) h+='<button data-py-pledge="'+b._id+'" data-py-amt="'+c+'">+'+fmtMoney(c)+'</button>';
+        });
+        h+='<button data-py-pledge="'+b._id+'" data-py-amt="'+left+'">Cover the rest ('+fmtMoney(left)+')</button>';
+        if(mine) h+='<button class="py-pull" data-py-unpledge="'+b._id+'">Pull out</button>';
+        h+='</div>';
+      }
+      h+='</div>';
+    });
+  }
+
+  // ── The tracker: the count, the clock, the pace ──
+  var trk=partyTracker(buys);
+  h+='<div class="bx-section">Tracker</div>';
+  h+='<div class="py-track">'+
+     '<div class="py-tstat"><b>'+trk.doneCount+'</b><span>finished</span></div>'+
+     '<div class="py-tstat"><b>'+trk.pending+'</b><span>owed</span></div>'+
+     '<div class="py-tstat"><b>'+trk.out+'</b><span>bought out</span></div>'+
+     '</div>';
+  if(trk.doneCount){
+    h+='<div class="bx-sub">Last one at '+x(partyTime(trk.last))+
+       (trk.perHour?(' &middot; '+(Math.round(trk.perHour*10)/10)+' an hour'):'')+
+       (trk.first&&trk.first!==trk.last?(' &middot; started '+x(partyTime(trk.first))):'')+'</div>';
+    h+='<div class="py-log">';
+    trk.done.slice(0,20).forEach(function(b){
+      h+='<div class="py-logrow"><span class="py-lt">'+x(partyTime(b.doneAt))+'</span>'+
+         '<span class="py-le">'+x(partyEmoji(partyMenu().filter(function(m){ return m.id===b.item; })[0]||{}))+'</span>'+
+         '<span class="py-ln"><b>'+x(b.name)+'</b> <i>from '+x(nameOf(b.by))+'</i></span>';
+      if((isBach || (typeof isGroupAdminByUid==="function" && isGroupAdminByUid())) && (Date.now()-Number(b.doneAt||0))<=PARTY_UNDO_MS){
+        h+='<button class="py-undo" data-py-undo="'+b._id+'">undo</button>';
+      }
+      h+='</div>';
+    });
+    h+='</div>';
+  }
 
   // The queue: what's owed, bought off, and done.
   var list=Object.keys(buys).map(function(id){ var b=buys[id]; b._id=id; return b; })
@@ -1272,7 +1519,9 @@ function renderPartyTab(){
   h+='<div class="bx-section">'+(pend.length?('Owed &middot; '+pend.length):'Nothing owed right now')+'</div>';
   pend.forEach(function(b){
     var cost=partyBuyoutCents(b.priceCents,N);
-    h+='<div class="py-row pending"><div class="py-what"><b>'+x(b.name)+'</b><span>from '+x(nameOf(b.by))+'</span></div>';
+    var _from = b.pledges ? ("group: "+Object.keys(b.pledges).map(function(u){ return nameOf(u); }).join(", "))
+                          : ("from "+nameOf(b.by));
+    h+='<div class="py-row pending"><div class="py-what"><b>'+x(b.name)+'</b><span>'+x(_from)+'</span></div>';
     if(isBach){
       h+='<button class="py-out" data-py-out="'+b._id+'"'+(partyWallet(me)>=cost?'':' disabled')+'>Buy out '+fmtMoney(cost)+'</button>';
     }
@@ -1286,7 +1535,8 @@ function renderPartyTab(){
     h+='<div class="bx-section">History</div>';
     hist.forEach(function(b){
       h+='<div class="py-row '+b.status+'"><div class="py-what"><b>'+x(b.name)+'</b><span>from '+x(nameOf(b.by))+'</span></div>'+
-         '<span class="py-tag">'+(b.status==="out"?('bought out '+fmtMoney(b.outCents)):'&#10003; done')+'</span></div>';
+         '<span class="py-tag">'+(b.status==="out"?('bought out '+fmtMoney(b.outCents)+' &middot; '+x(partyTime(b.outAt)))
+                                                     :('&#10003; '+x(partyTime(b.doneAt))))+'</span></div>';
     });
   }
 
@@ -1303,6 +1553,16 @@ function renderPartyTab(){
 // ── Admin controls ────────────────────────────────────────
 function renderPartyAdmin(){
   var c=partyCfg(), h='';
+  h+='<div class="adm-game">';
+  h+='<div class="adm-game-title">Bet feed &mdash; posts bets to chat once their game kicks off</div>';
+  h+='<div class="adm-btns">'+
+     '<button class="adm-btn'+(feedOn()?' sel':'')+'" id="fd-on">&#127915; On</button>'+
+     '<button class="adm-btn'+(!feedOn()?' sel':'')+'" id="fd-off">Off</button></div>';
+  h+='<div style="font-size:9.5px;font-weight:700;color:var(--muted);margin-top:4px">'+
+     'Nothing posts before kickoff, so no one can copy a slip. Only bets placed after you switch it on are announced.'+
+     (chatOn()?'':' <b>Chat is off, so nothing will post.</b>')+'</div>';
+  h+='</div>';
+
   h+='<div class="adm-game">';
   h+='<div class="adm-game-title">Bachelor Party Mode &mdash; winnings buy punishments</div>';
   h+='<div class="adm-btns">'+
@@ -1338,11 +1598,31 @@ function wireParty(){
   document.querySelectorAll("[data-py-buy]").forEach(function(b){
     b.addEventListener("click",function(){ buyPunishment(this.getAttribute("data-py-buy")); });
   });
+  document.querySelectorAll("[data-py-pot]").forEach(function(b){
+    b.addEventListener("click",function(){ startPot(this.getAttribute("data-py-pot")); });
+  });
+  document.querySelectorAll("[data-py-pledge]").forEach(function(b){
+    b.addEventListener("click",function(){ pledgePot(this.getAttribute("data-py-pledge"), Number(this.getAttribute("data-py-amt"))); });
+  });
+  document.querySelectorAll("[data-py-unpledge]").forEach(function(b){
+    b.addEventListener("click",function(){ unpledgePot(this.getAttribute("data-py-unpledge")); });
+  });
   document.querySelectorAll("[data-py-out]").forEach(function(b){
     b.addEventListener("click",function(){ buyOut(this.getAttribute("data-py-out")); });
   });
+  document.querySelectorAll("[data-py-undo]").forEach(function(b){
+    b.addEventListener("click",function(){ undoDone(this.getAttribute("data-py-undo")); });
+  });
   document.querySelectorAll("[data-py-done]").forEach(function(b){
     b.addEventListener("click",function(){ markDone(this.getAttribute("data-py-done")); });
+  });
+  el=document.getElementById("fd-on"); if(el) el.addEventListener("click",function(){
+    if(DB) DB.ref(BASE+"/meta/feed").set({on:true, from:Date.now()});
+    ST.feedOn=true; ST.feedFrom=Date.now(); toast("Bet feed on \u2014 from now"); draw();
+  });
+  el=document.getElementById("fd-off"); if(el) el.addEventListener("click",function(){
+    if(DB) DB.ref(BASE+"/meta/feed").update({on:false});
+    ST.feedOn=false; draw();
   });
   el=document.getElementById("py-on");  if(el) el.addEventListener("click",function(){
     var patch={on:true};
@@ -3231,6 +3511,10 @@ function loadData(){
       DB.ref(BASE+"/meta/chatEnabled").on("value",function(sn){ ST.chatEnabled=!!sn.val(); scheduleDraw(); });
       DB.ref(BASE+"/meta/remindersOn").on("value",function(sn){ ST.remindersOn=!!sn.val(); scheduleDraw(); });
       DB.ref(BASE+"/meta/party").on("value",function(sn){ ST.party=sn.val()||{}; scheduleDraw(); });
+      DB.ref(BASE+"/meta/feed").on("value",function(sn){
+        var v=sn.val()||{}; ST.feedOn=!!v.on; ST.feedFrom=Number(v.from)||0; scheduleDraw();
+      });
+      DB.ref(BASE+"/feedPosted").on("value",function(sn){ ST.feedPosted=sn.val()||{}; });
       DB.ref(BASE+"/party/buys").on("value",function(sn){ ST.partyBuys=sn.val()||{}; scheduleDraw(); });
       // Firebase reports its own connection state here. Without this a phone on
       // a dead network shows every pick as saved.
@@ -8716,6 +9000,7 @@ function bind(){
   if(ST.page==="picks"){ wireBets(); startLivePolling(); } else stopLivePolling();
   if(ST.page==="props") wireBets();         // the slip and its controls are shared
   wireParty();
+  runBetFeed();
   (function(){
     var w=ST.curWeek||displayWeekId();
     document.querySelectorAll("[data-prop-id]").forEach(function(b){
