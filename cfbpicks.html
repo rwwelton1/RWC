@@ -686,6 +686,7 @@ function legOdds(g, market, side){
   if(!g) return null;
   if(market==="spread"){
     if(!g.favSide || g.spread==null || g.spread==="") return null;
+    if(Number(g.spread)===0 && g.favSide!=="even") return null;
     var sj = side==="away" ? g.spOddsAway : g.spOddsHome;
     return (sj!=null && !isNaN(Number(sj))) ? Number(sj) : SPREAD_JUICE;
   }
@@ -3362,7 +3363,9 @@ function parseEspnSchedule(data){
     var geo=(comp.geoBroadcasts||[]).find(function(b){ return b.type&&b.type.shortName==="TV"; });
     if(geo&&geo.media) tv=geo.media.shortName||geo.media.name||"";
     if(!tv&&comp.broadcasts&&comp.broadcasts.length) tv=(comp.broadcasts[0].names||[])[0]||"";
-    var spread=0,favSide="home";
+    // No line until ESPN supplies one. Defaulting to 0 / home made a game with
+    // no odds (FCS opponents, mostly) look like a pick'em that could be bet.
+    var spread=null,favSide=null;
     var odds=(comp.odds||[])[0];
     // Moneylines and the total live on the same object as the spread. ESPN
     // doesn't populate them for every college game, so each is optional — a
@@ -3409,6 +3412,10 @@ function parseEspnSchedule(data){
       if(typeof odds.spread==="number" && (awayFav||homeFav)){
         spread=Math.abs(odds.spread);
         favSide=awayFav?"away":"home";
+      } else if(odds.spread===0 || /\b(PK|EVEN|pick)/i.test(String(odds.details||""))){
+        // A genuine pick'em is marked as one, so it stays distinguishable
+        // from a game that simply has no line.
+        spread=0; favSide="even";
       } else if(odds.details){
         // 2) Fallback: parse the "TEAM -7.5" details string, matching favorite by ABBREVIATION
         //    (abbreviations are unambiguous, unlike substring name matches).
@@ -3765,7 +3772,7 @@ function addImportedGames(weekId){
       awayConf:g.awayConf||"", homeConf:g.homeConf||"",
       awayLogo:g.awayLogo||"", homeLogo:g.homeLogo||"",
       kickoff:g.kickoff||"", kickoffTs:g.kickoffTs||"", tv:g.tv||"", venue:g.venue||"",
-      favSide:g.favSide||"home", spread:g.spread!=null?g.spread:0,
+      favSide:g.favSide||null, spread:g.spread!=null?g.spread:null,
       mlAway:g.mlAway!=null?g.mlAway:null, mlHome:g.mlHome!=null?g.mlHome:null,
       total:g.total!=null?g.total:null,
       spOddsAway:g.spOddsAway!=null?g.spOddsAway:null, spOddsHome:g.spOddsHome!=null?g.spOddsHome:null,
@@ -5901,7 +5908,7 @@ function priceBtn(weekId, gid, market, side, top, bottom, disabled){
   var sel=slipHas(gid,market,side);
   return '<button class="bx-price'+(sel?' sel':'')+'" '+(disabled?'disabled ':'')+
     'data-bet-gid="'+gid+'" data-bet-mkt="'+market+'" data-bet-side="'+side+'">'+
-    '<span class="bx-top">'+top+'</span><span class="bx-odds">'+bottom+'</span></button>';
+    '<span class="bx-top">'+top+'</span>'+(bottom?'<span class="bx-odds">'+bottom+'</span>':'')+'</button>';
 }
 
 function renderBets(){
@@ -5985,7 +5992,7 @@ function renderBets(){
                    : '<div class="bx-na">&ndash;</div>';
       // moneyline
       var mo=_odds("ml",side);
-      h+= mo!=null ? priceBtn(weekId,gid,"ml",side,"ML",fmtAmerican(mo),closed)
+      h+= mo!=null ? priceBtn(weekId,gid,"ml",side,fmtAmerican(mo),"",closed)
                    : '<div class="bx-na">&ndash;</div>';
       // total: over on the away row, under on the home row
       var tside = side==="away" ? "over" : "under";
