@@ -593,6 +593,21 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pem-diff.big{color:var(--purple)}
 .pem-diff.big span{color:var(--purple)}
 
+
+.pem-prov{font-size:9px;font-weight:800;color:var(--muted);margin-bottom:2px}
+.pem-prov b{color:var(--text)}
+.pem-warn{background:var(--red-bg);border:2px solid var(--red);border-radius:8px;padding:7px 10px;font-size:9px;font-weight:800;color:var(--red);line-height:1.45;margin-top:8px}
+.pem-bench{display:flex;gap:6px;margin-top:8px}
+.pem-bl{flex:1;background:var(--card2);border:2px solid var(--border2);border-radius:8px;padding:6px 8px;text-align:center}
+.pem-bl span{display:block;font-size:7px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.pem-bl b{display:block;font-size:14px;font-weight:900;color:var(--text);margin-top:1px}
+.pem-knob{margin-top:12px;padding-top:10px;border-top:2px dashed var(--border2)}
+.pem-knoblab{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.pem-knoblab b{color:var(--text);font-size:11px}
+#pem-priorw{width:100%;accent-color:var(--gold-dark)}
+.pem-knobends{display:flex;justify-content:space-between;font-size:8px;font-weight:700;color:var(--dim);margin-top:1px}
+.pe-stat-val.neg{color:var(--red)}
+
 </style>
 
 </head>
@@ -6405,20 +6420,26 @@ function showPeImportModal(){
 }
 
 // ── POOL EDGE: SCORE MODEL (experimental, unweighted) ────────────────────────
-// Fits additive offence/defence ratings to every completed FBS result this
-// season, then predicts scores. Deliberately kept OUT of the pick score — it's
-// here to look at and to be checked against a holdout week, not to move the
-// board. A rating model is the thing the market already prices.
-var PEM = { ratings:null, avg:0, hfa:0, n:0, mae:null, holdout:null, busy:false, weeks:0 };
+// Fits additive offence/defence ratings to completed FBS-vs-FBS results, with
+// each team's rating anchored to an external prior (ESPN's FPI) rather than to
+// league average. The prior is what keeps a 3-game sample sane; the season
+// results are what pull a team away from it when the evidence is real.
+//
+// Deliberately kept OUT of the pick score. A rating model is the thing the
+// market already prices — this is here to look at, and to be judged on the
+// holdout number, not to move the board.
+var PEM = {
+  ratings:null, prior:null, avg:0, hfa:0, n:0, mae:null, holdout:null,
+  busy:false, weeks:0, dropped:0, priorSrc:"none", railed:false,
+  // Tunable. priorW is the headline knob: 0 ignores FPI entirely and fits
+  // from results alone, 1 leans on it hard.
+  opts: { priorW: 0.55, lambda: 0.020, lr: 0.035, epochs: 400, cap: 28, hfaMax: 5 }
+};
 
-// Blowouts carry garbage time. Capping margin stops a 63-7 result dragging a
-// rating further than the win deserves.
-var PEM_CAP = 28;
-
-function pemCapped(a, b){
+function pemCapped(a, b, cap){
   var m = a - b;
-  if(m >  PEM_CAP) return [b + PEM_CAP, b];
-  if(m < -PEM_CAP) return [a, a + PEM_CAP];
+  if(m >  cap) return [b + cap, b];
+  if(m < -cap) return [a, a + cap];
   return [a, b];
 }
 
@@ -6430,8 +6451,7 @@ function pemFetchWeek(year, week, cb){
     ((d && d.events) || []).forEach(function(ev){
       var c = (ev.competitions||[])[0];
       if(!c) return;
-      var st = ((c.status||{}).type||{});
-      if(!st.completed) return;
+      if(!(((c.status||{}).type||{}).completed)) return;
       var away=null, home=null;
       (c.competitors||[]).forEach(function(t){
         if(t.homeAway==="away") away=t; else if(t.homeAway==="home") home=t;
@@ -6462,20 +6482,74 @@ function pemFetchSeason(year, maxWeek, cb){
   }
 }
 
-// Additive model: points = league average + offence(team) + defence(opponent),
-// with half the home-field edge added to the home side and taken off the away.
-// Fitted by plain gradient descent with shrinkage — the shrinkage is what stops
-// a 3-game sample producing wild ratings.
-function pemFit(games, opts){
-  opts = opts || {};
-  var lr     = opts.lr     || 0.035;
-  var lambda = opts.lambda || 0.020;   // pull toward league average
-  var epochs = opts.epochs || 400;
+// FBS whitelist. FCS visitors are the reason the first build railed its home
+// edge: they appear once, get shrunk toward average, and their blowout road
+// losses get blamed on home field instead of on the gap in class.
+function pemFetchFbs(cb){
+  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?groups=80&limit=400")
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var set = {}, n = 0;
+      (((d||{}).sports||[])[0]||{}).leagues && (((d.sports[0].leagues||[])[0]||{}).teams||[]).forEach(function(t){
+        var id = String(((t||{}).team||{}).id||"");
+        if(id){ set[id] = 1; n++; }
+      });
+      cb(null, n >= 100 ? set : null);
+    })
+    .catch(function(){ cb(null, null); });
+}
+
+// ESPN's FPI. Net points vs an average opponent on a neutral field, which maps
+// cleanly onto this model: a team's (off - def) IS its FPI, so half goes to
+// each side of the ledger.
+function pemFetchFpi(year, cb){
+  var url = "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/" +
+            year + "/powerindex?limit=400";
+  fetch(url).then(function(r){ return r.json(); }).then(function(d){
+    var items = (d && d.items) || [];
+    // The core API often returns $ref stubs rather than inline values. Only
+    // usable if the values came back inline; otherwise fall back cleanly.
+    var prior = {}, n = 0;
+    items.forEach(function(it){
+      var id = String(((it||{}).team||{}).$ref || (it||{}).teamId || "");
+      var m = id.match(/teams\/(\d+)/); if(m) id = m[1];
+      var fpi = null;
+      ((it||{}).categories||[]).forEach(function(cat){
+        ((cat||{}).values||[]).forEach(function(v, i){
+          var nm = ((cat.names||[])[i]||"").toLowerCase();
+          if(nm === "fpi" && typeof v === "number") fpi = v;
+        });
+        ((cat||{}).stats||[]).forEach(function(s){
+          if(((s||{}).name||"").toLowerCase() === "fpi" && typeof s.value === "number") fpi = s.value;
+        });
+      });
+      if(id && fpi !== null){ prior[id] = { off: fpi/2, def: -fpi/2, fpi: fpi }; n++; }
+    });
+    cb(null, n >= 50 ? prior : null);
+  }).catch(function(){ cb(null, null); });
+}
+
+// points = league average + offence(team) + defence(opponent) ± half the home
+// edge. Gradient descent, shrinking each rating toward its prior.
+function pemFit(games, prior, o){
+  o = o || PEM.opts;
+  var lr = o.lr, lambda = o.lambda, epochs = o.epochs, cap = o.cap, hfaMax = o.hfaMax;
+  prior = prior || {};
 
   var teams = {}, total = 0, n = 0;
   games.forEach(function(g){
     [g.awayId, g.homeId].forEach(function(id){
-      if(!teams[id]) teams[id] = { off:0, def:0, games:0 };
+      if(!teams[id]){
+        var p = prior[id];
+        // Start AT the prior rather than at zero, weighted by how much we trust it.
+        teams[id] = {
+          off: p ? p.off * o.priorW : 0,
+          def: p ? p.def * o.priorW : 0,
+          pOff: p ? p.off * o.priorW : 0,
+          pDef: p ? p.def * o.priorW : 0,
+          hasPrior: !!p, games: 0
+        };
+      }
     });
     teams[g.awayId].games++; teams[g.homeId].games++;
     total += g.as + g.hs; n += 2;
@@ -6485,28 +6559,28 @@ function pemFit(games, opts){
 
   for(var ep=0; ep<epochs; ep++){
     games.forEach(function(g){
-      var sc = pemCapped(g.as, g.hs);
+      var sc = pemCapped(g.as, g.hs, cap);
       var aAct = sc[0], hAct = sc[1];
       var A = teams[g.awayId], H = teams[g.homeId];
       var edge = g.neutral ? 0 : hfa/2;
 
-      var aPred = avg + A.off + H.def - edge;
-      var hPred = avg + H.off + A.def + edge;
-      var aErr = aAct - aPred, hErr = hAct - hPred;
+      var aErr = aAct - (avg + A.off + H.def - edge);
+      var hErr = hAct - (avg + H.off + A.def + edge);
 
       A.off += lr * aErr;  H.def += lr * aErr;
       H.off += lr * hErr;  A.def += lr * hErr;
       if(!g.neutral) hfa += lr * 0.25 * (hErr - aErr);
     });
-    // Shrinkage — teams with fewer games get pulled back hardest.
+    // Shrink toward the PRIOR, not toward zero. Teams with fewer games get
+    // pulled back hardest, which is exactly when the prior should dominate.
     for(var id in teams){
       var t = teams[id];
-      var pull = lambda * (1 / Math.max(1, t.games));
-      t.off -= t.off * pull * 4;
-      t.def -= t.def * pull * 4;
+      var pull = lambda * (1 / Math.max(1, t.games)) * 4;
+      t.off -= (t.off - t.pOff) * pull;
+      t.def -= (t.def - t.pDef) * pull;
     }
     if(hfa < 0) hfa = 0;
-    if(hfa > 6) hfa = 6;
+    if(hfa > hfaMax) hfa = hfaMax;
   }
 
   var errSum = 0, cnt = 0;
@@ -6516,22 +6590,18 @@ function pemFit(games, opts){
     errSum += Math.abs((p.home - p.away) - (g.hs - g.as));
     cnt++;
   });
-
-  var wks = {};
-  games.forEach(function(g){ wks[g.week] = 1; });
+  var wks = {}; games.forEach(function(g){ wks[g.week] = 1; });
 
   return { ratings:teams, avg:avg, hfa:hfa, n:games.length,
-           weeks:Object.keys(wks).length, mae: cnt ? errSum/cnt : null };
+           weeks:Object.keys(wks).length, mae: cnt ? errSum/cnt : null,
+           railed: hfa >= hfaMax - 0.01 };
 }
 
 function pemPredictRaw(teams, avg, hfa, awayId, homeId, neutral){
   var A = teams[awayId], H = teams[homeId];
   if(!A || !H) return null;
   var edge = neutral ? 0 : hfa/2;
-  return {
-    away: avg + A.off + H.def - edge,
-    home: avg + H.off + A.def + edge
-  };
+  return { away: avg + A.off + H.def - edge, home: avg + H.off + A.def + edge };
 }
 
 function pemPredict(awayId, homeId, neutral){
@@ -6539,16 +6609,17 @@ function pemPredict(awayId, homeId, neutral){
   var p = pemPredictRaw(PEM.ratings, PEM.avg, PEM.hfa, awayId, homeId, neutral);
   if(!p) return null;
   return {
-    away: Math.round(p.away*10)/10,
-    home: Math.round(p.home*10)/10,
+    away: Math.round(p.away*10)/10, home: Math.round(p.home*10)/10,
     margin: Math.round((p.home - p.away)*10)/10,
     total: Math.round((p.home + p.away)*10)/10
   };
 }
 
-// The honest check: fit on everything BEFORE the last week, then predict that
-// week cold. In-sample error always flatters a model; this is the real number.
-function pemHoldout(games){
+// The honest check: fit on everything BEFORE the last week, predict that week
+// cold. In-sample error always flatters a model; this is the real number.
+// Baselines are included because a model that can't beat "home team by 2.4"
+// isn't worth looking at.
+function pemHoldout(games, prior, o){
   var weeks = games.map(function(g){ return g.week; });
   if(!weeks.length) return null;
   var last = Math.max.apply(null, weeks);
@@ -6556,42 +6627,84 @@ function pemHoldout(games){
   var test  = games.filter(function(g){ return g.week === last; });
   if(train.length < 40 || !test.length) return null;
 
-  var fit = pemFit(train);
-  var errs = [];
+  var fit = pemFit(train, prior, o);
+  var errs = [], flat = [], priErrs = [];
   test.forEach(function(g){
+    var actual = g.hs - g.as;
     var p = pemPredictRaw(fit.ratings, fit.avg, fit.hfa, g.awayId, g.homeId, g.neutral);
-    if(!p) return;
-    errs.push(Math.abs((p.home - p.away) - (g.hs - g.as)));
+    if(p) errs.push(Math.abs((p.home - p.away) - actual));
+    // Baseline 1: always "home team by the fitted edge".
+    flat.push(Math.abs((g.neutral ? 0 : fit.hfa) - actual));
+    // Baseline 2: the prior alone, no season results at all.
+    if(prior && prior[g.homeId] && prior[g.awayId]){
+      var pm = (prior[g.homeId].fpi - prior[g.awayId].fpi) + (g.neutral ? 0 : 2.4);
+      priErrs.push(Math.abs(pm - actual));
+    }
   });
   if(!errs.length) return null;
-  errs.sort(function(a,b){ return a-b; });
-  var sum = 0;
-  errs.forEach(function(e){ sum += e; });
+  var mean = function(a){ var s=0; a.forEach(function(v){ s+=v; }); return s/a.length; };
+  var sorted = errs.slice().sort(function(a,b){ return a-b; });
   return {
     week: last, n: errs.length, trainN: train.length,
-    mae: sum / errs.length,
-    median: errs[Math.floor(errs.length/2)],
-    within7: errs.filter(function(e){ return e <= 7; }).length / errs.length,
-    within14: errs.filter(function(e){ return e <= 14; }).length / errs.length
+    mae: mean(errs), median: sorted[Math.floor(sorted.length/2)],
+    within7: errs.filter(function(e){ return e<=7; }).length / errs.length,
+    within14: errs.filter(function(e){ return e<=14; }).length / errs.length,
+    baseFlat: flat.length ? mean(flat) : null,
+    basePrior: priErrs.length ? mean(priErrs) : null
   };
 }
 
-// Build (or rebuild) the model from this season's completed games.
+// Build (or rebuild) from this season's completed games.
 function pemBuild(cb){
   if(PEM.busy) return;
   PEM.busy = true;
   var year = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
   var upto = (PE.meta && PE.meta.espnWeek) ? Math.max(1, PE.meta.espnWeek - 1) : 4;
-  pemFetchSeason(year, upto, function(err, games){
-    PEM.busy = false;
-    if(err || !games || !games.length){ cb && cb(err || new Error("no games")); return; }
-    var fit = pemFit(games);
-    PEM.ratings = fit.ratings; PEM.avg = fit.avg; PEM.hfa = fit.hfa;
-    PEM.n = fit.n; PEM.mae = fit.mae; PEM.weeks = fit.weeks;
-    PEM.holdout = pemHoldout(games);
-    cb && cb(null, PEM);
+
+  pemFetchFbs(function(_e, fbsSet){
+    pemFetchFpi(year, function(_e2, prior){
+      pemFetchSeason(year, upto, function(err, games){
+        PEM.busy = false;
+        if(err || !games || !games.length){ cb && cb(err || new Error("no games")); return; }
+
+        var before = games.length;
+        if(fbsSet){
+          games = games.filter(function(g){ return fbsSet[g.awayId] && fbsSet[g.homeId]; });
+          PEM.fbsSrc = "ESPN team list";
+        } else {
+          // Fallback: an FCS visitor usually appears once all season.
+          var seen = {};
+          games.forEach(function(g){ seen[g.awayId]=(seen[g.awayId]||0)+1; seen[g.homeId]=(seen[g.homeId]||0)+1; });
+          games = games.filter(function(g){ return seen[g.awayId] >= 2 && seen[g.homeId] >= 2; });
+          PEM.fbsSrc = "appearance heuristic";
+        }
+        PEM.dropped = before - games.length;
+        PEM.prior = prior;
+        PEM.priorSrc = prior ? "ESPN FPI" : "none (results only)";
+
+        if(!games.length){ cb && cb(new Error("no FBS games")); return; }
+        var fit = pemFit(games, prior, PEM.opts);
+        PEM.ratings = fit.ratings; PEM.avg = fit.avg; PEM.hfa = fit.hfa;
+        PEM.n = fit.n; PEM.mae = fit.mae; PEM.weeks = fit.weeks; PEM.railed = fit.railed;
+        PEM.holdout = pemHoldout(games, prior, PEM.opts);
+        PEM._games = games;
+        cb && cb(null, PEM);
+      });
+    });
   });
 }
+
+// Refit from cached games — lets the prior-weight slider respond instantly
+// without re-fetching the whole season.
+function pemRefit(){
+  if(!PEM._games || !PEM._games.length) return false;
+  var fit = pemFit(PEM._games, PEM.prior, PEM.opts);
+  PEM.ratings = fit.ratings; PEM.avg = fit.avg; PEM.hfa = fit.hfa;
+  PEM.n = fit.n; PEM.mae = fit.mae; PEM.railed = fit.railed;
+  PEM.holdout = pemHoldout(PEM._games, PEM.prior, PEM.opts);
+  return true;
+}
+
 
 // ── POOL EDGE: SCORE MODEL PANEL ─────────────────────────────────────────────
 function pemPanelHtml(){
@@ -6601,7 +6714,7 @@ function pemPanelHtml(){
   if(!PEM.ratings){
     h += '<div class="pe-empty" style="padding:10px 0">Not built yet.</div>';
     h += '<button class="btn btn-ghost" id="pem-build">&#129518; Build from season results</button>';
-    h += '<div class="pe-note">Fits offence and defence ratings to every completed FBS game this season, then predicts scores. Does not affect your picks.</div>';
+    h += '<div class="pe-note">Anchors each team to its ESPN FPI, then lets this season’s FBS results pull it away. Does not affect your picks.</div>';
     h += '</div>';
     return h;
   }
@@ -6609,17 +6722,44 @@ function pemPanelHtml(){
   var ho = PEM.holdout;
   h += '<div class="pe-stats" style="margin-bottom:10px">';
   h += '<div class="pe-stat"><div class="pe-stat-val">' + PEM.n + '</div><div class="pe-stat-lab">Games fit</div></div>';
-  h += '<div class="pe-stat"><div class="pe-stat-val">' + PEM.hfa.toFixed(1) + '</div><div class="pe-stat-lab">Home edge</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val' + (PEM.railed ? " neg" : "") + '">' + PEM.hfa.toFixed(1) + '</div><div class="pe-stat-lab">Home edge</div></div>';
   h += '<div class="pe-stat"><div class="pe-stat-val">' + (ho ? ho.mae.toFixed(1) : "—") + '</div><div class="pe-stat-lab">Holdout MAE</div></div>';
   h += '</div>';
 
+  // Provenance — what actually went in.
+  h += '<div class="pem-prov">Prior: <b>' + x(PEM.priorSrc) + '</b>';
+  if(PEM.dropped) h += ' &middot; dropped <b>' + PEM.dropped + '</b> non-FBS game' + (PEM.dropped===1?"":"s");
+  h += '</div>';
+
+  if(PEM.railed){
+    h += '<div class="pem-warn">Home edge hit its ceiling — the fit is pushing bias it can’t explain into home field. Usually means bad games are still in the sample.</div>';
+  }
+
   if(ho){
-    h += '<div class="pe-note" style="margin-top:0">Trained on ' + ho.trainN + ' games through week ' + (ho.week-1) +
+    h += '<div class="pe-note" style="margin-top:8px">Trained on ' + ho.trainN + ' games through week ' + (ho.week-1) +
          ', then predicted week ' + ho.week + ' cold: median miss ' + ho.median.toFixed(1) + ' pts, ' +
          Math.round(ho.within7*100) + '% within a touchdown, ' + Math.round(ho.within14*100) + '% within two.</div>';
+    // The comparison that decides whether any of this earns its place.
+    h += '<div class="pem-bench">';
+    h += '<div class="pem-bl"><span>This model</span><b>' + ho.mae.toFixed(1) + '</b></div>';
+    if(ho.basePrior !== null) h += '<div class="pem-bl"><span>FPI alone</span><b>' + ho.basePrior.toFixed(1) + '</b></div>';
+    if(ho.baseFlat !== null)  h += '<div class="pem-bl"><span>"Home by ' + PEM.hfa.toFixed(1) + '"</span><b>' + ho.baseFlat.toFixed(1) + '</b></div>';
+    h += '</div>';
+    var beatsFlat = (ho.baseFlat !== null) && (ho.mae < ho.baseFlat);
+    h += '<div class="pe-note" style="margin-top:6px">' + (beatsFlat
+        ? 'Lower is better. The model beats picking the home team every week — a low bar, but it clears it.'
+        : '<b>Lower is better. The model does not beat simply picking the home team.</b> Until it does, treat its numbers as decoration.') + '</div>';
   } else {
-    h += '<div class="pe-note" style="margin-top:0">Not enough weeks yet for a holdout test — in-sample error only, which always flatters a model.</div>';
+    h += '<div class="pe-note" style="margin-top:8px">Not enough weeks for a holdout test — in-sample error only, which always flatters a model.</div>';
   }
+
+  // The knob.
+  var pw = Math.round(PEM.opts.priorW * 100);
+  h += '<div class="pem-knob">';
+  h += '<div class="pem-knoblab">Trust in FPI <b>' + pw + '%</b></div>';
+  h += '<input type="range" id="pem-priorw" min="0" max="100" step="5" value="' + pw + '">';
+  h += '<div class="pem-knobends"><span>results only</span><span>FPI only</span></div>';
+  h += '</div>';
 
   // Predictions for the current board.
   var preds = [];
@@ -6627,7 +6767,6 @@ function pemPanelHtml(){
     if(!g.awayId || !g.homeId) return;
     var p = pemPredict(g.awayId, g.homeId, false);
     if(!p) return;
-    // Model margin expressed as points the stored favourite gives.
     var favMargin = (g.favIsHome === false) ? (p.away - p.home) : (p.home - p.away);
     preds.push({ g:g, p:p, favMargin: Math.round(favMargin*10)/10 });
   });
@@ -6641,11 +6780,10 @@ function pemPanelHtml(){
       var diff = Math.round((r.favMargin - r.g.mkt)*10)/10;
       var leans = diff > 0 ? r.g.fav : r.g.dog;
       var strong = Math.abs(diff) >= 3;
-      var aScore = Math.round(r.p.away), hScore = Math.round(r.p.home);
-      var favName = (r.g.favIsHome === false) ? r.g.fav : r.g.dog;
+      var favName  = (r.g.favIsHome === false) ? r.g.fav : r.g.dog;
       var homeName = (r.g.favIsHome === false) ? r.g.dog : r.g.fav;
       h += '<div class="pem-row">';
-      h += '<div class="pem-score">' + aScore + '&ndash;' + hScore + '</div>';
+      h += '<div class="pem-score">' + Math.round(r.p.away) + '&ndash;' + Math.round(r.p.home) + '</div>';
       h += '<div class="pem-mid"><div class="pem-teams">' + x(favName) + ' at ' + x(homeName) + '</div>';
       h += '<div class="pem-sub">model ' + (r.favMargin>=0?"-":"+") + Math.abs(r.favMargin) +
            ' &middot; market ' + (r.g.mkt>=0?"-":"+") + Math.abs(r.g.mkt) + '</div></div>';
@@ -6921,6 +7059,14 @@ function renderPoolEdge(){
     PE.games = [];
     peSave(); renderPoolEdge();
     toast("Week banked","ok");
+  });
+
+  var pemSlider = document.getElementById("pem-priorw");
+  if(pemSlider) pemSlider.addEventListener("change", function(){
+    var v = parseInt(this.value,10);
+    if(isNaN(v)) return;
+    PEM.opts.priorW = v/100;
+    if(pemRefit()) renderPoolEdge();
   });
 
   var pemBtn = document.getElementById("pem-build");
