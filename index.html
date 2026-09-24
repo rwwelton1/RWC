@@ -619,6 +619,13 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pem-range{width:100%;accent-color:var(--gold-dark);margin:0}
 .pem-knobends{display:flex;justify-content:space-between;font-size:8px;font-weight:700;color:var(--dim);margin-top:1px}
 
+
+.pem-flip{display:inline-block;font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;padding:1px 5px;border-radius:4px;background:var(--purple-bg);color:var(--purple);border:1px solid var(--purple);margin-left:3px}
+.pem-slope{font-size:9px;font-weight:700;color:var(--muted);line-height:1.5;background:var(--card2);border:2px solid var(--border2);border-radius:8px;padding:7px 9px;margin-bottom:8px}
+.pem-slope b{color:var(--text)}
+.pem-slope.bad{background:var(--gold-bg);border-color:var(--gold-dark);color:var(--gold-dark)}
+.pem-slope.bad b{color:var(--gold-dark)}
+
 </style>
 
 </head>
@@ -6449,6 +6456,7 @@ var PEM = {
   busy:false, weeks:0, dropped:0, priorSrc:"none", priorN:0, fbsSrc:"", nameMap:null,
   opts: {
     hfa:      2.5,   // points, fixed
+    scale:    1.0,   // expands ratings back out after shrinkage
     priorW:   0.55,  // 0 = results only, 1 = prior only
     lambda:   0.020, // shrinkage toward prior
     cap:      28,    // blowout margin cap
@@ -6457,7 +6465,7 @@ var PEM = {
   }
 };
 
-var PEM_DEFAULTS = { hfa:2.5, priorW:0.55, lambda:0.020, cap:28, recency:0.0 };
+var PEM_DEFAULTS = { hfa:2.5, scale:1.0, priorW:0.55, lambda:0.020, cap:28, recency:0.0 };
 
 function pemCapped(a, b, cap){
   var m = a - b;
@@ -6663,6 +6671,13 @@ function pemFit(games, prior, o){
     }
   }
 
+  // Shrinkage pulls every rating toward the prior, which systematically
+  // COMPRESSES the gap between good and bad teams. Scaling back out is a
+  // standard correction, not a fudge — but it is a knob, so it can be checked.
+  if(o.scale && o.scale !== 1){
+    for(var sid in teams){ teams[sid].off *= o.scale; teams[sid].def *= o.scale; }
+  }
+
   var errSum = 0, cnt = 0;
   games.forEach(function(g){
     var p = pemPredictRaw(teams, avg, hfa, g.awayId, g.homeId, g.neutral);
@@ -6830,6 +6845,9 @@ var PEM_KNOBS = [
   { key:"hfa",     label:"Home edge",      min:0,   max:6,    step:0.25, fmt:function(v){ return v.toFixed(2) + " pts"; },
     lo:"none", hi:"6 pts",
     help:"A setting, not a fitted value — in September home teams are genuinely stronger, so fitting this absorbs their quality." },
+  { key:"scale",   label:"Rating spread",   min:0.5, max:2.5,  step:0.05, fmt:function(v){ return v.toFixed(2) + "x"; },
+    lo:"compressed", hi:"expanded",
+    help:"Shrinkage squashes good and bad teams toward each other. Above 1 pushes them back apart. If the model calls every game close, raise this." },
   { key:"priorW",  label:"Trust in prior", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"results only", hi:"prior only",
     help:"How far each team starts from, and is pulled back toward, its external rating." },
@@ -6919,6 +6937,17 @@ function pemPanelInner(){
 
   if(preds.length){
     h += '<div class="pem-hd">Model vs market</div>';
+    var sc = pemScaleCheck();
+    if(sc){
+      h += '<div class="pem-slope' + ((sc.slope < 0.8 || sc.slope > 1.25) ? " bad" : "") + '">' +
+           'Scale vs market: <b>' + sc.slope.toFixed(2) + 'x</b>. ' +
+           (sc.slope < 0.8
+             ? ('Where the market separates two teams by 10 pts, this model separates them by ' + (sc.slope*10).toFixed(1) +
+                ' \u2014 everything is squashed toward a toss-up. Raise <b>Rating spread</b>, or load a prior.')
+             : (sc.slope > 1.25
+                ? 'The model separates teams more aggressively than the market does.'
+                : 'Roughly the same scale as the market.')) + '</div>';
+    }
     preds.sort(function(a,b){
       return Math.abs(b.favMargin - b.g.mkt) - Math.abs(a.favMargin - a.g.mkt);
     });
@@ -6931,14 +6960,39 @@ function pemPanelInner(){
       h += '<div class="pem-row">';
       h += '<div class="pem-score">' + Math.round(r.p.away) + '&ndash;' + Math.round(r.p.home) + '</div>';
       h += '<div class="pem-mid"><div class="pem-teams">' + x(favName) + ' at ' + x(homeName) + '</div>';
-      h += '<div class="pem-sub">model ' + (r.favMargin>=0?"-":"+") + Math.abs(r.favMargin) +
-           ' &middot; market ' + (r.g.mkt>=0?"-":"+") + Math.abs(r.g.mkt) + '</div></div>';
+      var mFav = r.favMargin >= 0 ? r.g.fav : r.g.dog;
+      var kFav = r.g.mkt      >= 0 ? r.g.fav : r.g.dog;
+      h += '<div class="pem-sub">model <b>' + x(mFav) + ' -' + Math.abs(r.favMargin).toFixed(1) + '</b>' +
+           ' &middot; market <b>' + x(kFav) + ' -' + Math.abs(r.g.mkt) + '</b>' +
+           (mFav !== kFav ? ' <span class="pem-flip">different favourite</span>' : '') + '</div></div>';
       h += '<div class="pem-diff ' + (strong?"big":"") + '">' + (diff>0?"+":"") + diff + '<span>' + x(leans) + '</span></div>';
       h += '</div>';
     });
     h += '<div class="pe-note">Positive means the model likes the favourite more than the market. Nothing here moves your board ranking.</div>';
   }
   return h;
+}
+
+// How closely the model's scale matches the market's. A slope well under 1
+// means the model squashes everything toward a pick'em, which reads as
+// "backwards" whenever a short line flips sign.
+function pemScaleCheck(){
+  var xs = [], ys = [];
+  PE.games.forEach(function(g){
+    if(!g.awayId || !g.homeId) return;
+    var p = pemPredict(g.awayId, g.homeId, false);
+    if(!p) return;
+    var fm = (g.favIsHome === false) ? (p.away - p.home) : (p.home - p.away);
+    xs.push(g.mkt); ys.push(fm);
+  });
+  if(xs.length < 4) return null;
+  var n = xs.length, mx = 0, my = 0;
+  xs.forEach(function(v){ mx += v; }); mx /= n;
+  ys.forEach(function(v){ my += v; }); my /= n;
+  var sxy = 0, sxx = 0;
+  for(var i=0;i<n;i++){ sxy += (xs[i]-mx)*(ys[i]-my); sxx += (xs[i]-mx)*(xs[i]-mx); }
+  if(!sxx) return null;
+  return { slope: sxy/sxx, n: n };
 }
 
 function pemPanelHtml(){
@@ -7022,6 +7076,7 @@ function pemAutoTune(){
   if(!PEM._games) return null;
   var grid = {
     hfa:     [0,0.5,1,1.5,2,2.5,3,3.5,4],
+    scale:   [0.6,0.8,1,1.2,1.4,1.6,1.9,2.2],
     priorW:  [0,0.2,0.35,0.5,0.65,0.8,1],
     lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07],
     cap:     [14,17,21,24,28,35,45],
@@ -7155,7 +7210,12 @@ function renderPoolEdge(){
       h += '</div>';
 
       h += '<div class="pe-bar"><i style="width:' + pct + '%"></i></div>';
-      h += '<div class="pe-sub">' + x(g.fav) + ' vs ' + x(g.dog) + '</div>';
+      // "fav vs dog" reads as the favourite hosting, which is wrong whenever the
+      // favourite is on the road. Show the real venue when it is known.
+      var _vs = (g.favIsHome === true)  ? (x(g.dog) + ' at ' + x(g.fav))
+              : (g.favIsHome === false) ? (x(g.fav) + ' at ' + x(g.dog))
+              : (x(g.fav) + ' vs ' + x(g.dog));
+      h += '<div class="pe-sub">' + _vs + '</div>';
 
       h += '<div class="pe-move">';
       h += peSpark(g, up);
