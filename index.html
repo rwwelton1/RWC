@@ -709,6 +709,16 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pe-sr2 .pe-minibar{flex:1 1 20px;min-width:16px}
 .pe-card.done .pe-vs{color:var(--dim)}
 
+
+.pe-mpick{flex:0 0 auto;font-size:10px;font-weight:700;color:var(--muted);white-space:nowrap;max-width:44%;overflow:hidden;text-overflow:ellipsis}
+.pe-mpick b{font-weight:900;color:var(--muted)}
+.pe-mpick.dis{color:var(--purple)}
+.pe-mpick.dis b{color:var(--purple)}
+.pe-mpickbig{font-size:13px;font-weight:900;color:var(--text);letter-spacing:-.01em}
+.pe-model.big .pe-mpickbig{color:var(--purple)}
+.pe-mnote{font-size:9px;font-weight:700;color:var(--purple);line-height:1.5;margin-top:4px}
+.pe-mnote b{font-weight:900}
+
 </style>
 
 </head>
@@ -5920,7 +5930,7 @@ function renderHub() {
 // not granted masters, since this is a personal tool rather than an admin one.
 // NOTE: this gate is cosmetic. The code ships to every visitor; the only real
 // protection is the Firebase rule on prophescore/{uid}.
-var PE = { games: [], history: [], meta: null, priors: {}, ready: false, err: "" };
+var PE = { games: [], history: [], meta: null, priors: {}, settings: null, turnovers: {}, ready: false, err: "" };
 var PE_KEYNUMS = [3, 7];
 
 function peOwner(){ return isRootMaster(ME()); }
@@ -5934,13 +5944,23 @@ function peLoad(cb){
   // Local first so the screen paints instantly, then reconcile with the server.
   try{
     var raw = localStorage.getItem(peLocalKey()) || localStorage.getItem(peLegacyLocalKey());
-    if(raw){ var o = JSON.parse(raw); PE.games = o.games||[]; PE.history = o.history||[]; PE.meta = o.meta||null; PE.priors = o.priors||{}; }
+    if(raw){
+      var o = JSON.parse(raw);
+      PE.games = o.games||[]; PE.history = o.history||[]; PE.meta = o.meta||null;
+      PE.priors = o.priors||{}; PE.settings = o.settings||null; PE.turnovers = o.turnovers||{};
+    }
   }catch(e){}
   var uid = ME();
   if(!DB || !uid){ PE.ready = true; if(cb) cb(); return; }
   DB.ref("prophescore/"+uid).once("value", function(sn){
     var v = sn.val();
-    if(v){ PE.games = v.games || []; PE.history = v.history || []; PE.meta = v.meta || null; PE.priors = v.priors || PE.priors || {}; }
+    if(v){
+      PE.games = v.games || []; PE.history = v.history || []; PE.meta = v.meta || null;
+      PE.priors = v.priors || PE.priors || {};
+      PE.settings = v.settings || PE.settings || null;
+      PE.turnovers = v.turnovers || PE.turnovers || {};
+    }
+    pemApplySavedOpts();
     PE.ready = true; PE.err = "";
     if(cb) cb();
   }, function(err){
@@ -5963,10 +5983,14 @@ function peClean(o){
 
 function peSave(){
   var payload = peClean({
-    games:   PE.games   || [],
-    history: PE.history || [],
-    meta:    PE.meta    || null,
-    priors:  PE.priors  || null
+    games:     PE.games     || [],
+    history:   PE.history   || [],
+    meta:      PE.meta      || null,
+    priors:    PE.priors    || null,
+    settings:  PE.settings  || null,
+    // Keyed by ESPN event id, so it survives rebuilds and season rollovers and
+    // only the genuinely new games ever need fetching again.
+    turnovers: PE.turnovers || null
   });
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
@@ -6592,6 +6616,27 @@ function pemCapped(a, b, cap){
 // ── STORED PRIORS ───────────────────────────────────────────────────────────
 // SP+ has no public API, so the paste is the supply line. Keeping it per week
 // means it survives reloads and you only re-paste when new numbers publish.
+// Slider positions are worth keeping — retuning from scratch every visit is
+// exactly the friction that makes a tool annoying. Debounced so dragging does
+// not write on every frame.
+var _pemOptsTimer = null;
+function pemSaveOpts(){
+  PE.settings = {};
+  for(var k in PEM.opts) PE.settings[k] = PEM.opts[k];
+  if(_pemOptsTimer) clearTimeout(_pemOptsTimer);
+  _pemOptsTimer = setTimeout(function(){ _pemOptsTimer = null; peSave(); }, 700);
+}
+
+function pemApplySavedOpts(){
+  var s = PE.settings;
+  if(!s) return false;
+  // Only keys the model actually has, so a stale save cannot inject junk.
+  for(var k in PEM.opts){
+    if(typeof s[k] === "number" && isFinite(s[k])) PEM.opts[k] = s[k];
+  }
+  return true;
+}
+
 function pePriorKey(){
   var y = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
   var w = (PE.meta && PE.meta.espnWeek) || 0;
@@ -6736,7 +6781,30 @@ function pemParseTurnovers(d){
   return Object.keys(out).length === 2 ? out : null;
 }
 
+// Paint cached turnovers onto a freshly fetched season before deciding what
+// still needs downloading.
+function pemApplyCachedTurnovers(games){
+  var cache = PE.turnovers || {}, n = 0;
+  games.forEach(function(g){
+    if(!g.eventId) return;
+    var v = cache[g.eventId];
+    if(typeof v === "number"){ g.toMargin = v; n++; }
+  });
+  return n;
+}
+
+function pemCacheTurnovers(games){
+  PE.turnovers = PE.turnovers || {};
+  var n = 0;
+  games.forEach(function(g){
+    if(g.eventId && typeof g.toMargin === "number"){ PE.turnovers[g.eventId] = g.toMargin; n++; }
+  });
+  peSave();
+  return n;
+}
+
 function pemFetchBoxScores(games, progress, cb){
+  pemApplyCachedTurnovers(games);
   var todo = games.filter(function(g){ return g.eventId && g.toMargin === undefined; });
   var got = 0, tried = 0;
   pemPool(todo, 8, function(g, next){
@@ -6756,7 +6824,10 @@ function pemFetchBoxScores(games, progress, cb){
         next();
       })
       .catch(function(){ g.toMargin = null; tried++; next(); });
-  }, function(){ cb(null, { got: got, of: todo.length }); });
+  }, function(){
+    var saved = pemCacheTurnovers(games);
+    cb(null, { got: got, of: todo.length, cached: saved });
+  });
 }
 
 // How much turnover luck is present, and how repeatable it is. Week-to-week
@@ -7197,6 +7268,9 @@ function pemBuild(cb){
         PEM.priorSrc = prior ? "ESPN FPI" : ("unavailable — " + (why || "fetch failed"));
         PEM.priorAt = null; PEM.priorStale = false;
         PEM._games = games;
+        // Turnovers already downloaded are reused; only new games cost anything.
+        pemApplySavedOpts();
+        if(pemApplyCachedTurnovers(games)) PEM.toStats = pemTurnoverStats(games);
         // A pasted prior is the deliberate choice, so it wins over a live fetch.
         pemRestorePrior();
         if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
@@ -7298,11 +7372,16 @@ function pemPanelInner(){
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">';
   h += '<button class="btn btn-ghost btn-sm" id="pem-paste">&#128203; ' +
        (PEM.prior && PEM.priorAt ? 'Update SP+ ratings' : 'Paste SP+ / FPI ratings') + '</button>';
-  if(!PEM.toStats) h += '<button class="btn btn-ghost btn-sm" id="pem-to">&#127944; Load turnovers</button>';
+  var _cachedTo = PE.turnovers ? Object.keys(PE.turnovers).length : 0;
+  if(!PEM.toStats){
+    h += '<button class="btn btn-ghost btn-sm" id="pem-to">&#127944; Load turnovers' +
+         (_cachedTo ? (' (' + _cachedTo + ' cached)') : '') + '</button>';
+  }
   h += '</div>';
   if(PEM.toStats){
     var ts = PEM.toStats;
     h += '<div class="pem-prov" style="margin-top:7px">Turnovers: <b>' + ts.n + '</b> of ' + ts.of + ' games';
+    if(_cachedTo) h += ' &middot; ' + _cachedTo + ' saved';
     if(ts.repeatability !== null && ts.repeatability !== undefined){
       h += ' &middot; repeatability <b>' + ts.repeatability.toFixed(2) + '</b>';
     }
@@ -7477,6 +7556,7 @@ function pemBindPanel(){
         pending = null;
         if(pemRefit()) pemRepaint();
       });
+      pemSaveOpts();
     });
   });
 
@@ -7486,6 +7566,7 @@ function pemBindPanel(){
     if(out) out.textContent = "Sweeping…";
     setTimeout(function(){
       var best = pemAutoTune();
+      pemSaveOpts();
       pemRepaint();
       var o2 = document.getElementById("pem-tuned");
       if(o2) o2.innerHTML = best
@@ -7497,6 +7578,7 @@ function pemBindPanel(){
   var reset = document.getElementById("pem-reset");
   if(reset) reset.addEventListener("click", function(){
     for(var k in PEM_DEFAULTS) PEM.opts[k] = PEM_DEFAULTS[k];
+    pemSaveOpts();
     pemRefit(); pemRepaint();
   });
 
@@ -7514,8 +7596,11 @@ function pemBindPanel(){
       }
       // Default to full regression once the data is actually there.
       if(!PEM.opts.toAdj) PEM.opts.toAdj = 1;
+      pemSaveOpts();
       pemRefit(); pemRepaint();
-      toast("Turnovers loaded for " + res.got + " of " + res.of + " games", "ok");
+      toast(res.of
+        ? ("Turnovers: " + res.got + " of " + res.of + " fetched, " + res.cached + " saved")
+        : ("Turnovers already saved for " + res.cached + " games"), "ok");
     });
   });
 
@@ -7608,6 +7693,7 @@ function pemShowPasteModal(){
         PEM.priorSrc = "SP+ \u00b7 " + pePriorKey();
         PEM.priorAt = Date.now(); PEM.priorStale = false;
         if(!PEM.opts.priorW) PEM.opts.priorW = 0.55;
+        pemSaveOpts();
         pemRefit();
         el.remove();
         if(typeof pemRepaint === "function" && document.getElementById("pem-panel")) pemRepaint();
@@ -7718,14 +7804,19 @@ function renderPoolEdge(){
       var pct2 = Math.max(6, Math.round((e.score / (maxScore||1)) * 100));
 
       var openCard = !!(PE.ui.open && PE.ui.open[g.id]);
-      var mp = null, favM = null, mDiff = null;
+      var mp = null, favM = null, mDiff = null, mPickTeam = null, mPickLine = null, mAgrees = true;
       if(PEM.ratings && g.awayId && g.homeId){
         mp = pemPredict(g.awayId, g.homeId, false);
         if(mp){
           favM = Math.round(((g.favIsHome === false) ? (mp.away - mp.home) : (mp.home - mp.away))*10)/10;
           mDiff = Math.round((favM - g.mkt)*10)/10;
+          // Which side would the model take AT the market number?
+          if(favM > g.mkt){ mPickTeam = g.fav; mPickLine = -favM; }
+          else            { mPickTeam = g.dog; mPickLine =  favM; }
+          mAgrees = (mPickTeam === e.team);
         }
       }
+      function peFmtLine(v){ return (v >= 0 ? "+" : "") + (Math.round(v*10)/10); }
 
       // Collapsed by default so the whole board reads at a glance; the detail
       // is one tap away rather than always on screen.
@@ -7744,8 +7835,9 @@ function renderPoolEdge(){
       h +=   '<span class="pe-sr2">';
       h +=     '<span class="pe-vs">' + _vs + '</span>';
       h +=     '<span class="pe-minibar"><i style="width:' + pct2 + '%"></i></span>';
-      if(mDiff !== null){
-        h +=   '<span class="pe-mdot' + (Math.abs(mDiff) >= 3 ? " big" : "") + '">' + (mDiff>0?"+":"") + mDiff + '</span>';
+      if(mPickTeam){
+        h +=   '<span class="pe-mpick' + (mAgrees ? "" : " dis") + '">' +
+               '<b>' + x(mPickTeam) + '</b> ' + peFmtLine(mPickLine) + '</span>';
       }
       h +=   '</span>';
       h += '</span>';
@@ -7775,14 +7867,16 @@ function renderPoolEdge(){
       }
 
       if(mp){
-        var mFav = favM >= 0 ? g.fav : g.dog;
-        h += '<div class="pe-model' + (Math.abs(mDiff) >= 3 ? " big" : "") + '">';
-        h += '<span class="pe-mlab">Model</span>';
-        h += '<span class="pe-mscore">' + Math.round(mp.away) + '&ndash;' + Math.round(mp.home) + '</span>';
-        h += '<span class="pe-mline">' + x(mFav) + ' -' + Math.abs(favM).toFixed(1) + '</span>';
+        h += '<div class="pe-model' + (mAgrees ? "" : " big") + '">';
+        h += '<span class="pe-mlab">Model picks</span>';
+        h += '<span class="pe-mpickbig">' + x(mPickTeam) + ' ' + peFmtLine(mPickLine) + '</span>';
         h += '<span class="pe-sp"></span>';
-        h += '<span class="pe-mdiff">' + (mDiff>0?"+":"") + mDiff + '</span>';
+        h += '<span class="pe-mscore">' + Math.round(mp.away) + '&ndash;' + Math.round(mp.home) + '</span>';
         h += '</div>';
+        if(!mAgrees){
+          h += '<div class="pe-mnote">Your pick is <b>' + x(e.team) + ' ' + e.number +
+               '</b>; the model would take the other side.</div>';
+        }
       }
 
       h += '<div class="pe-ft">';
