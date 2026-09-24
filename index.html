@@ -525,6 +525,12 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-err{background:var(--red-bg);border:2px solid var(--red);border-radius:8px;padding:7px 10px;font-size:9px;font-weight:800;color:var(--red);margin-bottom:10px}
 .pe-opt{display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:7px;border:2px solid var(--border);border-radius:9px;background:#ffffff;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:3px 3px 0 var(--border2)}
 .pe-opt:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--border2)}
+.pe-wsec{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;margin:12px 0 6px}
+.pe-wsec:first-child{margin-top:0}
+.pe-wtag{font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:4px;border:1px solid var(--border)}
+.pe-wtag.open{background:var(--green-bg);color:var(--green)}
+.pe-wtag.lock{background:var(--card2);color:var(--muted)}
+.pe-opt[disabled]{cursor:default;box-shadow:none}
 .pe-mktrow{display:flex;align-items:center;gap:6px;margin-top:5px}
 .pe-mktlab{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
 .pe-mkt{width:66px;padding:3px 6px;font-size:16px;font-weight:800;background:var(--cream);color:var(--text);border:2px solid var(--border2);border-radius:6px}
@@ -5884,6 +5890,74 @@ function peLoadCfbMeta(groupId, cb){
   }, function(){ cb(null); });
 }
 
+// Gathers everything needed to describe each week: how many games have teams,
+// whether spreads are in, whether the week is locked, and whether the owner has
+// already picked. The point is to surface the week that's still open, since
+// that's the one worth evaluating.
+function peLoadWeekStates(groupId, year, meta, cb){
+  var base = peCfbBase(groupId, year);
+  var ids  = meta.weekIds || [];
+  var labels = meta.weekLabels || {};
+  var uid = ME();
+  var out = {};
+
+  function finish(){
+    cb(ids.map(function(w){
+      var s = out[w] || {};
+      var games = s.games || {};
+      var filled = 0, spreads = 0;
+      Object.keys(games).forEach(function(gid){
+        var g = games[gid] || {};
+        if((g.away||"").trim() && (g.home||"").trim()){
+          filled++;
+          if(Math.abs(parseFloat(g.spread)||0) > 0) spreads++;
+        }
+      });
+      var myPicks = 0;
+      Object.keys(s.picks || {}).forEach(function(k){
+        if(k === "tb") return;
+        var p = s.picks[k];
+        if(p && p.side) myPicks++;
+      });
+      return {
+        id: w,
+        label: labels[w] || w,
+        filled: filled,
+        spreads: spreads,
+        locked: !!s.locked,
+        myPicks: myPicks,
+        // "Evaluate me": games are in, the week isn't locked, and picks aren't done.
+        open: filled > 0 && !s.locked && myPicks < filled
+      };
+    }));
+  }
+
+  if(!DB || !ids.length){ finish(); return; }
+
+  var pending = 2 + ids.length;
+  function step(){ if(--pending === 0) finish(); }
+
+  DB.ref(base+"/games").once("value", function(sn){
+    var all = sn.val() || {};
+    ids.forEach(function(w){ out[w] = out[w] || {}; out[w].games = all[w] || {}; });
+    step();
+  }, step);
+
+  DB.ref(base+"/locked").once("value", function(sn){
+    var lk = sn.val() || {};
+    ids.forEach(function(w){ out[w] = out[w] || {}; out[w].locked = !!lk[w]; });
+    step();
+  }, step);
+
+  ids.forEach(function(w){
+    if(!uid){ step(); return; }
+    DB.ref(base+"/picks/"+w+"/"+uid).once("value", function(sn){
+      out[w] = out[w] || {}; out[w].picks = sn.val() || {};
+      step();
+    }, step);
+  });
+}
+
 function peImportWeek(groupId, year, weekId, cb){
   if(!DB){ cb(null); return; }
   DB.ref(peCfbBase(groupId, year)+"/games/"+weekId).once("value", function(sn){
@@ -5963,12 +6037,40 @@ function showPeImportModal(){
 
         peLoadCfbMeta(gid, function(res){
           if(!res){ body.innerHTML = '<div class="pe-empty">No weeks found in that pool.</div>'; return; }
-          var ids = res.meta.weekIds || [], labels = res.meta.weekLabels || {};
+          var ids = res.meta.weekIds || [];
           if(!ids.length){ body.innerHTML = '<div class="pe-empty">No weeks set up yet.</div>'; return; }
-          body.innerHTML = ids.slice().reverse().map(function(w){
-            return '<button class="pe-opt" data-wid="' + x(w) + '">' +
-                   optBtn(labels[w] || w, null) + '</button>';
-          }).join("");
+
+          peLoadWeekStates(gid, res.year, res.meta, function(weeks){
+            // Open-and-unpicked weeks first — those are the ones worth running
+            // the board on. Everything else falls below, newest first.
+            var open = weeks.filter(function(w){ return w.open; });
+            var rest = weeks.filter(function(w){ return !w.open; }).reverse();
+
+            function weekRow(w){
+              var bits = [];
+              if(!w.filled)            bits.push("no games set");
+              else                     bits.push(w.filled + " games");
+              if(w.filled && !w.spreads) bits.push("no spreads yet");
+              if(w.myPicks)            bits.push(w.myPicks + " picks in");
+              var badge = w.locked ? '<span class="pe-wtag lock">Locked</span>'
+                        : w.open   ? '<span class="pe-wtag open">Open</span>'
+                        : '';
+              return '<button class="pe-opt" data-wid="' + x(w.id) + '"' + (w.filled ? '' : ' disabled style="opacity:.45"') + '>' +
+                     '<div style="display:flex;align-items:center;gap:6px">' +
+                       '<div style="font-size:12px;font-weight:900;color:var(--text);flex:1">' + x(w.label) + '</div>' + badge +
+                     '</div>' +
+                     '<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:1px">' + x(bits.join(" \u00b7 ")) + '</div>' +
+                     '</button>';
+            }
+
+            var html = "";
+            if(open.length){
+              html += '<div class="pe-wsec">Ready to evaluate</div>' + open.map(weekRow).join("");
+            }
+            if(rest.length){
+              html += '<div class="pe-wsec">Other weeks</div>' + rest.map(weekRow).join("");
+            }
+            body.innerHTML = html || '<div class="pe-empty">No weeks set up yet.</div>';
 
           Array.prototype.forEach.call(body.querySelectorAll("[data-wid]"), function(wb){
             wb.addEventListener("click", function(){
@@ -5988,6 +6090,7 @@ function showPeImportModal(){
                 toast(msg, "ok");
               });
             });
+          });
           });
         });
       });
