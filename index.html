@@ -5747,7 +5747,7 @@ function renderHub() {
 // not granted masters, since this is a personal tool rather than an admin one.
 // NOTE: this gate is cosmetic. The code ships to every visitor; the only real
 // protection is the Firebase rule on pooledge/{uid}. See PE_NOTES in the repo.
-var PE = { games: [], history: [], ready: false, err: "" };
+var PE = { games: [], history: [], meta: null, ready: false, err: "" };
 var PE_KEYNUMS = [3, 7];
 
 function peOwner(){ return isRootMaster(ME()); }
@@ -5759,13 +5759,13 @@ function peLoad(cb){
   // Local first so the screen paints instantly, then reconcile with the server.
   try{
     var raw = localStorage.getItem(peLocalKey());
-    if(raw){ var o = JSON.parse(raw); PE.games = o.games||[]; PE.history = o.history||[]; }
+    if(raw){ var o = JSON.parse(raw); PE.games = o.games||[]; PE.history = o.history||[]; PE.meta = o.meta||null; }
   }catch(e){}
   var uid = ME();
   if(!DB || !uid){ PE.ready = true; if(cb) cb(); return; }
   DB.ref("pooledge/"+uid).once("value", function(sn){
     var v = sn.val();
-    if(v){ PE.games = v.games || []; PE.history = v.history || []; }
+    if(v){ PE.games = v.games || []; PE.history = v.history || []; PE.meta = v.meta || null; }
     PE.ready = true; PE.err = "";
     if(cb) cb();
   }, function(){
@@ -5777,10 +5777,10 @@ function peLoad(cb){
 }
 
 function peSave(){
-  try{ localStorage.setItem(peLocalKey(), JSON.stringify({games:PE.games, history:PE.history})); }catch(e){}
+  try{ localStorage.setItem(peLocalKey(), JSON.stringify({games:PE.games, history:PE.history, meta:PE.meta})); }catch(e){}
   var uid = ME();
   if(!DB || !uid) return;
-  DB.ref("pooledge/"+uid).set({games:PE.games, history:PE.history}, function(err){
+  DB.ref("pooledge/"+uid).set({games:PE.games, history:PE.history, meta:PE.meta||null}, function(err){
     var was = PE.err;
     PE.err = err ? "Cloud sync unavailable — saving to this device only." : "";
     if(was !== PE.err && SC.screen === "pooledge") renderPoolEdge();
@@ -5977,17 +5977,115 @@ function peImportWeek(groupId, year, weekId, cb){
       if(g.favSide === "away"){ fav = away; dog = home; }
       else { fav = home; dog = away; }                    // home, or pick'em
       if(g.favSide === "even" || !sp) pk++;
+      var favIsHome = (g.favSide !== "away");
       out.push({
         id: "imp" + Date.now() + "_" + gid,
         fav: fav, dog: dog,
         pool: sp,
-        mkt: sp,        // flat until the current number is entered
+        mkt: sp,        // flat until a market number lands
         model: null,
-        result: null
+        result: null,
+        // Kept so ESPN lines can be matched by id rather than by team name.
+        awayId: String(g.awayId||""), homeId: String(g.homeId||""),
+        favIsHome: favIsHome
       });
     });
     cb({games:out, skipped:skipped, pickem:pk});
   }, function(){ cb(null); });
+}
+
+// ── POOL EDGE: ESPN MARKET LINES ─────────────────────────────────────────────
+// The scoreboard feed carries a live odds block per game. That number is the
+// market — the only input in this system with real predictive support — so it
+// fills the Market column. Nothing here is a rating or a projection.
+function peNormName(s){
+  return String(s||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+}
+
+// Points the favorite gives, from ESPN's odds block. Mirrors cfbpool.html's
+// parser so the two agree on who's favored.
+function peEspnLine(comp){
+  var odds = (comp.odds||[])[0];
+  if(!odds) return null;
+  var aOdds = odds.awayTeamOdds||{}, hOdds = odds.homeTeamOdds||{};
+  var awayFav = aOdds.favorite === true, homeFav = hOdds.favorite === true;
+  if(typeof odds.spread === "number" && (awayFav || homeFav)){
+    return { spread: Math.abs(odds.spread), favSide: awayFav ? "away" : "home" };
+  }
+  if(odds.details){
+    var m = String(odds.details).match(/(-?\d+(\.\d+)?)/);
+    if(!m) return null;
+    if(/^PK|^EVEN/i.test(String(odds.details).trim())) return { spread:0, favSide:"home" };
+    return { spread: Math.abs(parseFloat(m[1])), favSide: awayFav ? "away" : "home" };
+  }
+  return null;
+}
+
+function peFetchEspnLines(cb){
+  var meta = PE.meta || {};
+  var url = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?groups=80&limit=300";
+  if(meta.espnWeek && meta.espnYear) url += "&year="+meta.espnYear+"&week="+meta.espnWeek+"&seasontype=2";
+
+  fetch(url).then(function(r){ return r.json(); }).then(function(data){
+    var events = (data && data.events) || [];
+    var rows = [];
+    events.forEach(function(ev){
+      var comp = (ev.competitions||[])[0];
+      if(!comp) return;
+      var cs = comp.competitors || [];
+      var away = null, home = null;
+      cs.forEach(function(c){ if(c.homeAway==="away") away=c; else if(c.homeAway==="home") home=c; });
+      if(!away || !home) return;
+      var line = peEspnLine(comp);
+      rows.push({
+        awayId: String((away.team&&away.team.id)||""),
+        homeId: String((home.team&&home.team.id)||""),
+        awayName: peNormName((away.team&&(away.team.location||away.team.displayName))||""),
+        homeName: peNormName((home.team&&(home.team.location||home.team.displayName))||""),
+        awayAb: peNormName((away.team&&away.team.abbreviation)||""),
+        homeAb: peNormName((home.team&&home.team.abbreviation)||""),
+        line: line
+      });
+    });
+    cb(null, rows);
+  }).catch(function(err){ cb(err || new Error("fetch failed")); });
+}
+
+// Find the ESPN row for one board game. IDs first — names only as a fallback,
+// since "Miami" and "Miami (OH)" are a real collision in this sport.
+function peMatchRow(g, rows){
+  var i;
+  if(g.awayId && g.homeId){
+    for(i=0;i<rows.length;i++){
+      if(rows[i].awayId===String(g.awayId) && rows[i].homeId===String(g.homeId)) return rows[i];
+    }
+  }
+  var f = peNormName(g.fav), d = peNormName(g.dog);
+  for(i=0;i<rows.length;i++){
+    var r = rows[i];
+    var names = [r.awayName, r.homeName, r.awayAb, r.homeAb];
+    if(names.indexOf(f) >= 0 && names.indexOf(d) >= 0) return r;
+  }
+  return null;
+}
+
+// Applies a fetched line to a board game. Result is signed in terms of g.fav:
+// if ESPN now has the other side favored, the market number goes negative —
+// which is a genuine signal, not an error.
+function peApplyLine(g, row){
+  if(!row || !row.line) return false;
+  var favSideInRow;
+  if(g.favIsHome === true)       favSideInRow = "home";
+  else if(g.favIsHome === false) favSideInRow = "away";
+  else {
+    // No stored side (hand-entered game) — fall back to matching the name.
+    var fav = peNormName(g.fav);
+    if(fav === row.homeName || fav === row.homeAb)      favSideInRow = "home";
+    else if(fav === row.awayName || fav === row.awayAb) favSideInRow = "away";
+    else return false;
+  }
+  g.mkt = (row.line.favSide === favSideInRow) ? row.line.spread : -row.line.spread;
+  return true;
 }
 
 function showPeImportModal(){
@@ -6082,6 +6180,13 @@ function showPeImportModal(){
                   return;
                 }
                 PE.games = out.games;
+                PE.meta = {
+                  groupId: gid, weekId: wid,
+                  label: (res.meta.weekLabels||{})[wid] || wid,
+                  espnYear: res.year || new Date().getFullYear(),
+                  espnWeek: (((res.meta.weekMeta||{})[wid]||{}).espnWeek) ||
+                            (parseInt(String((res.meta.weekLabels||{})[wid]||wid).replace(/\D/g,""),10) || null)
+                };
                 peSave();
                 el.remove();
                 renderPoolEdge();
@@ -6137,6 +6242,7 @@ function renderPoolEdge(){
   h += '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:11px">';
   h += '<button class="btn btn-gold" id="pe-add">Add to board</button>';
   h += '<button class="btn btn-primary" id="pe-import">&#128229; Import from group</button>';
+  if(PE.games.length) h += '<button class="btn btn-gold" id="pe-espn">&#128225; Fetch market lines</button>';
   h += '<button class="btn btn-ghost" id="pe-example">Load sample week</button>';
   h += '</div>';
   h += '</div>';
@@ -6241,6 +6347,24 @@ function renderPoolEdge(){
   var impBtn = document.getElementById("pe-import");
   if(impBtn) impBtn.addEventListener("click", function(){ showPeImportModal(); });
 
+  var espnBtn = document.getElementById("pe-espn");
+  if(espnBtn) espnBtn.addEventListener("click", function(){
+    var b = this; b.disabled = true; b.textContent = "Fetching…";
+    peFetchEspnLines(function(err, rows){
+      b.disabled = false;
+      if(err || !rows){ toast("Couldn't reach ESPN","warn"); renderPoolEdge(); return; }
+      var hit = 0, miss = [];
+      PE.games.forEach(function(g){
+        var row = peMatchRow(g, rows);
+        if(row && peApplyLine(g, row)) hit++;
+        else miss.push(g.fav + "/" + g.dog);
+      });
+      peSave(); renderPoolEdge();
+      if(!hit) toast("No games matched — check the week","warn");
+      else toast(hit + " line" + (hit===1?"":"s") + " updated" + (miss.length ? (" · " + miss.length + " not found") : ""), "ok");
+    });
+  });
+
   var exBtn = document.getElementById("pe-example");
   if(exBtn) exBtn.addEventListener("click", function(){
     PE.games = [
@@ -6280,7 +6404,8 @@ function renderPoolEdge(){
       var id = this.getAttribute("data-pe-mkt");
       var v  = parseFloat(this.value);
       var g  = PE.games.filter(function(z){ return z.id===id; })[0];
-      if(g && !isNaN(v)){ g.mkt = Math.abs(v); peSave(); renderPoolEdge(); }
+      // Not abs: a negative market means the other side is now favoured.
+      if(g && !isNaN(v)){ g.mkt = v; peSave(); renderPoolEdge(); }
     });
   });
 
