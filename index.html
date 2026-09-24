@@ -568,6 +568,9 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-delta.flat{color:var(--dim);font-weight:700}
 .pe-sigs{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 0 7px}
 .pe-tag.soft{background:var(--card2);color:var(--dim);border-color:var(--border2)}
+.pe-tag.cush{background:var(--green-bg);color:var(--green)}
+.pe-tag.prior{background:var(--purple-bg);color:var(--purple)}
+.pe-tag.bounce{background:var(--red-bg);color:var(--red)}
 .pe-ft{display:flex;align-items:center;gap:6px;margin:8px 0 0 7px;padding-top:7px;border-top:2px dashed var(--border2)}
 .pe-ftlab{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 .pe-ftval{font-size:12px;font-weight:900;color:var(--text);margin-right:3px}
@@ -5857,6 +5860,14 @@ function peEvaluate(g){
   else if(reason === "model") score = Math.min(Math.abs(g.model - g.mkt) * 0.25, 1.2);
   else                        score = 0.15;
 
+  // Only the two documented priors move the score. Everything else in
+  // peSignals is displayed and tracked, but deliberately unweighted until the
+  // calibration table says it earns a weight.
+  if(side === "dog"){
+    if(g.pool >= 7 && g.favIsHome === false) score += 0.30;
+    if(g.pool >= 14)                        score += 0.20;
+  }
+
   return {
     delta: delta, mag: mag, side: side, reason: reason, key: key,
     score: Math.round(score*100)/100, steam: mv.steam, mv: mv,
@@ -5905,7 +5916,7 @@ function peKeyCrossed(a, b){
   return hit;
 }
 
-function peSignals(g, e){
+function peSignals(g, e, ctx){
   var out = [];
   var k = (e.reason === "delta") ? peKeyCrossed(g.pool, g.mkt) : null;
   if(k) out.push({ tone:"key",   label:"crosses " + k });
@@ -5914,6 +5925,43 @@ function peSignals(g, e){
   if(d >= 1) out.push({ tone:"disp", label:"books \u00b1" + d });
   if(e.reason === "model") out.push({ tone:"soft", label:"model tiebreak" });
   if(e.reason === "prior") out.push({ tone:"soft", label:"no movement" });
+
+  // ── Structural properties of the line. Not ratings: facts about the number.
+  var onDog = (e.side === "dog");
+
+  // Cushion: points relative to expected scoring. Same spread means very
+  // different things in a 38-point game and a 62-point game.
+  // Cushion only means something in comparison. A pool is ten games, so the
+  // board itself is the reference class rather than a league-wide constant.
+  if(g.total && g.pool > 0 && ctx && ctx.cushMed){
+    var cush = g.pool / g.total;
+    var pctOfTotal = Math.round(cush*100);
+    if(onDog && cush >= ctx.cushMed * 1.35){
+      out.push({ tone:"cush", label:"widest cushion \u00b7 " + pctOfTotal + "%" });
+    } else if(!onDog && cush <= ctx.cushMed * 0.65){
+      out.push({ tone:"soft", label:"thin cushion \u00b7 " + pctOfTotal + "%" });
+    }
+  }
+
+  // Documented: home underdogs of 7+ covered 59.69% over a 20-year sample.
+  // Home dog = the DOG is at home, i.e. the favourite is the away team.
+  if(onDog && g.pool >= 7 && g.favIsHome === false){
+    out.push({ tone:"prior", label:"home dog 7+" });
+  }
+
+  // Favourite tax is steepest at the top of the board.
+  if(onDog && g.pool >= 14) out.push({ tone:"prior", label:"big fav fade" });
+
+  // Line moved and came back — somebody tried, the market refused.
+  var mvB = peMovement(g);
+  if(mvB.legs >= 3 && mvB.travelled >= 2 && mvB.net <= 0.5){
+    out.push({ tone:"bounce", label:"bounce \u00b7 " + mvB.travelled + " travelled" });
+  }
+
+  // Pool number was never the market number to begin with.
+  if(g.open != null && Math.abs(g.open - g.pool) >= 1){
+    out.push({ tone:"soft", label:"off-market at lock" });
+  }
   // Future metrics drop in here.
   return out;
 }
@@ -5939,6 +5987,17 @@ function peTier(score){
   if(score >= 1.5) return "strong";
   if(score >= 0.5) return "mid";
   return "weak";
+}
+
+// Median cushion across the current board — the reference every row is judged
+// against. Returned alongside the rows so signals don't recompute it per game.
+function peBoardCtx(games){
+  var cs = [];
+  games.forEach(function(g){ if(g.total && g.pool > 0) cs.push(g.pool/g.total); });
+  if(!cs.length) return { cushMed: 0 };
+  cs.sort(function(a,b){ return a-b; });
+  var mid = Math.floor(cs.length/2);
+  return { cushMed: cs.length % 2 ? cs[mid] : (cs[mid-1]+cs[mid])/2 };
 }
 
 function peBoard(){
@@ -6157,6 +6216,10 @@ function peFetchEspnLines(cb){
       var line = peEspnLine(comp);
       // ESPN's odds array can carry several providers. Disagreement between
       // books is free signal, so keep them all rather than just the first.
+      var ou = null;
+      (comp.odds||[]).forEach(function(o){
+        if(ou === null && typeof o.overUnder === "number") ou = o.overUnder;
+      });
       var books = [];
       (comp.odds||[]).forEach(function(o){
         var l = peEspnLine({odds:[o]});
@@ -6169,7 +6232,7 @@ function peFetchEspnLines(cb){
         homeName: peNormName((home.team&&(home.team.location||home.team.displayName))||""),
         awayAb: peNormName((away.team&&away.team.abbreviation)||""),
         homeAb: peNormName((home.team&&home.team.abbreviation)||""),
-        line: line, books: books
+        line: line, books: books, total: ou
       });
     });
     cb(null, rows);
@@ -6378,10 +6441,11 @@ function renderPoolEdge(){
     h += '<div class="pe-empty">No games yet.</div>';
   } else {
     var maxScore = rows[0] ? rows[0].e.score : 1;
+    var boardCtx = peBoardCtx(PE.games);
     rows.forEach(function(r){
       var g = r.g, e = r.e, conf = r.conf;
       var tier = peTier(e.score);
-      var sigs = peSignals(g, e);
+      var sigs = peSignals(g, e, boardCtx);
       var toward = (e.reason === "delta") ? (e.side === "fav" ? g.fav : g.dog) : null;
       var up = (e.side === "fav");
       var pct = Math.max(6, Math.round((e.score / (maxScore||1)) * 100));
@@ -6421,6 +6485,7 @@ function renderPoolEdge(){
 
       h += '<div class="pe-ft">';
       h += '<span class="pe-ftlab">Locked</span><span class="pe-ftval">' + g.pool + '</span>';
+      if(g.total) h += '<span class="pe-ftlab">O/U</span><span class="pe-ftval">' + g.total + '</span>';
       h += '<span class="pe-ftlab">Market</span>';
       h += '<input class="pe-mkt" type="number" step="0.25" inputmode="decimal" value="' + g.mkt + '" data-pe-mkt="' + x(g.id) + '">';
       h += '<span class="pe-sp"></span>';
@@ -6507,6 +6572,10 @@ function renderPoolEdge(){
         if(row && peApplyLine(g, row)){
           hit++;
           g.books = row.books || [];
+          if(typeof row.total === "number") g.total = row.total;
+          // First market number we ever see is the closest thing we have to an
+          // opener — it tells us whether the pool's number was ever on-market.
+          if(g.open == null) g.open = g.mkt;
           // Seed the history with the locked number so the first fetch already
           // has something to measure against.
           if(!g.hist || !g.hist.length) g.hist = [{ t: 0, m: g.pool }];
