@@ -580,6 +580,19 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-chip-res.w{background:var(--green-bg);color:var(--green)}
 .pe-chip-res.l{background:var(--red-bg);color:var(--red)}
 
+
+.pem-hd{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;margin:14px 0 7px;padding-top:10px;border-top:2px dashed var(--border2)}
+.pem-row{display:flex;align-items:center;gap:9px;padding:6px 0;border-bottom:1px dashed var(--border2)}
+.pem-row:last-of-type{border-bottom:none}
+.pem-score{flex:0 0 auto;font-size:13px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums;min-width:52px}
+.pem-mid{flex:1;min-width:0}
+.pem-teams{font-size:11px;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pem-sub{font-size:9px;font-weight:700;color:var(--muted);margin-top:1px}
+.pem-diff{flex:0 0 auto;text-align:right;font-size:12px;font-weight:900;color:var(--muted)}
+.pem-diff span{display:block;font-size:8px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)}
+.pem-diff.big{color:var(--purple)}
+.pem-diff.big span{color:var(--purple)}
+
 </style>
 
 </head>
@@ -6391,6 +6404,262 @@ function showPeImportModal(){
   });
 }
 
+// ── POOL EDGE: SCORE MODEL (experimental, unweighted) ────────────────────────
+// Fits additive offence/defence ratings to every completed FBS result this
+// season, then predicts scores. Deliberately kept OUT of the pick score — it's
+// here to look at and to be checked against a holdout week, not to move the
+// board. A rating model is the thing the market already prices.
+var PEM = { ratings:null, avg:0, hfa:0, n:0, mae:null, holdout:null, busy:false, weeks:0 };
+
+// Blowouts carry garbage time. Capping margin stops a 63-7 result dragging a
+// rating further than the win deserves.
+var PEM_CAP = 28;
+
+function pemCapped(a, b){
+  var m = a - b;
+  if(m >  PEM_CAP) return [b + PEM_CAP, b];
+  if(m < -PEM_CAP) return [a, a + PEM_CAP];
+  return [a, b];
+}
+
+function pemFetchWeek(year, week, cb){
+  var url = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard" +
+            "?groups=80&limit=400&seasontype=2&year=" + year + "&week=" + week;
+  fetch(url).then(function(r){ return r.json(); }).then(function(d){
+    var out = [];
+    ((d && d.events) || []).forEach(function(ev){
+      var c = (ev.competitions||[])[0];
+      if(!c) return;
+      var st = ((c.status||{}).type||{});
+      if(!st.completed) return;
+      var away=null, home=null;
+      (c.competitors||[]).forEach(function(t){
+        if(t.homeAway==="away") away=t; else if(t.homeAway==="home") home=t;
+      });
+      if(!away || !home) return;
+      var as = parseInt(away.score,10), hs = parseInt(home.score,10);
+      if(isNaN(as) || isNaN(hs)) return;
+      out.push({
+        week: week,
+        awayId: String((away.team||{}).id||""), homeId: String((home.team||{}).id||""),
+        awayName: (away.team||{}).displayName || "", homeName: (home.team||{}).displayName || "",
+        as: as, hs: hs, neutral: !!c.neutralSite
+      });
+    });
+    cb(null, out);
+  }).catch(function(e){ cb(e); });
+}
+
+function pemFetchSeason(year, maxWeek, cb){
+  var all = [], pending = maxWeek, failed = 0;
+  for(var w=1; w<=maxWeek; w++){
+    (function(wk){
+      pemFetchWeek(year, wk, function(err, games){
+        if(err) failed++; else all = all.concat(games);
+        if(--pending === 0) cb(failed === maxWeek ? new Error("no data") : null, all);
+      });
+    })(w);
+  }
+}
+
+// Additive model: points = league average + offence(team) + defence(opponent),
+// with half the home-field edge added to the home side and taken off the away.
+// Fitted by plain gradient descent with shrinkage — the shrinkage is what stops
+// a 3-game sample producing wild ratings.
+function pemFit(games, opts){
+  opts = opts || {};
+  var lr     = opts.lr     || 0.035;
+  var lambda = opts.lambda || 0.020;   // pull toward league average
+  var epochs = opts.epochs || 400;
+
+  var teams = {}, total = 0, n = 0;
+  games.forEach(function(g){
+    [g.awayId, g.homeId].forEach(function(id){
+      if(!teams[id]) teams[id] = { off:0, def:0, games:0 };
+    });
+    teams[g.awayId].games++; teams[g.homeId].games++;
+    total += g.as + g.hs; n += 2;
+  });
+  var avg = n ? total/n : 24;
+  var hfa = 2.4;
+
+  for(var ep=0; ep<epochs; ep++){
+    games.forEach(function(g){
+      var sc = pemCapped(g.as, g.hs);
+      var aAct = sc[0], hAct = sc[1];
+      var A = teams[g.awayId], H = teams[g.homeId];
+      var edge = g.neutral ? 0 : hfa/2;
+
+      var aPred = avg + A.off + H.def - edge;
+      var hPred = avg + H.off + A.def + edge;
+      var aErr = aAct - aPred, hErr = hAct - hPred;
+
+      A.off += lr * aErr;  H.def += lr * aErr;
+      H.off += lr * hErr;  A.def += lr * hErr;
+      if(!g.neutral) hfa += lr * 0.25 * (hErr - aErr);
+    });
+    // Shrinkage — teams with fewer games get pulled back hardest.
+    for(var id in teams){
+      var t = teams[id];
+      var pull = lambda * (1 / Math.max(1, t.games));
+      t.off -= t.off * pull * 4;
+      t.def -= t.def * pull * 4;
+    }
+    if(hfa < 0) hfa = 0;
+    if(hfa > 6) hfa = 6;
+  }
+
+  var errSum = 0, cnt = 0;
+  games.forEach(function(g){
+    var p = pemPredictRaw(teams, avg, hfa, g.awayId, g.homeId, g.neutral);
+    if(!p) return;
+    errSum += Math.abs((p.home - p.away) - (g.hs - g.as));
+    cnt++;
+  });
+
+  var wks = {};
+  games.forEach(function(g){ wks[g.week] = 1; });
+
+  return { ratings:teams, avg:avg, hfa:hfa, n:games.length,
+           weeks:Object.keys(wks).length, mae: cnt ? errSum/cnt : null };
+}
+
+function pemPredictRaw(teams, avg, hfa, awayId, homeId, neutral){
+  var A = teams[awayId], H = teams[homeId];
+  if(!A || !H) return null;
+  var edge = neutral ? 0 : hfa/2;
+  return {
+    away: avg + A.off + H.def - edge,
+    home: avg + H.off + A.def + edge
+  };
+}
+
+function pemPredict(awayId, homeId, neutral){
+  if(!PEM.ratings) return null;
+  var p = pemPredictRaw(PEM.ratings, PEM.avg, PEM.hfa, awayId, homeId, neutral);
+  if(!p) return null;
+  return {
+    away: Math.round(p.away*10)/10,
+    home: Math.round(p.home*10)/10,
+    margin: Math.round((p.home - p.away)*10)/10,
+    total: Math.round((p.home + p.away)*10)/10
+  };
+}
+
+// The honest check: fit on everything BEFORE the last week, then predict that
+// week cold. In-sample error always flatters a model; this is the real number.
+function pemHoldout(games){
+  var weeks = games.map(function(g){ return g.week; });
+  if(!weeks.length) return null;
+  var last = Math.max.apply(null, weeks);
+  var train = games.filter(function(g){ return g.week < last; });
+  var test  = games.filter(function(g){ return g.week === last; });
+  if(train.length < 40 || !test.length) return null;
+
+  var fit = pemFit(train);
+  var errs = [];
+  test.forEach(function(g){
+    var p = pemPredictRaw(fit.ratings, fit.avg, fit.hfa, g.awayId, g.homeId, g.neutral);
+    if(!p) return;
+    errs.push(Math.abs((p.home - p.away) - (g.hs - g.as)));
+  });
+  if(!errs.length) return null;
+  errs.sort(function(a,b){ return a-b; });
+  var sum = 0;
+  errs.forEach(function(e){ sum += e; });
+  return {
+    week: last, n: errs.length, trainN: train.length,
+    mae: sum / errs.length,
+    median: errs[Math.floor(errs.length/2)],
+    within7: errs.filter(function(e){ return e <= 7; }).length / errs.length,
+    within14: errs.filter(function(e){ return e <= 14; }).length / errs.length
+  };
+}
+
+// Build (or rebuild) the model from this season's completed games.
+function pemBuild(cb){
+  if(PEM.busy) return;
+  PEM.busy = true;
+  var year = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
+  var upto = (PE.meta && PE.meta.espnWeek) ? Math.max(1, PE.meta.espnWeek - 1) : 4;
+  pemFetchSeason(year, upto, function(err, games){
+    PEM.busy = false;
+    if(err || !games || !games.length){ cb && cb(err || new Error("no games")); return; }
+    var fit = pemFit(games);
+    PEM.ratings = fit.ratings; PEM.avg = fit.avg; PEM.hfa = fit.hfa;
+    PEM.n = fit.n; PEM.mae = fit.mae; PEM.weeks = fit.weeks;
+    PEM.holdout = pemHoldout(games);
+    cb && cb(null, PEM);
+  });
+}
+
+// ── POOL EDGE: SCORE MODEL PANEL ─────────────────────────────────────────────
+function pemPanelHtml(){
+  var h = '<div class="section-label">Score Model <span style="font-weight:800;color:var(--dim)">&middot; experimental</span></div>';
+  h += '<div class="admin-panel">';
+
+  if(!PEM.ratings){
+    h += '<div class="pe-empty" style="padding:10px 0">Not built yet.</div>';
+    h += '<button class="btn btn-ghost" id="pem-build">&#129518; Build from season results</button>';
+    h += '<div class="pe-note">Fits offence and defence ratings to every completed FBS game this season, then predicts scores. Does not affect your picks.</div>';
+    h += '</div>';
+    return h;
+  }
+
+  var ho = PEM.holdout;
+  h += '<div class="pe-stats" style="margin-bottom:10px">';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + PEM.n + '</div><div class="pe-stat-lab">Games fit</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + PEM.hfa.toFixed(1) + '</div><div class="pe-stat-lab">Home edge</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + (ho ? ho.mae.toFixed(1) : "—") + '</div><div class="pe-stat-lab">Holdout MAE</div></div>';
+  h += '</div>';
+
+  if(ho){
+    h += '<div class="pe-note" style="margin-top:0">Trained on ' + ho.trainN + ' games through week ' + (ho.week-1) +
+         ', then predicted week ' + ho.week + ' cold: median miss ' + ho.median.toFixed(1) + ' pts, ' +
+         Math.round(ho.within7*100) + '% within a touchdown, ' + Math.round(ho.within14*100) + '% within two.</div>';
+  } else {
+    h += '<div class="pe-note" style="margin-top:0">Not enough weeks yet for a holdout test — in-sample error only, which always flatters a model.</div>';
+  }
+
+  // Predictions for the current board.
+  var preds = [];
+  PE.games.forEach(function(g){
+    if(!g.awayId || !g.homeId) return;
+    var p = pemPredict(g.awayId, g.homeId, false);
+    if(!p) return;
+    // Model margin expressed as points the stored favourite gives.
+    var favMargin = (g.favIsHome === false) ? (p.away - p.home) : (p.home - p.away);
+    preds.push({ g:g, p:p, favMargin: Math.round(favMargin*10)/10 });
+  });
+
+  if(preds.length){
+    h += '<div class="pem-hd">Model vs market</div>';
+    preds.sort(function(a,b){
+      return Math.abs(b.favMargin - b.g.mkt) - Math.abs(a.favMargin - a.g.mkt);
+    });
+    preds.forEach(function(r){
+      var diff = Math.round((r.favMargin - r.g.mkt)*10)/10;
+      var leans = diff > 0 ? r.g.fav : r.g.dog;
+      var strong = Math.abs(diff) >= 3;
+      var aScore = Math.round(r.p.away), hScore = Math.round(r.p.home);
+      var favName = (r.g.favIsHome === false) ? r.g.fav : r.g.dog;
+      var homeName = (r.g.favIsHome === false) ? r.g.dog : r.g.fav;
+      h += '<div class="pem-row">';
+      h += '<div class="pem-score">' + aScore + '&ndash;' + hScore + '</div>';
+      h += '<div class="pem-mid"><div class="pem-teams">' + x(favName) + ' at ' + x(homeName) + '</div>';
+      h += '<div class="pem-sub">model ' + (r.favMargin>=0?"-":"+") + Math.abs(r.favMargin) +
+           ' &middot; market ' + (r.g.mkt>=0?"-":"+") + Math.abs(r.g.mkt) + '</div></div>';
+      h += '<div class="pem-diff ' + (strong?"big":"") + '">' + (diff>0?"+":"") + diff + '<span>' + x(leans) + '</span></div>';
+      h += '</div>';
+    });
+    h += '<div class="pe-note">Positive means the model likes the favourite more than the market does. Shown for interest only — nothing here moves your board ranking.</div>';
+  }
+
+  h += '<div style="margin-top:10px"><button class="btn btn-ghost" id="pem-build">Rebuild</button></div>';
+  h += '</div>';
+  return h;
+}
+
 function renderPoolEdge(){
   if(!peOwner()){ SC.screen = "profile"; draw(); return; }
   if(!PE.ready){ peLoad(function(){ if(SC.screen==="pooledge") renderPoolEdge(); }); }
@@ -6504,6 +6773,8 @@ function renderPoolEdge(){
     h += '<button class="btn btn-ghost" id="pe-clear">Clear</button>';
     h += '</div>';
   }
+
+  h += pemPanelHtml();
 
   h += '<div class="section-label">Calibration</div>';
   h += '<div class="admin-panel">';
@@ -6650,6 +6921,16 @@ function renderPoolEdge(){
     PE.games = [];
     peSave(); renderPoolEdge();
     toast("Week banked","ok");
+  });
+
+  var pemBtn = document.getElementById("pem-build");
+  if(pemBtn) pemBtn.addEventListener("click", function(){
+    var b = this; b.disabled = true; b.textContent = "Fetching season\u2026";
+    pemBuild(function(err){
+      if(err){ b.disabled = false; b.textContent = "Build from season results"; toast("Couldn't reach ESPN","warn"); return; }
+      renderPoolEdge();
+      toast("Model built on " + PEM.n + " games", "ok");
+    });
   });
 
   var clr = document.getElementById("pe-clear");
