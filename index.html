@@ -538,6 +538,45 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-mkt{width:66px;padding:3px 6px;font-size:16px;font-weight:800;background:var(--cream);color:var(--text);border:2px solid var(--border2);border-radius:6px}
 .pe-mkt:focus{outline:none;border-color:var(--blue)}
 @media(max-width:400px){.pe-form{grid-template-columns:1fr}}
+
+/* Pool Edge board cards — signal strength first, matchup second. */
+.pe-card{position:relative;background:#fff;border:2px solid var(--border);border-radius:11px;padding:9px 11px 8px;margin-bottom:9px;box-shadow:3px 3px 0 var(--border)}
+.pe-card::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:4px;border-radius:0 3px 3px 0}
+.pe-card.strong::before{background:var(--gold-dark)}
+.pe-card.mid::before{background:var(--blue)}
+.pe-card.weak::before{background:var(--border2)}
+.pe-card.weak{opacity:.72;box-shadow:2px 2px 0 var(--border2);border-color:var(--border2)}
+.pe-card.done{opacity:.55}
+.pe-hd{display:flex;align-items:center;gap:7px;margin-left:7px}
+.pe-rank{flex:0 0 auto;min-width:20px;height:20px;padding:0 5px;border-radius:6px;background:var(--card2);color:var(--muted);font-size:11px;font-weight:900;display:flex;align-items:center;justify-content:center}
+.pe-card.strong .pe-rank{background:var(--gold);color:var(--text)}
+.pe-card.mid .pe-rank{background:var(--blue-bg);color:var(--blue)}
+.pe-team{font-size:14px;font-weight:900;color:var(--text);letter-spacing:-.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pe-num{font-size:14px;font-weight:900;color:var(--gold-dark);flex:0 0 auto}
+.pe-card.weak .pe-num{color:var(--muted)}
+.pe-sp{flex:1}
+.pe-bar{height:3px;border-radius:2px;background:var(--border2);margin:6px 0 6px 7px;overflow:hidden}
+.pe-bar i{display:block;height:100%;border-radius:2px;background:var(--gold-dark)}
+.pe-card.mid .pe-bar i{background:var(--blue)}
+.pe-card.weak .pe-bar i{background:var(--dim)}
+.pe-sub{font-size:10px;font-weight:700;color:var(--muted);margin-left:7px}
+.pe-move{display:flex;align-items:center;gap:7px;margin:4px 0 0 7px;min-height:18px}
+.pe-spark{flex:0 0 auto;display:block}
+.pe-delta{font-size:11px;font-weight:900;letter-spacing:-.01em}
+.pe-delta.up{color:var(--blue)}
+.pe-delta.dn{color:var(--green)}
+.pe-delta.flat{color:var(--dim);font-weight:700}
+.pe-sigs{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 0 7px}
+.pe-tag.soft{background:var(--card2);color:var(--dim);border-color:var(--border2)}
+.pe-ft{display:flex;align-items:center;gap:6px;margin:8px 0 0 7px;padding-top:7px;border-top:2px dashed var(--border2)}
+.pe-ftlab{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.pe-ftval{font-size:12px;font-weight:900;color:var(--text);margin-right:3px}
+.pe-mkt{width:58px;padding:3px 6px;font-size:16px;font-weight:900;background:var(--cream);color:var(--text);border:2px solid var(--border2);border-radius:6px}
+.pe-mini.ghost{border-color:var(--border2);color:var(--muted);box-shadow:none}
+.pe-chip-res{font-size:11px;font-weight:900;padding:3px 9px;border-radius:6px;border:2px solid var(--border);cursor:pointer;font-family:'Nunito',sans-serif}
+.pe-chip-res.w{background:var(--green-bg);color:var(--green)}
+.pe-chip-res.l{background:var(--red-bg);color:var(--red)}
+
 </style>
 
 </head>
@@ -5856,6 +5895,52 @@ function peDispersion(g){
   return Math.max.apply(null, vals) - Math.min.apply(null, vals);
 }
 
+// ── POOL EDGE: SIGNAL REGISTRY ───────────────────────────────────────────────
+// Single place that decides what a row displays. Adding a predictive metric
+// later means appending one entry here — the renderer just maps over whatever
+// comes back, so layout never has to change again.
+function peKeyCrossed(a, b){
+  var lo = Math.min(a,b), hi = Math.max(a,b), hit = null;
+  PE_KEYNUMS.forEach(function(k){ if(lo < k && hi >= k) hit = k; });
+  return hit;
+}
+
+function peSignals(g, e){
+  var out = [];
+  var k = (e.reason === "delta") ? peKeyCrossed(g.pool, g.mkt) : null;
+  if(k) out.push({ tone:"key",   label:"crosses " + k });
+  if(e.steam) out.push({ tone:"steam", label:"steam" });
+  var d = peDispersion(g);
+  if(d >= 1) out.push({ tone:"disp", label:"books \u00b1" + d });
+  if(e.reason === "model") out.push({ tone:"soft", label:"model tiebreak" });
+  if(e.reason === "prior") out.push({ tone:"soft", label:"no movement" });
+  // Future metrics drop in here.
+  return out;
+}
+
+// Tiny line-history sparkline. Reads as shape rather than numbers.
+function peSpark(g, up){
+  var hs = (g.hist||[]).map(function(s){ return s.m; });
+  if(hs.length < 2) return "";
+  var min = Math.min.apply(null,hs), max = Math.max.apply(null,hs);
+  var rng = (max-min) || 1, W = 46, H = 14;
+  var pts = hs.map(function(v,i){
+    return ((i/(hs.length-1))*W).toFixed(1) + "," + (H - ((v-min)/rng)*H).toFixed(1);
+  }).join(" ");
+  var col = up ? "var(--blue)" : "var(--green)";
+  var last = pts.split(" ").pop().split(",");
+  return '<svg class="pe-spark" viewBox="0 0 '+(W+4)+' '+(H+4)+'" width="'+(W+4)+'" height="'+(H+4)+'" aria-hidden="true">' +
+         '<polyline points="'+pts+'" fill="none" stroke="'+col+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="translate(2,2)"/>' +
+         '<circle cx="'+(parseFloat(last[0])+2).toFixed(1)+'" cy="'+(parseFloat(last[1])+2).toFixed(1)+'" r="2.4" fill="'+col+'"/>' +
+         '</svg>';
+}
+
+function peTier(score){
+  if(score >= 1.5) return "strong";
+  if(score >= 0.5) return "mid";
+  return "weak";
+}
+
 function peBoard(){
   var rows = PE.games.map(function(g){ return { g:g, e:peEvaluate(g) }; });
   rows.sort(function(a,b){ return b.e.score - a.e.score; });
@@ -6292,40 +6377,59 @@ function renderPoolEdge(){
   if(!rows.length){
     h += '<div class="pe-empty">No games yet.</div>';
   } else {
+    var maxScore = rows[0] ? rows[0].e.score : 1;
     rows.forEach(function(r){
       var g = r.g, e = r.e, conf = r.conf;
-      var cls = conf >= Math.ceil(rows.length*0.7) ? "hi" : (conf <= Math.ceil(rows.length*0.3) ? "lo" : "");
-      var tags = "";
-      if(e.key) tags += '<span class="pe-tag key">key number</span>';
-      if(e.reason === "model") tags += '<span class="pe-tag flat">model tiebreak</span>';
-      if(e.reason === "prior") tags += '<span class="pe-tag dog">flat &mdash; dog default</span>';
-      if(e.steam) tags += '<span class="pe-tag steam">steam</span>';
-      var _disp = peDispersion(g);
-      if(_disp >= 1) tags += '<span class="pe-tag disp">books split ' + _disp + '</span>';
-      var movement = e.reason === "delta"
-        ? (e.mag + " pt move toward " + x(e.side === "fav" ? g.fav : g.dog))
-        : (e.reason === "model" ? "no line movement" : "no signal");
-      h += '<div class="pe-row">';
-      h += '<div class="pe-conf ' + cls + '">' + conf + '</div>';
-      h += '<div class="pe-body">';
-      h += '<div class="pe-pick">' + x(e.team) + ' ' + e.number + '</div>';
-      h += '<div class="pe-meta">' + tags + x(g.fav) + ' vs ' + x(g.dog) + ' &middot; yours ' + g.pool + ' &middot; ' + movement + '</div>';
-      if(e.mv && e.mv.legs >= 2) h += '<div class="pe-meta" style="margin-top:1px">' + x(e.mv.path) + '</div>';
-      h += '<div class="pe-mktrow"><span class="pe-mktlab">Market</span>';
-      h += '<input class="pe-mkt" type="number" step="0.25" inputmode="decimal" value="' + g.mkt + '" data-pe-mkt="' + x(g.id) + '">';
-      h += '</div>';
-      h += '</div>';
-      h += '<div class="pe-acts">';
+      var tier = peTier(e.score);
+      var sigs = peSignals(g, e);
+      var toward = (e.reason === "delta") ? (e.side === "fav" ? g.fav : g.dog) : null;
+      var up = (e.side === "fav");
+      var pct = Math.max(6, Math.round((e.score / (maxScore||1)) * 100));
+
+      h += '<div class="pe-card ' + tier + (g.result ? " done" : "") + '">';
+
+      h += '<div class="pe-hd">';
+      h += '<span class="pe-rank">' + conf + '</span>';
+      h += '<span class="pe-team">' + x(e.team) + '</span>';
+      h += '<span class="pe-num">' + e.number + '</span>';
+      h += '<span class="pe-sp"></span>';
       if(g.result){
-        h += '<span class="pe-res ' + (g.result==="W"?"w":"l") + '">' + g.result + '</span>';
-        h += '<button class="pe-mini" data-pe-res="" data-pe-id="' + x(g.id) + '">&#10005;</button>';
+        h += '<button class="pe-chip-res ' + (g.result==="W"?"w":"l") + '" data-pe-res="" data-pe-id="' + x(g.id) + '">' + g.result + '</button>';
       } else {
         h += '<button class="pe-mini" data-pe-res="W" data-pe-id="' + x(g.id) + '">W</button>';
         h += '<button class="pe-mini" data-pe-res="L" data-pe-id="' + x(g.id) + '">L</button>';
       }
-      h += '<button class="pe-mini" data-pe-del="' + x(g.id) + '">&minus;</button>';
-      h += '</div></div>';
+      h += '</div>';
+
+      h += '<div class="pe-bar"><i style="width:' + pct + '%"></i></div>';
+      h += '<div class="pe-sub">' + x(g.fav) + ' vs ' + x(g.dog) + '</div>';
+
+      h += '<div class="pe-move">';
+      h += peSpark(g, up);
+      if(e.reason === "delta"){
+        h += '<span class="pe-delta ' + (up?"up":"dn") + '">' + e.mag + ' pt &rarr; ' + x(toward) + '</span>';
+      } else {
+        h += '<span class="pe-delta flat">line hasn&rsquo;t moved</span>';
+      }
+      h += '</div>';
+
+      if(sigs.length){
+        h += '<div class="pe-sigs">' + sigs.map(function(s){
+          return '<span class="pe-tag ' + s.tone + '">' + x(s.label) + '</span>';
+        }).join("") + '</div>';
+      }
+
+      h += '<div class="pe-ft">';
+      h += '<span class="pe-ftlab">Locked</span><span class="pe-ftval">' + g.pool + '</span>';
+      h += '<span class="pe-ftlab">Market</span>';
+      h += '<input class="pe-mkt" type="number" step="0.25" inputmode="decimal" value="' + g.mkt + '" data-pe-mkt="' + x(g.id) + '">';
+      h += '<span class="pe-sp"></span>';
+      h += '<button class="pe-mini ghost" data-pe-del="' + x(g.id) + '" title="Remove">&minus;</button>';
+      h += '</div>';
+
+      h += '</div>';
     });
+
   }
   h += '</div>';
 
