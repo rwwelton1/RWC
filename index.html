@@ -6774,37 +6774,89 @@ function pemFetchSeason(year, maxWeek, cb){
 
 // FBS whitelist — FCS visitors appear once, get shrunk toward average, and
 // their blowout road losses get blamed on home field instead of class.
+// Pull team id + display name out of whatever shape ESPN returns.
+function pemReadTeams(d){
+  var out = {};
+  var leagues = (((d||{}).sports||[])[0]||{}).leagues || [];
+  var lists = [];
+  leagues.forEach(function(lg){ if(lg && lg.teams) lists.push(lg.teams); });
+  if((d||{}).teams) lists.push(d.teams);
+  if((d||{}).items) lists.push(d.items);
+  lists.forEach(function(arr){
+    (arr||[]).forEach(function(t){
+      var tm = ((t||{}).team) || t || {};
+      var id = String(tm.id||"");
+      var nm = tm.displayName || tm.location || tm.name || tm.shortDisplayName || "";
+      if(id && nm) out[id] = nm;
+    });
+  });
+  return out;
+}
+
+// Names the board already knows. No network, always available after an import,
+// and enough to match the teams actually on the slate.
+function pemBoardNames(){
+  var out = {};
+  (PE.games||[]).forEach(function(g){
+    if(!g.awayId || !g.homeId) return;
+    if(g.favIsHome === true){ out[g.homeId] = g.fav; out[g.awayId] = g.dog; }
+    else if(g.favIsHome === false){ out[g.awayId] = g.fav; out[g.homeId] = g.dog; }
+  });
+  return out;
+}
+
+// groups=80 gives the FBS whitelist. If that comes back thin the unfiltered
+// list is tried for NAMES only — the whitelist stays null so the caller falls
+// back to its appearance heuristic rather than treating FCS teams as FBS.
 function pemFetchFbs(cb){
-  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?groups=80&limit=400")
+  var base = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams";
+  function absorb(names){
+    if(!names) return 0;
+    var k = Object.keys(names);
+    if(!k.length) return 0;
+    PEM.nameMap = PEM.nameMap || {};
+    k.forEach(function(id){ PEM.nameMap[id] = names[id]; });
+    return k.length;
+  }
+  // Seed from the board first so something is always there.
+  absorb(pemBoardNames());
+
+  fetch(base + "?groups=80&limit=900")
     .then(function(r){ return r.json(); })
     .then(function(d){
-      var set = {}, names = {}, n = 0;
-      var leagues = (((d||{}).sports||[])[0]||{}).leagues || [];
-      (((leagues[0]||{}).teams)||[]).forEach(function(t){
-        var tm = (t||{}).team || {};
-        var id = String(tm.id||"");
-        if(!id) return;
-        set[id] = 1;
-        names[id] = tm.displayName || tm.location || tm.name || "";
-        n++;
-      });
+      var names = pemReadTeams(d);
+      var n = absorb(names);
       if(n >= 100){
-        // Names outlive this call: the ratings paste matches against them.
-        PEM.nameMap = PEM.nameMap || {};
-        for(var k in names){ if(names[k]) PEM.nameMap[k] = names[k]; }
+        var set = {}; Object.keys(names).forEach(function(id){ set[id] = 1; });
+        cb(null, set); return;
       }
-      cb(null, n >= 100 ? set : null);
+      // Thin or unexpected shape — try unfiltered, names only.
+      fetch(base + "?limit=900")
+        .then(function(r2){ return r2.json(); })
+        .then(function(d2){ absorb(pemReadTeams(d2)); cb(null, null); })
+        .catch(function(){ cb(null, null); });
     })
-    .catch(function(){ cb(null, null); });
+    .catch(function(){
+      fetch(base + "?limit=900")
+        .then(function(r2){ return r2.json(); })
+        .then(function(d2){ absorb(pemReadTeams(d2)); cb(null, null); })
+        .catch(function(){ cb(null, null); });
+    });
 }
 
 // Team names are needed to match a ratings paste. Fetching the FBS list is one
 // request, so pasting never has to wait on a full model build.
+function pemNameCount(){ return PEM.nameMap ? Object.keys(PEM.nameMap).length : 0; }
+
 function pemEnsureNameMap(cb){
-  if(PEM.nameMap && Object.keys(PEM.nameMap).length > 50){ cb(true); return; }
-  pemFetchFbs(function(){
-    cb(!!(PEM.nameMap && Object.keys(PEM.nameMap).length > 50));
-  });
+  if(pemNameCount() >= 100){ cb(true); return; }
+  // The board alone covers the teams on this week's slate.
+  var seeded = pemBoardNames();
+  if(Object.keys(seeded).length){
+    PEM.nameMap = PEM.nameMap || {};
+    for(var id in seeded) PEM.nameMap[id] = seeded[id];
+  }
+  pemFetchFbs(function(){ cb(pemNameCount() > 0); });
 }
 
 // ESPN's FPI. The core API usually hands back $ref stubs rather than values,
@@ -7532,35 +7584,57 @@ function pemShowPasteModal(){
   document.getElementById("pem-p-close").addEventListener("click", function(){ el.remove(); });
   document.getElementById("pem-p-go").addEventListener("click", function(){
     var txt = document.getElementById("pem-p-text").value;
-    var st = document.getElementById("pem-p-status");
+    var st  = document.getElementById("pem-p-status");
     var goBtn = this;
-    if(!PEM.nameMap || Object.keys(PEM.nameMap).length < 50){
+    if(!String(txt||"").trim()){
+      if(st) st.innerHTML = "<b>Nothing to load.</b> Paste a list of teams and ratings.";
+      return;
+    }
+
+    function finish(){
+      var res = pemParsePaste(txt, PEM.nameMap || {}) || { prior:null, matched:0, missed:[] };
+      var ratings = {};
+      if(res.prior) for(var pid in res.prior) ratings[pid] = res.prior[pid].fpi;
+
+      // The ratings are kept whatever the match rate. Names improve once the
+      // model is built, and pemRestorePrior re-parses this text then, so a
+      // thin match now is not a reason to throw the paste away.
+      pePriorSave(txt, ratings, res.matched, "SP+");
+
+      var lines = String(txt).split(/\n/).filter(function(s){ return s.trim(); }).length;
+      if(res.matched){
+        PEM.prior = res.prior;
+        PEM.priorN = res.matched;
+        PEM.priorSrc = "SP+ \u00b7 " + pePriorKey();
+        PEM.priorAt = Date.now(); PEM.priorStale = false;
+        if(!PEM.opts.priorW) PEM.opts.priorW = 0.55;
+        pemRefit();
+        el.remove();
+        if(typeof pemRepaint === "function" && document.getElementById("pem-panel")) pemRepaint();
+        else renderPoolEdge();
+        var extra = (res.matched < lines * 0.6)
+          ? " \u00b7 more will match once the model is built"
+          : (res.missed.length ? (" \u00b7 " + res.missed.length + " unmatched") : "");
+        toast(res.matched + " of " + lines + " teams matched" + extra, "ok");
+      } else {
+        // Saved but unmatched: say so plainly rather than losing the paste.
+        if(st) st.innerHTML = "<b>Saved, but no names matched yet.</b> " +
+          (pemNameCount()
+            ? "Team names are matched against ESPN\u2019s \u2014 try \u201cOhio State\u201d rather than an abbreviation."
+            : "Team names aren\u2019t loaded. Build the score model and these will be matched automatically.");
+      }
+    }
+
+    if(pemNameCount() < 100){
       if(st) st.textContent = "Loading team names\u2026";
       goBtn.disabled = true;
-      pemEnsureNameMap(function(ok){
+      pemEnsureNameMap(function(){
         goBtn.disabled = false;
-        if(!ok){ if(st) st.innerHTML = "<b>Couldn\u2019t load team names.</b> Check the connection and try again."; return; }
-        goBtn.click();
+        finish();                 // proceed regardless; finish() copes with a thin map
       });
       return;
     }
-    var res = pemParsePaste(txt, PEM.nameMap);
-    if(!res || !res.matched){
-      if(st) st.innerHTML = "<b>No teams matched.</b> Names are matched against ESPN’s, e.g. “Ohio State” or “Ohio State Buckeyes”.";
-      return;
-    }
-    PEM.prior = res.prior;
-    PEM.priorN = res.matched;
-    var ratings = {};
-    for(var pid in res.prior) ratings[pid] = res.prior[pid].fpi;
-    pePriorSave(txt, ratings, res.matched, "SP+");
-    PEM.priorSrc = "SP+ \u00b7 " + pePriorKey();
-    PEM.priorAt = Date.now(); PEM.priorStale = false;
-    if(!PEM.opts.priorW) PEM.opts.priorW = 0.55;
-    pemRefit();
-    el.remove();
-    pemRepaint();
-    toast(res.matched + " teams loaded" + (res.missed.length ? (" · " + res.missed.length + " unmatched") : ""), "ok");
+    finish();
   });
 }
 
