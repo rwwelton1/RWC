@@ -525,6 +525,8 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-err{background:var(--red-bg);border:2px solid var(--red);border-radius:8px;padding:7px 10px;font-size:9px;font-weight:800;color:var(--red);margin-bottom:10px}
 .pe-opt{display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:7px;border:2px solid var(--border);border-radius:9px;background:#ffffff;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:3px 3px 0 var(--border2)}
 .pe-opt:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--border2)}
+.pe-tag.steam{background:var(--purple-bg);color:var(--purple)}
+.pe-tag.disp{background:var(--blue-bg);color:var(--blue)}
 .pe-wsec{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;margin:12px 0 6px}
 .pe-wsec:first-child{margin-top:0}
 .pe-wtag{font-size:7px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:4px;border:1px solid var(--border)}
@@ -5811,16 +5813,47 @@ function peEvaluate(g){
   }
 
   var key = (mag >= 0.5) && peCrossesKey(g.pool, g.mkt);
-  if(reason === "delta")      score = mag * (key ? 1.5 : 1);
+  var mv = peMovement(g);
+  if(reason === "delta")      score = mag * (key ? 1.5 : 1) * (mv.steam ? 1.25 : 1);
   else if(reason === "model") score = Math.min(Math.abs(g.model - g.mkt) * 0.25, 1.2);
   else                        score = 0.15;
 
   return {
     delta: delta, mag: mag, side: side, reason: reason, key: key,
-    score: Math.round(score*100)/100,
+    score: Math.round(score*100)/100, steam: mv.steam, mv: mv,
     team: side === "fav" ? g.fav : g.dog,
     number: side === "fav" ? ("-" + g.pool) : ("+" + g.pool)
   };
+}
+
+
+// Movement shape from the stored snapshots. A line that jumps in one go is
+// behaving like sharp money; one that drifts across several reads looks like
+// public drift. Endpoint-to-endpoint delta can't tell those apart.
+function peMovement(g){
+  var h = g.hist || [];
+  if(h.length < 2) return { legs:0, net:0, maxJump:0, steam:false, path:"" };
+  var net = Math.abs(h[h.length-1].m - h[0].m);
+  var maxJump = 0, travelled = 0;
+  for(var i=1;i<h.length;i++){
+    var d = Math.abs(h[i].m - h[i-1].m);
+    travelled += d;
+    if(d > maxJump) maxJump = d;
+  }
+  // One decisive move that accounts for most of the travel.
+  var steam = (h.length >= 3) && maxJump >= 1 && maxJump >= travelled * 0.7;
+  return {
+    legs: h.length, net: net, maxJump: maxJump, travelled: travelled, steam: steam,
+    path: h.map(function(s){ return s.m; }).join(" \u2192 ")
+  };
+}
+
+// Book disagreement — wide spread across providers means the number is unsettled.
+function peDispersion(g){
+  var b = g.books || [];
+  if(b.length < 2) return 0;
+  var vals = b.map(function(x){ return x.favSide === (g.favIsHome?"home":"away") ? x.spread : -x.spread; });
+  return Math.max.apply(null, vals) - Math.min.apply(null, vals);
 }
 
 function peBoard(){
@@ -6037,6 +6070,13 @@ function peFetchEspnLines(cb){
       cs.forEach(function(c){ if(c.homeAway==="away") away=c; else if(c.homeAway==="home") home=c; });
       if(!away || !home) return;
       var line = peEspnLine(comp);
+      // ESPN's odds array can carry several providers. Disagreement between
+      // books is free signal, so keep them all rather than just the first.
+      var books = [];
+      (comp.odds||[]).forEach(function(o){
+        var l = peEspnLine({odds:[o]});
+        if(l) books.push({ name: (o.provider&&o.provider.name)||"book", spread:l.spread, favSide:l.favSide });
+      });
       rows.push({
         awayId: String((away.team&&away.team.id)||""),
         homeId: String((home.team&&home.team.id)||""),
@@ -6044,7 +6084,7 @@ function peFetchEspnLines(cb){
         homeName: peNormName((home.team&&(home.team.location||home.team.displayName))||""),
         awayAb: peNormName((away.team&&away.team.abbreviation)||""),
         homeAb: peNormName((home.team&&home.team.abbreviation)||""),
-        line: line
+        line: line, books: books
       });
     });
     cb(null, rows);
@@ -6259,6 +6299,9 @@ function renderPoolEdge(){
       if(e.key) tags += '<span class="pe-tag key">key number</span>';
       if(e.reason === "model") tags += '<span class="pe-tag flat">model tiebreak</span>';
       if(e.reason === "prior") tags += '<span class="pe-tag dog">flat &mdash; dog default</span>';
+      if(e.steam) tags += '<span class="pe-tag steam">steam</span>';
+      var _disp = peDispersion(g);
+      if(_disp >= 1) tags += '<span class="pe-tag disp">books split ' + _disp + '</span>';
       var movement = e.reason === "delta"
         ? (e.mag + " pt move toward " + x(e.side === "fav" ? g.fav : g.dog))
         : (e.reason === "model" ? "no line movement" : "no signal");
@@ -6267,6 +6310,7 @@ function renderPoolEdge(){
       h += '<div class="pe-body">';
       h += '<div class="pe-pick">' + x(e.team) + ' ' + e.number + '</div>';
       h += '<div class="pe-meta">' + tags + x(g.fav) + ' vs ' + x(g.dog) + ' &middot; yours ' + g.pool + ' &middot; ' + movement + '</div>';
+      if(e.mv && e.mv.legs >= 2) h += '<div class="pe-meta" style="margin-top:1px">' + x(e.mv.path) + '</div>';
       h += '<div class="pe-mktrow"><span class="pe-mktlab">Market</span>';
       h += '<input class="pe-mkt" type="number" step="0.25" inputmode="decimal" value="' + g.mkt + '" data-pe-mkt="' + x(g.id) + '">';
       h += '</div>';
@@ -6356,7 +6400,15 @@ function renderPoolEdge(){
       var hit = 0, miss = [];
       PE.games.forEach(function(g){
         var row = peMatchRow(g, rows);
-        if(row && peApplyLine(g, row)) hit++;
+        if(row && peApplyLine(g, row)){
+          hit++;
+          g.books = row.books || [];
+          // Seed the history with the locked number so the first fetch already
+          // has something to measure against.
+          if(!g.hist || !g.hist.length) g.hist = [{ t: 0, m: g.pool }];
+          var last = g.hist[g.hist.length-1];
+          if(last.m !== g.mkt) g.hist.push({ t: Date.now(), m: g.mkt });
+        }
         else miss.push(g.fav + "/" + g.dog);
       });
       peSave(); renderPoolEdge();
