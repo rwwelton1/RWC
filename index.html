@@ -640,6 +640,44 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-rule pre{margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;line-height:1.5;color:var(--text);white-space:pre;overflow-x:auto}
 .pe-rulenote{font-size:9px;font-weight:700;color:var(--muted);line-height:1.5;margin-top:7px}
 
+
+/* Prophescore layout: setup first, board big, everything else folded. */
+.pe-hdr{display:flex;align-items:center;gap:9px;margin-bottom:14px}
+.pe-title{font-size:18px;font-weight:900;color:var(--text);flex:1;letter-spacing:-.02em}
+.pe-rec{font-size:12px;font-weight:900;color:var(--muted);background:var(--card2);border:2px solid var(--border2);border-radius:7px;padding:3px 8px}
+.pe-rec span{color:var(--gold-dark)}
+.pe-setupbar{display:flex;flex-direction:column;gap:6px;margin-bottom:18px}
+.pe-setup{display:flex;align-items:center;gap:9px;width:100%;text-align:left;padding:10px 11px;border:2px solid var(--border);border-radius:10px;background:#fff;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:3px 3px 0 var(--border)}
+.pe-setup:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--border)}
+.pe-setup.todo{background:var(--gold-bg);border-color:var(--gold-dark)}
+.pe-setup.off{opacity:.62;box-shadow:2px 2px 0 var(--border2);border-color:var(--border2)}
+.pe-setup.warn{background:var(--gold-bg)}
+.pe-si{font-size:15px;flex:0 0 auto;line-height:1}
+.pe-sl{font-size:12px;font-weight:900;color:var(--text);flex:0 0 auto}
+.pe-ss{flex:1;font-size:10px;font-weight:700;color:var(--muted);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pe-sc{flex:0 0 16px;text-align:center;font-size:13px;font-weight:900;color:var(--dim)}
+.pe-setup.ok .pe-sc{color:var(--green)}
+.pe-setup.todo .pe-sc,.pe-setup.warn .pe-sc{color:var(--gold-dark)}
+.pe-setup.busy{opacity:.55;pointer-events:none}
+.pe-model{display:flex;align-items:center;gap:7px;margin:7px 0 0 7px;padding:5px 8px;background:var(--card2);border-radius:7px;border:1px solid var(--border2)}
+.pe-model.big{background:var(--purple-bg);border-color:var(--purple)}
+.pe-mlab{font-size:7px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+.pe-mscore{font-size:12px;font-weight:900;color:var(--text);font-variant-numeric:tabular-nums}
+.pe-mline{font-size:10px;font-weight:800;color:var(--muted)}
+.pe-mdiff{font-size:12px;font-weight:900;color:var(--muted);font-variant-numeric:tabular-nums}
+.pe-model.big .pe-mdiff,.pe-model.big .pe-mlab{color:var(--purple)}
+.pe-fold{background:#fff;border:2px solid var(--border2);border-radius:10px;margin-top:10px;overflow:hidden}
+.pe-fold[open]{border-color:var(--border);box-shadow:3px 3px 0 var(--border2)}
+.pe-fold summary{display:flex;align-items:center;gap:8px;padding:11px 12px;cursor:pointer;list-style:none}
+.pe-fold summary::-webkit-details-marker{display:none}
+.pe-fname{font-size:11px;font-weight:900;color:var(--text);text-transform:uppercase;letter-spacing:.06em}
+.pe-fsub{flex:1;font-size:10px;font-weight:700;color:var(--dim);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pe-farrow{flex:0 0 auto;font-size:15px;font-weight:900;color:var(--dim);transition:transform .15s}
+.pe-fold[open] .pe-farrow{transform:rotate(90deg)}
+.pe-fbody{padding:0 12px 12px}
+.pe-fbody .section-label:first-child{margin-top:0}
+.pe-fbody .admin-panel{box-shadow:none;border-color:var(--border2)}
+
 </style>
 
 </head>
@@ -6740,15 +6778,33 @@ function pemFetchFbs(cb){
   fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?groups=80&limit=400")
     .then(function(r){ return r.json(); })
     .then(function(d){
-      var set = {}, n = 0;
+      var set = {}, names = {}, n = 0;
       var leagues = (((d||{}).sports||[])[0]||{}).leagues || [];
       (((leagues[0]||{}).teams)||[]).forEach(function(t){
-        var id = String(((t||{}).team||{}).id||"");
-        if(id){ set[id] = 1; n++; }
+        var tm = (t||{}).team || {};
+        var id = String(tm.id||"");
+        if(!id) return;
+        set[id] = 1;
+        names[id] = tm.displayName || tm.location || tm.name || "";
+        n++;
       });
+      if(n >= 100){
+        // Names outlive this call: the ratings paste matches against them.
+        PEM.nameMap = PEM.nameMap || {};
+        for(var k in names){ if(names[k]) PEM.nameMap[k] = names[k]; }
+      }
       cb(null, n >= 100 ? set : null);
     })
     .catch(function(){ cb(null, null); });
+}
+
+// Team names are needed to match a ratings paste. Fetching the FBS list is one
+// request, so pasting never has to wait on a full model build.
+function pemEnsureNameMap(cb){
+  if(PEM.nameMap && Object.keys(PEM.nameMap).length > 50){ cb(true); return; }
+  pemFetchFbs(function(){
+    cb(!!(PEM.nameMap && Object.keys(PEM.nameMap).length > 50));
+  });
 }
 
 // ESPN's FPI. The core API usually hands back $ref stubs rather than values,
@@ -7476,8 +7532,19 @@ function pemShowPasteModal(){
   document.getElementById("pem-p-close").addEventListener("click", function(){ el.remove(); });
   document.getElementById("pem-p-go").addEventListener("click", function(){
     var txt = document.getElementById("pem-p-text").value;
-    var res = pemParsePaste(txt, PEM.nameMap);
     var st = document.getElementById("pem-p-status");
+    var goBtn = this;
+    if(!PEM.nameMap || Object.keys(PEM.nameMap).length < 50){
+      if(st) st.textContent = "Loading team names\u2026";
+      goBtn.disabled = true;
+      pemEnsureNameMap(function(ok){
+        goBtn.disabled = false;
+        if(!ok){ if(st) st.innerHTML = "<b>Couldn\u2019t load team names.</b> Check the connection and try again."; return; }
+        goBtn.click();
+      });
+      return;
+    }
+    var res = pemParsePaste(txt, PEM.nameMap);
     if(!res || !res.matched){
       if(st) st.innerHTML = "<b>No teams matched.</b> Names are matched against ESPN’s, e.g. “Ohio State” or “Ohio State Buckeyes”.";
       return;
@@ -7500,68 +7567,81 @@ function pemShowPasteModal(){
 function renderPoolEdge(){
   if(!peOwner()){ SC.screen = "profile"; draw(); return; }
   if(!PE.ready){ peLoad(function(){ if(SC.screen==="prophescore") renderPoolEdge(); }); }
+  PE.ui = PE.ui || { adj:false, calib:false, add:false };
 
   var rows = peBoard();
   var graded = peGraded();
   var w = graded.filter(function(x){ return x.result==="W"; }).length;
   var l = graded.filter(function(x){ return x.result==="L"; }).length;
   var pct = (w+l) ? (100*w/(w+l)) : null;
-  var edge = (pct==null) ? "—" : ((pct-52.4>=0?"+":"") + (pct-52.4).toFixed(1));
+  var boardCtx = peBoardCtx(PE.games);
+  var maxScore = rows[0] ? rows[0].e.score : 1;
 
   var h = topbar(false);
   h += '<div class="main fade-up">';
-  h += '<div style="display:flex;align-items:center;margin-bottom:16px">';
-  h += '<div style="font-size:18px;font-weight:900;color:var(--text);flex:1">&#128201; Prophescore</div>';
+  h += '<div class="pe-hdr">';
+  h += '<div class="pe-title">&#128201; Prophescore</div>';
+  if(w+l) h += '<div class="pe-rec">' + w + '-' + l + (pct!=null ? ' <span>' + pct.toFixed(0) + '%</span>' : '') + '</div>';
   h += '<button class="btn btn-ghost btn-sm" id="pe-back">&#8592; Back</button>';
   h += '</div>';
 
   if(PE.err){
     h += '<div class="pe-err">' + x(PE.err) + '</div>';
     if(/PERMISSION_DENIED/.test(PE.err)){
-      h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase Realtime Database rules, then reload</div>' +
+      h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase rules, then reload</div>' +
            '<pre>"prophescore": {\n  "$uid": {\n    ".read":  "auth != null &amp;&amp; auth.uid === $uid",\n    ".write": "auth != null &amp;&amp; auth.uid === $uid"\n  }\n}</pre>' +
-           '<div class="pe-rulenote">Sits alongside your existing rules, at the same level as "users" and "groups". Until it is there, everything here lives only on this device.</div></div>';
+           '<div class="pe-rulenote">Same level as "users" and "groups". Until it is there, everything here lives only on this device.</div></div>';
     }
   }
 
-  h += '<div class="pe-stats">';
-  h += '<div class="pe-stat"><div class="pe-stat-val">' + w + '-' + l + '</div><div class="pe-stat-lab">Record</div></div>';
-  h += '<div class="pe-stat"><div class="pe-stat-val">' + (pct==null?"—":pct.toFixed(1)+"%") + '</div><div class="pe-stat-lab">Hit rate</div></div>';
-  h += '<div class="pe-stat"><div class="pe-stat-val ' + (pct==null?"":(pct>=52.4?"pos":"neg")) + '">' + edge + '</div><div class="pe-stat-lab">vs breakeven</div></div>';
+  // ── Setup bar. Four things the week needs, each one tap, status on the right.
+  //    Ratings sits first because it is the input that is pasted every week.
+  var pr = pePriorLatest(pePriorKey());
+  var priorReady = !!(pr && pr.e && pr.e.n);
+  var priorStale = priorReady && pr.key !== pePriorKey();
+  var linesAt = null;
+  PE.games.forEach(function(g){
+    if(g.hist && g.hist.length > 1){
+      var t = g.hist[g.hist.length-1].t;
+      if(t && (!linesAt || t > linesAt)) linesAt = t;
+    }
+  });
+
+  function setupRow(id, icon, label, status, state){
+    return '<button class="pe-setup ' + state + '" id="' + id + '">' +
+           '<span class="pe-si">' + icon + '</span>' +
+           '<span class="pe-sl">' + label + '</span>' +
+           '<span class="pe-ss">' + status + '</span>' +
+           '<span class="pe-sc">' + (state==="ok" ? "&#10003;" : (state==="warn" ? "!" : "&rsaquo;")) + '</span>' +
+           '</button>';
+  }
+  h += '<div class="pe-setupbar">';
+  h += setupRow("pe-paste-top", "&#128203;", "SP+ ratings",
+        priorReady ? (pr.e.n + " teams" + (priorStale ? " · last week" : "")) : "paste to add",
+        priorReady ? (priorStale ? "warn" : "ok") : "todo");
+  h += setupRow("pe-import", "&#128229;", "Games",
+        PE.games.length ? (PE.games.length + " on board") : "import a week",
+        PE.games.length ? "ok" : "todo");
+  h += setupRow("pe-espn", "&#128225;", "Market lines",
+        linesAt ? ("updated " + new Date(linesAt).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"})) : "fetch current",
+        linesAt ? "ok" : (PE.games.length ? "todo" : "off"));
+  h += setupRow("pe-buildmodel", "&#129518;", "Score model",
+        PEM.ratings ? (PEM.n + " games fit") : "build to predict",
+        PEM.ratings ? "ok" : "off");
   h += '</div>';
 
-  h += '<div class="section-label" style="margin-top:0">Add Game</div>';
-  h += '<div class="admin-panel" style="margin-bottom:6px">';
-  h += '<div class="pe-form">';
-  h += '<div><label class="pe-lab" for="pe-fav">Favorite</label><input class="pe-in" id="pe-fav" placeholder="Michigan" autocorrect="off"></div>';
-  h += '<div><label class="pe-lab" for="pe-dog">Underdog</label><input class="pe-in" id="pe-dog" placeholder="Iowa" autocorrect="off"></div>';
-  h += '<div><label class="pe-lab" for="pe-pool">Your locked #</label><input class="pe-in" id="pe-pool" type="number" step="0.5" inputmode="decimal" placeholder="4.5"></div>';
-  h += '<div><label class="pe-lab" for="pe-mkt">Current market</label><input class="pe-in" id="pe-mkt" type="number" step="0.5" inputmode="decimal" placeholder="5.5"></div>';
-  h += '<div class="pe-full"><label class="pe-lab" for="pe-model">Model line &mdash; optional</label><input class="pe-in" id="pe-model" type="number" step="0.5" inputmode="decimal" placeholder="Favorite by…">';
-  h += '<div class="pe-hint">All three as points the favorite gives, positive. The model line only breaks ties when the delta is flat.</div></div>';
-  h += '</div>';
-  h += '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:11px">';
-  h += '<button class="btn btn-gold" id="pe-add">Add to board</button>';
-  h += '<button class="btn btn-primary" id="pe-import">&#128229; Import from group</button>';
-  if(PE.games.length) h += '<button class="btn btn-gold" id="pe-espn">&#128225; Fetch market lines</button>';
-  h += '<button class="btn btn-ghost" id="pe-example">Load sample week</button>';
-  h += '</div>';
-  h += '</div>';
-
+  // ── Board ────────────────────────────────────────────────────────────────
   h += '<div class="section-label">This Week&#39;s Board</div>';
-  h += '<div class="admin-panel">';
   if(!rows.length){
-    h += '<div class="pe-empty">No games yet.</div>';
+    h += '<div class="admin-panel"><div class="pe-empty">No games yet. Import a week above.</div></div>';
   } else {
-    var maxScore = rows[0] ? rows[0].e.score : 1;
-    var boardCtx = peBoardCtx(PE.games);
     rows.forEach(function(r){
       var g = r.g, e = r.e, conf = r.conf;
       var tier = peTier(e.score);
       var sigs = peSignals(g, e, boardCtx);
       var toward = (e.reason === "delta") ? (e.side === "fav" ? g.fav : g.dog) : null;
       var up = (e.side === "fav");
-      var pct = Math.max(6, Math.round((e.score / (maxScore||1)) * 100));
+      var pct2 = Math.max(6, Math.round((e.score / (maxScore||1)) * 100));
 
       h += '<div class="pe-card ' + tier + (g.result ? " done" : "") + '">';
 
@@ -7578,9 +7658,8 @@ function renderPoolEdge(){
       }
       h += '</div>';
 
-      h += '<div class="pe-bar"><i style="width:' + pct + '%"></i></div>';
-      // "fav vs dog" reads as the favourite hosting, which is wrong whenever the
-      // favourite is on the road. Show the real venue when it is known.
+      h += '<div class="pe-bar"><i style="width:' + pct2 + '%"></i></div>';
+
       var _vs = (g.favIsHome === true)  ? (x(g.dog) + ' at ' + x(g.fav))
               : (g.favIsHome === false) ? (x(g.fav) + ' at ' + x(g.dog))
               : (x(g.fav) + ' vs ' + x(g.dog));
@@ -7601,6 +7680,26 @@ function renderPoolEdge(){
         }).join("") + '</div>';
       }
 
+      // Model prediction folded into the card, so a game is one place to look
+      // rather than two lists to scroll between.
+      if(PEM.ratings && g.awayId && g.homeId){
+        var mp = pemPredict(g.awayId, g.homeId, false);
+        if(mp){
+          var favM = (g.favIsHome === false) ? (mp.away - mp.home) : (mp.home - mp.away);
+          favM = Math.round(favM*10)/10;
+          var mFav = favM >= 0 ? g.fav : g.dog;
+          var diff = Math.round((favM - g.mkt)*10)/10;
+          var awayNm = (g.favIsHome === false) ? g.fav : g.dog;
+          h += '<div class="pe-model' + (Math.abs(diff) >= 3 ? " big" : "") + '">';
+          h += '<span class="pe-mlab">Model</span>';
+          h += '<span class="pe-mscore">' + Math.round(mp.away) + '&ndash;' + Math.round(mp.home) + '</span>';
+          h += '<span class="pe-mline">' + x(mFav) + ' -' + Math.abs(favM).toFixed(1) + '</span>';
+          h += '<span class="pe-sp"></span>';
+          h += '<span class="pe-mdiff">' + (diff>0?"+":"") + diff + '</span>';
+          h += '</div>';
+        }
+      }
+
       h += '<div class="pe-ft">';
       h += '<span class="pe-ftlab">Locked</span><span class="pe-ftval">' + g.pool + '</span>';
       if(g.total) h += '<span class="pe-ftlab">O/U</span><span class="pe-ftval">' + g.total + '</span>';
@@ -7612,48 +7711,69 @@ function renderPoolEdge(){
 
       h += '</div>';
     });
-
-  }
-  h += '</div>';
-
-  if(rows.length){
-    h += '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">';
-    h += '<button class="btn btn-ghost" id="pe-bank">Bank week &amp; clear</button>';
-    h += '<button class="btn btn-ghost" id="pe-clear">Clear</button>';
+    h += '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:4px">';
+    h += '<button class="btn btn-ghost btn-sm" id="pe-bank">Bank week &amp; clear</button>';
+    h += '<button class="btn btn-ghost btn-sm" id="pe-clear">Clear</button>';
     h += '</div>';
   }
 
-  h += pemPanelHtml();
+  // ── Everything else folds away ───────────────────────────────────────────
+  function fold(id, title, sub, open, body){
+    return '<details class="pe-fold" id="' + id + '"' + (open ? " open" : "") + '>' +
+           '<summary><span class="pe-fname">' + title + '</span>' +
+           '<span class="pe-fsub">' + sub + '</span>' +
+           '<span class="pe-farrow">&rsaquo;</span></summary>' +
+           '<div class="pe-fbody">' + body + '</div></details>';
+  }
 
-  h += '<div class="section-label">Calibration</div>';
-  h += '<div class="admin-panel">';
-  h += '<table class="pe-tbl"><thead><tr><th>Confidence tier</th><th>Record</th><th>Hit %</th></tr></thead><tbody>';
-  var tiers = [
-    {name:"High (top third)",   test:function(v){ return v.conf >  v.max*2/3; }},
+  var adjSub = PEM.ratings
+      ? ((PEM.cv ? PEM.cv.mae.toFixed(1) + " err" : "") + " · " + PEM_KNOBS.length + " inputs")
+      : "build the model first";
+  h += fold("pe-fold-adj", "Model &amp; adjustments", adjSub, PE.ui.adj, pemPanelHtml());
+
+  var n = graded.length;
+  var cal = '<table class="pe-tbl"><thead><tr><th>Confidence tier</th><th>Record</th><th>Hit %</th></tr></thead><tbody>';
+  [ {name:"High (top third)",   test:function(v){ return v.conf >  v.max*2/3; }},
     {name:"Middle",             test:function(v){ return v.conf <= v.max*2/3 && v.conf > v.max/3; }},
-    {name:"Low (bottom third)", test:function(v){ return v.conf <= v.max/3; }}
-  ];
-  tiers.forEach(function(t){
+    {name:"Low (bottom third)", test:function(v){ return v.conf <= v.max/3; }} ].forEach(function(t){
     var set = graded.filter(t.test);
     var tw = set.filter(function(v){ return v.result==="W"; }).length;
     var tl = set.filter(function(v){ return v.result==="L"; }).length;
-    h += '<tr><td>' + t.name + '</td><td>' + tw + '-' + tl + '</td><td>' + ((tw+tl)?(100*tw/(tw+tl)).toFixed(1)+"%":"—") + '</td></tr>';
+    cal += '<tr><td>' + t.name + '</td><td>' + tw + '-' + tl + '</td><td>' + ((tw+tl)?(100*tw/(tw+tl)).toFixed(1)+"%":"—") + '</td></tr>';
   });
-  h += '</tbody></table>';
-  var n = graded.length;
-  h += '<div class="pe-note">' + (n < 200
+  cal += '</tbody></table>';
+  cal += '<div class="pe-note">' + (n < 200
       ? (n + ' graded picks. Roughly ' + (200-n) + ' more before this table means much — high should beat low if the delta is doing any work.')
       : (n + ' graded picks. Large enough to read. If high does not beat low, the edge ranking is not working.')) + '</div>';
-  h += '</div>';
+  cal += '<div class="pe-note">Breakeven against a standard spread is 52.4%. Telling a 57% system from a coin flip takes roughly 200 graded picks — about two seasons at ten a week.</div>';
+  h += fold("pe-fold-calib", "Calibration", (n ? n + " graded" : "no picks graded yet"), PE.ui.calib, cal);
 
-  h += '<div class="pe-warn">Breakeven against a standard spread is 52.4%. Telling a 57% system from a coin flip takes roughly 200 graded picks — about two seasons at ten a week. Until then this is collecting data, not proving anything.</div>';
-  h += '</div>';
+  var addBody = '<div class="pe-form">' +
+    '<div><label class="pe-lab" for="pe-fav">Favourite</label><input class="pe-in" id="pe-fav" placeholder="Michigan" autocorrect="off"></div>' +
+    '<div><label class="pe-lab" for="pe-dog">Underdog</label><input class="pe-in" id="pe-dog" placeholder="Iowa" autocorrect="off"></div>' +
+    '<div><label class="pe-lab" for="pe-pool">Your locked #</label><input class="pe-in" id="pe-pool" type="number" step="0.5" inputmode="decimal" placeholder="4.5"></div>' +
+    '<div><label class="pe-lab" for="pe-mkt">Current market</label><input class="pe-in" id="pe-mkt" type="number" step="0.5" inputmode="decimal" placeholder="5.5"></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:10px">' +
+    '<button class="btn btn-gold btn-sm" id="pe-add">Add to board</button>' +
+    '<button class="btn btn-ghost btn-sm" id="pe-example">Load sample week</button></div>';
+  h += fold("pe-fold-add", "Add a game by hand", "rarely needed", PE.ui.add, addBody);
 
+  h += '</div>';
   render(h);
+
+  // Remember which sections are open, without re-rendering and losing scroll.
+  [["pe-fold-adj","adj"],["pe-fold-calib","calib"],["pe-fold-add","add"]].forEach(function(p){
+    var el = document.getElementById(p[0]);
+    if(el) el.addEventListener("toggle", function(){ PE.ui[p[1]] = el.open; });
+  });
 
   document.getElementById("pe-back").addEventListener("click", function(){
     SC.screen = "profile"; draw();
   });
+
+  var topPaste = document.getElementById("pe-paste-top");
+  if(topPaste) topPaste.addEventListener("click", function(){ pemShowPasteModal(); });
 
   var addBtn = document.getElementById("pe-add");
   if(addBtn) addBtn.addEventListener("click", function(){
@@ -7661,18 +7781,15 @@ function renderPoolEdge(){
     var dog = (document.getElementById("pe-dog").value||"").trim();
     var pool = parseFloat(document.getElementById("pe-pool").value);
     var mkt  = parseFloat(document.getElementById("pe-mkt").value);
-    var mRaw = document.getElementById("pe-model").value;
-    var model = (mRaw === "") ? null : parseFloat(mRaw);
     if(!fav || !dog || isNaN(pool) || isNaN(mkt)){
       toast("Need both teams, your number, and the market number","warn"); return;
     }
     PE.games.push({
       id: "g" + Date.now() + Math.random().toString(36).slice(2,6),
-      fav: fav, dog: dog,
-      pool: Math.abs(pool), mkt: Math.abs(mkt),
-      model: (model==null || isNaN(model)) ? null : Math.abs(model),
-      result: null
+      fav: fav, dog: dog, pool: Math.abs(pool), mkt: Math.abs(mkt),
+      model: null, result: null
     });
+    PE.ui.add = true;
     peSave(); renderPoolEdge();
     var f = document.getElementById("pe-fav"); if(f) f.focus();
   });
@@ -7680,24 +7797,36 @@ function renderPoolEdge(){
   var impBtn = document.getElementById("pe-import");
   if(impBtn) impBtn.addEventListener("click", function(){ showPeImportModal(); });
 
+  var bm = document.getElementById("pe-buildmodel");
+  if(bm) bm.addEventListener("click", function(){
+    if(PEM.ratings){ PE.ui.adj = true; renderPoolEdge(); return; }  // already built: just open it
+    var b = this; b.classList.add("busy");
+    var ss = b.querySelector(".pe-ss"); if(ss) ss.textContent = "fetching season\u2026";
+    pemBuild(function(err){
+      b.classList.remove("busy");
+      if(err){ toast("Couldn't reach ESPN","warn"); renderPoolEdge(); return; }
+      PE.ui.adj = true;
+      renderPoolEdge();
+      toast("Model built on " + PEM.n + " games", "ok");
+    });
+  });
+
   var espnBtn = document.getElementById("pe-espn");
   if(espnBtn) espnBtn.addEventListener("click", function(){
-    var b = this; b.disabled = true; b.textContent = "Fetching…";
-    peFetchEspnLines(function(err, rows){
-      b.disabled = false;
-      if(err || !rows){ toast("Couldn't reach ESPN","warn"); renderPoolEdge(); return; }
+    if(!PE.games.length){ toast("Import a week first","warn"); return; }
+    var b = this; b.classList.add("busy");
+    peFetchEspnLines(function(err, rws){
+      b.classList.remove("busy");
+      if(err || !rws){ toast("Couldn't reach ESPN","warn"); return; }
       var hit = 0, miss = [];
       PE.games.forEach(function(g){
-        var row = peMatchRow(g, rows);
+        var row = peMatchRow(g, rws);
         if(row && peApplyLine(g, row)){
           hit++;
           g.books = row.books || [];
           if(typeof row.total === "number") g.total = row.total;
-          // First market number we ever see is the closest thing we have to an
-          // opener — it tells us whether the pool's number was ever on-market.
+          // The first market number seen is the closest thing to an opener.
           if(g.open == null) g.open = g.mkt;
-          // Seed the history with the locked number so the first fetch already
-          // has something to measure against.
           if(!g.hist || !g.hist.length) g.hist = [{ t: 0, m: g.pool }];
           var last = g.hist[g.hist.length-1];
           if(last.m !== g.mkt) g.hist.push({ t: Date.now(), m: g.mkt });
@@ -7757,10 +7886,10 @@ function renderPoolEdge(){
   var bank = document.getElementById("pe-bank");
   if(bank) bank.addEventListener("click", async function(){
     var rws = peBoard();
-    var done = rws.filter(function(r){ return r.g.result; });
-    if(!done.length){ toast("Mark some results first","warn"); return; }
-    if(!await scConfirm("Bank " + done.length + " graded pick(s) and clear the board?", {title:"Bank Week", okLabel:"Bank"})) return;
-    done.forEach(function(r){
+    var fin = rws.filter(function(r){ return r.g.result; });
+    if(!fin.length){ toast("Mark some results first","warn"); return; }
+    if(!await scConfirm("Bank " + fin.length + " graded pick(s) and clear the board?", {title:"Bank Week", okLabel:"Bank"})) return;
+    fin.forEach(function(r){
       PE.history.push({
         conf: r.conf, max: rws.length, result: r.g.result,
         pick: r.e.team + " " + r.e.number,
@@ -7772,13 +7901,13 @@ function renderPoolEdge(){
     toast("Week banked","ok");
   });
 
-  pemBindPanel();
-
   var clr = document.getElementById("pe-clear");
   if(clr) clr.addEventListener("click", async function(){
     if(!await scConfirm("Clear the board without banking results?", {title:"Clear Board", okLabel:"Clear"})) return;
     PE.games = []; peSave(); renderPoolEdge();
   });
+
+  pemBindPanel();
 }
 
 // ── ADMIN SCREEN ─────────────────────────────────────────────────────────────
