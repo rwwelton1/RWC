@@ -523,6 +523,12 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,te
 .pe-note{font-size:9px;font-weight:700;color:var(--muted);line-height:1.5;margin-top:9px}
 .pe-warn{background:var(--gold-bg);border:2px solid var(--border);border-radius:10px;padding:9px 11px;font-size:9px;font-weight:800;color:var(--gold-dark);line-height:1.5;margin-top:12px;box-shadow:3px 3px 0 var(--border)}
 .pe-err{background:var(--red-bg);border:2px solid var(--red);border-radius:8px;padding:7px 10px;font-size:9px;font-weight:800;color:var(--red);margin-bottom:10px}
+.pe-opt{display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:7px;border:2px solid var(--border);border-radius:9px;background:#ffffff;cursor:pointer;font-family:'Nunito',sans-serif;box-shadow:3px 3px 0 var(--border2)}
+.pe-opt:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--border2)}
+.pe-mktrow{display:flex;align-items:center;gap:6px;margin-top:5px}
+.pe-mktlab{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+.pe-mkt{width:66px;padding:3px 6px;font-size:16px;font-weight:800;background:var(--cream);color:var(--text);border:2px solid var(--border2);border-radius:6px}
+.pe-mkt:focus{outline:none;border-color:var(--blue)}
 @media(max-width:400px){.pe-form{grid-template-columns:1fr}}
 </style>
 
@@ -5826,6 +5832,169 @@ function peGraded(){
   return PE.history.filter(function(h){ return h.result; }).concat(live);
 }
 
+// ── POOL EDGE: IMPORT FROM GROUP ─────────────────────────────────────────────
+// Reads a CFB pool's saved slate straight out of the group. The pool's own
+// `spread` field IS the Tuesday-locked number, so it lands in `pool` and the
+// market number is what you fill in afterwards.
+function peCfbBase(groupId, year){
+  var root = "groups/" + groupId + "/data/cfbpool";
+  return year ? (root + "/seasons/" + year) : root;
+}
+
+// Groups the owner belongs to that actually carry the CFB pool.
+function peMyCfbGroups(cb){
+  var u = SC.currentUser;
+  var ids = _myGroupIds(u);
+  if(!ids.length){ cb([]); return; }
+
+  // Prefer the cache the profile screen already filled.
+  if(_allGroupsCache && _allGroupsCache.length){
+    var hit = _allGroupsCache.filter(function(g){
+      return g && ids.indexOf(g.id) >= 0 && (g.pools||[]).indexOf("cfb") >= 0;
+    });
+    if(hit.length){ cb(hit.map(function(g){ return {id:g.id, name:g.name||g.id}; })); return; }
+  }
+  if(!DB){ cb([]); return; }
+
+  // Cold path — read the group records directly.
+  var out = [], pending = ids.length;
+  ids.forEach(function(id){
+    DB.ref("groups/"+id).once("value", function(sn){
+      var g = sn.val();
+      if(g && (g.pools||[]).indexOf("cfb") >= 0) out.push({id:id, name:g.name||id});
+      if(--pending === 0) cb(out);
+    }, function(){ if(--pending === 0) cb(out); });
+  });
+}
+
+// meta lives at the unsuffixed path by default; fall back to the newest season.
+function peLoadCfbMeta(groupId, cb){
+  if(!DB){ cb(null); return; }
+  DB.ref(peCfbBase(groupId, null)+"/meta").once("value", function(sn){
+    var meta = sn.val();
+    if(meta && meta.weekIds && meta.weekIds.length){ cb({meta:meta, year:null}); return; }
+    DB.ref(peCfbBase(groupId, null).replace(/\/data\/cfbpool$/, "/data/cfbpool")+"/seasons").once("value", function(sn2){
+      var seasons = sn2.val() || {};
+      var years = Object.keys(seasons).sort();
+      if(!years.length){ cb(null); return; }
+      var y = years[years.length-1];
+      var m = (seasons[y]||{}).meta;
+      cb(m && m.weekIds ? {meta:m, year:y} : null);
+    }, function(){ cb(null); });
+  }, function(){ cb(null); });
+}
+
+function peImportWeek(groupId, year, weekId, cb){
+  if(!DB){ cb(null); return; }
+  DB.ref(peCfbBase(groupId, year)+"/games/"+weekId).once("value", function(sn){
+    var games = sn.val() || {};
+    var out = [], skipped = 0, pk = 0;
+    // g1..g10 — sort on the numeric suffix, or g10 lands between g1 and g2.
+    Object.keys(games).sort(function(a,b){
+      var na = parseInt(String(a).replace(/\D/g,""),10), nb = parseInt(String(b).replace(/\D/g,""),10);
+      if(isNaN(na) || isNaN(nb)) return String(a).localeCompare(String(b));
+      return na - nb;
+    }).forEach(function(gid){
+      var g = games[gid] || {};
+      var away = (g.away||"").trim(), home = (g.home||"").trim();
+      if(!away || !home){ skipped++; return; }           // blank slot
+      var sp = Math.abs(parseFloat(g.spread) || 0);
+      var fav, dog;
+      if(g.favSide === "away"){ fav = away; dog = home; }
+      else { fav = home; dog = away; }                    // home, or pick'em
+      if(g.favSide === "even" || !sp) pk++;
+      out.push({
+        id: "imp" + Date.now() + "_" + gid,
+        fav: fav, dog: dog,
+        pool: sp,
+        mkt: sp,        // flat until the current number is entered
+        model: null,
+        result: null
+      });
+    });
+    cb({games:out, skipped:skipped, pickem:pk});
+  }, function(){ cb(null); });
+}
+
+function showPeImportModal(){
+  if(!peOwner()) return;
+  var existing = document.getElementById("pe-import-overlay");
+  if(existing) existing.remove();
+
+  var el = document.createElement("div");
+  el.id = "pe-import-overlay";
+  el.className = "auth-modal-overlay";
+  el.innerHTML =
+    '<div class="auth-modal-box" style="max-width:340px;padding:20px">' +
+      '<button class="auth-modal-close" id="pe-imp-close">&#10005;</button>' +
+      '<div style="font-size:13px;font-weight:900;color:var(--text);margin-bottom:4px">&#128229; Import Slate</div>' +
+      '<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px" id="pe-imp-sub">Choose a group</div>' +
+      '<div id="pe-imp-body"><div class="pe-empty">Loading groups…</div></div>' +
+    "</div>";
+  document.body.appendChild(el);
+
+  el.addEventListener("click", function(e){ if(e.target===el) el.remove(); });
+  document.getElementById("pe-imp-close").addEventListener("click", function(){ el.remove(); });
+
+  var body = document.getElementById("pe-imp-body");
+  var sub  = document.getElementById("pe-imp-sub");
+
+  function optBtn(label, sublabel){
+    return '<div style="font-size:12px;font-weight:900;color:var(--text)">' + x(label) + '</div>' +
+           (sublabel ? '<div style="font-size:9px;font-weight:700;color:var(--muted);margin-top:1px">' + x(sublabel) + '</div>' : '');
+  }
+
+  peMyCfbGroups(function(groups){
+    if(!groups.length){
+      body.innerHTML = '<div class="pe-empty">No groups with a CFB pool.</div>';
+      return;
+    }
+    body.innerHTML = groups.map(function(g){
+      return '<button class="pe-opt" data-gid="' + x(g.id) + '" data-gname="' + x(g.name) + '">' +
+             optBtn(g.name, g.id) + '</button>';
+    }).join("");
+
+    Array.prototype.forEach.call(body.querySelectorAll("[data-gid]"), function(b){
+      b.addEventListener("click", function(){
+        var gid = this.getAttribute("data-gid");
+        var gname = this.getAttribute("data-gname");
+        sub.textContent = gname;
+        body.innerHTML = '<div class="pe-empty">Loading weeks…</div>';
+
+        peLoadCfbMeta(gid, function(res){
+          if(!res){ body.innerHTML = '<div class="pe-empty">No weeks found in that pool.</div>'; return; }
+          var ids = res.meta.weekIds || [], labels = res.meta.weekLabels || {};
+          if(!ids.length){ body.innerHTML = '<div class="pe-empty">No weeks set up yet.</div>'; return; }
+          body.innerHTML = ids.slice().reverse().map(function(w){
+            return '<button class="pe-opt" data-wid="' + x(w) + '">' +
+                   optBtn(labels[w] || w, null) + '</button>';
+          }).join("");
+
+          Array.prototype.forEach.call(body.querySelectorAll("[data-wid]"), function(wb){
+            wb.addEventListener("click", function(){
+              var wid = this.getAttribute("data-wid");
+              body.innerHTML = '<div class="pe-empty">Importing…</div>';
+              peImportWeek(gid, res.year, wid, function(out){
+                if(!out || !out.games.length){
+                  body.innerHTML = '<div class="pe-empty">That week has no games filled in.</div>';
+                  return;
+                }
+                PE.games = out.games;
+                peSave();
+                el.remove();
+                renderPoolEdge();
+                var msg = "Imported " + out.games.length + " game" + (out.games.length===1?"":"s");
+                if(out.pickem) msg += " · " + out.pickem + " pick'em";
+                toast(msg, "ok");
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+}
+
 function renderPoolEdge(){
   if(!peOwner()){ SC.screen = "profile"; draw(); return; }
   if(!PE.ready){ peLoad(function(){ if(SC.screen==="pooledge") renderPoolEdge(); }); }
@@ -5864,6 +6033,7 @@ function renderPoolEdge(){
   h += '</div>';
   h += '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:11px">';
   h += '<button class="btn btn-gold" id="pe-add">Add to board</button>';
+  h += '<button class="btn btn-primary" id="pe-import">&#128229; Import from group</button>';
   h += '<button class="btn btn-ghost" id="pe-example">Load sample week</button>';
   h += '</div>';
   h += '</div>';
@@ -5887,7 +6057,10 @@ function renderPoolEdge(){
       h += '<div class="pe-conf ' + cls + '">' + conf + '</div>';
       h += '<div class="pe-body">';
       h += '<div class="pe-pick">' + x(e.team) + ' ' + e.number + '</div>';
-      h += '<div class="pe-meta">' + tags + x(g.fav) + ' vs ' + x(g.dog) + ' &middot; yours ' + g.pool + ', market ' + g.mkt + ' &middot; ' + movement + '</div>';
+      h += '<div class="pe-meta">' + tags + x(g.fav) + ' vs ' + x(g.dog) + ' &middot; yours ' + g.pool + ' &middot; ' + movement + '</div>';
+      h += '<div class="pe-mktrow"><span class="pe-mktlab">Market</span>';
+      h += '<input class="pe-mkt" type="number" step="0.25" inputmode="decimal" value="' + g.mkt + '" data-pe-mkt="' + x(g.id) + '">';
+      h += '</div>';
       h += '</div>';
       h += '<div class="pe-acts">';
       if(g.result){
@@ -5962,6 +6135,9 @@ function renderPoolEdge(){
     var f = document.getElementById("pe-fav"); if(f) f.focus();
   });
 
+  var impBtn = document.getElementById("pe-import");
+  if(impBtn) impBtn.addEventListener("click", function(){ showPeImportModal(); });
+
   var exBtn = document.getElementById("pe-example");
   if(exBtn) exBtn.addEventListener("click", function(){
     PE.games = [
@@ -5993,6 +6169,15 @@ function renderPoolEdge(){
       var id = this.getAttribute("data-pe-del");
       PE.games = PE.games.filter(function(z){ return z.id!==id; });
       peSave(); renderPoolEdge();
+    });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll("[data-pe-mkt]"), function(inp){
+    inp.addEventListener("change", function(){
+      var id = this.getAttribute("data-pe-mkt");
+      var v  = parseFloat(this.value);
+      var g  = PE.games.filter(function(z){ return z.id===id; })[0];
+      if(g && !isNaN(v)){ g.mkt = Math.abs(v); peSave(); renderPoolEdge(); }
     });
   });
 
