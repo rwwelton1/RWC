@@ -349,6 +349,16 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 
 
 .pem-prov{font-size:9px;font-weight:800;color:var(--muted);margin-bottom:2px}
+.pem-sheets{border:2px solid var(--border);border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff;box-shadow:2px 2px 0 var(--border)}
+.pem-sheetshd{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+.pem-sheetsel{width:100%;padding:8px 10px;border:2px solid var(--border);border-radius:9px;background:var(--cream);font:800 13px 'Nunito',sans-serif;color:var(--text)}
+.pem-sheetinfo{font-size:11px;font-weight:700;color:var(--muted);margin:6px 0;line-height:1.4}
+.pem-sheetbtns{display:flex;gap:6px;flex-wrap:wrap}
+.pem-sheetmap{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.pem-sheetmap span{font-size:9.5px;font-weight:900;border:1.5px solid var(--border2);border-radius:7px;padding:2px 6px;color:var(--muted);background:var(--cream)}
+.pem-sheetmap span.on{border-color:var(--border);color:var(--text);background:var(--gold-bg)}
+.pem-sheetmap i{font-style:normal;font-weight:700}
+.pem-sheetlab{display:flex;align-items:center;font-size:11px;font-weight:900;color:var(--text);margin-top:8px}
 
 .pem-prov b{color:var(--text)}
 
@@ -1929,9 +1939,19 @@ function pePriorKey(){
   return y + "-w" + w;
 }
 
+// Sheets are saved per week: "week N" = the ratings going into week N's games
+// (the preseason sheet is week 1). Live predictions use the newest sheet for
+// this week or earlier; past weeks are graded with the sheet from their own week.
+function pePriorWeek(k){ var m = /^(\d{4})-w(\d+)$/.exec(k || ""); return m ? { y: +m[1], w: +m[2] } : null; }
 function pePriorLatest(preferKey){
   var st = PE.priors || {};
   if(preferKey && st[preferKey]) return { key: preferKey, e: st[preferKey] };
+  var pk = pePriorWeek(preferKey);
+  if(pk){
+    var bestK = null, bestW = -1;
+    Object.keys(st).forEach(function(k){ var q = pePriorWeek(k); if(q && q.y === pk.y && q.w <= pk.w && q.w > bestW && st[k]){ bestW = q.w; bestK = k; } });
+    if(bestK) return { key: bestK, e: st[bestK] };
+  }
   var best = null;
   Object.keys(st).forEach(function(k){
     var e = st[k];
@@ -1941,19 +1961,46 @@ function pePriorLatest(preferKey){
   return best;
 }
 
-function pePriorSave(text, ratingsById, matched, label){
+function pePriorSave(text, ratingsById, matched, label, key){
   PE.priors = PE.priors || {};
-  PE.priors[pePriorKey()] = {
+  PE.priors[key || pePriorKey()] = {
     text: String(text||"").slice(0, 20000),
     r: ratingsById, at: Date.now(), n: matched, label: label || "SP+"
   };
-  // Keep the last 8 weeks so the record does not grow without bound.
+  // A whole season of weekly sheets, plus a little slack; oldest seasons go first.
   var keys = Object.keys(PE.priors).sort(function(a,b){
-    return (PE.priors[b].at||0) - (PE.priors[a].at||0);
+    var qa = pePriorWeek(a) || { y: 0, w: 0 }, qb = pePriorWeek(b) || { y: 0, w: 0 };
+    return (qb.y - qa.y) || (qb.w - qa.w);
   });
-  keys.slice(8).forEach(function(k){ delete PE.priors[k]; });
+  keys.slice(24).forEach(function(k){ delete PE.priors[k]; });
+  PEM._ppCache = null;
   peSave();
 }
+function pePriorDelete(key){
+  if(!PE.priors || !PE.priors[key]) return;
+  delete PE.priors[key]; PEM._ppCache = null;
+  peSave();
+}
+// The sheet a past week is graded with: the newest one saved for that week or
+// earlier. Using today's sheet instead would "predict" games it already knows
+// the results of. No sheet that early means results only.
+function pemPriorAt(w){
+  var y = (PE.meta && PE.meta.espnYear) || new Date().getFullYear(), st = PE.priors || {}, best = null, bw = -1;
+  Object.keys(st).forEach(function(k){ var q = pePriorWeek(k); if(q && q.y === y && q.w <= w && q.w > bw && st[k] && st[k].r){ bw = q.w; best = k; } });
+  if(!best) return null;
+  PEM._ppCache = PEM._ppCache || {};
+  var c = PEM._ppCache[best];
+  if(!c || c.at !== st[best].at){
+    var e = st[best], r = e.r;
+    if(e.text && PEM.nameMap){ var re = pemParsePaste(e.text, PEM.nameMap); if(re && re.prior && re.matched >= (e.n || 0)){ r = {}; for(var id in re.prior) r[id] = re.prior[id].fpi; } }
+    c = PEM._ppCache[best] = { at: e.at, p: pePriorToModel(r || {}), key: best };
+  }
+  return c.p;
+}
+// Walk-forward code swaps the live prior for the week's own sheet; a prior
+// passed in explicitly (e.g. a comparison) is left alone.
+function pemFoldPrior(prior, w){ return prior === PEM.prior ? pemPriorAt(w) : prior; }
+function pemSheetSig(){ var st = PE.priors || {}; return Object.keys(st).sort().map(function(k){ return k + ":" + (st[k] && st[k].at); }).join(","); }
 
 function pePriorToModel(r){
   var out = {}, n = 0;
@@ -2610,6 +2657,7 @@ function pemHoldout(games, prior, o){
   var test  = games.filter(function(g){ return g.week === last; });
   if(train.length < 30 || !test.length) return null;
 
+  prior = pemFoldPrior(prior, last);
   var fit = pemFit(train, prior, o);
   var errs = [], flat = [], priErrs = [];
   test.forEach(function(g){
@@ -2658,7 +2706,7 @@ function pemCV(games, prior, o){
     var train = games.filter(function(g){ return g.week < w; });
     var test  = games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, prior, o);
+    var fit = pemFit(train, pemFoldPrior(prior, w), o);
     var any = false;
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW);
@@ -2689,7 +2737,7 @@ function pemCVErrMap(games, prior, o){
     var train = games.filter(function(g){ return g.week < w; });
     var test  = games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, prior, o);
+    var fit = pemFit(train, pemFoldPrior(prior, w), o);
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW);
       if(p) out[g.eventId] = Math.abs((p.home - p.away) - (g.hs - g.as));
@@ -3333,7 +3381,7 @@ var PE_SIM_N = 1000;
 // Residual spread, from rolling-origin predictions. Margin and total get their
 // own figure because they miss by different amounts.
 function pemSimParams(){
-  if(PEM._simP && PEM._simPFor === PEM._games) return PEM._simP;
+  if(PEM._simP && PEM._simPFor === PEM._games && PEM._simPSig === pemSheetSig()) return PEM._simP;
   if(!PEM._games || !PEM._games.length) return null;
   var ws = pemCVWeeks(PEM._games);
   var mR = [], tR = [];
@@ -3341,7 +3389,7 @@ function pemSimParams(){
     var train = PEM._games.filter(function(g){ return g.week < w; });
     var test  = PEM._games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, PEM.prior, PEM.opts);
+    var fit = pemFit(train, pemPriorAt(w), PEM.opts);
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
       if(!p) return;
@@ -3372,7 +3420,7 @@ function pemSimParams(){
     out.blended = Math.round((1 - wgt) * 100);
   }
   if(out.sdTotal === null || !isFinite(out.sdTotal)) out.sdTotal = PRIOR_T;
-  PEM._simP = out; PEM._simPFor = PEM._games;
+  PEM._simP = out; PEM._simPFor = PEM._games; PEM._simPSig = pemSheetSig();
   return out;
 }
 
@@ -4083,6 +4131,7 @@ function pemPanelInner(){
   }
   if(PEM.dropped) h += ' &middot; dropped <b>' + PEM.dropped + '</b> non-FBS';
   h += '</div>';
+  h += pemSheetsHtml();
   if(PEM.prior && PEM.priorStale){
     h += '<div class="pe-note" style="margin-top:2px;color:var(--gold-dark)"><b>These are last week\u2019s numbers.</b> Paste the current SP+ when it publishes.</div>';
   }
@@ -4388,6 +4437,7 @@ function pemBindPanel(){
 
   var paste = document.getElementById("pem-paste");
   if(paste) paste.addEventListener("click", function(){ pemShowPasteModal(); });
+  pemBindSheets();
 
   Array.prototype.forEach.call(document.querySelectorAll("[data-pem-help]"), function(b){
     b.addEventListener("click", function(e){
@@ -4552,7 +4602,7 @@ function pemEnsureLines(force){
 function pemAts(){
   if(!PEM._games || !PEM._games.length) return null;
   var L = PE.lines || {};
-  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + Object.keys(L).length + "|" + (PEM.priorN||0);
+  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + Object.keys(L).length + "|" + pemSheetSig();
   if(PEM._ats && PEM._ats.key === key && PEM._ats.games === PEM._games) return PEM._ats.v;
   var weeks = {}; PEM._games.forEach(function(g){ weeks[g.week] = 1; });
   var ws = Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; });
@@ -4564,7 +4614,7 @@ function pemAts(){
     var test  = PEM._games.filter(function(g){ return g.week === w && L[g.eventId]; });
     if(train.length < 30){ r.early += test.length; if(test.length) r.earlyWeeks.push(w); return; }
     if(!test.length) return;
-    var fit = pemFit(train, PEM.prior, PEM.opts), any = false;
+    var fit = pemFit(train, pemPriorAt(w), PEM.opts), any = false;
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
       if(!p) return;
@@ -4690,7 +4740,7 @@ function pemAutoFit(onStep, done){
 // What the model was last tuned against. When this changes, it tunes again.
 function pemTuneSig(){
   if(!PEM._games) return "";
-  return PEM._games.length + "|" + (PEM.priorN || 0) + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
+  return PEM._games.length + "|" + pemSheetSig() + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
 }
 function pemAutoOn(){ return !(PE.tune && PE.tune.auto === false); }
 var PEM_AUTO = { running: false, msg: "" };
@@ -4756,11 +4806,66 @@ function pemBindAutoCard(){
   };
 }
 
-function pemShowPasteModal(){
+// Pick a week from the drop-down to see, paste, replace or delete its sheet.
+var PEM_SHEETWK = null;
+function pemCurWeek(){ return (PE.meta && PE.meta.espnWeek) || 1; }
+function pemSheetsHtml(){
+  var y = (PE.meta && PE.meta.espnYear) || new Date().getFullYear(), st = PE.priors || {}, cw = pemCurWeek();
+  var maxW = Math.max(15, cw); Object.keys(st).forEach(function(k){ var q = pePriorWeek(k); if(q && q.y === y && q.w > maxW) maxW = q.w; });
+  var sel = PEM_SHEETWK || cw, liveKey = (pePriorLatest(pePriorKey()) || {}).key;
+  var h = '<div class="pem-sheets"><div class="pem-sheetshd">Saved SP+ sheets</div>';
+  h += '<select id="pem-sheetsel" class="pem-sheetsel">';
+  for(var w = 1; w <= maxW; w++){
+    var e = st[y + "-w" + w];
+    h += '<option value="' + w + '"' + (w === sel ? ' selected' : '') + '>Week ' + w + (w === 1 ? ' (preseason)' : '') + ' — ' +
+         (e ? ((e.n || 0) + ' teams · ' + new Date(e.at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ' ✓') : 'none saved') +
+         (w === cw ? ' · this week' : '') + '</option>';
+  }
+  h += '</select>';
+  var cur = st[y + "-w" + sel];
+  h += '<div class="pem-sheetinfo">';
+  if(cur){
+    h += 'Week ' + sel + ': <b>' + (cur.n || 0) + '</b> teams, saved ' + new Date(cur.at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + '.';
+    if(liveKey === y + "-w" + sel) h += ' <b>Used for this week\u2019s projections.</b>';
+  } else h += 'No sheet for week ' + sel + '. ' + (sel === 1 ? 'Paste the preseason SP+ here.' : 'Paste the SP+ that was out going into week ' + sel + '\u2019s games.');
+  h += '</div><div class="pem-sheetbtns"><button class="btn btn-ghost btn-sm" id="pem-sheetpaste">&#128203; ' + (cur ? 'Replace' : 'Paste') + ' week ' + sel + '</button>' +
+       (cur ? '<button class="btn btn-ghost btn-sm" id="pem-sheetdel">Delete</button>' : '') + '</div>';
+  // Which sheet grades each week that has results.
+  var ws = {}; (PEM._games || []).forEach(function(g){ ws[g.week] = 1; });
+  var wl = Object.keys(ws).map(Number).sort(function(a, b){ return a - b; });
+  if(wl.length){
+    h += '<div class="pem-sheetmap">';
+    wl.forEach(function(w){
+      var k = null, bw = -1; Object.keys(st).forEach(function(kk){ var q = pePriorWeek(kk); if(q && q.y === y && q.w <= w && q.w > bw){ bw = q.w; k = kk; } });
+      h += '<span class="' + (k ? 'on' : '') + '">Wk ' + w + ' <i>' + (k ? ('sheet ' + bw) : 'results only') + '</i></span>';
+    });
+    h += '</div><div class="pe-note" style="margin-top:4px">Each past week is graded with the sheet you had going into it, so the error and the record vs Vegas are ones you could actually have had. A week with no earlier sheet is graded from results alone.</div>';
+  }
+  return h + '</div>';
+}
+function pemBindSheets(){
+  var sel = document.getElementById("pem-sheetsel");
+  if(sel) sel.onchange = function(){ PEM_SHEETWK = +this.value; pemRepaint(); };
+  var ps = document.getElementById("pem-sheetpaste");
+  if(ps) ps.onclick = function(){ pemShowPasteModal(PEM_SHEETWK || pemCurWeek()); };
+  var dl = document.getElementById("pem-sheetdel");
+  if(dl) dl.onclick = function(){
+    var w = PEM_SHEETWK || pemCurWeek(), y = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
+    if(!confirm("Delete the week " + w + " SP+ sheet?")) return;
+    pePriorDelete(y + "-w" + w);
+    PEM.prior = null; PEM.priorN = 0; PEM.priorSrc = "none"; PEM.priorAt = null;
+    if(!pemRestorePrior() && PEM._fpi){ PEM.prior = PEM._fpi; PEM.priorSrc = "ESPN FPI"; }
+    pemRefit(); pemRepaint(); toast("Week " + w + " sheet deleted");
+  };
+}
+function pemShowPasteModal(forWeek){
   var ex = document.getElementById("pem-paste-overlay");
   if(ex) ex.remove();
-  var _prev = pePriorLatest(pePriorKey());
-  var _prevText = (_prev && _prev.e && _prev.e.text) ? _prev.e.text : "";
+  var _y = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
+  var _wk = forWeek || PEM_SHEETWK || pemCurWeek();
+  function _sheet(w){ return (PE.priors || {})[_y + "-w" + w] || null; }
+  var _prevText = (_sheet(_wk) && _sheet(_wk).text) || "";
+  var _opts = ""; for(var _w = 1; _w <= Math.max(15, pemCurWeek()); _w++) _opts += '<option value="' + _w + '"' + (_w === _wk ? ' selected' : '') + '>Week ' + _w + (_w === 1 ? ' (preseason)' : '') + (_sheet(_w) ? ' ✓' : '') + '</option>';
   var el = document.createElement("div");
   el.id = "pem-paste-overlay";
   el.className = "auth-modal-overlay";
@@ -4770,7 +4875,8 @@ function pemShowPasteModal(){
       '<div style="font-size:13px;font-weight:900;color:var(--text);margin-bottom:4px">&#128203; Paste ratings</div>' +
       '<div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px">One team per line</div>' +
       '<div class="pe-note" style="margin-top:0">Any net rating in points works — SP+, FPI, Sagarin. Formats like <b>Georgia 22.5</b>, <b>1. Georgia 22.5</b> or <b>Georgia,22.5</b> all parse.</div>' +
-      (_prev ? ('<div class="pe-note">Holding <b>' + (_prev.e.n||0) + '</b> teams from <b>' + x(_prev.key) + '</b>, shown below. Stored per week, so last week\u2019s set is kept.</div>') : '') +
+      '<label class="pem-sheetlab">Sheet for <select id="pem-p-week" class="pem-sheetsel" style="width:auto;margin:0 0 0 4px">' + _opts + '</select></label>' +
+      '<div class="pe-note" id="pem-p-held">' + (_sheet(_wk) ? ('Week ' + _wk + ' already has <b>' + (_sheet(_wk).n || 0) + '</b> teams, shown below. Loading replaces it.') : 'Paste the SP+ that was out going into this week\u2019s games.') + '</div>' +
       '<textarea id="pem-p-text" rows="8" style="width:100%;margin-top:8px;padding:8px;font-size:13px;font-family:ui-monospace,Menlo,monospace;border:2px solid var(--border);border-radius:8px;background:var(--cream);color:var(--text)" placeholder="Ohio State 28.4&#10;Georgia 26.1&#10;Texas 24.9">' + x(_prevText) + '</textarea>' +
       '<div class="pe-note" id="pem-p-status"></div>' +
       '<button class="btn btn-gold" id="pem-p-go" style="width:100%;margin-top:8px">Load ratings</button>' +
@@ -4778,6 +4884,11 @@ function pemShowPasteModal(){
   document.body.appendChild(el);
   el.addEventListener("click", function(e){ if(e.target===el) el.remove(); });
   document.getElementById("pem-p-close").addEventListener("click", function(){ el.remove(); });
+  document.getElementById("pem-p-week").addEventListener("change", function(){
+    _wk = +this.value; var e = _sheet(_wk);
+    document.getElementById("pem-p-text").value = (e && e.text) || "";
+    document.getElementById("pem-p-held").innerHTML = e ? ('Week ' + _wk + ' already has <b>' + (e.n || 0) + '</b> teams, shown below. Loading replaces it.') : 'Paste the SP+ that was out going into this week\u2019s games.';
+  });
   document.getElementById("pem-p-go").addEventListener("click", function(){
     var txt = document.getElementById("pem-p-text").value;
     var st  = document.getElementById("pem-p-status");
@@ -4795,14 +4906,15 @@ function pemShowPasteModal(){
       // The ratings are kept whatever the match rate. Names improve once the
       // model is built, and pemRestorePrior re-parses this text then, so a
       // thin match now is not a reason to throw the paste away.
-      pePriorSave(txt, ratings, res.matched, "SP+");
+      var _key = _y + "-w" + _wk;
+      pePriorSave(txt, ratings, res.matched, "SP+", _key);
+      PEM_SHEETWK = _wk;
 
       var lines = String(txt).split(/\n/).filter(function(s){ return s.trim(); }).length;
       if(res.matched){
-        PEM.prior = res.prior;
-        PEM.priorN = res.matched;
-        PEM.priorSrc = "SP+ \u00b7 " + pePriorKey();
-        PEM.priorAt = Date.now(); PEM.priorStale = false;
+        // The live model uses the newest sheet for this week or earlier, which
+        // may not be the one just pasted (e.g. filling in an old week).
+        pemRestorePrior();
         if(!PEM.opts.priorW) PEM.opts.priorW = 0.55;
         pemSaveOpts();
         pemRefit();
@@ -4812,7 +4924,7 @@ function pemShowPasteModal(){
         var extra = (res.matched < lines * 0.6)
           ? " \u00b7 more will match once the model is built"
           : (res.missed.length ? (" \u00b7 " + res.missed.length + " unmatched") : "");
-        toast(res.matched + " of " + lines + " teams matched" + extra, "ok");
+        toast("Week " + _wk + ": " + res.matched + " of " + lines + " teams matched" + extra, "ok");
       } else {
         // Saved but unmatched: say so plainly rather than losing the paste.
         if(st) st.innerHTML = "<b>Saved, but no names matched yet.</b> " +
@@ -5640,10 +5752,10 @@ var _pearFitCache = { key: null, fit: null };
 function pearFitFor(week){
   if(!PEM._games || !PEM.ratings || !week) return null;
   if(!PEM._games.some(function(g){ return g.week >= week; })) return null;
-  var key = week + "|" + PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + (PEM.priorN || 0);
+  var key = week + "|" + PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + pemSheetSig();
   if(_pearFitCache.key === key) return _pearFitCache.fit;
   var train = PEM._games.filter(function(g){ return g.week < week; });
-  var fit = train.length < 30 ? false : pemFit(train, PEM.prior, PEM.opts);
+  var fit = train.length < 30 ? false : pemFit(train, pemPriorAt(week), PEM.opts);
   _pearFitCache = { key: key, fit: fit };
   return fit;
 }
@@ -5846,11 +5958,11 @@ function pearRankOrder(ratings){
 function pearPrevRanks(){
   if(!PEM._games || !PEM._games.length) return null;
   var last = 0; PEM._games.forEach(function(g){ if(g.week > last) last = g.week; });
-  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + (PEM.priorN || 0);
+  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + pemSheetSig();
   if(_pearPrev.key === key) return _pearPrev;
   var train = PEM._games.filter(function(g){ return g.week < last; });
   var r = null;
-  if(train.length >= 30){ var fit = pemFit(train, PEM.prior, PEM.opts); r = pearRankOrder(fit.ratings).rank; }
+  if(train.length >= 30){ var fit = pemFit(train, pemPriorAt(last), PEM.opts); r = pearRankOrder(fit.ratings).rank; }
   _pearPrev = { key: key, ranks: r, week: last };
   return _pearPrev;
 }
