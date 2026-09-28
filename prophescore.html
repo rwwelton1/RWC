@@ -825,6 +825,13 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pp-rt{font-variant-numeric:tabular-nums;color:var(--muted);font-size:11px;font-weight:800}
 .pp-rk{font-size:10px;font-weight:900;color:#fff;background:#111;border-radius:6px;padding:2px 6px;min-width:34px;text-align:center}
 .pp-rk.dim{background:none;color:var(--dim)}
+
+.pem-auto{border:2px solid var(--border);border-radius:12px;padding:10px 12px;margin:12px 0 4px;background:#fff;box-shadow:2px 2px 0 var(--border)}
+.pem-auto.on{background:var(--gold-bg)}
+.pem-autotop{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pem-autotop b{font-size:13px;font-weight:900}
+.pem-autosub{font-size:11px;font-weight:800;color:var(--text);margin-top:6px}
+.pem-autonote{font-size:10px;font-weight:700;color:var(--muted);margin-top:4px;line-height:1.45}
 </style>
 </head>
 <body>
@@ -1057,6 +1064,7 @@ function peLoad(cb){
       PE.season = o.season||null;
       PE.runs = o.runs||[]; PE.baseline = o.baseline||null;
       PE.teamstats = o.teamstats||{};
+      PE.tune = o.tune||null;
     }
   }catch(e){}
   var uid = ME();
@@ -1072,6 +1080,7 @@ function peLoad(cb){
       PE.runs = v.runs || PE.runs || [];
       PE.baseline = v.baseline || PE.baseline || null;
       PE.teamstats = v.teamstats || PE.teamstats || {};
+      PE.tune = v.tune || PE.tune || null;
     }
     peAfterLoad();
     PE.ready = true; PE.err = "";
@@ -1130,7 +1139,9 @@ function peSave(){
     baseline:  PE.baseline  || null,
     // Per-game team lines, keyed by event id like the turnover cache, so they
     // survive a rebuild and only genuinely new games ever cost a request.
-    teamstats: PE.teamstats || null
+    teamstats: PE.teamstats || null,
+    // Auto-tune: on/off, and which data it last tuned against.
+    tune:      PE.tune      || null
   });
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
@@ -3972,7 +3983,8 @@ function pemPanelInner(){
   }
 
   // ── Knobs ──
-  h += '<div class="pem-knobs"><div class="pem-sechd">Inputs <span>drag to refit instantly</span></div>';
+  h += pemAutoCardHtml();
+  h += '<div class="pem-knobs"><div class="pem-sechd">Inputs <span>' + (pemAutoOn() ? 'set by auto-tune \u00b7 drag to take over' : 'drag to refit instantly') + '</span></div>';
   PEM_KNOBS.forEach(function(k){
     var v = o[k.key];
     h += '<div class="pem-knob">';
@@ -3984,7 +3996,7 @@ function pemPanelInner(){
     h += '</div>';
   });
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">';
-  h += '<button class="btn btn-gold btn-sm" id="pem-auto">&#9889; Auto-tune</button>';
+  h += '<button class="btn btn-gold btn-sm" id="pem-auto">&#9889; Re-tune now</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-reset">Reset</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-rebuild">Rebuild data</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-logrun">&#128221; Log this run</button>';
@@ -4116,6 +4128,11 @@ function pemBindPanel(){
       var v = parseFloat(this.value);
       if(isNaN(v)) return;
       PEM.opts[key] = v;
+      if(pemAutoOn()){
+        PE.tune = PE.tune || {}; PE.tune.auto = false;
+        toast("Auto-tune paused \u2014 you\u2019re tuning by hand", "warn");
+        pemAutoStatus();
+      }
       var kd = null;
       PEM_KNOBS.forEach(function(k){ if(k.key===key) kd=k; });
       var lab = document.getElementById("pem-v-" + key);
@@ -4131,33 +4148,10 @@ function pemBindPanel(){
 
   var auto = document.getElementById("pem-auto");
   if(auto) auto.addEventListener("click", function(){
-    var out = document.getElementById("pem-tuned");
-    var btn = this;
-    btn.disabled = true;
-    var before = pemOptsSnapshot();
-    pemAutoTuneAsync(function(done, total, label){
-      var p = document.getElementById("pem-tuned");
-      if(p) p.innerHTML = "Sweeping <b>" + x(label) + "</b> \u2014 " + done + " of " + total + "\u2026";
-    }, function(best){
-      btn.disabled = false;
-      pemSaveOpts();
-      // A tune is worth recording whether or not it helped \u2014 especially if not.
-      var cmp = pemCompare(pemOptsSnapshot(), before);
-      pemLogRun("auto-tune");
-      pemRepaint();
-      var o2 = document.getElementById("pem-tuned");
-      if(!best){ if(o2) o2.textContent = "Not enough data to sweep."; return; }
-      var msg = "Swept each input in turn, keeping the most conservative setting that is statistically tied with the best one. CV error <b>" +
-                best.mae.toFixed(2) + "</b> over " + (best.n||0) + " games.";
-      if(cmp){
-        var vd = pemVerdict(cmp);
-        msg += " Against where you started: <b>" + (cmp.d > 0 ? "+" : "") + cmp.d.toFixed(2) +
-               " \u00b1 " + cmp.se.toFixed(2) + " pts \u2014 " + vd.word + "</b>.";
-        if(!vd.real) msg += " Tuning did not find anything the data can actually support; the old settings were fine.";
-      }
-      if(o2) o2.innerHTML = msg;
-    });
+    if(PE.tune) PE.tune.sig = "";
+    pemRunAutoFit("by hand");
   });
+  pemBindAutoCard();
 
   var reset = document.getElementById("pem-reset");
   if(reset) reset.addEventListener("click", function(){
@@ -4335,6 +4329,135 @@ function pemTuneOne(key){
   return best;
 }
 
+// ── AUTO-FIT ─────────────────────────────────────────────────────────────────
+// Finds the settings with the lowest honest error over every result pulled so
+// far. "Honest" = the same rolling test as the CV score: fit on the weeks before,
+// predict the next week's games cold. Each input is swept over its range, then
+// the search zooms in around the winner; passes repeat over all inputs until
+// nothing improves. Runs by itself whenever the data changes.
+function pemKnob(key){ var r = null; PEM_KNOBS.forEach(function(k){ if(k.key === key) r = k; }); return r; }
+function pemSnap(v, kd){
+  v = Math.round(v / kd.step) * kd.step;
+  return +Math.max(kd.min, Math.min(kd.max, v)).toFixed(4);
+}
+function pemTuneBest(key){
+  var kd = pemKnob(key), grid = PEM_GRID[key];
+  if(!kd || !grid || !PEM._games) return null;
+  if(key === "priorW" && !PEM.prior) return null;
+  if(key === "toAdj"  && !PEM.toStats) return null;
+  var cur = PEM.opts[key];
+  var vals = grid.slice(); if(vals.indexOf(cur) < 0) vals.push(cur);
+  var res = pemSweep(key, vals, false) || [];
+  var bestV = cur, bestM = Infinity;
+  res.forEach(function(r){ if(r.v === cur && r.mae !== null) bestM = r.mae; });
+  // Only move off the current value for a real (if small) improvement.
+  res.forEach(function(r){ if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; } });
+  // Zoom in between the winner's neighbours on the grid.
+  var sorted = vals.slice().sort(function(a, b){ return a - b; }), i = sorted.indexOf(bestV);
+  var lo = i > 0 ? sorted[i-1] : bestV, hi = i < sorted.length - 1 ? sorted[i+1] : bestV, fine = [];
+  for(var f = 1; f <= 4; f++){
+    [pemSnap(bestV + (lo - bestV) * f / 5, kd), pemSnap(bestV + (hi - bestV) * f / 5, kd)].forEach(function(v){
+      if(v !== bestV && vals.indexOf(v) < 0 && fine.indexOf(v) < 0) fine.push(v);
+    });
+  }
+  if(fine.length) (pemSweep(key, fine, false) || []).forEach(function(r){
+    if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; }
+  });
+  PEM.opts[key] = bestV;
+  return { v: bestV, mae: bestM === Infinity ? null : bestM, changed: bestV !== cur };
+}
+function pemAutoFit(onStep, done){
+  if(!PEM._games || !PEM._games.length){ done && done(null); return; }
+  var keys = PEM_KNOBS.filter(function(k){
+    return !(k.key === "priorW" && !PEM.prior) && !(k.key === "toAdj" && !PEM.toStats);
+  }).map(function(k){ return k.key; });
+  var start = pemCV(PEM._games, PEM.prior, PEM.opts), startM = start ? start.mae : null;
+  var MAXP = 4, pass = 0, i = 0, passStart = startM, cur = startM;
+  function step(){
+    if(i >= keys.length){
+      pass++; i = 0;
+      var gain = (passStart != null && cur != null) ? passStart - cur : 0;
+      passStart = cur;
+      if(pass >= MAXP || gain < 0.002){
+        pemRefit();
+        done && done({ before: startM, after: PEM.cv ? PEM.cv.mae : cur, n: PEM.cv ? PEM.cv.n : 0, passes: pass });
+        return;
+      }
+    }
+    var key = keys[i++], r = pemTuneBest(key);
+    if(r && r.mae != null) cur = r.mae;
+    onStep && onStep(pass * keys.length + i, keys.length * MAXP, (pemKnob(key) || {}).label || key, pass + 1);
+    setTimeout(step, 0);
+  }
+  setTimeout(step, 0);
+}
+// What the model was last tuned against. When this changes, it tunes again.
+function pemTuneSig(){
+  if(!PEM._games) return "";
+  return PEM._games.length + "|" + (PEM.priorN || 0) + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
+}
+function pemAutoOn(){ return !(PE.tune && PE.tune.auto === false); }
+var PEM_AUTO = { running: false, msg: "" };
+function pemRunAutoFit(reason){
+  if(PEM_AUTO.running || !PEM._games || !PEM._games.length) return;
+  PEM_AUTO.running = true; PEM_AUTO.msg = "starting";
+  pemAutoStatus();
+  pemAutoFit(function(done, total, label, pass){
+    PEM_AUTO.msg = "pass " + pass + " · " + label;
+    pemAutoStatus();
+  }, function(res){
+    PEM_AUTO.running = false; PEM_AUTO.msg = "";
+    PE.tune = { auto: pemAutoOn(), sig: pemTuneSig(), at: Date.now(),
+                before: res ? res.before : null, after: res ? res.after : null,
+                n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, reason: reason || "" };
+    pemSaveOpts();                // saves settings + tune together
+    try{ pemLogRun("auto-fit"); }catch(e){}
+    if(SC.screen === "prophescore") renderPoolEdge();
+    if(res && res.before != null && res.after != null)
+      toast("Model auto-tuned · error " + res.before.toFixed(2) + " → " + res.after.toFixed(2), "ok");
+  });
+}
+// Called after every render: tunes in the background when there is new data.
+function pemAutoMaybe(){
+  if(!pemAutoOn() || PEM_AUTO.running || !PE.ready || !PEM.ratings || !PEM._games) return;
+  if(PE.tune && PE.tune.sig === pemTuneSig()) return;
+  pemRunAutoFit(PE.tune && PE.tune.sig ? "new results" : "first run");
+}
+function pemAutoCardHtml(){
+  var t = PE.tune || {}, on = pemAutoOn();
+  var h = '<div class="pem-auto' + (on ? " on" : "") + '" id="pem-autocard">';
+  h += '<div class="pem-autotop"><b>⚡ Auto-tune ' + (on ? "on" : "off") + '</b>' +
+       '<button class="btn btn-sm ' + (on ? "btn-ghost" : "btn-gold") + '" id="pem-autotoggle">' + (on ? "Turn off" : "Turn on") + '</button></div>';
+  if(PEM_AUTO.running){
+    h += '<div class="pem-autosub">Tuning to all ' + (PEM._games ? PEM._games.length : 0) + ' results… ' + x(PEM_AUTO.msg) + '</div>';
+  } else if(t.at){
+    h += '<div class="pem-autosub">Last tuned ' + new Date(t.at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+         ' on <b>' + (t.games || 0) + '</b> games' +
+         (t.before != null && t.after != null ? ' · error <b>' + t.before.toFixed(2) + ' → ' + t.after.toFixed(2) + '</b>' : '') +
+         (on && t.sig !== pemTuneSig() ? ' · new data, retuning shortly' : '') + '</div>';
+  } else {
+    h += '<div class="pem-autosub">' + (on ? 'Will tune as soon as the model is built.' : 'Off — the inputs stay where you set them.') + '</div>';
+  }
+  h += '<div class="pem-autonote">' + (on
+      ? 'Whenever new results, box scores or ratings come in, each input below is re-fit to the setting with the lowest error on games the model hadn’t seen yet. Moving a slider pauses it.'
+      : 'Turn it on to have the inputs re-fit to every result automatically.') + '</div>';
+  return h + '</div>';
+}
+function pemAutoStatus(){
+  var el = document.getElementById("pem-autocard");
+  if(el){ el.outerHTML = pemAutoCardHtml(); pemBindAutoCard(); }
+}
+function pemBindAutoCard(){
+  var b = document.getElementById("pem-autotoggle");
+  if(b) b.onclick = function(){
+    var on = !pemAutoOn();
+    PE.tune = PE.tune || {}; PE.tune.auto = on;
+    pemSaveOpts();
+    if(on){ PE.tune.sig = ""; pemRunAutoFit("turned on"); }
+    else { pemAutoStatus(); if(SC.screen === "prophescore") renderPoolEdge(); }
+  };
+}
+
 function pemShowPasteModal(){
   var ex = document.getElementById("pem-paste-overlay");
   if(ex) ex.remove();
@@ -4453,6 +4576,7 @@ function renderPoolEdge(){
     render(h);
     var _bk = document.getElementById("pe-back");
     if(_bk) _bk.addEventListener("click", function(){ SC.screen = "profile"; draw(); });
+    setTimeout(pemAutoMaybe, 400);
     return;
   }
 
@@ -4969,6 +5093,7 @@ function renderPoolEdge(){
   });
 
   pemBindPanel();
+  setTimeout(pemAutoMaybe, 400);
 }
 
 
