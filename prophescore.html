@@ -844,6 +844,7 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pem-atsrow b{font-size:17px;font-weight:900;margin-top:2px}
 .pem-atsrow b.up{color:#15803d}.pem-atsrow b.dn{color:var(--red2)}
 .pem-atsrow i{font-style:normal;font-size:11px;font-weight:800;color:var(--muted)}
+.pem-atsacct{font-size:11px;font-weight:800;color:var(--text);margin-top:8px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -4391,13 +4392,14 @@ function pemEnsureLines(force){
   var todo = pemLinesMissing();
   PEM_LINES.tried = true;
   if(!todo.length) return;
-  PEM_LINES.busy = true;
+  PEM_LINES.busy = true; PEM_LINES.done = 0; PEM_LINES.total = todo.length;
   PE.lines = PE.lines || {};
   pemPool(todo, 8, function(g, next){
+    function fin(){ PEM_LINES.done++; if(PEM_LINES.done % 25 === 0){ PEM._ats = null; pemAtsRefresh(); } next(); }
     fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event=" + g.eventId)
       .then(function(r){ return r.json(); })
-      .then(function(d){ PE.lines[g.eventId] = pemParseLine(d); next(); })
-      .catch(function(){ next(); });                  // leave undefined: retried next session
+      .then(function(d){ PE.lines[g.eventId] = pemParseLine(d); fin(); })
+      .catch(function(){ fin(); });                   // leave undefined: retried next session
   }, function(){
     PEM_LINES.busy = false; PEM._ats = null;
     peSave();
@@ -4413,11 +4415,14 @@ function pemAts(){
   if(PEM._ats && PEM._ats.key === key && PEM._ats.games === PEM._games) return PEM._ats.v;
   var weeks = {}; PEM._games.forEach(function(g){ weeks[g.week] = 1; });
   var ws = Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; });
-  var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0 };
+  var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0, noplay:0,
+            total: PEM._games.length, early:0, earlyWeeks:[], noLine:0, pending:0 };
+  PEM._games.forEach(function(g){ var v = L[g.eventId]; if(v === null) r.noLine++; else if(v === undefined) r.pending++; });
   ws.forEach(function(w){
     var train = PEM._games.filter(function(g){ return g.week < w; });
     var test  = PEM._games.filter(function(g){ return g.week === w && L[g.eventId]; });
-    if(train.length < 30 || !test.length) return;
+    if(train.length < 30){ r.early += test.length; if(test.length) r.earlyWeeks.push(w); return; }
+    if(!test.length) return;
     var fit = pemFit(train, PEM.prior, PEM.opts), any = false;
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
@@ -4426,7 +4431,7 @@ function pemAts(){
       var pred = p.home - p.away, act = g.hs - g.as;
       r.lined++; any = true;
       if(pred !== 0){ r.suN++; if((pred > 0) === (act > 0)) r.su++; }
-      if(Math.abs(pred - vHome) < 0.05) return;     // model agrees with the line: no play
+      if(Math.abs(pred - vHome) < 0.05){ r.noplay++; return; }   // model agrees with the line: no play
       var pickHome = pred > vHome, cover = act - vHome, strong = Math.abs(pred - vHome) >= 3;
       if(cover === 0){ r.p++; if(strong) r.sp++; return; }
       var won = (cover > 0) === pickHome;
@@ -4439,14 +4444,22 @@ function pemAts(){
   PEM._ats = { key: key, games: PEM._games, v: r };
   return r;
 }
+// Repaint just the record (card + chip) without re-rendering the page.
+function pemAtsRefresh(){
+  var card = document.querySelector(".pem-ats");
+  if(card){ card.outerHTML = pemAtsCardHtml(); var lb = document.getElementById("pem-lines");
+    if(lb) lb.addEventListener("click", function(){ pemEnsureLines(true); this.disabled = true; this.textContent = "Loading\u2026"; }); }
+  var h2 = document.querySelector(".pr-h2");
+  if(h2 && PEM.ratings) h2.innerHTML = 'Prophescore projections \u00b7 ' + PEM.n + ' games fit' + pemAtsChip();
+}
 function pemAtsTxt(r){ return r.w + "-" + r.l + (r.p ? "-" + r.p : ""); }
 function pemAtsChip(){
   if(!PEM._games || !PEM.ratings) return "";
   var r = pemAts(), miss = pemLinesMissing().length;
-  if(!r || !(r.w + r.l)) return PEM_LINES.busy ? ' · <span class="pr-ats wait">vs Vegas: loading lines…</span>' : '';
+  if(!r || !(r.w + r.l)) return PEM_LINES.busy ? ' · <span class="pr-ats wait">vs Vegas: loading lines ' + (PEM_LINES.done||0) + '/' + (PEM_LINES.total||0) + '</span>' : '';
   var good = r.pct >= 0.524;
   return ' · <span class="pr-ats ' + (good ? "up" : "dn") + '">vs Vegas ' + pemAtsTxt(r) + ' (' + (r.pct*100).toFixed(1) + '%)</span>' +
-         (PEM_LINES.busy && miss ? ' <span class="pr-ats wait">updating…</span>' : '');
+         (PEM_LINES.busy && miss ? ' <span class="pr-ats wait">' + (PEM_LINES.done||0) + '/' + (PEM_LINES.total||0) + ' lines</span>' : '');
 }
 function pemAtsCardHtml(){
   if(!PEM._games || !PEM.ratings) return "";
@@ -4454,15 +4467,20 @@ function pemAtsCardHtml(){
   var h = '<div class="pem-ats"><div class="pem-autotop"><b>🎰 Record vs Vegas</b>' +
           (!PEM_LINES.busy && miss ? '<button class="btn btn-sm btn-ghost" id="pem-lines">Load ' + miss + ' lines</button>' : '') + '</div>';
   if(!r || !r.lined){
-    h += '<div class="pem-autosub">' + (PEM_LINES.busy ? 'Loading closing lines from ESPN…' : 'No closing lines yet.') + '</div></div>';
+    h += '<div class="pem-autosub">' + (PEM_LINES.busy ? ('Loading closing lines from ESPN\u2026 ' + (PEM_LINES.done||0) + ' of ' + (PEM_LINES.total||0)) : 'No closing lines yet.') + '</div></div>';
     return h;
   }
   var cls = function(p){ return p === null ? "" : (p >= 0.524 ? "up" : "dn"); };
   h += '<div class="pem-atsrow"><div><span>Against the spread</span><b class="' + cls(r.pct) + '">' + pemAtsTxt(r) + '</b><i>' + (r.pct !== null ? (r.pct*100).toFixed(1) + '%' : '—') + '</i></div>' +
        '<div><span>Edge 3+ pts</span><b class="' + cls(r.spct) + '">' + r.sw + '-' + r.sl + (r.sp ? '-' + r.sp : '') + '</b><i>' + (r.spct !== null ? (r.spct*100).toFixed(1) + '%' : '—') + '</i></div>' +
        '<div><span>Winners picked</span><b>' + r.su + '/' + r.suN + '</b><i>' + (r.suN ? (100*r.su/r.suN).toFixed(1) + '%' : '—') + '</i></div></div>';
-  h += '<div class="pem-autonote">' + r.lined + ' games with a closing line across ' + r.weeks + ' weeks. Each game was predicted by the model fitted only on the weeks before it, with today’s settings — so the record reflects picks it could actually have made. ' +
-       'Break-even at standard odds is 52.4%.' + (PEM_LINES.busy ? ' Loading more lines…' : '') + '</div>';
+  var parts = ['<b>' + r.lined + '</b> of ' + r.total + ' games graded across ' + r.weeks + ' week' + (r.weeks === 1 ? '' : 's')];
+  if(r.early) parts.push(r.early + ' from week ' + r.earlyWeeks.join(", ") + ' can\u2019t be \u2014 nothing earlier to fit on');
+  if(r.noLine) parts.push(r.noLine + ' had no closing line on ESPN');
+  if(r.pending) parts.push(PEM_LINES.busy ? ('<b>' + r.pending + ' lines still loading</b> (' + (PEM_LINES.done||0) + ' of ' + (PEM_LINES.total||0) + ' fetched)') : (r.pending + ' lines not loaded yet'));
+  h += '<div class="pem-atsacct">' + parts.join(' \u00b7 ') + '</div>';
+  h += '<div class="pem-autonote">Each game was predicted by the model fitted only on the weeks before it, with today\u2019s settings \u2014 so the record reflects picks it could actually have made. ' +
+       (r.noplay ? r.noplay + ' game' + (r.noplay === 1 ? '' : 's') + ' landed exactly on the line (no pick). ' : '') + 'Break-even at standard odds is 52.4%.</div>';
   return h + '</div>';
 }
 
