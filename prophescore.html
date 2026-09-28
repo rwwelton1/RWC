@@ -2715,6 +2715,9 @@ function pemFit(games, prior, o){
     ed[i] = g.neutral ? 0 : hfa/2;
     st[i] = lr * g._w;
   }
+  // Teams on the SP+ sheet that have no FBS game yet still get a rating (their
+  // sheet value), so an early matchup against one isn't silently skipped.
+  for(var pid in prior){ if(idx[pid] === undefined && prior[pid] && typeof prior[pid].off === "number") add(pid); }
   var avg = n ? total/n : 24, T = ids.length;
   var off = new Float64Array(T), def = new Float64Array(T), pOff = new Float64Array(T), pDef = new Float64Array(T), pull = new Float64Array(T);
   for(i = 0; i < T; i++){
@@ -4425,6 +4428,7 @@ function pemPanelInner(){
 
   // ── Knobs ──
   h += pemAtsCardHtml();
+  h += pemSpMissCardHtml();
   h += pemClvCardHtml();
   h += pemAnglesCardHtml();
   h += pemAutoCardHtml();
@@ -4955,8 +4959,12 @@ function pemMetaEnsure(){
   PEM_META.tried = true;
   var M = PE.gmeta = PE.gmeta || {}, need = {};
   PEM._games.forEach(function(g){ if(g.eventId && !M[g.eventId]) need[g.week] = 1; });
-  var weeks = Object.keys(need).map(Number); if(!weeks.length) return;
   var yr = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
+  // This week's slate, so openers get saved even if the Games tab is never opened.
+  fetch(PEAR_SCORE + "?groups=80&limit=400").then(function(r){ return r.json(); }).then(function(d){
+    pearNoteOpens(((d && d.events) || []).map(pearParseEvent).filter(Boolean));
+  }).catch(function(){});
+  var weeks = Object.keys(need).map(Number); if(!weeks.length) return;
   PEM_META.busy = true;
   pemPool(weeks, 4, function(w, next){
     fetch(PEAR_SCORE + "?groups=80&limit=400&seasontype=2&year=" + yr + "&week=" + w).then(function(r){ return r.json(); }).then(function(d){
@@ -5132,6 +5140,128 @@ function pemAnglesCardHtml(){
   return h + '</div>';
 }
 
+// ── WHERE SP+ MISSES ────────────────────────────────────────────────────────
+// Every graded game is predicted by the SP+ sheet you had going into that
+// week (rating gap + home edge), and the miss (actual margin minus that) is
+// broken down by situation. A bucket whose average miss is well away from zero
+// is somewhere SP+ is systematically off — and something to correct for.
+function pemSpRows(){
+  if(!PEM._games) return [];
+  var o = PEM.opts, hfa = o.hfa, out = [];
+  PEM._games.forEach(function(g){
+    var pr = pemPriorAt(g.week); if(!pr || !pr[g.homeId] || !pr[g.awayId]) return;
+    var gap = pr[g.homeId].fpi - pr[g.awayId].fpi, pred = gap + (g.neutral ? 0 : hfa), act = g.hs - g.as;
+    out.push({ g: g, w: g.week, gap: gap, pred: pred, act: act, res: act - pred, id: g.eventId });
+  });
+  return out;
+}
+function pemMeanSe(xs){
+  var n = xs.length; if(!n) return { n: 0, m: null, se: null };
+  var m = 0; xs.forEach(function(v){ m += v; }); m /= n;
+  var ss = 0; xs.forEach(function(v){ ss += (v - m) * (v - m); });
+  return { n: n, m: m, se: n > 1 ? Math.sqrt(ss / (n - 1)) / Math.sqrt(n) : null };
+}
+function pemSpMiss(){
+  var rows = pemSpRows(); if(rows.length < 20) return null;
+  var key = rows.length + "|" + pemSheetSig() + "|" + PEM.opts.hfa;
+  if(PEM._spm && PEM._spm.key === key) return PEM._spm.v;
+  var v = { n: rows.length, groups: [] };
+  // Scale: least-squares slope of the actual margin on SP+'s (gap + home edge).
+  var sx = 0, sy = 0, sxx = 0, sxy = 0;
+  rows.forEach(function(r){ sx += r.pred; sy += r.act; sxx += r.pred * r.pred; sxy += r.pred * r.act; });
+  var n = rows.length, slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+  var home = rows.filter(function(r){ return !r.g.neutral; }).map(function(r){ return r.act - r.gap; });
+  var mh = pemMeanSe(home), all = pemMeanSe(rows.map(function(r){ return r.res; }));
+  var ae = 0; rows.forEach(function(r){ ae += Math.abs(r.res); });
+  v.mae = ae / n; v.slope = slope; v.homeEdge = mh; v.bias = all;
+  // Favourite-perspective misses: positive = the SP+ favourite did better than SP+ said.
+  function fav(r){ return r.pred >= 0 ? r.res : -r.res; }
+  function grp(title, defs){
+    var G = { title: title, rows: [] };
+    defs.forEach(function(d){ var xs = rows.filter(d.f).map(d.v || fav); var ms = pemMeanSe(xs); if(ms.n) G.rows.push({ lab: d.lab, n: ms.n, m: ms.m, se: ms.se }); });
+    v.groups.push(G);
+  }
+  grp("By SP+ spread (favorite’s view)", [
+    { lab: "0–7", f: function(r){ return Math.abs(r.pred) < 7; } },
+    { lab: "7–14", f: function(r){ return Math.abs(r.pred) >= 7 && Math.abs(r.pred) < 14; } },
+    { lab: "14–21", f: function(r){ return Math.abs(r.pred) >= 14 && Math.abs(r.pred) < 21; } },
+    { lab: "21+", f: function(r){ return Math.abs(r.pred) >= 21; } }
+  ]);
+  grp("Home team’s view", [
+    { lab: "Home favorite", f: function(r){ return !r.g.neutral && r.pred > 0; }, v: function(r){ return r.res; } },
+    { lab: "Home underdog", f: function(r){ return !r.g.neutral && r.pred < 0; }, v: function(r){ return r.res; } }
+  ]);
+  var kind = function(id){ return pearConfKind(pearConfOf(id)); };
+  grp("By conference tier (favorite’s view)", [
+    { lab: "Power 4 vs Power 4", f: function(r){ return kind(r.g.awayId) === "p4" && kind(r.g.homeId) === "p4"; } },
+    { lab: "Group of 6 vs Group of 6", f: function(r){ return kind(r.g.awayId) === "g6" && kind(r.g.homeId) === "g6"; } },
+    { lab: "Power 4 favored over G6", f: function(r){ var fh = r.pred >= 0; return kind(fh ? r.g.homeId : r.g.awayId) === "p4" && kind(fh ? r.g.awayId : r.g.homeId) === "g6"; } }
+  ]);
+  var ws = {}; rows.forEach(function(r){ ws[r.w] = 1; });
+  grp("By week (favorite’s view)", Object.keys(ws).map(Number).sort(function(a, b){ return a - b; }).map(function(w){ return { lab: "Week " + w, f: function(r){ return r.w === w; } }; }));
+  // Do SP+'s misses on a team repeat? Correlation between a team's average miss
+  // before a week and its miss in that week. Near zero: SP+ already absorbs them.
+  var xs = [], ys = [];
+  rows.forEach(function(r){
+    [[r.g.homeId, r.res], [r.g.awayId, -r.res]].forEach(function(s){
+      var past = rows.filter(function(q){ return q.w < r.w && (q.g.homeId === s[0] || q.g.awayId === s[0]); })
+                     .map(function(q){ return q.g.homeId === s[0] ? q.res : -q.res; });
+      if(past.length){ var pm = 0; past.forEach(function(p){ pm += p; }); xs.push(pm / past.length); ys.push(s[1]); }
+    });
+  });
+  if(xs.length >= 30){
+    var mx = 0, my = 0; xs.forEach(function(a, i){ mx += a; my += ys[i]; }); mx /= xs.length; my /= ys.length;
+    var cxy = 0, cxx = 0, cyy = 0; xs.forEach(function(a, i){ cxy += (a - mx) * (ys[i] - my); cxx += (a - mx) * (a - mx); cyy += (ys[i] - my) * (ys[i] - my); });
+    v.persist = { r: cxy / Math.sqrt(cxx * cyy), n: xs.length, beta: cxy / cxx };
+  }
+  PEM._spm = { key: key, v: v };
+  return v;
+}
+// "SP+ corrected": SP+ plus the corrections its own earlier misses support —
+// a fitted home edge and scale, and a shrunk per-team miss — each estimated
+// only from the weeks before the one being predicted.
+function pemSpCorrected(w, rowsAll){
+  var past = rowsAll.filter(function(r){ return r.w < w; }), onsite = past.filter(function(r){ return !r.g.neutral; });
+  if(onsite.length < 30) return null;
+  var sx = 0, sy = 0, sxx = 0, sxy = 0, n = onsite.length;
+  onsite.forEach(function(r){ sx += r.gap; sy += r.act; sxx += r.gap * r.gap; sxy += r.gap * r.act; });
+  var b1 = (n * sxy - sx * sy) / (n * sxx - sx * sx), b0 = (sy - b1 * sx) / n;
+  // Pull the fitted line halfway back toward plain SP+ (slope 1, current home edge): a few weeks can't pin it down.
+  var K = 60, wgt = n / (n + K); b1 = wgt * b1 + (1 - wgt); b0 = wgt * b0 + (1 - wgt) * PEM.opts.hfa;
+  var tm = {}; past.forEach(function(r){ var e = r.act - ((r.g.neutral ? 0 : b0) + b1 * r.gap);
+    [[r.g.homeId, e], [r.g.awayId, -e]].forEach(function(s){ var t = tm[s[0]] = tm[s[0]] || { s: 0, n: 0 }; t.s += s[1]; t.n++; }); });
+  return function(r){
+    var th = tm[r.g.homeId], ta = tm[r.g.awayId], k = 6;                 // 6 games of "no correction" mixed in
+    var ch = th ? th.s / (th.n + k) : 0, ca = ta ? ta.s / (ta.n + k) : 0;
+    return (r.g.neutral ? 0 : b0) + b1 * r.gap + (ch - ca) / 2;   // a game's miss is shared by both teams, so each carries half
+  };
+}
+function pemSpMissCardHtml(){
+  var v = null; try{ v = pemSpMiss(); }catch(e){}
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🔍 Where SP+ misses</b></div>';
+  if(!v) return h + '<div class="pem-autosub">Needs SP+ sheets saved for graded weeks.</div></div>';
+  var bad = function(x){ return x.se && Math.abs(x.m) >= 2 * x.se; };
+  var fmt = function(m){ return (m >= 0 ? '+' : '') + m.toFixed(1); };
+  h += '<div class="pem-atsrow"><div><span>SP+ alone</span><b>' + v.mae.toFixed(2) + '</b><i>pts miss · ' + v.n + ' games</i></div>' +
+       '<div><span>Home edge in results</span><b>' + fmt(v.homeEdge.m) + '</b><i>±' + (v.homeEdge.se || 0).toFixed(1) + ' (using ' + PEM.opts.hfa.toFixed(1) + ')</i></div>' +
+       '<div><span>Best SP+ scale</span><b>' + v.slope.toFixed(2) + 'x</b><i>' + (v.slope > 1.08 ? 'SP+ too tight' : v.slope < 0.92 ? 'SP+ too wide' : 'about right') + '</i></div></div>';
+  v.groups.forEach(function(G){
+    if(!G.rows.length) return;
+    h += '<div class="pem-hd" style="margin-top:10px">' + x(G.title) + '</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Games</span><span>n</span><span>Avg miss</span></div>';
+    G.rows.forEach(function(r){
+      h += '<div class="pem-bkrow"><span>' + x(r.lab) + '</span><span>' + r.n + '</span><b class="' + (bad(r) ? (r.m > 0 ? 'up' : 'dn') : '') + '">' + fmt(r.m) + (r.se ? ' <small>±' + r.se.toFixed(1) + '</small>' : '') + '</b></div>';
+    });
+    h += '</div>';
+  });
+  if(v.persist){
+    h += '<div class="pem-atsacct">Team misses repeat? Correlation <b>' + v.persist.r.toFixed(2) + '</b> across ' + v.persist.n + ' team-games — ' +
+         (v.persist.r > 0.15 ? 'yes: teams SP+ has been wrong about tend to stay that way, so per-team corrections can help.'
+          : v.persist.r < -0.1 ? 'no, they bounce back: chasing a team’s recent misses would hurt.' : 'barely: SP+ already absorbs most of what the results say.') + '</div>';
+  }
+  h += '<div class="pem-autonote">Avg miss = actual margin minus SP+’s margin, from the favorite’s side unless noted: positive means favorites did better than SP+ said. Colored numbers are at least two standard errors from zero — a real pattern rather than noise. “SP+ corrected” in the table above applies the home edge, scale and per-team corrections these misses support, fitted only on earlier weeks.</div>';
+  return h + '</div>';
+}
+
 // The same honest weeks graded three ways, so it's visible whether leaning less
 // on SP+ would have done better: the tuned blend, the model with SP+ switched
 // off (results only), and the SP+ sheet on its own (rating gap + home edge).
@@ -5140,7 +5270,7 @@ function pemVersions(){
   var L = PE.lines || {};
   var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + Object.keys(L).length + "|" + pemSheetSig() + "|" + JSON.stringify((PE.tune && PE.tune.wf) || {});
   if(PEM._ver && PEM._ver.key === key) return PEM._ver.v;
-  var V = { blend: { lab: "Tuned blend" }, res: { lab: "Results only (no SP+)" }, sp: { lab: "SP+ sheet alone" } };
+  var V = { blend: { lab: "Tuned blend" }, res: { lab: "Results only (no SP+)" }, sp: { lab: "SP+ sheet alone" }, spc: { lab: "SP+ corrected" } };
   Object.keys(V).forEach(function(k){ var o = V[k]; o.err = 0; o.n = 0; o.w = 0; o.l = 0; o.p = 0; });
   function grade(v, g, pred){
     var act = g.hs - g.as; v.err += Math.abs(pred - act); v.n++;
@@ -5149,16 +5279,21 @@ function pemVersions(){
     var cover = act - vh; if(cover === 0){ v.p++; return; }
     if((cover > 0) === (pred > vh)) v.w++; else v.l++;
   }
+  var spRows = pemSpRows(), spById = {}; spRows.forEach(function(r){ spById[r.id] = r; });
   pemWFWeeks().forEach(function(w){
     var train = PEM._games.filter(function(g){ return g.week < w; }), test = PEM._games.filter(function(g){ return g.week === w; });
     if(!test.length) return;
-    var ow = pemOptsForWeek(w) || PEM.opts, pr = pemPriorAt(w);
+    var ow = pemOptsForWeek(w) || PEM.opts, pr = pemPriorAt(w), corr = pemSpCorrected(w, spRows);
     var oRes = {}; for(var k in ow) oRes[k] = ow[k]; oRes.priorW = 0; oRes.priorW8 = 0;
-    var fB = pemFit(train, pr, ow), fR = pemFit(train, pr, oRes);
+    var fB = pemFit(train, pr, ow), fR = pemFit(train, null, oRes);
     test.forEach(function(g){
-      var b = pemPredictRaw(fB.ratings, fB.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW); if(b) grade(V.blend, g, b.home - b.away);
-      var r = pemPredictRaw(fR.ratings, fR.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW); if(r) grade(V.res, g, r.home - r.away);
-      if(pr && pr[g.homeId] && pr[g.awayId]) grade(V.sp, g, pr[g.homeId].fpi - pr[g.awayId].fpi + (g.neutral ? 0 : ow.hfa));
+      // Only games every version can predict, so they're graded on exactly the same set.
+      var b = pemPredictRaw(fB.ratings, fB.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW);
+      var r = pemPredictRaw(fR.ratings, fR.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW);
+      var sr = spById[g.eventId];
+      if(!b || !r || !sr) return;
+      grade(V.blend, g, b.home - b.away); grade(V.res, g, r.home - r.away); grade(V.sp, g, sr.pred);
+      grade(V.spc, g, corr ? corr(sr) : sr.pred);
     });
   });
   PEM._ver = { key: key, v: V };
@@ -5221,13 +5356,13 @@ function pemAtsCardHtml(){
   if(VV && VV.blend.n){
     h += '<div class="pem-hd" style="margin-top:12px">Which version wins?</div>';
     h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Version</span><span>Miss</span><span>ATS</span></div>';
-    ["blend", "res", "sp"].forEach(function(k){
+    ["blend", "res", "sp", "spc"].forEach(function(k){
       var v = VV[k]; if(!v.n) return;
       var n = v.w + v.l, pc = n ? v.w / n : null;
       h += '<div class="pem-bkrow"><span>' + v.lab + '</span><span>' + (v.err / v.n).toFixed(2) + ' <small>pts</small></span>' +
            '<b class="' + cls(pc) + '">' + v.w + '-' + v.l + (pc !== null ? ' \u00b7 ' + (pc * 100).toFixed(1) + '%' : '') + '</b></div>';
     });
-    h += '</div><div class="pem-autonote" style="margin-top:4px">Same weeks, same honest grading. \u201cResults only\u201d is the model with SP+ switched off; \u201cSP+ alone\u201d is the pasted sheet\u2019s rating gap plus home edge. Lower miss is better.</div>';
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Same games (' + VV.blend.n + ') and the same honest grading for every row. \u201cResults only\u201d is the model with SP+ switched off; \u201cSP+ alone\u201d is the pasted sheet\u2019s rating gap plus home edge; \u201cSP+ corrected\u201d adds the fixes SP+\u2019s own earlier misses support (see Where SP+ misses). Lower miss is better.</div>';
   }
   var parts = ['<b>' + r.lined + '</b> of ' + r.total + ' games graded across ' + r.weeks + ' week' + (r.weeks === 1 ? '' : 's')];
   if(r.early) parts.push(r.early + ' from week ' + r.earlyWeeks.join(", ") + ' can\u2019t be \u2014 nothing earlier to fit on');
