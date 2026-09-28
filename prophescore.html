@@ -832,6 +832,18 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pem-autotop b{font-size:13px;font-weight:900}
 .pem-autosub{font-size:11px;font-weight:800;color:var(--text);margin-top:6px}
 .pem-autonote{font-size:10px;font-weight:700;color:var(--muted);margin-top:4px;line-height:1.45}
+
+.pr-ats{display:inline-block;border:1.5px solid var(--border);border-radius:20px;padding:0 7px;color:var(--text);letter-spacing:.02em}
+.pr-ats.up{background:var(--green-bg);color:#15803d}
+.pr-ats.dn{background:var(--red-bg);color:var(--red2)}
+.pr-ats.wait{border-style:dashed;color:var(--muted)}
+.pem-ats{border:2px solid var(--border);border-radius:12px;padding:10px 12px;margin:12px 0 4px;background:#fff;box-shadow:2px 2px 0 var(--border)}
+.pem-atsrow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.pem-atsrow div{display:flex;flex-direction:column;align-items:center;border:1.5px solid var(--border2);border-radius:9px;padding:6px 4px}
+.pem-atsrow span{font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;text-align:center}
+.pem-atsrow b{font-size:17px;font-weight:900;margin-top:2px}
+.pem-atsrow b.up{color:#15803d}.pem-atsrow b.dn{color:var(--red2)}
+.pem-atsrow i{font-style:normal;font-size:11px;font-weight:800;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -1065,6 +1077,7 @@ function peLoad(cb){
       PE.runs = o.runs||[]; PE.baseline = o.baseline||null;
       PE.teamstats = o.teamstats||{};
       PE.tune = o.tune||null;
+      PE.lines = o.lines||{};
     }
   }catch(e){}
   var uid = ME();
@@ -1081,6 +1094,7 @@ function peLoad(cb){
       PE.baseline = v.baseline || PE.baseline || null;
       PE.teamstats = v.teamstats || PE.teamstats || {};
       PE.tune = v.tune || PE.tune || null;
+      PE.lines = v.lines || PE.lines || {};
     }
     peAfterLoad();
     PE.ready = true; PE.err = "";
@@ -1141,7 +1155,9 @@ function peSave(){
     // survive a rebuild and only genuinely new games ever cost a request.
     teamstats: PE.teamstats || null,
     // Auto-tune: on/off, and which data it last tuned against.
-    tune:      PE.tune      || null
+    tune:      PE.tune      || null,
+    // Closing lines by event id, for the record vs Vegas.
+    lines:     PE.lines     || null
   });
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
@@ -2104,6 +2120,8 @@ function pemFetchBoxScores(games, progress, cb){
           g.toMargin = null;
         }
         // The rest of the same response \u2014 free.
+        PE.lines = PE.lines || {};
+        if(PE.lines[g.eventId] === undefined) PE.lines[g.eventId] = pemParseLine(d);
         var st = pemParseTeamStats(d);
         if(st && st[g.awayId] && st[g.homeId]){
           g.statAway = st[g.awayId];
@@ -3983,6 +4001,7 @@ function pemPanelInner(){
   }
 
   // ── Knobs ──
+  h += pemAtsCardHtml();
   h += pemAutoCardHtml();
   h += '<div class="pem-knobs"><div class="pem-sechd">Inputs <span>' + (pemAutoOn() ? 'set by auto-tune \u00b7 drag to take over' : 'drag to refit instantly') + '</span></div>';
   PEM_KNOBS.forEach(function(k){
@@ -4152,6 +4171,8 @@ function pemBindPanel(){
     pemRunAutoFit("by hand");
   });
   pemBindAutoCard();
+  var lb = document.getElementById("pem-lines");
+  if(lb) lb.addEventListener("click", function(){ pemEnsureLines(true); this.disabled = true; this.textContent = "Loading\u2026"; });
 
   var reset = document.getElementById("pem-reset");
   if(reset) reset.addEventListener("click", function(){
@@ -4329,6 +4350,122 @@ function pemTuneOne(key){
   return best;
 }
 
+// ── RECORD VS VEGAS ──────────────────────────────────────────────────────────
+// Closing lines for finished games come from the same ESPN summary the box
+// scores use, cached by event id in PE.lines as [homeSpread, total] (homeSpread
+// negative = home favoured; null = no line posted).
+function pemParseLine(d){
+  var pcs = (d && d.pickcenter) || [];
+  var comps = ((((d||{}).header||{}).competitions||[])[0]||{}).competitors || [];
+  var abbr = {};
+  comps.forEach(function(c){ var t = c.team || {}; if(t.abbreviation) abbr[String(t.abbreviation).toUpperCase()] = c.homeAway; });
+  for(var i = 0; i < pcs.length; i++){
+    var pc = pcs[i] || {}, sp = parseFloat(pc.spread), ou = parseFloat(pc.overUnder), det = String(pc.details || "");
+    var total = isFinite(ou) ? ou : null;
+    if(/^(EVEN|PK|PICK)/i.test(det)) return [0, total];
+    var hf = pc.homeTeamOdds && pc.homeTeamOdds.favorite, af = pc.awayTeamOdds && pc.awayTeamOdds.favorite;
+    if(isFinite(sp)){
+      var a = Math.abs(sp);
+      if(hf) return [-a, total];
+      if(af) return [a, total];
+    }
+    var m = det.match(/^\s*([A-Za-z&.'-]+)\s+(-?\d+(?:\.\d+)?)/);
+    if(m){
+      var side = abbr[m[1].toUpperCase()], v = Math.abs(parseFloat(m[2]));
+      if(side === "home") return [-v, total];
+      if(side === "away") return [v, total];
+    }
+    if(isFinite(sp)) return [sp, total];      // ESPN's own sign: the home team's number
+  }
+  return null;
+}
+var PEM_LINES = { busy: false, tried: false };
+function pemLinesMissing(){
+  if(!PEM._games) return [];
+  var L = PE.lines || {};
+  return PEM._games.filter(function(g){ return g.eventId && L[g.eventId] === undefined; });
+}
+// Fetch any missing lines in the background (once per session unless asked).
+function pemEnsureLines(force){
+  if(PEM_LINES.busy || (!force && PEM_LINES.tried) || !PEM._games) return;
+  var todo = pemLinesMissing();
+  PEM_LINES.tried = true;
+  if(!todo.length) return;
+  PEM_LINES.busy = true;
+  PE.lines = PE.lines || {};
+  pemPool(todo, 8, function(g, next){
+    fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event=" + g.eventId)
+      .then(function(r){ return r.json(); })
+      .then(function(d){ PE.lines[g.eventId] = pemParseLine(d); next(); })
+      .catch(function(){ next(); });                  // leave undefined: retried next session
+  }, function(){
+    PEM_LINES.busy = false; PEM._ats = null;
+    peSave();
+    if(SC.screen === "prophescore") renderPoolEdge();
+  });
+}
+// Each week's games predicted by a fit on the weeks before it, with the current
+// settings, then graded against the closing line.
+function pemAts(){
+  if(!PEM._games || !PEM._games.length) return null;
+  var L = PE.lines || {};
+  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + Object.keys(L).length + "|" + (PEM.priorN||0);
+  if(PEM._ats && PEM._ats.key === key && PEM._ats.games === PEM._games) return PEM._ats.v;
+  var weeks = {}; PEM._games.forEach(function(g){ weeks[g.week] = 1; });
+  var ws = Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; });
+  var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0 };
+  ws.forEach(function(w){
+    var train = PEM._games.filter(function(g){ return g.week < w; });
+    var test  = PEM._games.filter(function(g){ return g.week === w && L[g.eventId]; });
+    if(train.length < 30 || !test.length) return;
+    var fit = pemFit(train, PEM.prior, PEM.opts), any = false;
+    test.forEach(function(g){
+      var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
+      if(!p) return;
+      var vHome = -L[g.eventId][0];                 // Vegas' expected home margin
+      var pred = p.home - p.away, act = g.hs - g.as;
+      r.lined++; any = true;
+      if(pred !== 0){ r.suN++; if((pred > 0) === (act > 0)) r.su++; }
+      if(Math.abs(pred - vHome) < 0.05) return;     // model agrees with the line: no play
+      var pickHome = pred > vHome, cover = act - vHome, strong = Math.abs(pred - vHome) >= 3;
+      if(cover === 0){ r.p++; if(strong) r.sp++; return; }
+      var won = (cover > 0) === pickHome;
+      if(won){ r.w++; if(strong) r.sw++; } else { r.l++; if(strong) r.sl++; }
+    });
+    if(any) r.weeks++;
+  });
+  r.pct = (r.w + r.l) ? r.w / (r.w + r.l) : null;
+  r.spct = (r.sw + r.sl) ? r.sw / (r.sw + r.sl) : null;
+  PEM._ats = { key: key, games: PEM._games, v: r };
+  return r;
+}
+function pemAtsTxt(r){ return r.w + "-" + r.l + (r.p ? "-" + r.p : ""); }
+function pemAtsChip(){
+  if(!PEM._games || !PEM.ratings) return "";
+  var r = pemAts(), miss = pemLinesMissing().length;
+  if(!r || !(r.w + r.l)) return PEM_LINES.busy ? ' · <span class="pr-ats wait">vs Vegas: loading lines…</span>' : '';
+  var good = r.pct >= 0.524;
+  return ' · <span class="pr-ats ' + (good ? "up" : "dn") + '">vs Vegas ' + pemAtsTxt(r) + ' (' + (r.pct*100).toFixed(1) + '%)</span>' +
+         (PEM_LINES.busy && miss ? ' <span class="pr-ats wait">updating…</span>' : '');
+}
+function pemAtsCardHtml(){
+  if(!PEM._games || !PEM.ratings) return "";
+  var r = pemAts(), miss = pemLinesMissing().length;
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🎰 Record vs Vegas</b>' +
+          (!PEM_LINES.busy && miss ? '<button class="btn btn-sm btn-ghost" id="pem-lines">Load ' + miss + ' lines</button>' : '') + '</div>';
+  if(!r || !r.lined){
+    h += '<div class="pem-autosub">' + (PEM_LINES.busy ? 'Loading closing lines from ESPN…' : 'No closing lines yet.') + '</div></div>';
+    return h;
+  }
+  var cls = function(p){ return p === null ? "" : (p >= 0.524 ? "up" : "dn"); };
+  h += '<div class="pem-atsrow"><div><span>Against the spread</span><b class="' + cls(r.pct) + '">' + pemAtsTxt(r) + '</b><i>' + (r.pct !== null ? (r.pct*100).toFixed(1) + '%' : '—') + '</i></div>' +
+       '<div><span>Edge 3+ pts</span><b class="' + cls(r.spct) + '">' + r.sw + '-' + r.sl + (r.sp ? '-' + r.sp : '') + '</b><i>' + (r.spct !== null ? (r.spct*100).toFixed(1) + '%' : '—') + '</i></div>' +
+       '<div><span>Winners picked</span><b>' + r.su + '/' + r.suN + '</b><i>' + (r.suN ? (100*r.su/r.suN).toFixed(1) + '%' : '—') + '</i></div></div>';
+  h += '<div class="pem-autonote">' + r.lined + ' games with a closing line across ' + r.weeks + ' weeks. Each game was predicted by the model fitted only on the weeks before it, with today’s settings — so the record reflects picks it could actually have made. ' +
+       'Break-even at standard odds is 52.4%.' + (PEM_LINES.busy ? ' Loading more lines…' : '') + '</div>';
+  return h + '</div>';
+}
+
 // ── AUTO-FIT ─────────────────────────────────────────────────────────────────
 // Finds the settings with the lowest honest error over every result pulled so
 // far. "Honest" = the same rolling test as the CV score: fit on the weeks before,
@@ -4419,6 +4556,7 @@ function pemRunAutoFit(reason){
 }
 // Called after every render: tunes in the background when there is new data.
 function pemAutoMaybe(){
+  pemEnsureLines(false);
   if(!pemAutoOn() || PEM_AUTO.running || !PE.ready || !PEM.ratings || !PEM._games) return;
   if(PE.tune && PE.tune.sig === pemTuneSig()) return;
   pemRunAutoFit(PE.tune && PE.tune.sig ? "new results" : "first run");
@@ -5280,7 +5418,7 @@ function pearGamesHtml(){
   }
   var h = '<div class="pear">';
   h += '<div class="pr-h1">Week ' + (PEAR.week || "") + ' Games</div>';
-  h += '<div class="pr-h2">Prophescore projections' + (PEM.ratings ? ' · ' + PEM.n + ' games fit' : '') + '</div>';
+  h += '<div class="pr-h2">Prophescore projections' + (PEM.ratings ? ' · ' + PEM.n + ' games fit' + pemAtsChip() : '') + '</div>';
   if(PEAR.weeks){
     h += '<div class="pr-weeks">';
     PEAR.weeks.forEach(function(w){
