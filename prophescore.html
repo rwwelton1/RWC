@@ -1704,7 +1704,14 @@ var PX_KNOBS = [
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." }
 ];
 var PX_GRID = { alpha: [50, 100, 200, 400, 800, 1600], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1] };
-function pxState(){ PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {}; for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k]; return S; }
+function pxState(){
+  PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
+  for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
+  // Firebase drops empty objects, empty arrays and nulls on save (a week with no
+  // finished games comes back with no games/agg/lines at all), so restore the shape.
+  for(var wk in S.wk){ var W = S.wk[wk]; if(!W){ delete S.wk[wk]; continue; } W.games = W.games || []; W.agg = W.agg || {}; W.lines = W.lines || {}; }
+  return S;
+}
 function pxOpts(){ return pxState().opts; }
 function pxYear(){ return (PE.meta && PE.meta.espnYear) || new Date().getFullYear(); }
 function pxKey(){ return (PE.px && PE.px.key) || ""; }
@@ -1718,13 +1725,23 @@ function pxCall(path, params){
   if(!S.calls || S.calls.m !== mon) S.calls = { m: mon, n: 0 };
   S.calls.n++;
   var q = Object.keys(params || {}).map(function(k){ return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); }).join("&");
-  return fetch(PX_BASE + path + (q ? "?" + q : ""), { headers: { "Authorization": "Bearer " + pxKey(), "Accept": "application/json" } })
-    .then(function(r){
-      if(r.status === 401 || r.status === 403) throw new Error("CFBD rejected the API key");
-      if(r.status === 429) throw new Error("CFBD monthly call limit reached");
-      if(!r.ok) throw new Error("CFBD " + path + " returned " + r.status);
-      return r.json();
-    }, function(){ throw new Error("Couldn’t reach CFBD (network or browser blocked the request)"); });
+  var url = PX_BASE + path + (q ? "?" + q : "");
+  function wait(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+  function attempt(n){
+    return fetch(url, { headers: { "Authorization": "Bearer " + pxKey(), "Accept": "application/json" } })
+      .then(function(r){
+        if(r.status === 401 || r.status === 403) throw Object.assign(new Error("CFBD rejected the API key"), { fatal: true });
+        if(r.status === 429){ if(n < 2) return wait(6000).then(function(){ return attempt(n + 1); }); throw Object.assign(new Error("CFBD says too many requests (rate or monthly limit)"), { fatal: true }); }
+        if(!r.ok){ if(r.status >= 500 && n < 2) return wait(3000).then(function(){ return attempt(n + 1); }); throw Object.assign(new Error("CFBD " + path + " returned " + r.status), { fatal: true }); }
+        return r.json().catch(function(){ throw new Error("download cut off"); });
+      }, function(){ throw new Error("network"); })
+      .catch(function(e){
+        if(e.fatal) throw e;
+        if(n < 2) return wait(n ? 5000 : 1500).then(function(){ return attempt(n + 1); });
+        throw new Error("Couldn’t reach CFBD (connection dropped or blocked)");
+      });
+  }
+  return attempt(0);
 }
 // School name -> ESPN/CFBD team id (CFBD team ids are ESPN's).
 function pxTeamId(name){
@@ -2003,7 +2020,7 @@ function pxSync(force){
     for(var w = 1; w <= Math.max(1, cur); w++) weeks.push(w);
     return pxLoadTeams();
   }).then(function(){
-    PX.msg = "Loading roster prior…"; pxStatus();
+    PX.msg = "Loading roster prior…"; PX.step = "Roster prior"; pxStatus();
     return pxLoadPrior(force).catch(function(e){ PX.err = "Roster prior: " + e.message; });
   }).then(function(){
     var chain = Promise.resolve();
@@ -2011,18 +2028,19 @@ function pxSync(force){
       chain = chain.then(function(){
         var key = pxYear() + "-" + w, have = S.wk[key];
         if(have && have.done && have.v === PX_AGG_V && !force) return;
-        PX.msg = "Loading week " + w + " plays…"; pxStatus();
-        return pxLoadWeek(w, force);
+        PX.msg = "Loading week " + w + " plays…"; PX.step = "Week " + w; pxStatus();
+        return pxLoadWeek(w, force).then(function(){ peSave(); });
       });
     });
     return chain;
   }).then(function(){
-    PX.busy = false; PX.msg = ""; S.syncedAt = Date.now();
+    PX.busy = false; PX.msg = ""; PX.step = ""; S.syncedAt = Date.now();
     pxRebuild(); peSave();
     if(SC.screen === "prophescore") renderPoolEdge();
   }).catch(function(e){
-    PX.busy = false; PX.msg = ""; PX.err = e.message || String(e); pxStatus();
-    pxRebuild();
+    PX.busy = false; PX.msg = ""; PX.err = (PX.step ? PX.step + ": " : "") + (e.message || String(e)); PX.step = ""; pxStatus();
+    try{ pxRebuild(); }catch(e2){}
+    if(SC.screen === "prophescore") renderPoolEdge();
   });
 }
 
@@ -2483,7 +2501,7 @@ function pxRebuild(){
   });
   // Special teams, raw: kickoff return start (own yard line), kickoff coverage (opponent's start), punt net and punt net allowed.
   var st = {};
-  pxGames().forEach(function(x){ var A = x.W.agg[x.g.id]; if(!x.g.c || !A) return; var sh = pxUnpack(A.h), sa = pxUnpack(A.a); if(!sh || !sa) return;
+  pxGames().forEach(function(x){ var A = x.g.c && x.W.agg && x.W.agg[x.g.id]; if(!A) return; var sh = pxUnpack(A.h), sa = pxUnpack(A.a); if(!sh || !sa) return;
     [[x.g.h, sh, sa], [x.g.a, sa, sh]].forEach(function(z){ var t = st[z[0]] = st[z[0]] || { kN: 0, kY: 0, kTB: 0, cN: 0, cY: 0, pN: 0, pY: 0, aN: 0, aY: 0 };
       t.kN += z[1].koN; t.kY += z[1].koY; t.kTB += z[1].koTB; t.cN += z[2].koN; t.cY += z[2].koY; t.aN += z[1].pnN; t.aY += z[1].pnY; t.pN += z[2].pnN; t.pY += z[2].pnY; }); });
   PX.st = st;
@@ -2495,6 +2513,10 @@ function pxRebuild(){
     if(isFinite(L.c)) PE.lines[id] = [L.c, L.t]; if(L.o !== null && isFinite(L.o)) peOpenSet(id, L.o, "espn"); }); });
   return true;
 }
+// Coming back to the tab after a dropped download picks the sync up again.
+document.addEventListener("visibilitychange", function(){
+  if(document.visibilityState === "visible" && pxKey() && PX.err && /reach CFBD|cut off/.test(PX.err) && !PX.busy){ PX.err = ""; pxSync(false); }
+});
 // Auto-tune when the data changes.
 function pxMaybe(){
   if(!pxKey()) return;
@@ -2514,7 +2536,7 @@ function pxDataCardHtml(){
          '<div class="pem-autonote">Get one at collegefootballdata.com/key (free tier: about 1,000 calls a month; this page uses about 40 to set up and 3 a week after). It’s stored with your account.</div>';
   } else {
     h += '<div class="pem-autosub">' + (PX.busy ? x(PX.msg || 'Loading…') : (ws.length ? ('<b>' + g + '</b> FBS games from weeks ' + ws[0] + '–' + ws[ws.length - 1] + ' · ' + (S.prior ? Object.keys(S.prior.t).length + ' roster priors' : 'no roster prior yet')) : 'No weeks loaded yet.')) + '</div>';
-    if(PX.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PX.err) + (/reach CFBD/.test(PX.err) ? ' — if this keeps happening, your browser may be blocking CFBD; tell me and I’ll route it another way.' : '') + '</div>';
+    if(PX.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PX.err) + (/reach CFBD/.test(PX.err) ? ' Weeks already downloaded are kept, so tapping Refresh picks up where it stopped. Keep this tab in front while it loads — iPhone pauses downloads in background tabs.' : '') + '</div>';
     if(S.calls) h += '<div class="pem-autonote">' + S.calls.n + ' CFBD calls this month.' + (S.syncedAt ? ' Last refresh ' + new Date(S.syncedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + '.' : '') + '</div>';
   }
   h += '<div style="display:flex;gap:6px;margin-top:8px"><input id="px-key" type="password" autocomplete="off" placeholder="' + (pxKey() ? 'Key saved — paste to replace' : 'CFBD API key') + '" style="flex:1;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:800 13px \'Nunito\',sans-serif;background:var(--cream)">' +
@@ -2582,7 +2604,7 @@ function pxBind(){
     pxMaybe(); renderPoolEdge();
   };
   var sy = document.getElementById("px-sync");
-  if(sy) sy.onclick = function(){ pxSync(true); };
+  if(sy) sy.onclick = function(){ PX.err = ""; pxSync(false); };            // finished weeks are kept; this week and anything missing are fetched
   var tu = document.getElementById("px-tune");
   if(tu) tu.onclick = function(){ pxState().tuneSig = ""; pxAutoTune(); pxStatus(); renderPoolEdge(); };
 }
