@@ -900,6 +900,34 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .tm-res{font-weight:900;font-variant-numeric:tabular-nums}
 .tm-res.w{color:#15803d}.tm-res.l{color:var(--red2)}
 @media(max-width:380px){.rk-head,.rk-row{grid-template-columns:24px 30px 1fr 44px 30px 30px 30px}.rk-nm b{font-size:12px}}
+
+.tm-proj{background:#fff;border:2px solid var(--border);border-radius:12px;box-shadow:2px 2px 0 var(--border);padding:10px}
+.tm-pbig{display:flex;flex-direction:column;align-items:center}
+.tm-pbig small,.tm-pgrid small{font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.tm-pbig b{font-size:26px;font-weight:900;line-height:1.1}
+.tm-pbig span{font-size:11px;font-weight:800;color:var(--muted)}
+.tm-pgrid{display:flex;justify-content:space-around;gap:6px;margin-top:8px;padding-top:8px;border-top:1.5px dashed var(--border2)}
+.tm-pgrid div{display:flex;flex-direction:column;align-items:center}
+.tm-pgrid b{font-size:16px;font-weight:900}
+.tm-dist{display:flex;gap:3px;align-items:flex-end;justify-content:center;margin-top:10px;overflow-x:auto;padding-bottom:2px}
+.tm-dcol{flex:1;min-width:30px;max-width:64px;display:flex;flex-direction:column;align-items:center;gap:2px}
+.tm-dpct{font-size:9px;font-weight:900;color:var(--muted);min-height:12px}
+.tm-dbar{width:100%;height:56px;display:flex;align-items:flex-end}
+.tm-dbar i{display:block;width:100%;background:#cfd7ee;border:1.5px solid var(--border);border-radius:4px 4px 0 0}
+.tm-dcol.best .tm-dbar i{background:var(--gold)}
+.tm-dcol.best .tm-dpct{color:var(--text)}
+.tm-dlab{font-size:9.5px;font-weight:900;white-space:nowrap}
+.tm-g .tm-on{display:flex;flex-direction:column}
+.tm-onn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-onn u{text-decoration:none;font-size:8.5px;font-weight:900;color:var(--muted);border:1px solid var(--border2);border-radius:4px;padding:0 3px;vertical-align:1px}
+.tm-on small{font-size:9.5px;font-weight:700;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-g.post{border-style:dashed}
+.tm-res.live{color:var(--red2)}
+.tm-wp{display:flex;flex-direction:column;align-items:flex-end;gap:2px;min-width:54px}
+.tm-wp b{font-size:13px;font-weight:900}
+.tm-wp b.fav{color:#2f5fd0}.tm-wp b.dog{color:var(--red2)}
+.tm-wp i{display:block;width:54px;height:5px;background:var(--red-bg);border-radius:3px;overflow:hidden}
+.tm-wp i em{display:block;height:100%;background:#2f5fd0}
 </style>
 </head>
 <body>
@@ -5389,9 +5417,9 @@ function pearLoadFbs(cb, retry){
   if(PEAR._fbsFailed && !retry){ if(cb) cb(); return; }   // don't hammer ESPN; "Try again" retries
   PEAR._fbsFailed = false;
   try{
-    var c = JSON.parse(localStorage.getItem("pear_fbs2") || "null");
+    var c = JSON.parse(localStorage.getItem("pear_fbs3") || "null");
     if(c && c.ts && Date.now() - c.ts < 7*864e5 && c.ids && c.ids.length >= 125 && c.ids.length <= 145){
-      PEAR.fbs = {}; c.ids.forEach(function(id){ PEAR.fbs[id] = 1; }); PEAR.fbsSrc = c.src || ""; if(cb) cb(); return;
+      PEAR.fbs = {}; c.ids.forEach(function(id){ PEAR.fbs[id] = 1; }); PEAR.fbsSrc = c.src || ""; PEAR.conf = c.conf || {}; if(cb) cb(); return;
     }
   }catch(e){}
   try{ localStorage.removeItem("pear_fbs"); }catch(e){}
@@ -5405,14 +5433,14 @@ function pearLoadFbs(cb, retry){
     (function walk(n){
       if(!n) return;
       (n.children || []).forEach(walk);
-      ((n.standings && n.standings.entries) || []).forEach(function(e){ var t = e.team || {}; if(t.id){ out[String(t.id)] = 1; pearAbsorbTeam(t); } });
+      ((n.standings && n.standings.entries) || []).forEach(function(e){ var t = e.team || {}; if(t.id){ out[String(t.id)] = 1; pearAbsorbTeam(t); if(n.name) (PEAR.conf = PEAR.conf || {})[String(t.id)] = n.name; } });
     })(d);
     return Object.keys(out);
   }
   function ok(ids){ return ids.length >= 125 && ids.length <= 145; }   // FBS is ~136–138; anything else is the wrong list
   function accept(ids, src){
     PEAR.fbs = {}; ids.forEach(function(id){ PEAR.fbs[id] = 1; }); PEAR.fbsSrc = src;
-    try{ localStorage.setItem("pear_fbs2", JSON.stringify({ ts: Date.now(), ids: ids, src: src })); }catch(e){}
+    try{ localStorage.setItem("pear_fbs3", JSON.stringify({ ts: Date.now(), ids: ids, src: src, conf: PEAR.conf || {} })); localStorage.removeItem("pear_fbs2"); }catch(e){}
     try{ localStorage.removeItem("pear_fbs"); }catch(e){}                  // the old, unfiltered list
   }
   // 1. FBS standings in one request.
@@ -5814,43 +5842,187 @@ function pearBindRank(){
 }
 
 // ── Team page ─────────────────────────────────────────────────────────────────
+// ── Team info sheet ──────────────────────────────────────────────────────────
+// Full schedule from ESPN, the model's chance to win every remaining game, and
+// a projected finish built from those chances (every combination of results,
+// not just the favourite in each game).
+PEAR.sched = {};
+var PEAR_FCS_WIN = 0.95;   // no rating for FCS teams; an FBS team wins these ~95% of the time
+function pearNum(v){ if(v && typeof v === "object") v = v.value != null ? v.value : v.displayValue; var n = parseFloat(v); return isFinite(n) ? n : null; }
+function pearLoadSched(id, cb){
+  var c = PEAR.sched[id];
+  if(c && Date.now() - c.ts < 10*60*1000){ cb(); return; }
+  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams/" + id + "/schedule")
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var t = d.team || {};
+      var evs = (d.events || []).map(function(ev){
+        var c0 = (ev.competitions || [])[0] || {}, st = (c0.status || {}).type || {};
+        var me = null, op = null;
+        (c0.competitors || []).forEach(function(k){ var tm = k.team || {}; pearAbsorbTeam(tm); if(String(tm.id || k.id) === String(id)) me = k; else op = k; });
+        if(!me || !op) return null;
+        var bc = []; (c0.broadcasts || []).forEach(function(b){ var n = (b.media && b.media.shortName) || (b.names && b.names[0]); if(n && bc.indexOf(n) < 0) bc.push(n); });
+        return { id: String(ev.id), date: ev.date || c0.date, week: (ev.week && ev.week.number) || null,
+                 post: ((ev.seasonType || {}).type === 3), neutral: !!c0.neutralSite, conf: c0.conferenceCompetition,
+                 home: me.homeAway === "home", oppId: String((op.team || {}).id || op.id),
+                 state: st.state || "pre", done: !!st.completed, detail: st.shortDetail || "",
+                 my: pearNum(me.score), their: pearNum(op.score), won: me.winner === true, tv: bc.join("/") };
+      }).filter(Boolean);
+      evs.sort(function(a, b){ return new Date(a.date) - new Date(b.date); });
+      PEAR.sched[id] = { ts: Date.now(), events: evs, rec: t.recordSummary || "", standing: t.standingSummary || "" };
+      cb();
+    })
+    .catch(function(){ PEAR.sched[id] = { ts: Date.now(), events: null, err: true }; cb(); });
+}
+// The model's chance that `id` wins a scheduled game (null when it can't say).
+function pearGameChance(id, g){
+  if(!pearIsFbs(g.oppId)) return { p: PEAR_FCS_WIN, est: true };
+  var a = g.home ? g.oppId : id, h = g.home ? id : g.oppId;
+  var p = pearProject(a, h, g.neutral);
+  if(!p) return null;
+  return { p: g.home ? p.homeWin : p.awayWin, proj: p, myPts: g.home ? p.home : p.away, oppPts: g.home ? p.away : p.home,
+           line: pearLineTxt(a, h, p.margin) };
+}
+// Chance of each final win total from the remaining games' chances.
+function pearWinDist(ps){
+  var dist = [1];
+  ps.forEach(function(p){
+    var nd = new Array(dist.length + 1).fill(0);
+    dist.forEach(function(q, k){ nd[k] += q * (1 - p); nd[k+1] += q * p; });
+    dist = nd;
+  });
+  return dist;
+}
 function pearTeamHtml(id){
-  var cur = pearRankOrder(PEM.ratings), rk = cur.rank[id];
-  var rows = pemCompareRows(), r = null; rows.forEach(function(z){ if(z.id === id) r = z; });
-  var R = pemRanks(), log = pemTeamLog(id) || [];
+  var cur = PEM.ratings ? pearRankOrder(PEM.ratings) : { rank: {} }, rk = cur.rank[id];
+  var rows = PEM.ratings ? pemCompareRows() : [], r = null; rows.forEach(function(z){ if(z.id === id) r = z; });
+  var R = PEM.ratings ? pemRanks() : { rank: {}, n: {} }, S = PEAR.sched[id];
   var h = '<div class="pc-back" data-pear-close></div><div class="pc tm">';
   h += '<button class="pc-x" data-pear-close aria-label="Close">✕</button>';
   h += '<div class="tm-top">' + pearImg(id, "tm-logo") + '<div><div class="pc-title" style="text-align:left;padding:0">' + x(pearName(id)) + '</div>' +
-       '<div class="tm-sub">' + (rk ? '<b>#' + rk + '</b> in Prophescore · ' : '') + (r ? r.w + '-' + r.l : '') + ' vs FBS</div></div></div>';
-  h += '<div class="tm-stats">';
-  [["Rating", "rating"], ["Offense", "off"], ["Defense", "def"], ["Sched", "sos"], ["Margin", "margin"], ["aPPG", "appg"], ["aPA/G", "apapg"]].forEach(function(s){
-    var v = r ? r[s[1]] : null, rr = R.rank[id] && R.rank[id][s[1]], c = pearHeat(rr, R.n[s[1]]);
-    h += '<div class="tm-stat"><small>' + s[0] + '</small><b>' + pearFmt(s[1], v) + '</b>' +
-         (rr ? '<i style="background:' + c.bg + ';color:' + c.fg + '">#' + rr + '</i>' : '') + '</div>';
+       '<div class="tm-sub">' + (rk ? '<b>#' + rk + '</b> in Prophescore' : 'Not rated') +
+       (S && S.rec ? ' · ' + x(S.rec) : (r ? ' · ' + r.w + '-' + r.l + ' vs FBS' : '')) + (S && S.standing ? ' · ' + x(S.standing) : '') + '</div></div></div>';
+  if(r){
+    h += '<div class="tm-stats">';
+    [["Rating", "rating"], ["Offense", "off"], ["Defense", "def"], ["Sched", "sos"]].forEach(function(s){
+      var v = r[s[1]], rr = R.rank[id] && R.rank[id][s[1]], c = pearHeat(rr, R.n[s[1]]);
+      h += '<div class="tm-stat"><small>' + s[0] + '</small><b>' + pearFmt(s[1], v) + '</b>' +
+           (rr ? '<i style="background:' + c.bg + ';color:' + c.fg + '">#' + rr + '</i>' : '') + '</div>';
+    });
+    h += '</div>';
+  }
+  if(!S) return h + '<div class="pr-empty">Loading schedule…</div></div>';
+  if(!S.events || !S.events.length){
+    // ESPN's schedule didn't load (or came back empty) — fall back to the results the model already has.
+    var fb = (PEM._games || []).filter(function(g){ return String(g.awayId) === id || String(g.homeId) === id; })
+      .sort(function(a, b){ return a.week - b.week; }).map(function(g){
+        var home = String(g.homeId) === id, my = home ? g.hs : g.as, th = home ? g.as : g.hs;
+        return { id: String(g.eventId), date: null, week: g.week, post: false, neutral: !!g.neutral, home: home,
+                 oppId: String(home ? g.awayId : g.homeId), state: "post", done: true, my: my, their: th, won: my > th, tv: "" };
+      });
+    S = { events: fb, fallback: true };
+  }
+
+  // ── Projected finish ──
+  var ev = S.events.filter(function(g){ return !g.post; });          // regular season
+  var w = 0, l = 0, cw = 0, cl = 0, ps = [], cps = [], unknown = 0;
+  var myConf = PEAR.conf && PEAR.conf[id];
+  var showConf = (myConf && !/independent/i.test(myConf)) || (!myConf && S.events.some(function(g){ return g.conf === true; }));
+  function isConf(g){ if(typeof g.conf === "boolean") return g.conf; return !!(myConf && !/independent/i.test(myConf) && PEAR.conf[g.oppId] === myConf); }
+  ev.forEach(function(g){
+    var c = isConf(g);
+    if(g.done){ if(g.won){ w++; if(c) cw++; } else { l++; if(c) cl++; } return; }
+    var ch = pearGameChance(id, g);
+    if(!ch){ unknown++; return; }
+    g._ch = ch; ps.push(ch.p); if(c) cps.push(ch.p);
+  });
+  if(!S.fallback && PEM.ratings && ps.length + w + l > 0){
+    var dist = pearWinDist(ps), exp = 0, best = 0;
+    dist.forEach(function(q, k){ exp += q * k; if(q > dist[best]) best = k; });
+    var total = w + l + ps.length, bowl = 0;
+    dist.forEach(function(q, k){ if(w + k >= 6) bowl += q; });
+    var cexp = cps.reduce(function(a, b){ return a + b; }, 0);
+    h += '<div class="tm-sec">Projected finish</div><div class="tm-proj">';
+    h += '<div class="tm-pbig"><small>Expected record</small><b>' + (w + exp).toFixed(1) + '–' + (l + ps.length - exp).toFixed(1) + '</b>' +
+         '<span>Most likely ' + (w + best) + '–' + (l + ps.length - best) + ' (' + Math.round(dist[best] * 100) + '%)</span></div>';
+    h += '<div class="tm-pgrid">' +
+         '<div><small>Win out</small><b>' + (ps.length ? pearPct(dist[dist.length - 1]) : (l ? "—" : "✓")) + '</b></div>' +
+         '<div><small>Bowl eligible</small><b>' + pearPct(bowl) + '</b></div>' +
+         (showConf ? '<div><small>Conference</small><b>' + (cw + cexp).toFixed(1) + '–' + (cl + cps.length - cexp).toFixed(1) + '</b></div>' : '') +
+         '</div>';
+    // Final win totals
+    var peak = Math.max.apply(null, dist);
+    h += '<div class="tm-dist">';
+    // Only the win totals that are actually in play (≥0.5%), plus the most likely one.
+    var lo = best, hi = best;
+    dist.forEach(function(q, k){ if(q >= 0.005){ lo = Math.min(lo, k); hi = Math.max(hi, k); } });
+    dist.forEach(function(q, k){
+      if(k < lo || k > hi) return;
+      h += '<div class="tm-dcol' + (k === best ? " best" : "") + '"><span class="tm-dpct">' + (q >= 0.005 ? Math.round(q * 100) + '%' : '') + '</span>' +
+           '<span class="tm-dbar"><i style="height:' + Math.max(2, Math.round(100 * q / peak)) + '%"></i></span><span class="tm-dlab">' + (w + k) + '–' + (l + ps.length - k) + '</span></div>';
+    });
+    h += '</div>';
+    if(unknown) h += '<div class="pr-foot" style="margin:4px 0 0">' + unknown + ' game' + (unknown === 1 ? "" : "s") + ' left out — opponent not rated yet.</div>';
+    h += '</div>';
+  }
+
+  // ── Schedule ──
+  h += '<div class="tm-sec">Schedule</div><div class="tm-log">';
+  S.events.forEach(function(g){
+    var ork = cur.rank[g.oppId], at = g.neutral ? 'N' : g.home ? 'vs' : '@';
+    var dl = g.date ? new Date(g.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+    var right, sub = "";
+    if(g.done){
+      right = '<span class="tm-res ' + (g.won ? "w" : "l") + '">' + (g.won ? "W" : "L") + ' ' + (g.my != null ? g.my + '–' + g.their : '') + '</span>';
+    } else if(g.state === "in"){
+      right = '<span class="tm-res live">LIVE ' + (g.my != null ? g.my + '–' + g.their : '') + '</span>';
+    } else {
+      var ch = g._ch || pearGameChance(id, g);
+      if(ch){
+        var pc = Math.round(ch.p * 100);
+        right = '<span class="tm-wp"><b class="' + (pc >= 50 ? "fav" : "dog") + '">' + pc + '%</b><i><em style="width:' + pc + '%"></em></i></span>';
+        sub = ch.est ? 'FCS opponent · estimate' : ('Proj ' + ch.myPts.toFixed(0) + '–' + ch.oppPts.toFixed(0) + ' · ' + ch.line);
+      } else right = '<span class="tm-res">—</span>';
+    }
+    var tap = (!g.done && g.state !== "in" && pearIsFbs(g.oppId) && PEM.ratings)
+      ? 'data-pear-sgame="' + x(id) + '|' + x(g.id) + '"' : 'data-pear-team="' + x(g.oppId) + '"';
+    h += '<button class="tm-g' + (g.post ? " post" : "") + '" ' + tap + '>' +
+         '<span class="tm-wk">' + (g.post ? 'Bowl' : (g.week ? 'W' + g.week : dl)) + '</span><span class="tm-at">' + at + '</span>' + pearImg(g.oppId, "tm-ologo") +
+         '<span class="tm-on"><span class="tm-onn">' + (ork ? '<i>' + ork + '</i> ' : '') + x(pearName(g.oppId)) + (pearIsFbs(g.oppId) ? '' : ' <u>FCS</u>') + '</span>' +
+         (sub ? '<small>' + x(sub) + '</small>' : '<small>' + dl + (g.neutral ? ' · neutral' : '') + (g.tv ? ' · ' + x(g.tv) : '') + '</small>') + '</span>' + right + '</button>';
   });
   h += '</div>';
-  h += '<div class="tm-sec">Results</div><div class="tm-log">';
-  if(!log.length) h += '<div class="pr-empty">No FBS games yet.</div>';
-  log.forEach(function(g){
-    var ork = cur.rank[g.oppId];
-    h += '<button class="tm-g" data-pear-team="' + x(String(g.oppId)) + '"><span class="tm-wk">W' + g.week + '</span>' +
-         '<span class="tm-at">' + (g.neutral ? 'vs' : g.home ? 'vs' : '@') + '</span>' + pearImg(g.oppId, "tm-ologo") +
-         '<span class="tm-on">' + (ork ? '<i>' + ork + '</i> ' : '') + x(pearName(g.oppId)) + '</span>' +
-         '<span class="tm-res ' + (g.won ? "w" : "l") + '">' + (g.won ? "W" : "L") + ' ' + g.pts + '–' + g.oppPts + '</span></button>';
-  });
-  h += '</div>';
-  // This week's game, if it's on the schedule that's loaded
-  var next = null; (PEAR.games || []).forEach(function(z){ if(!next && z.state !== "post" && (z.away.id === id || z.home.id === id)) next = z; });
-  h += '<div class="sh-actions" style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px">' +
-       (next ? '<button class="pr-btn" data-pear-game="' + x(next.id) + '">Week ' + PEAR.week + ': ' + x(pearName(next.away.id)) + ' at ' + x(pearName(next.home.id)) + ' ›</button>' : '') +
+  if(S.fallback) h += '<div class="pr-foot" style="margin-top:8px">Couldn’t load the full schedule from ESPN — showing results the model has so far.</div>';
+  else h += '<div class="pr-foot" style="margin-top:8px">Win chances come from the Prophescore model with today’s settings. FCS opponents aren’t rated, so those use a flat ' + Math.round(PEAR_FCS_WIN*100) + '%.</div>';
+  h += '<div class="sh-actions" style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px">' +
        '<button class="pr-btn ghost" style="margin:0" data-pear-teamvs="' + x(id) + '">↔ Put in a matchup</button></div>';
   return h + '</div>';
 }
+function pearPct(p){ return p >= 0.995 ? ">99%" : p < 0.005 ? "<1%" : Math.round(p * 100) + "%"; }
+// A scheduled game opened as a matchup card (the week's list may not be loaded).
+function pearOpenSchedGame(id, gid){
+  var S = PEAR.sched[id], g = null; (S && S.events || []).forEach(function(z){ if(z.id === gid) g = z; });
+  if(!g) return;
+  var a = g.home ? g.oppId : id, hm = g.home ? id : g.oppId;
+  var game = { id: g.id, date: g.date, state: g.state, detail: g.detail, tv: g.tv, neutral: g.neutral,
+               away: { id: a, score: null }, home: { id: hm, score: null }, vegas: "", vegasOU: null };
+  PEAR.card = { a: a, h: hm, neutral: g.neutral, game: game, week: g.week };
+  PEAR.pick = null; pearRenderCard();
+}
+
 function pearOpenTeam(id){
   PEAR.card = null; PEAR.team = id;
   var host = pearHost(); document.body.style.overflow = "hidden";
   host.innerHTML = pearTeamHtml(id);
   var box = host.querySelector(".pc"); if(box) box.scrollTop = 0;
+  pearLoadFbs(function(){
+    pearLoadSched(id, function(){
+      if(PEAR.team !== id || PEAR.card) return;
+      var bx = host.querySelector(".pc"), top = bx ? bx.scrollTop : 0;
+      host.innerHTML = pearTeamHtml(id);
+      var nb = host.querySelector(".pc"); if(nb) nb.scrollTop = top;
+    });
+  });
 }
 
 // ── Matchup card ────────────────────────────────────────────────────────────
@@ -6043,13 +6215,14 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
     pearLoadFbs(function(){ pemEnsureFbs(); if(SC.screen === "prophescore") renderPoolEdge(); }, true); return;
   }
   if(t.hasAttribute("data-pear-team")){ pearOpenTeam(t.getAttribute("data-pear-team")); return; }
+  if(t.hasAttribute("data-pear-sgame")){ var sp = t.getAttribute("data-pear-sgame").split("|"); pearOpenSchedGame(sp[0], sp[1]); return; }
   if(t.hasAttribute("data-pear-rankall")){ PEAR.rankAll = t.getAttribute("data-pear-rankall") === "1"; renderPoolEdge(); return; }
   if(t.hasAttribute("data-pear-teamvs")){
     var tid = t.getAttribute("data-pear-teamvs"), order = pearRankOrder(PEM.ratings).order;
