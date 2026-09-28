@@ -771,6 +771,12 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pc-logo{min-width:0;border:none;background:none;padding:2px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:6px}
 .pc-logo img{width:100%;max-width:130px;aspect-ratio:1;object-fit:contain}
 .pc-logo span{font-size:8.5px;font-weight:900;text-transform:uppercase;letter-spacing:.04em;border:1.5px solid var(--border);border-radius:20px;padding:2px 8px;background:var(--gold-bg);box-shadow:1.5px 1.5px 0 var(--border);text-align:center;line-height:1.25;max-width:100%}
+.pc-lcol{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.pc-info{border:2px solid var(--border);background:#fff;color:var(--text);border-radius:20px;padding:3px 10px;font:900 10px 'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);cursor:pointer;max-width:100%;line-height:1.25}
+.pc-info:active{transform:translate(2px,2px);box-shadow:none}
+.pc-backrow{margin:-2px 44px 6px 0}
+.pc-bk{border:2px solid var(--border);background:#fff;color:var(--text);border-radius:9px;padding:5px 10px;font:900 11px 'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);cursor:pointer;max-width:100%;text-align:left;line-height:1.25}
+.pc-bk:active{transform:translate(2px,2px);box-shadow:none}
 .pc-logo:active span{transform:translate(1.5px,1.5px);box-shadow:none}
 .pc-mid{min-width:0;overflow-wrap:break-word;text-align:center;display:flex;flex-direction:column;align-items:center;gap:2px}
 .pc-pair{display:flex;justify-content:center;align-items:flex-end;gap:clamp(8px,5vw,34px);width:100%}
@@ -6174,6 +6180,7 @@ function pearTeamHtml(id){
   var R = PEM.ratings ? pemRanks() : { rank: {}, n: {} }, S = PEAR.sched[id];
   var h = '<div class="pc-back" data-pear-close></div><div class="pc tm">';
   h += '<button class="pc-x" data-pear-close aria-label="Close">✕</button>';
+  if(PEAR.backCard) h += '<div class="pc-backrow"><button class="pc-bk" data-pear-backcard>← Back to matchup</button></div>';
   h += '<div class="tm-top">' + pearImg(id, "tm-logo") + '<div><div class="pc-title" style="text-align:left;padding:0">' + x(pearName(id)) + '</div>' +
        '<div class="tm-sub">' + (rk ? '<b>#' + rk + '</b> in Prophescore' : 'Not rated') +
        (S && S.rec ? ' · ' + x(S.rec) : (r ? ' · ' + r.w + '-' + r.l + ' vs FBS' : '')) + (S && S.standing ? ' · ' + x(S.standing) : '') + '</div></div></div>';
@@ -6195,6 +6202,7 @@ function pearTeamHtml(id){
         return { id: String(g.eventId), date: null, week: g.week, post: false, neutral: !!g.neutral, home: home,
                  oppId: String(home ? g.awayId : g.homeId), state: "post", done: true, my: my, their: th, won: my > th, tv: "" };
       });
+    if(PEAR.sched[id]) PEAR.sched[id].fbEvents = fb;
     S = { events: fb, fallback: true };
   }
 
@@ -6260,8 +6268,7 @@ function pearTeamHtml(id){
         sub = ch.est ? 'FCS opponent · estimate' : ('Proj ' + ch.myPts.toFixed(0) + '–' + ch.oppPts.toFixed(0) + ' · ' + ch.line);
       } else right = '<span class="tm-res">—</span>';
     }
-    var tap = (!g.done && g.state !== "in" && pearIsFbs(g.oppId) && PEM.ratings)
-      ? 'data-pear-sgame="' + x(id) + '|' + x(g.id) + '"' : 'data-pear-team="' + x(g.oppId) + '"';
+    var tap = 'data-pear-sgame="' + x(id) + '|' + x(g.id) + '"';
     h += '<button class="tm-g' + (g.post ? " post" : "") + '" ' + tap + '>' +
          '<span class="tm-wk">' + (g.post ? 'Bowl' : (g.week ? 'W' + g.week : dl)) + '</span><span class="tm-at">' + at + '</span>' + pearImg(g.oppId, "tm-ologo") +
          '<span class="tm-on"><span class="tm-onn">' + (ork ? '<i>' + ork + '</i> ' : '') + x(pearName(g.oppId)) + (pearIsFbs(g.oppId) ? '' : ' <u>FCS</u>') + '</span>' +
@@ -6299,15 +6306,27 @@ function pearConfShort(n){
 function pearPct(p){ return p >= 0.995 ? ">99%" : p < 0.005 ? "<1%" : Math.round(p * 100) + "%"; }
 // A scheduled game opened as a matchup card (the week's list may not be loaded).
 function pearOpenSchedGame(id, gid){
-  var S = PEAR.sched[id], g = null; (S && S.events || []).forEach(function(z){ if(z.id === gid) g = z; });
+  var S = PEAR.sched[id], g = null; ((S && S.events) || []).concat((S && S.fbEvents) || []).forEach(function(z){ if(z.id === gid) g = z; });
   if(!g) return;
   var a = g.home ? g.oppId : id, hm = g.home ? id : g.oppId;
-  var game = { id: g.id, date: g.date, state: g.state, detail: g.detail, tv: g.tv, neutral: g.neutral,
-               away: { id: a, score: null }, home: { id: hm, score: null }, vegas: "", vegasOU: null };
-  PEAR.card = { a: a, h: hm, neutral: g.neutral, game: game, week: g.week };
+  var fin = g.done || g.state === "in";
+  var game = { id: g.id, date: g.date, state: g.done ? "post" : g.state, detail: g.detail, tv: g.tv, neutral: g.neutral,
+               away: { id: a, score: fin && g.my != null ? (g.home ? g.their : g.my) : null },
+               home: { id: hm, score: fin && g.my != null ? (g.home ? g.my : g.their) : null }, vegas: "", vegasOU: null };
+  // Last week's list may still be cached with the Vegas line; use it when it's the same game.
+  Object.keys(PEAR.cache || {}).forEach(function(k){ ((PEAR.cache[k] || {}).games || []).forEach(function(z){
+    if(z.id === g.id){ game.vegas = z.vegas; game.vegasOU = z.vegasOU; game.vegasSpread = z.vegasSpread; game.vegasFav = z.vegasFav; } }); });
+  PEAR.backTeam = id; PEAR.backCard = null;
+  PEAR.card = { a: a, h: hm, neutral: g.neutral, game: game, week: g.done ? g.week : null };
   PEAR.pick = null; pearRenderCard();
 }
 
+function pearRedrawTeam(){
+  var id = PEAR.team; if(!id || PEAR.card) return;
+  var host = pearHost(), bx = host.querySelector(".pc"), top = bx ? bx.scrollTop : 0;
+  host.innerHTML = pearTeamHtml(id);
+  var nb = host.querySelector(".pc"); if(nb) nb.scrollTop = top;
+}
 function pearOpenTeam(id){
   PEAR.card = null; PEAR.team = id;
   var host = pearHost(); document.body.style.overflow = "hidden"; document.documentElement.style.overflow = "hidden"; pearFitPicker();
@@ -6333,6 +6352,7 @@ function pearHost(){
 function pearOpenGame(id){
   var g = null; (PEAR.games||[]).forEach(function(z){ if(z.id === id) g = z; });
   if(!g) return;
+  PEAR.backTeam = null; PEAR.backCard = null;
   PEAR.card = { a: g.away.id, h: g.home.id, neutral: g.neutral, game: g, week: PEAR.week };
   PEAR.pick = null; pearRenderCard();
 }
@@ -6340,10 +6360,11 @@ function pearOpenCustom(){
   var c = PEAR.card, teams = pemTeamList().filter(function(t){ return t.rating !== null; });
   var a = c ? c.a : (teams[0] && teams[0].id), h = c ? c.h : (teams[1] && teams[1].id);
   if(!a || !h){ toast(PEM.ratings ? "No teams yet" : "Build the score model first", "warn"); return; }
+  if(!c){ PEAR.backTeam = null; PEAR.backCard = null; }
   PEAR.card = { a: a, h: h, neutral: c ? c.neutral : true, game: null };
   PEAR.pick = null; pearRenderCard();
 }
-function pearClose(){ PEAR.card = null; PEAR.pick = null; pearHost().innerHTML = ""; document.body.style.overflow = ""; document.documentElement.style.overflow = ""; }
+function pearClose(){ PEAR.card = null; PEAR.pick = null; PEAR.backTeam = null; PEAR.backCard = null; PEAR.team = null; pearHost().innerHTML = ""; document.body.style.overflow = ""; document.documentElement.style.overflow = ""; }
 // The game's time, TV and Vegas line only belong on the card while it is still that game.
 function pearCardGame(){
   var c = PEAR.card, g = c && c.game;
@@ -6358,14 +6379,17 @@ function pearCardHtml(){
   var rows = pemCompareRows(), byId = {}; rows.forEach(function(r){ byId[r.id] = r; });
   var ra = byId[A] || null, rh = byId[H] || null;
   var ranks = PEM.ratings ? pemRanks() : { rank: {}, n: {} };
-  var sub = g ? (new Date(g.date).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" }) + (g.tv ? " - " + g.tv : ""))
+  var sub = (g && !g.date) ? ("Week " + (c.week || "") + (g.state === "post" ? " · Final" : "")) : g ? ((g.state === "post" ? new Date(g.date).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+                                      : new Date(g.date).toLocaleString(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" })) + (g.tv ? " - " + g.tv : ""))
               : ("Hypothetical matchup" + (c.neutral ? " · neutral site" : ""));
   var h = '<div class="pc-back" data-pear-close></div><div class="pc">';
   h += '<button class="pc-x" data-pear-close aria-label="Close">✕</button>';
+  if(PEAR.backTeam) h += '<div class="pc-backrow"><button class="pc-bk" data-pear-backteam>← ' + x(pearName(PEAR.backTeam)) + ' schedule</button></div>';
   h += '<div class="pc-title">' + x(pearName(A)) + (c.neutral ? ' vs ' : ' at ') + x(pearName(H)) + '</div>';
   h += '<div class="pc-sub">' + x(sub) + '</div>';
   h += '<div class="pc-top">';
-  h += '<button class="pc-logo" data-pear-swap="a">' + pearImg(A, "") + '<span>tap to change</span></button>';
+  h += '<div class="pc-lcol"><button class="pc-logo" data-pear-swap="a">' + pearImg(A, "") + '<span>tap to change</span></button>' +
+       '<button class="pc-info" data-pear-cardteam="' + x(A) + '">Team info</button></div>';
   h += '<div class="pc-mid">';
   if(p){
     h += '<div class="pc-pair"><div><small>WIN PROB (%)</small><b>' + (p.awayWin*100).toFixed(1) + '</b></div>' +
@@ -6376,7 +6400,7 @@ function pearCardHtml(){
     h += '<div class="pc-kv">O/U: ' + p.total.toFixed(1) + '</div>';
     h += '<div class="pc-line">' + x(pearLineTxt(A, H, p.margin)) + '</div>';
   } else {
-    h += '<div class="pc-none">' + (PEM.ratings ? 'One of these teams has no rating yet.' : 'Build the score model to project this game.') + '</div>';
+    h += '<div class="pc-none">' + (!PEM.ratings ? 'Build the score model to project this game.' : (!pearIsFbs(A) || !pearIsFbs(H)) ? 'FCS teams aren’t rated, so there’s no projection for this one.' : 'One of these teams has no rating yet.') + '</div>';
   }
   var _vt = g ? pearVegasTxt(g) : "", _vou = g ? (g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g)||[])[1] != null ? pearSavedLine(g)[1] : null)) : null;
   if(g && (_vt || _vou != null)) h += '<div class="pc-vegas">Vegas: ' + x(_vt || "\u2014") + (_vou != null ? ' \u00b7 O/U ' + _vou : '') + (cFit ? ' \u00b7 pre-game projection' : '') + '</div>';
@@ -6389,7 +6413,8 @@ function pearCardHtml(){
     h += '<div class="pc-final">' + (g.state === "post" ? "Final" : "Live") + ': ' + fa + '–' + fh + '</div>';
   }
   h += '</div>';
-  h += '<button class="pc-logo" data-pear-swap="h">' + pearImg(H, "") + '<span>tap to change</span></button>';
+  h += '<div class="pc-lcol"><button class="pc-logo" data-pear-swap="h">' + pearImg(H, "") + '<span>tap to change</span></button>' +
+       '<button class="pc-info" data-pear-cardteam="' + x(H) + '">Team info</button></div>';
   h += '</div>';
   h += '<div class="pc-ctrls"><button data-pear-flip>⇆ Flip home/away</button>' +
        '<button class="' + (c.neutral ? "on" : "") + '" data-pear-neutral>Neutral site: ' + (c.neutral ? "on" : "off") + '</button></div>';
@@ -6521,18 +6546,22 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
     pearLoadFbs(function(){ pemEnsureFbs(); if(SC.screen === "prophescore") renderPoolEdge(); }, true); return;
   }
-  if(t.hasAttribute("data-pear-team")){ pearOpenTeam(t.getAttribute("data-pear-team")); return; }
+  if(t.hasAttribute("data-pear-cardteam")){ var bc = PEAR.card; pearOpenTeam(t.getAttribute("data-pear-cardteam")); PEAR.backCard = bc; pearRedrawTeam(); return; }
+  if(t.hasAttribute("data-pear-backcard")){ var cc = PEAR.backCard; PEAR.backCard = null; if(cc){ PEAR.team = null; PEAR.card = cc; PEAR.pick = null; pearRenderCard(); } return; }
+  if(t.hasAttribute("data-pear-backteam")){ var bt = PEAR.backTeam; PEAR.backTeam = null; if(bt){ var keep = PEAR.backCard; pearOpenTeam(bt); PEAR.backCard = keep; pearRedrawTeam(); } return; }
+  if(t.hasAttribute("data-pear-team")){ PEAR.backCard = null; pearOpenTeam(t.getAttribute("data-pear-team")); return; }
   if(t.hasAttribute("data-pear-sgame")){ var sp = t.getAttribute("data-pear-sgame").split("|"); pearOpenSchedGame(sp[0], sp[1]); return; }
   if(t.hasAttribute("data-pear-rankall")){ PEAR.rankAll = t.getAttribute("data-pear-rankall") === "1"; renderPoolEdge(); return; }
   if(t.hasAttribute("data-pear-teamvs")){
     var tid = t.getAttribute("data-pear-teamvs"), order = pearRankOrder(PEM.ratings).order;
     var opp = order[0] === tid ? order[1] : order[0];
+    PEAR.backTeam = tid; PEAR.backCard = null;
     PEAR.card = { a: tid, h: opp, neutral: true, game: null }; PEAR.pick = null; pearRenderCard(); return;
   }
   if(t.hasAttribute("data-pe-view")){
