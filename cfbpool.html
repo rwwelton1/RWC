@@ -544,6 +544,27 @@ button:focus-visible,select:focus-visible,input:focus-visible,[tabindex]:focus-v
   *,*::before,*::after{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important;scroll-behavior:auto !important}
   .btn:active,.conf-chip:active,.wtab:active,.user-btn:active,.gp-isolate-btn:active{transform:none}
 }
+
+/* ── Share picks sheet ── */
+.ps-back{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.4)}
+.ps-sheet{position:fixed;z-index:9001;left:50%;bottom:0;transform:translateX(-50%);width:min(520px,100vw);max-height:90vh;background:#fff;border:3px solid var(--border);border-bottom:none;border-radius:18px 18px 0 0;box-shadow:0 -4px 0 var(--border);display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)}
+.ps-head{padding:14px 16px 8px;display:flex;align-items:center;gap:10px;border-bottom:2px solid var(--border2)}
+.ps-title{font-size:15px;font-weight:900;flex:1;min-width:0}
+.ps-title small{display:block;font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:1px}
+.ps-x{font-size:17px;font-weight:900;color:var(--muted);background:none;border:none;padding:2px 6px;cursor:pointer}
+.ps-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 16px 16px}
+.ps-prev{display:block;width:100%;border:2px solid var(--border);border-radius:12px;box-shadow:3px 3px 0 var(--border);background:var(--cream)}
+.ps-busy{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:260px;font-size:11px;font-weight:800;color:var(--muted)}
+.ps-dots{display:flex;gap:7px}
+.ps-dots span{width:9px;height:9px;border-radius:50%;background:var(--muted);animation:psPulse 1.1s ease-in-out infinite}
+.ps-dots span:nth-child(2){animation-delay:.15s}.ps-dots span:nth-child(3){animation-delay:.3s}
+@keyframes psPulse{0%,80%,100%{opacity:.25;transform:scale(.85)}40%{opacity:1;transform:scale(1)}}
+.ps-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.ps-btn{padding:10px 8px;font-size:12px;font-weight:900;background:#fff;border:2px solid var(--border);border-radius:9px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.ps-btn[disabled]{opacity:.5}
+.ps-gold{background:var(--gold)}
+.ps-wide{grid-column:1 / -1}
+.ps-note{font-size:9.5px;font-weight:700;color:var(--muted);text-align:center;margin-top:8px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -4387,15 +4408,16 @@ function _gutsiestHit(weekId, active){
   return gutsy;
 }
 
-function shareMyPicks(weekId){
-  var uk=ST.user;
-  var picks=((ST.picks[weekId]||{})[uk])||{};
+// ── SHARE PICKS ───────────────────────────────────────────
+// Sharing now makes a picture: every pick ordered by confidence, in team colors
+// with logos, spreads and (once games finish) results. The old text version is
+// still one tap away as "Send as text" / "Copy as text".
+function picksText(weekId){
+  var picks=((ST.picks[weekId]||{})[ST.user])||{};
   var games=ST.games[weekId]||{};
   var active=activeGames(weekId);
   var label=ST.weekLabels[weekId]||weekId;
-  var lines=["📋 "+x(nameOf(ST.user))+" – "+label+" Picks"];
-  // Short form for the matchup line. ESPN's abbreviation when we stored one,
-  // otherwise squeeze the name down so the line stays readable in a text.
+  var lines=["📋 "+nameOf(ST.user)+" – "+label+" Picks"];
   function ab(name, abbrev){
     var a=String(abbrev||"").toUpperCase();
     if(a && a.length<=5) return a;
@@ -4403,39 +4425,305 @@ function shareMyPicks(weekId){
     if(!n) return "?";
     if(n.length<=5) return n.toUpperCase();
     var words=n.split(/\s+/);
-    // Multi-word names become initials (Texas A&M -> TAM); single words clip.
     if(words.length>1) return words.map(function(w){ return w[0]; }).join("").toUpperCase();
     return n.slice(0,4).toUpperCase();
   }
-  // Kickoff order, so the list reads the way the weekend actually plays out.
-  var sorted=active.slice().sort(function(a,b){
+  _psSortedByKickoff(weekId, active).forEach(function(gid){
+    var g=games[gid]||{}, p=picks[gid]||{};
+    if(!pickComplete(p)) return;
+    var away=ab(g.away,g.awayAbbrev), home=ab(g.home,g.homeAbbrev);
+    var pickAb=p.side==="away"?away:home;
+    lines.push("  "+(p.conf?String(p.conf):"-")+" - "+away+" v "+home+" - "+pickAb+" "+spreadLabel(g,p.side));
+  });
+  var unpicked=active.filter(function(gid){ return !pickComplete(picks[gid]); }).length;
+  if(unpicked) lines.push("  ⚠ "+unpicked+" unpicked");
+  return lines.join("\n");
+}
+function _psSortedByKickoff(weekId, ids){
+  var games=ST.games[weekId]||{};
+  return ids.slice().sort(function(a,b){
     var ka=Number((games[a]||{}).kickoffTs)||0, kb=Number((games[b]||{}).kickoffTs)||0;
     if(ka&&kb&&ka!==kb) return ka-kb;
     if(ka&&!kb) return -1;
     if(!ka&&kb) return 1;
     return 0;
   });
-  sorted.forEach(function(gid){
-    var g=games[gid]||{};
-    var p=picks[gid]||{};
-    if(!pickComplete(p)) return;
-    var away=ab(g.away,g.awayAbbrev), home=ab(g.home,g.homeAbbrev);
-    var pickAb=p.side==="away"?away:home;
-    var spread=spreadLabel(g,p.side);
-    // Confidence leads the line, so the numbers form a column you can scan.
-    var conf=p.conf?String(p.conf):"-";
-    lines.push("  "+conf+" - "+away+" v "+home+" - "+pickAb+" "+spread);
+}
+function shareMyPicks(weekId){ openPicksShare(weekId); }
+
+var PSHARE={blob:null,url:null,busy:false,weekId:null,err:"",missing:0};
+function _psHost(){
+  var h=document.getElementById("ps-host");
+  if(!h){ h=document.createElement("div"); h.id="ps-host"; document.body.appendChild(h); }
+  return h;
+}
+function openPicksShare(weekId){
+  if(PSHARE.url) try{ URL.revokeObjectURL(PSHARE.url); }catch(e){}
+  PSHARE={blob:null,url:null,busy:true,weekId:weekId,err:"",missing:0};
+  renderPicksShare();
+  buildPicksGraphic(weekId).then(function(res){
+    if(PSHARE.weekId!==weekId) return;
+    PSHARE.blob=res.blob; PSHARE.url=URL.createObjectURL(res.blob); PSHARE.busy=false; PSHARE.missing=res.missing;
+    renderPicksShare();
+  }).catch(function(e){
+    PSHARE.busy=false; PSHARE.err="Couldn’t draw the graphic — "+((e&&e.message)||"unknown error");
+    try{ console.error(e); }catch(_){}
+    renderPicksShare();
   });
-  var unpicked=active.filter(function(gid){ return !pickComplete(picks[gid]); }).length;
-  if(unpicked) lines.push("  ⚠ "+unpicked+" unpicked");
-  var text=lines.join("\n");
-  if(navigator.share){
-    navigator.share({text:text}).catch(function(){});
-  } else {
+}
+function closePicksShare(){
+  PSHARE.weekId=null;
+  _psHost().innerHTML="";
+  document.body.style.overflow="";
+}
+function _psFileName(weekId){ return ("my-picks-"+(ST.weekLabels[weekId]||weekId)).toLowerCase().replace(/[^a-z0-9]+/g,"-")+".png"; }
+function renderPicksShare(){
+  var host=_psHost(), wk=PSHARE.weekId;
+  if(!wk){ host.innerHTML=""; return; }
+  document.body.style.overflow="hidden";
+  var label=ST.weekLabels[wk]||wk;
+  var canFiles=false;
+  if(PSHARE.blob && navigator.canShare){
+    try{ canFiles=navigator.canShare({files:[new File([PSHARE.blob],"picks.png",{type:"image/png"})]}); }catch(e){}
+  }
+  var h='<div class="ps-back" id="ps-back"></div><div class="ps-sheet">';
+  h+='<div class="ps-head"><div class="ps-title">Share your '+x(label)+' picks<small>Made for Instagram &amp; group chats</small></div><button class="ps-x" id="ps-x" aria-label="Close">✕</button></div>';
+  h+='<div class="ps-body">';
+  if(PSHARE.busy||!PSHARE.url) h+='<div class="ps-busy"><div class="ps-dots"><span></span><span></span><span></span></div>'+(PSHARE.err?x(PSHARE.err):"Drawing your picks…")+'</div>';
+  else h+='<img class="ps-prev" src="'+PSHARE.url+'" alt="Your picks graphic">';
+  h+='<div class="ps-actions">';
+  if(canFiles) h+='<button class="btn ps-btn ps-gold" id="ps-share">📤 Share image</button><button class="btn ps-btn" id="ps-save">⬇️ Save PNG</button>';
+  else h+='<button class="btn ps-btn ps-gold" id="ps-save"'+(PSHARE.url?'':' disabled')+'>⬇️ Download PNG</button>';
+  h+='<button class="btn ps-btn ps-wide" id="ps-text">📋 '+(navigator.share?'Send as text':'Copy as text')+'</button>';
+  h+='</div><div class="ps-note">On a phone you can also press and hold the image to save it.'+(PSHARE.missing?'<br>Some logos couldn’t be drawn, so those teams show their initials.':'')+'</div>';
+  h+='</div></div>';
+  host.innerHTML=h;
+  function on(id,fn){ var el=document.getElementById(id); if(el) el.onclick=fn; }
+  on("ps-back",closePicksShare); on("ps-x",closePicksShare);
+  on("ps-save",function(){
+    if(!PSHARE.url) return;
+    var a=document.createElement("a"); a.href=PSHARE.url; a.download=_psFileName(wk);
+    document.body.appendChild(a); a.click(); setTimeout(function(){ a.remove(); },100);
+  });
+  on("ps-share",function(){
+    var f=new File([PSHARE.blob], _psFileName(wk), {type:"image/png"});
+    navigator.share({files:[f], title:label+" picks"}).catch(function(){});
+  });
+  on("ps-text",function(){
+    var text=picksText(wk);
+    if(navigator.share){ navigator.share({text:text}).catch(function(){}); return; }
     try{ navigator.clipboard.writeText(text); toast("Picks copied to clipboard ✓"); }
     catch(e){ toast(text.substring(0,80)+"…"); }
-  }
+  });
 }
+
+// ── Canvas helpers ──
+function _psLoadImg(src){
+  return new Promise(function(res){
+    if(!src) return res(null);
+    var im=new Image(), done=false;
+    var to=setTimeout(function(){ if(!done){ done=true; res(null); } }, 7000);
+    im.crossOrigin="anonymous";
+    im.onload=function(){ if(done) return; done=true; clearTimeout(to); res(im.naturalWidth?im:null); };
+    im.onerror=function(){ if(done) return; done=true; clearTimeout(to); res(null); };
+    im.src=src;
+  });
+}
+function _psProxy(u){ return u ? "https://images.weserv.nl/?url="+encodeURIComponent(String(u).replace(/^https?:\/\//,""))+"&w=160&h=160&fit=contain&output=png" : ""; }
+// Era logo (same setting as the Picks tab) → ESPN crest → CORS proxy → monogram.
+function _psLogo(name, url){
+  var first=eraLogo(name, url)||url||"";
+  return _psLoadImg(first).then(function(im){
+    if(im) return im;
+    return (url && url!==first ? _psLoadImg(url) : Promise.resolve(null)).then(function(im2){
+      return im2 || (url ? _psLoadImg(_psProxy(url)) : null);
+    });
+  });
+}
+function _psRR(g,x0,y0,w,h,r){
+  var tl,tr,br,bl; if(typeof r==="number"){ tl=tr=br=bl=r; } else { tl=r[0];tr=r[1];br=r[2];bl=r[3]; }
+  g.beginPath(); g.moveTo(x0+tl,y0); g.lineTo(x0+w-tr,y0); g.quadraticCurveTo(x0+w,y0,x0+w,y0+tr);
+  g.lineTo(x0+w,y0+h-br); g.quadraticCurveTo(x0+w,y0+h,x0+w-br,y0+h); g.lineTo(x0+bl,y0+h);
+  g.quadraticCurveTo(x0,y0+h,x0,y0+h-bl); g.lineTo(x0,y0+tl); g.quadraticCurveTo(x0,y0,x0+tl,y0); g.closePath();
+}
+function _psFit(g,txt,maxW){
+  txt=String(txt||"");
+  if(g.measureText(txt).width<=maxW) return txt;
+  var s=txt; while(s.length>1 && g.measureText(s+"…").width>maxW) s=s.slice(0,-1);
+  return s+"…";
+}
+function _psStack(g,txt,x0,y0,size,layers,step){
+  g.font="900 "+size+"px Nunito, sans-serif"; g.lineJoin="round";
+  var offs=[[1,"#111"],[2,"#111"],[3,layers[0]],[4,layers[1]],[5,layers[2]]];
+  for(var i=offs.length-1;i>=0;i--){
+    var o=offs[i][0]*step; g.fillStyle=offs[i][1]; g.strokeStyle=offs[i][1]; g.lineWidth=size*0.2;
+    g.strokeText(txt,x0+o,y0+o); g.fillText(txt,x0+o,y0+o);
+  }
+  g.strokeStyle="#111"; g.lineWidth=size*0.2; g.strokeText(txt,x0,y0);
+  g.fillStyle="#fff"; g.fillText(txt,x0,y0);
+}
+function _psInk(hex){ return _readableInk(hex); }
+var _PS_SEC=null;
+function _psSecondary(name){
+  if(!_PS_SEC){ _PS_SEC={}; Object.keys(TEAM_SECONDARY).forEach(function(k){ _PS_SEC[logoKey(k)]=TEAM_SECONDARY[k]; }); }
+  return _PS_SEC[logoKey(name)]||null;
+}
+function _psCssVar(n, dflt){
+  try{ var v=getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v||dflt; }catch(e){ return dflt; }
+}
+
+// ── The picture ──
+function buildPicksGraphic(weekId){
+  var games=ST.games[weekId]||{}, picks=((ST.picks[weekId]||{})[ST.user])||{}, results=ST.results[weekId]||{};
+  var active=_psSortedByKickoff(weekId, activeGames(weekId));
+  var picked=active.filter(function(gid){ return pickComplete(picks[gid]); })
+    .sort(function(a,b){ return (Number(picks[b].conf)||0)-(Number(picks[a].conf)||0); });
+  var unpicked=active.filter(function(gid){ return !pickComplete(picks[gid]); });
+  var rows=picked.map(function(gid){
+    var g=games[gid]||{}, p=picks[gid], side=p.side, opp=side==="away"?"home":"away";
+    return {gid:gid, g:g, p:p, r:results[gid]||null,
+      team:g[side]||"", teamId:g[side+"Id"], logo:g[side+"Logo"]||"", abbr:g[side+"Abbrev"]||"",
+      opp:g[opp]||"", oppId:g[opp+"Id"], oppLogo:g[opp+"Logo"]||"", oppAbbr:g[opp+"Abbrev"]||"",
+      where:side==="away"?"@":"vs", spread:spreadLabel(g,side)};
+  });
+  var fontP=(document.fonts&&document.fonts.load)?Promise.all([document.fonts.load("900 40px Nunito"),document.fonts.load("800 20px Nunito")]).catch(function(){}):Promise.resolve();
+  var logoP=Promise.all(rows.map(function(r){
+    return Promise.all([_psLogo(r.team, r.logo), _psLogo(r.opp, r.oppLogo)]);
+  }));
+  return Promise.all([fontP, logoP]).then(function(res){
+    var imgs=res[1];
+    var out=_psPaint(weekId, rows, unpicked, imgs);
+    return new Promise(function(ok){
+      try{ out.cv.toBlob(function(b){ ok({blob:b, missing:out.missing}); },"image/png"); }
+      catch(e){
+        var o2=_psPaint(weekId, rows, unpicked, rows.map(function(){ return [null,null]; }));
+        o2.cv.toBlob(function(b){ ok({blob:b, missing:rows.length}); },"image/png");
+      }
+    });
+  });
+}
+function _psPaint(weekId, rows, unpicked, imgs){
+  var games=ST.games[weekId]||{}, picks=((ST.picks[weekId]||{})[ST.user])||{};
+  var W=1080, side=40, top=250, pitch=96, rh=84, upitch=62;
+  var hasTb = tbReady(weekId) && picks.tb!=null && picks.tb!=="";
+  var ws=weekScore(weekId, ST.user), anyResult=(ws.correct+ws.wrong+ws.pushed)>0;
+  var bodyH=rows.length*pitch + (unpicked.length?30+unpicked.length*upitch:0) + (hasTb?104:0) + (anyResult?104:0);
+  var H=Math.max(1080, top+bodyH+24+66+10);
+  var cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+  var g=cv.getContext("2d"), missing=0;
+  var fan=fanTeamOf(ST.user), fc=fan&&TEAM_COLORS[fan];
+  var headBg=fc?fc[0]:"#111", headInk=_psInk(headBg);
+  var layers=[_psCssVar("--logo-1","#4c1d95"), _psCssVar("--logo-2","#2e1158"), _psCssVar("--logo-3","#1a0a33")];
+  // background + header
+  g.fillStyle="#f5f0e8"; g.fillRect(0,0,W,H);
+  g.fillStyle="rgba(17,17,17,0.045)";
+  for(var yy=0; yy<H; yy+=36) for(var xx=(yy/36)%2?18:0; xx<W; xx+=36){ g.beginPath(); g.arc(xx,yy,2,0,Math.PI*2); g.fill(); }
+  g.fillStyle=headBg; g.fillRect(0,0,W,206); g.fillStyle="#111"; g.fillRect(0,206,W,8);
+  g.textBaseline="alphabetic"; g.textAlign="left";
+  var label=String(ST.weekLabels[weekId]||weekId).toUpperCase();
+  var emo=emojiOf(ST.user), title=label+" PICKS", tsz=96, tmax=W-96-(emo?100:0);
+  g.font="900 "+tsz+"px Nunito, sans-serif";
+  while(tsz>48 && g.measureText(title).width>tmax){ tsz-=4; g.font="900 "+tsz+"px Nunito, sans-serif"; }
+  title=_psFit(g,title,tmax);
+  _psStack(g,title,48,120,tsz,layers,tsz/32);
+  var who=(nameOf(ST.user)||"").trim();
+  var sub=[]; if(who) sub.push(who.toUpperCase()+"’S CONFIDENCE PICKS"); sub.push("CFB POOL"+(SEASON_YEAR?" "+SEASON_YEAR:""));
+  g.font="900 27px Nunito, sans-serif"; g.fillStyle=headInk==="#111"?"#333":"rgba(255,255,255,0.9)";
+  g.fillText(_psFit(g,sub.join("  ·  "),W-96),50,172);
+  if(emo){ g.font="64px sans-serif"; g.textAlign="right"; g.fillText(emo,W-48,112); g.textAlign="left"; }
+
+  var anyR=rows.some(function(r){ return r.r; });
+  var y=top;
+  rows.forEach(function(r,i){
+    var x0=side, w=W-side*2;
+    var prim=teamHex(r.team)||"#475569", sec=_psSecondary(r.team), ink=_psInk(prim);
+    g.fillStyle="#111"; _psRR(g,x0+5,y+5,w,rh,16); g.fill();
+    g.fillStyle=prim; _psRR(g,x0,y,w,rh,16); g.fill();
+    if(sec && sec.toLowerCase()!==prim.toLowerCase()){ g.save(); _psRR(g,x0,y,w,rh,16); g.clip(); g.fillStyle=sec; g.fillRect(x0,y+rh-8,w,8); g.restore(); }
+    // confidence block
+    g.fillStyle="#111"; _psRR(g,x0,y,86,rh,[16,0,0,16]); g.fill();
+    g.fillStyle="#fff"; g.textAlign="center";
+    g.font="900 44px Nunito, sans-serif"; g.fillText(String(r.p.conf),x0+43,y+54);
+    g.font="900 12px Nunito, sans-serif"; g.fillStyle="rgba(255,255,255,0.6)"; g.fillText("CONF",x0+43,y+72);
+    g.textAlign="left";
+    g.strokeStyle="#111"; g.lineWidth=3; _psRR(g,x0,y,w,rh,16); g.stroke();
+    // picked team logo
+    var lx=x0+98, ly=y+8, ls=68, im=(imgs[i]||[])[0];
+    g.fillStyle="#fff"; _psRR(g,lx,ly,ls,ls,13); g.fill();
+    if(im){ var sc=Math.min((ls-10)/im.naturalWidth,(ls-10)/im.naturalHeight), iw=im.naturalWidth*sc, ih=im.naturalHeight*sc; g.drawImage(im,lx+(ls-iw)/2,ly+(ls-ih)/2,iw,ih); }
+    else { missing++; g.fillStyle=prim; g.beginPath(); g.arc(lx+ls/2,ly+ls/2,ls/2-6,0,Math.PI*2); g.fill(); g.fillStyle=ink; g.font="900 19px Nunito, sans-serif"; g.textAlign="center"; g.fillText(String(r.abbr||r.team).slice(0,4).toUpperCase(),lx+ls/2,ly+ls/2+7); g.textAlign="left"; }
+    // right side: result chip, opponent tile
+    var right=x0+w-14;
+    if(anyR){
+      var cw=112, cx=right-cw, cy=y+(rh-40)/2-2, txt="", col="#777";
+      if(r.r==="push"){ txt="PUSH"; col="#777"; }
+      else if(r.r && r.r===r.p.side){ txt="✓ +"+r.p.conf; col="#15803d"; }
+      else if(r.r){ txt="✗ MISS"; col="#c0392b"; }
+      if(txt){
+        g.fillStyle="#fff"; _psRR(g,cx,cy,cw,40,20); g.fill(); g.strokeStyle="#111"; g.lineWidth=2.5; g.stroke();
+        g.fillStyle=col; g.font="900 21px Nunito, sans-serif"; g.textAlign="center"; g.fillText(txt,cx+cw/2,cy+28); g.textAlign="left";
+      }
+      right=cx-12;
+    }
+    var os=50, ox=right-os, oy=y+(rh-os)/2-2, oim=(imgs[i]||[])[1];
+    g.globalAlpha=0.92; g.fillStyle="#fff"; _psRR(g,ox,oy,os,os,10); g.fill(); g.globalAlpha=1;
+    if(oim){ var s2=Math.min((os-8)/oim.naturalWidth,(os-8)/oim.naturalHeight), w2=oim.naturalWidth*s2, h2=oim.naturalHeight*s2; g.drawImage(oim,ox+(os-w2)/2,oy+(os-h2)/2,w2,h2); }
+    else { var opc=teamHex(r.opp)||"#475569"; g.fillStyle=opc; g.beginPath(); g.arc(ox+os/2,oy+os/2,os/2-5,0,Math.PI*2); g.fill(); g.fillStyle=_psInk(opc); g.font="900 13px Nunito, sans-serif"; g.textAlign="center"; g.fillText(String(r.oppAbbr||r.opp).slice(0,4).toUpperCase(),ox+os/2,oy+os/2+5); g.textAlign="left"; }
+    g.fillStyle=ink; g.font="900 22px Nunito, sans-serif"; g.textAlign="right"; g.fillText(r.where,ox-10,oy+os/2+8); g.textAlign="left";
+    // names
+    var nx=lx+ls+16, maxW=ox-44-nx;
+    var rk=rankFor(r.team, r.teamId), ork=rankFor(r.opp, r.oppId);
+    g.fillStyle=ink; g.font="900 34px Nunito, sans-serif";
+    var nm=(rk?"#"+rk.rank+" ":"")+r.team;
+    g.fillText(_psFit(g,nm,maxW-(g.measureText(" "+r.spread).width)),nx,y+40);
+    var nmW=Math.min(g.measureText(nm).width, maxW-(g.measureText(" "+r.spread).width));
+    g.font="900 28px Nunito, sans-serif"; g.globalAlpha=0.85; g.fillText(r.spread,nx+nmW+12,y+40); g.globalAlpha=1;
+    g.font="800 20px Nunito, sans-serif"; g.globalAlpha=0.82;
+    g.fillText(_psFit(g,(r.where==="@"?"at ":"vs ")+(ork?"#"+ork.rank+" ":"")+r.opp,maxW),nx,y+68); g.globalAlpha=1;
+    y+=pitch;
+  });
+  // games left unpicked
+  if(unpicked.length){
+    g.fillStyle="#777"; g.font="900 18px Nunito, sans-serif"; g.fillText("NOT PICKED",side+4,y+18); y+=30;
+    unpicked.forEach(function(gid){
+      var gm=games[gid]||{};
+      g.setLineDash([10,8]); g.strokeStyle="#999"; g.lineWidth=3; _psRR(g,side,y,W-side*2,upitch-12,14); g.stroke(); g.setLineDash([]);
+      g.fillStyle="#888"; g.font="900 22px Nunito, sans-serif"; g.fillText(_psFit(g,(gm.away||"?")+" @ "+(gm.home||"?"),W-side*2-40),side+22,y+33);
+      y+=upitch;
+    });
+  }
+  // tiebreaker
+  if(hasTb){
+    var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+    g.fillStyle="#fff"; _psRR(g,side,y+6,W-side*2,82,16); g.fill(); g.strokeStyle="#111"; g.lineWidth=3; g.stroke();
+    g.fillStyle="#777"; g.font="900 16px Nunito, sans-serif";
+    var tbl="TIEBREAKER · "+String(tbLabel(weekId)).toUpperCase()+(tbMode(weekId)==="total"&&tb.away&&tb.home?" · "+String(tb.away).toUpperCase()+" @ "+String(tb.home).toUpperCase():"");
+    g.fillText(_psFit(g,tbl,W-side*2-190),side+22,y+38);
+    g.fillStyle="#111"; g.font="900 44px Nunito, sans-serif"; g.textAlign="right"; g.fillText(String(picks.tb),W-side-24,y+64); g.textAlign="left";
+    g.fillStyle="#111"; g.font="800 22px Nunito, sans-serif"; g.fillText("My guess",side+22,y+68);
+    y+=104;
+  }
+  // score so far
+  if(anyResult){
+    g.fillStyle="#111"; _psRR(g,side,y+6,W-side*2,82,16); g.fill();
+    g.fillStyle="rgba(255,255,255,0.65)"; g.font="900 16px Nunito, sans-serif";
+    g.fillText(ws.pending?"SCORE SO FAR":"FINAL SCORE",side+22,y+38);
+    g.fillStyle="#fff"; g.font="900 30px Nunito, sans-serif";
+    var rec=ws.correct+"–"+ws.wrong+(ws.pushed?"–"+ws.pushed:"")+(ws.pending?"  ·  "+ws.pending+" left":"");
+    g.fillText(rec,side+22,y+72);
+    g.font="900 46px Nunito, sans-serif"; g.textAlign="right"; g.fillStyle="#e8c840";
+    g.fillText((Math.round(ws.total*10)/10)+" PTS",W-side-24,y+64); g.textAlign="left";
+    y+=104;
+  }
+  // footer
+  g.fillStyle="#111"; g.fillRect(0,H-66,W,66);
+  _psStack(g,"SCORECERY",40,H-20,34,layers,1.3);
+  g.font="800 20px Nunito, sans-serif"; g.fillStyle="rgba(255,255,255,0.8)"; g.textAlign="right";
+  var ds=new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+  g.fillText("CFB Confidence Pool  ·  "+ds,W-40,H-26); g.textAlign="left";
+  return {cv:cv, missing:missing};
+}
+
 function _updatePickDom(weekId, gid, side){
   var rows=document.querySelectorAll('[data-pick-week="'+weekId+'"][data-pick-gid="'+gid+'"]');
   rows.forEach(function(row){
