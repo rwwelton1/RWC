@@ -843,13 +843,6 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pp-rk{font-size:10px;font-weight:900;color:#fff;background:#111;border-radius:6px;padding:2px 6px;min-width:34px;text-align:center}
 .pp-rk.dim{background:none;color:var(--dim)}
 
-.pem-autosub b.good{color:var(--green)}.pem-autosub b.bad{color:var(--red2)}.pem-autosub b.same{color:var(--muted)}
-.pem-cal{margin-top:8px;border:1.5px solid var(--border2);border-radius:9px;overflow:hidden;font-size:11px;font-weight:800}
-.pem-calhd,.pem-calrow{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;gap:4px;padding:4px 8px;text-align:center}
-.pem-calhd{background:var(--cream);font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-.pem-calrow{border-top:1px solid var(--border2)}
-.pem-calhd>:first-child,.pem-calrow>:first-child{text-align:left}
-.pem-calrow b.up{color:#15803d}.pem-calrow b.dn{color:var(--red2)}
 .pem-auto{border:2px solid var(--border);border-radius:12px;padding:10px 12px;margin:12px 0 4px;background:#fff;box-shadow:2px 2px 0 var(--border)}
 .pem-auto.on{background:var(--gold-bg)}
 .pem-autotop{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -1238,7 +1231,6 @@ function peLoad(cb){
 // Everything derived from what was just loaded. Called from all three exits of
 // peLoad so no path can quietly skip it.
 function peAfterLoad(){
-  if(pemCleanRuns()) setTimeout(function(){ try{ peSave(); }catch(e){} }, 0);   // drop old auto-fit copies for good
   pemApplySavedOpts();
   // A bad cache must not break the page, but swallowing the reason means the
   // model silently fails to restore and the setup bar just says "build to
@@ -1891,20 +1883,16 @@ var PEM = {
     lambda:   0.020, // shrinkage toward prior
     cap:      28,    // blowout margin cap
     recency:  0.0,   // 0 = all games equal, 1 = heavy tilt to recent
-    carry:    0.5,   // how much of last season's rating a team starts with
-    capSlope: 0.0,   // share of the margin past the cap that still counts
     lr: 0.035, epochs: 300
   }
 };
 
-var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.55, lambda:0.020, cap:28, recency:0.0, carry:0.5, capSlope:0.0 };
+var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.55, lambda:0.020, cap:28, recency:0.0 };
 
-// Margins past the cap are trimmed. With a taper (capSlope > 0) the part past
-// the cap still counts, at that fraction, instead of being thrown away.
-function pemCapped(a, b, cap, slope){
-  var m = a - b, k = slope || 0;
-  if(m >  cap) return [b + cap + (m - cap) * k, b];
-  if(m < -cap) return [a, a + cap + (-m - cap) * k];
+function pemCapped(a, b, cap){
+  var m = a - b;
+  if(m >  cap) return [b + cap, b];
+  if(m < -cap) return [a, a + cap];
   return [a, b];
 }
 
@@ -2513,60 +2501,63 @@ function pemParsePaste(text, nameMap){
 function pemFit(games, prior, o){
   o = o || PEM.opts;
   prior = prior || {};
-  // A start point built from last season is weighted by its own knob; a pasted sheet by Trust in prior.
-  var pw = prior._kind === "auto" ? (typeof o.carry === "number" ? o.carry : 0.5) : o.priorW;
-  var lr = o.lr, lambda = o.lambda, epochs = o.epochs, cap = o.cap, hfa = o.hfa, ow = o.oppW;
-  var G = games.length, maxWeek = 1, i, e;
-  for(i = 0; i < G; i++) if(games[i].week > maxWeek) maxWeek = games[i].week;
+  var lr = o.lr, lambda = o.lambda, epochs = o.epochs, cap = o.cap;
+  var hfa = o.hfa;                         // fixed, never fitted
+  var maxWeek = 1;
+  games.forEach(function(g){ if(g.week > maxWeek) maxWeek = g.week; });
 
-  // Teams go into flat arrays so the inner loop does no lookups or allocation.
-  var teams = {}, ids = [], idx = {}, total = 0, n = 0;
-  function add(id){
-    if(idx[id] !== undefined) return idx[id];
-    var p = prior[id];
-    teams[id] = { off: p ? p.off * pw : 0, def: p ? p.def * pw : 0,
-                  pOff: p ? p.off * pw : 0, pDef: p ? p.def * pw : 0, hasPrior: !!p, games: 0 };
-    idx[id] = ids.length; ids.push(id); return idx[id];
-  }
-  var ga = new Int32Array(G), gh = new Int32Array(G), sa = new Float64Array(G), sh = new Float64Array(G),
-      ed = new Float64Array(G), st = new Float64Array(G);
-  for(i = 0; i < G; i++){
-    var g = games[i];
-    ga[i] = add(g.awayId); gh[i] = add(g.homeId);
+  var teams = {}, total = 0, n = 0;
+  games.forEach(function(g){
+    [g.awayId, g.homeId].forEach(function(id){
+      if(!teams[id]){
+        var p = prior[id];
+        teams[id] = {
+          off:  p ? p.off * o.priorW : 0,
+          def:  p ? p.def * o.priorW : 0,
+          pOff: p ? p.off * o.priorW : 0,
+          pDef: p ? p.def * o.priorW : 0,
+          hasPrior: !!p, games: 0
+        };
+      }
+    });
     teams[g.awayId].games++; teams[g.homeId].games++;
     total += g.as + g.hs; n += 2;
-    // Recency: 0 leaves every game equal, 1 roughly doubles the newest week against the oldest.
+    // Recency: 0 leaves every game equal, 1 roughly doubles the newest week
+    // against the oldest.
     g._w = 1 + o.recency * ((g.week - 1) / Math.max(1, maxWeek - 1));
-    // The fitted score never changes between passes, so strip turnovers and cap once.
-    var rawA = g.as, rawH = g.hs;
-    if(o.toAdj && typeof g.toMargin === "number" && g.toMargin !== 0){
-      var swing = g.toMargin * PEM_TO_PTS * o.toAdj / 2;
-      rawA = g.as + swing; rawH = g.hs - swing;
-    }
-    var sc = pemCapped(rawA, rawH, cap, o.capSlope);
-    sa[i] = sc[0]; sh[i] = sc[1];
-    ed[i] = g.neutral ? 0 : hfa/2;
-    st[i] = lr * g._w;
-  }
-  var avg = n ? total/n : 24, T = ids.length;
-  var off = new Float64Array(T), def = new Float64Array(T), pOff = new Float64Array(T), pDef = new Float64Array(T), pull = new Float64Array(T);
-  for(i = 0; i < T; i++){ var t0 = teams[ids[i]]; off[i] = t0.off; def[i] = t0.def; pOff[i] = t0.pOff; pDef[i] = t0.pDef; pull[i] = lambda * (1 / Math.max(1, t0.games)) * 4; }
+  });
+  var avg = n ? total/n : 24;
 
-  for(var ep = 0; ep < epochs; ep++){
-    for(i = 0; i < G; i++){
-      var A = ga[i], H = gh[i], step = st[i], edge = ed[i];
+  for(var ep=0; ep<epochs; ep++){
+    games.forEach(function(g){
+      // Strip the turnover swing before capping, so the cap applies to how the
+      // teams actually played rather than to the luck on top of it.
+      var rawA = g.as, rawH = g.hs;
+      if(o.toAdj && typeof g.toMargin === "number" && g.toMargin !== 0){
+        var swing = g.toMargin * PEM_TO_PTS * o.toAdj / 2;
+        rawA = g.as + swing; rawH = g.hs - swing;
+      }
+      var sc = pemCapped(rawA, rawH, cap);
+      var A = teams[g.awayId], H = teams[g.homeId];
+      var edge = g.neutral ? 0 : hfa/2;
+      var step = lr * g._w;
       // oppW scales how much the OPPONENT's rating shapes the expectation.
-      var aErr = sa[i] - (avg + off[A] + ow * def[H] - edge);
-      var hErr = sh[i] - (avg + off[H] + ow * def[A] + edge);
-      off[A] += step * aErr;       def[H] += step * aErr * ow;
-      off[H] += step * hErr;       def[A] += step * hErr * ow;
-    }
-    for(i = 0; i < T; i++){
-      off[i] -= (off[i] - pOff[i]) * pull[i];
-      def[i] -= (def[i] - pDef[i]) * pull[i];
+      // At 0 a rating is just raw points, and who you played is irrelevant.
+      // At 1 it is a full opponent adjustment. Above 1, beating a good team
+      // counts for extra.
+      var ow = o.oppW;
+      var aErr = sc[0] - (avg + A.off + ow * H.def - edge);
+      var hErr = sc[1] - (avg + H.off + ow * A.def + edge);
+      A.off += step * aErr;       H.def += step * aErr * ow;
+      H.off += step * hErr;       A.def += step * hErr * ow;
+    });
+    for(var id in teams){
+      var t = teams[id];
+      var pull = lambda * (1 / Math.max(1, t.games)) * 4;
+      t.off -= (t.off - t.pOff) * pull;
+      t.def -= (t.def - t.pDef) * pull;
     }
   }
-  for(i = 0; i < T; i++){ var tt = teams[ids[i]]; tt.off = off[i]; tt.def = def[i]; }
 
   // Shrinkage pulls every rating toward the prior, which systematically
   // COMPRESSES the gap between good and bad teams. Scaling back out is a
@@ -2617,7 +2608,7 @@ function pemHoldout(games, prior, o){
   var test  = games.filter(function(g){ return g.week === last; });
   if(train.length < 30 || !test.length) return null;
 
-  var fit = pemFit(train, pemFoldPrior(prior, last, o), o);
+  var fit = pemFit(train, prior, o);
   var errs = [], flat = [], priErrs = [];
   test.forEach(function(g){
     var actual = g.hs - g.as;
@@ -2665,7 +2656,7 @@ function pemCV(games, prior, o){
     var train = games.filter(function(g){ return g.week < w; });
     var test  = games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, pemFoldPrior(prior, w, o), o);
+    var fit = pemFit(train, prior, o);
     var any = false;
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW);
@@ -2696,7 +2687,7 @@ function pemCVErrMap(games, prior, o){
     var train = games.filter(function(g){ return g.week < w; });
     var test  = games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, pemFoldPrior(prior, w, o), o);
+    var fit = pemFit(train, prior, o);
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW);
       if(p) out[g.eventId] = Math.abs((p.home - p.away) - (g.hs - g.as));
@@ -2797,7 +2788,6 @@ function pemBuild(cb){
 // Refit from cached games — what every slider calls. No network.
 function pemRefit(){
   if(!PEM._games || !PEM._games.length) return false;
-  pemAutoPriorSync();
   var fit = pemFit(PEM._games, PEM.prior, PEM.opts);
   PEM.ratings = fit.ratings; PEM.avg = fit.avg;
   PEM.n = fit.n; PEM.mae = fit.mae; PEM.weeks = fit.weeks;
@@ -2904,9 +2894,16 @@ function pemSweep(key, values, wantErrs){
   var saved = PEM.opts[key], out = [];
   values.forEach(function(v){
     PEM.opts[key] = v;
-    // Past seasons + this season, scored the same way (see pemObjErrs).
-    var r = pemObjMae(PEM.opts, key);
-    out.push(wantErrs ? { v:v, mae: r ? r.mae : null, errs: r ? r.errs : null } : { v:v, mae: r ? r.mae : null });
+    if(wantErrs){
+      // Derive the mean from the same pass rather than fitting twice.
+      var em = pemCVErrMap(PEM._games, PEM.prior, PEM.opts);
+      var ks = Object.keys(em), s = 0;
+      for(var i=0;i<ks.length;i++) s += em[ks[i]];
+      out.push({ v:v, mae: ks.length ? s/ks.length : null, errs: em });
+    } else {
+      var cvr = pemCV(PEM._games, PEM.prior, PEM.opts);
+      out.push({ v:v, mae: cvr ? cvr.mae : null });
+    }
   });
   PEM.opts[key] = saved;
   return out;
@@ -3334,25 +3331,15 @@ var PE_SIM_N = 1000;
 // Residual spread, from rolling-origin predictions. Margin and total get their
 // own figure because they miss by different amounts.
 function pemSimParams(){
-  var spKey = JSON.stringify(pemOptsSnapshot()) + "|" + pemHistCount();
-  if(PEM._simP && PEM._simPFor === PEM._games && PEM._simPKey === spKey) return PEM._simP;
+  if(PEM._simP && PEM._simPFor === PEM._games) return PEM._simP;
   if(!PEM._games || !PEM._games.length) return null;
-  // Thousands of past-season residuals beat a few hundred from this season.
-  if(pemHistReady()){
-    var acc = null; try{ acc = pemAccuracy(); }catch(e){}
-    if(acc && acc.hist && acc.hist.n >= 300){
-      PEM._simP = { sdMargin: acc.hist.sd, sdTotal: acc.hist.sdT || 13.0, n: acc.hist.n, past: true };
-      PEM._simPFor = PEM._games; PEM._simPKey = spKey;
-      return PEM._simP;
-    }
-  }
   var ws = pemCVWeeks(PEM._games);
   var mR = [], tR = [];
   ws.forEach(function(w){
     var train = PEM._games.filter(function(g){ return g.week < w; });
     var test  = PEM._games.filter(function(g){ return g.week === w; });
     if(train.length < 30 || !test.length) return;
-    var fit = pemFit(train, pemPriorAt(w, PEM.opts), PEM.opts);
+    var fit = pemFit(train, PEM.prior, PEM.opts);
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
       if(!p) return;
@@ -3383,7 +3370,7 @@ function pemSimParams(){
     out.blended = Math.round((1 - wgt) * 100);
   }
   if(out.sdTotal === null || !isFinite(out.sdTotal)) out.sdTotal = PRIOR_T;
-  PEM._simP = out; PEM._simPFor = PEM._games; PEM._simPKey = spKey;
+  PEM._simP = out; PEM._simPFor = PEM._games;
   return out;
 }
 
@@ -3965,259 +3952,10 @@ function pemTeamLogHtml(){
   return h;
 }
 
-
-// ── PAST SEASONS: BACKTEST + LAST-SEASON PRIOR ──────────────────────────────
-// This season alone is a few hundred games, too few to tell most settings
-// apart. The last four seasons' regular-season results (ESPN scoreboards,
-// cached on this device for good since they never change) turn that into
-// thousands of games. Each past season is replayed week by week the same way
-// the live model works: every week is predicted from a fit on only the weeks
-// before it, starting from the previous season's final ratings pulled toward
-// average by "Last season carryover". The same thing gives this season a
-// starting point when no SP+ sheet has been pasted.
-var PEM_HIST = { data: null, loading: false, done: 0, total: 0, err: "", tried: false };
-var PEM_HIST_KEY = "ps_hist_v1", PEM_HIST_N = 4;
-var PEM_BT_FOLDS = [1, 2, 3, 4, 5, 6, 8, 10, 12];   // early weeks, where the start point matters most
-function pemCurYear(){ return (PE.season && PE.season.year) || (PE.meta && PE.meta.espnYear) || new Date().getFullYear(); }
-function pemHistYears(){ var y = pemCurYear(), out = []; for(var i = PEM_HIST_N; i >= 1; i--) out.push(y - i); return out; }
-function pemHistRead(){
-  if(PEM_HIST.data) return PEM_HIST.data;
-  try{ var o = JSON.parse(localStorage.getItem(PEM_HIST_KEY) || "null"); if(o && o.v === 1) PEM_HIST.data = o; }catch(e){}
-  return PEM_HIST.data;
-}
-// Past season as model games (FBS vs FBS only). Built once per season and kept.
-function pemHistGames(y){
-  var d = pemHistRead(); if(!d || !d.y || !d.y[y]) return null;
-  PEM_HIST._g = PEM_HIST._g || {};
-  if(PEM_HIST._g[y]) return PEM_HIST._g[y];
-  var out = d.y[y].map(function(r, i){ return { eventId: "h" + y + "-" + i, week: r[0], awayId: String(r[1]), homeId: String(r[2]), as: r[3], hs: r[4], neutral: !!r[5] }; });
-  return (PEM_HIST._g[y] = out);
-}
-function pemHistCount(){ var n = 0; pemHistYears().forEach(function(y){ var g = pemHistGames(y); if(g) n += g.length; }); return n; }
-function pemHistReady(){ return pemHistYears().slice(1).some(function(y){ return pemHistGames(y) && pemHistGames(y - 1); }); }
-function pemHistLoad(force, done){
-  if(PEM_HIST.loading || (PEM_HIST.tried && !force)){ done && done(); return; }
-  PEM_HIST.tried = true;
-  var d = pemHistRead() || { v: 1, y: {} };
-  var need = pemHistYears().filter(function(y){ return !d.y[y]; });
-  if(!need.length){ done && done(); return; }
-  PEM_HIST.loading = true; PEM_HIST.err = ""; PEM_HIST.done = 0;
-  var jobs = [];
-  need.forEach(function(y){ for(var w = 1; w <= 16; w++) jobs.push({ y: y, w: w }); });
-  PEM_HIST.total = jobs.length;
-  var got = {}, fails = 0;
-  pemPool(jobs, 6, function(j, next){
-    pemFetchWeek(j.y, j.w, function(err, games){
-      PEM_HIST.done++;
-      if(err) fails++; else (got[j.y] = got[j.y] || []).push.apply(got[j.y], games);
-      if(PEM_HIST.done % 8 === 0) pemHistStatus();
-      next();
-    });
-  }, function(){
-    need.forEach(function(y){
-      var gs = got[y] || []; if(gs.length < 300) return;          // incomplete year: try again another day
-      // FBS teams play 11-13 games in this feed; FCS guests show up once or twice.
-      var seen = {}; gs.forEach(function(g){ seen[g.awayId] = (seen[g.awayId] || 0) + 1; seen[g.homeId] = (seen[g.homeId] || 0) + 1; });
-      var dup = {};
-      d.y[y] = gs.filter(function(g){ if(dup[g.eventId]) return false; dup[g.eventId] = 1; return seen[g.awayId] >= 5 && seen[g.homeId] >= 5; })
-                 .sort(function(a, b){ return a.week - b.week; })
-                 .map(function(g){ return [g.week, +g.awayId, +g.homeId, g.as, g.hs, g.neutral ? 1 : 0]; });
-    });
-    PEM_HIST.loading = false; PEM_HIST.data = d; PEM_HIST._g = {};
-    if(fails && need.some(function(y){ return !d.y[y]; })) PEM_HIST.err = "ESPN didn’t return every past week — try again later.";
-    try{ localStorage.setItem(PEM_HIST_KEY, JSON.stringify(d)); }catch(e){ PEM_HIST.err = "Couldn’t save past seasons on this device (storage full)."; }
-    PEM._bt = null; PEM._acc = null;
-    done && done();
-  });
-}
-function pemHistStatus(){ var el = document.getElementById("pem-acc"); if(el){ el.outerHTML = pemAccCardHtml(); pemBindAccCard(); } }
-
-// Settings that change a fit, minus the two that only weight the start point.
-function pemFitSig(o){ var s = []; for(var k in PEM_DEFAULTS) if(k !== "priorW" && k !== "carry") s.push(o[k]); return s.join(","); }
-function pemMarkAuto(p){ try{ Object.defineProperty(p, "_kind", { value: "auto", enumerable: false }); }catch(e){ p._kind = "auto"; } return p; }
-// Season y's final ratings as a start point for season y+1 (carryover is applied inside the fit).
-function pemAutoPrior(y, o){
-  var games = y === pemCurYear() ? null : pemHistGames(y);
-  if(!games || games.length < 300) return null;
-  var sig = y + "|" + pemFitSig(o);
-  PEM._apCache = PEM._apCache || {};
-  if(PEM._apCache[sig]) return PEM._apCache[sig];
-  var fit = pemFit(games, null, o), p = {};
-  for(var id in fit.ratings){ var r = fit.ratings[id]; p[id] = { off: r.off, def: r.def, fpi: r.off - r.def }; }
-  pemMarkAuto(p); p._avg = fit.avg;
-  var ks = Object.keys(PEM._apCache); if(ks.length > 40) PEM._apCache = {};
-  PEM._apCache[sig] = p;
-  return p;
-}
-// The start point for predicting week w of this season from the weeks before
-// it: the newest pasted sheet saved BEFORE that week, or last season's ratings.
-// Using today's SP+ to "predict" week 2 would leak the results it already
-// contains, and make the prior look far better than it is.
-function pemPriorAt(w, o){
-  var y = pemCurYear(), st = PE.priors || {}, best = null, bw = -1;
-  Object.keys(st).forEach(function(k){
-    var m = /^(\d{4})-w(\d+)$/.exec(k); if(!m || +m[1] !== y) return;
-    var kw = +m[2]; if(kw < w && kw > bw && st[k] && st[k].r){ bw = kw; best = k; }
-  });
-  if(best){
-    PEM._ppCache = PEM._ppCache || {};
-    var c = PEM._ppCache[best];
-    if(!c || c.at !== st[best].at){ c = PEM._ppCache[best] = { at: st[best].at, p: pePriorToModel(st[best].r) }; }
-    if(c.p) return c.p;
-  }
-  return pemAutoPrior(y - 1, o || PEM.opts);
-}
-// Which prior a walk-forward fold should use. Only the live prior is swapped;
-// anything passed in explicitly is respected.
-function pemFoldPrior(prior, w, o){ return prior === PEM.prior ? pemPriorAt(w, o) : prior; }
-function pemHasSheet(){ return !!(PEM.prior && PEM.prior._kind !== "auto") || Object.keys(PE.priors || {}).length > 0; }
-// Keep the live model's start point in step: a pasted sheet wins; otherwise last season.
-function pemAutoPriorSync(){
-  if(PEM.prior && PEM.prior._kind !== "auto") return;
-  var ap = pemAutoPrior(pemCurYear() - 1, PEM.opts);
-  PEM.prior = ap || null;
-  PEM.priorN = ap ? Object.keys(ap).length : 0;
-  PEM.priorSrc = ap ? ("Last season (" + (pemCurYear() - 1) + " final, auto)") : "none";
-  PEM.priorAt = null; PEM.priorStale = false;
-}
-// Rating for a team the fit hasn't seen yet (week 1): its start point, as the fit would set it.
-function pemRateOf(fit, prior, o, id){
-  var t = fit && fit.ratings[id];
-  if(t) return t;
-  var p = prior && prior[id], w = (prior && prior._kind === "auto") ? o.carry : o.priorW, s = o.scale || 1;
-  return p ? { off: p.off * w * s, def: p.def * w * s } : { off: 0, def: 0 };
-}
-// Replay past seasons. Returns per-game predictions (margin/total vs actual).
-function pemBacktest(o){
-  var out = [];
-  pemHistYears().forEach(function(y){
-    var games = pemHistGames(y), prior = pemAutoPrior(y - 1, o);
-    if(!games || !prior) return;
-    var weeks = {}; games.forEach(function(g){ weeks[g.week] = 1; });
-    PEM_BT_FOLDS.forEach(function(w){
-      if(!weeks[w]) return;
-      var train = games.filter(function(g){ return g.week < w; }), test = games.filter(function(g){ return g.week === w; });
-      var fit = train.length ? pemFit(train, prior, o) : null, avg = fit ? fit.avg : (prior._avg || 27);
-      test.forEach(function(g){
-        var A = pemRateOf(fit, prior, o, g.awayId), H = pemRateOf(fit, prior, o, g.homeId), edge = g.neutral ? 0 : o.hfa / 2;
-        var pa = avg + A.off + o.oppW * H.def - edge, ph = avg + H.off + o.oppW * A.def + edge;
-        out.push({ id: g.eventId, y: y, w: w, pred: ph - pa, act: g.hs - g.as, tot: ph + pa, atot: g.hs + g.as, neutral: g.neutral });
-      });
-    });
-  });
-  return out;
-}
-// Errors the tuner minimises: past seasons replayed, plus this season's own
-// walk-forward test. One number over thousands of games.
-// Past seasons start every team from last year's ratings, not from SP+, so the
-// inputs that decide how far to trust the start point (Trust in SP+, Shrinkage)
-// are only ever tuned on this season's games.
-var PEM_TUNE_LOCAL = { priorW: 1, lambda: 1 };
-function pemHistUse(key){ return pemHistReady() && !(PE.tune && PE.tune.noHist) && !(key && PEM_TUNE_LOCAL[key]); }
-function pemObjErrs(o, key){
-  var em = PEM._games ? pemCVErrMap(PEM._games, PEM.prior, o) : {};
-  if(pemHistUse(key)) pemBacktest(o).forEach(function(r){ em[r.id] = Math.abs(r.pred - r.act); });
-  return em;
-}
-function pemObjMae(o, key){ var em = pemObjErrs(o, key), s = 0, n = 0; for(var k in em){ s += em[k]; n++; } return n ? { mae: s / n, n: n, errs: em } : null; }
-// This season's honest error on its own (each week predicted from the weeks before it).
-function pemCurMae(o){ var c = PEM._games ? pemCV(PEM._games, PEM.prior, o) : null; return c ? c.mae : null; }
-
-// ── Accuracy report ──
-function pemAccuracy(){
-  var key = JSON.stringify(pemOptsSnapshot()) + "|" + (PEM._games ? PEM._games.length : 0) + "|" + pemHistCount() + "|" + Object.keys(PE.lines || {}).length + "|" + Object.keys(PE.priors || {}).length;
-  if(PEM._acc && PEM._acc.key === key) return PEM._acc.v;
-  var o = PEM.opts, v = { hist: null, cur: null, cal: null };
-  if(pemHistReady()){
-    var bt = pemBacktest(o), e = 0, eh = 0, sq = 0, sqt = 0, n = bt.length, early = [0, 0];
-    bt.forEach(function(r){ var d = r.act - r.pred; e += Math.abs(d); sq += d * d; sqt += Math.pow(r.atot - r.tot, 2); eh += Math.abs(r.act - (r.neutral ? 0 : o.hfa)); if(r.w <= 3){ early[0] += Math.abs(d); early[1]++; } });
-    var years = {}; bt.forEach(function(r){ years[r.y] = 1; });
-    v.hist = { n: n, mae: e / n, base: eh / n, sd: Math.sqrt(sq / n), sdT: Math.sqrt(sqt / n), years: Object.keys(years).map(Number).sort(), early: early[1] ? early[0] / early[1] : null };
-    // Win-probability calibration on the favourite.
-    var B = [[50, 60], [60, 70], [70, 80], [80, 90], [90, 101]].map(function(b){ return { lo: b[0], hi: b[1], n: 0, p: 0, w: 0 }; }), brier = 0;
-    bt.forEach(function(r){
-      if(r.act === 0) return;
-      var ph = pearNormCdf(r.pred / v.hist.sd), fav = ph >= 0.5 ? ph : 1 - ph, favWon = (ph >= 0.5) === (r.act > 0);
-      brier += Math.pow((r.act > 0 ? 1 : 0) - ph, 2);
-      var pc = fav * 100; B.forEach(function(b){ if(pc >= b.lo && pc < b.hi){ b.n++; b.p += fav; if(favWon) b.w++; } });
-    });
-    v.cal = { brier: brier / n, bins: B.filter(function(b){ return b.n; }).map(function(b){ return { lo: b.lo, hi: Math.min(100, b.hi), n: b.n, pred: b.p / b.n, act: b.w / b.n }; }) };
-  }
-  if(PEM._games && PEM._games.length){
-    // This season: walk-forward error, and the same games against the closing line.
-    var L = PE.lines || {}, ws = {}; PEM._games.forEach(function(g){ ws[g.week] = 1; });
-    var m = 0, mn = 0, mv = 0, gap = 0, ln = 0, closer = 0;
-    Object.keys(ws).map(Number).sort(function(a, b){ return a - b; }).forEach(function(w){
-      var train = PEM._games.filter(function(g){ return g.week < w; }), test = PEM._games.filter(function(g){ return g.week === w; });
-      if(train.length < 30 || !test.length) return;
-      var pr = pemPriorAt(w, o), fit = pemFit(train, pr, o);
-      test.forEach(function(g){
-        var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW); if(!p) return;
-        var pred = p.home - p.away, act = g.hs - g.as; m += Math.abs(pred - act); mn++;
-        var l = L[g.eventId]; if(!l || typeof l[0] !== "number") return;
-        var vh = -l[0]; mv += Math.abs(vh - act); gap += Math.abs(pred - vh); ln++;
-        if(Math.abs(pred - act) < Math.abs(vh - act)) closer++;
-      });
-    });
-    v.cur = { n: mn, mae: mn ? m / mn : null, lined: ln, modelOnLined: null, vegas: ln ? mv / ln : null, gap: ln ? gap / ln : null, closer: closer };
-    if(ln){ // model error on exactly the lined games
-      var s2 = 0, c2 = 0;
-      Object.keys(ws).map(Number).forEach(function(w){
-        var train = PEM._games.filter(function(g){ return g.week < w; }), test = PEM._games.filter(function(g){ return g.week === w && L[g.eventId] && typeof L[g.eventId][0] === "number"; });
-        if(train.length < 30 || !test.length) return;
-        var fit = pemFit(train, pemPriorAt(w, o), o);
-        test.forEach(function(g){ var p = pemPredictRaw(fit.ratings, fit.avg, o.hfa, g.awayId, g.homeId, g.neutral, o.oppW); if(p){ s2 += Math.abs((p.home - p.away) - (g.hs - g.as)); c2++; } });
-      });
-      v.cur.modelOnLined = c2 ? s2 / c2 : null;
-    }
-  }
-  PEM._acc = { key: key, v: v };
-  return v;
-}
-function pemAccCardHtml(){
-  var h = '<div class="pem-ats pem-acc" id="pem-acc"><div class="pem-autotop"><b>📏 Predictive accuracy</b>' +
-          (!PEM_HIST.loading && !pemHistReady() ? '<button class="btn btn-sm btn-ghost" id="pem-histload">Load past seasons</button>' : '') + '</div>';
-  if(PEM_HIST.loading) h += '<div class="pem-autosub">Loading past seasons from ESPN… ' + PEM_HIST.done + ' of ' + PEM_HIST.total + ' weeks</div>';
-  if(PEM_HIST.err) h += '<div class="pem-autosub">' + x(PEM_HIST.err) + '</div>';
-  var v = null; try{ v = pemAccuracy(); }catch(e){ v = null; }
-  if(v && v.hist){
-    var H = v.hist;
-    h += '<div class="pem-atsrow"><div><span>Past seasons</span><b>' + H.mae.toFixed(2) + '</b><i>pts off per game</i></div>' +
-         '<div><span>Home edge only</span><b>' + H.base.toFixed(2) + '</b><i>baseline</i></div>' +
-         '<div><span>Weeks 1–3</span><b>' + (H.early != null ? H.early.toFixed(2) : '—') + '</b><i>start-point test</i></div></div>';
-    h += '<div class="pem-atsacct"><b>' + H.n.toLocaleString() + '</b> games from ' + H.years[0] + '–' + H.years[H.years.length - 1] + ', each predicted only from the weeks before it and the previous season’s final ratings.</div>';
-    if(v.cal){
-      h += '<div class="pem-cal"><div class="pem-calhd"><span>Favourite’s win chance</span><span>Said</span><span>Won</span><span>Games</span></div>';
-      v.cal.bins.forEach(function(b){
-        var off = Math.abs(b.act - b.pred) > 0.05;
-        h += '<div class="pem-calrow"><span>' + b.lo + '–' + b.hi + '%</span><span>' + Math.round(b.pred * 100) + '%</span><b class="' + (off ? "dn" : "up") + '">' + Math.round(b.act * 100) + '%</b><span>' + b.n + '</span></div>';
-      });
-      h += '</div><div class="pem-autonote">Calibration: when the model gives a team 70%, it should win about 70% of the time. Win chances everywhere use the ' + H.sd.toFixed(1) + '-pt spread measured here.</div>';
-    }
-  } else if(!PEM_HIST.loading){
-    h += '<div class="pem-autosub">Past seasons not loaded yet — they turn a few hundred test games into thousands.</div>';
-  }
-  if(v && v.cur && v.cur.n){
-    var C = v.cur;
-    h += '<div class="pem-hd" style="margin-top:10px">This season</div>';
-    h += '<div class="pem-atsrow"><div><span>Model</span><b>' + C.mae.toFixed(2) + '</b><i>' + C.n + ' games</i></div>';
-    if(C.lined) h += '<div><span>Model · lined games</span><b>' + C.modelOnLined.toFixed(2) + '</b><i>' + C.lined + ' games</i></div>' +
-                     '<div><span>Vegas close</span><b>' + C.vegas.toFixed(2) + '</b><i>same games</i></div>';
-    h += '</div>';
-    if(C.lined) h += '<div class="pem-atsacct">Sits <b>' + C.gap.toFixed(1) + ' pts</b> from the closing line on average · closer to the final margin than Vegas in <b>' + C.closer + '</b> of ' + C.lined + ' (' + Math.round(100 * C.closer / C.lined) + '%).</div>';
-    h += '<div class="pem-autonote">The closing line is the toughest benchmark there is. Matching it is good; beating it over hundreds of games is the goal. Weekly SP+ sheets only count for weeks after they were pasted, so they can’t leak results they already contain.</div>';
-  }
-  return h + '</div>';
-}
-function pemBindAccCard(){
-  var b = document.getElementById("pem-histload");
-  if(b) b.onclick = function(){ this.disabled = true; this.textContent = "Loading…"; pemHistLoad(true, function(){ PE.tune && (PE.tune.sig = ""); if(SC.screen === "prophescore") renderPoolEdge(); }); pemHistStatus(); };
-}
-
 // ── TUNING LOG ──────────────────────────────────────────────────────────────
 // A settings change is only an improvement if it survives being written down
 // and compared against a fixed reference. Both live in PE so they persist.
-var PE_RUNS_MAX = 10;
+var PE_RUNS_MAX = 24;
 
 function pemOptsSnapshot(){
   var o = {};
@@ -4244,23 +3982,10 @@ function pemApplyOpts(o){
   return pemRefit();
 }
 
-// Auto-tune used to log itself on every pass, which filled the log with copies.
-// Only hand-logged runs are kept, and never the same settings on the same games twice.
-function pemSameOpts(a, b){ for(var k in PEM_DEFAULTS){ if(Math.abs((a && a[k] || 0) - (b && b[k] || 0)) > 1e-9) return false; } return true; }
-function pemCleanRuns(){
-  var before = (PE.runs || []).length, seen = [];
-  PE.runs = (PE.runs || []).filter(function(r){
-    if(!r || r.label === "auto-fit") return false;
-    for(var i = 0; i < seen.length; i++) if(seen[i].n === r.n && pemSameOpts(seen[i].opts, r.opts)) return false;
-    seen.push(r); return true;
-  }).slice(0, PE_RUNS_MAX);
-  return PE.runs.length !== before;
-}
 function pemLogRun(label){
   if(!PEM._games || !PEM.cv) return false;
   PE.runs = PE.runs || [];
   var snap = pemOptsSnapshot();
-  if(PE.runs[0] && PE.runs[0].n === PEM.cv.n && pemSameOpts(PE.runs[0].opts, snap)) return "dup";
   var cmp  = PE.baseline ? pemCompare(snap, PE.baseline.opts) : null;
   PE.runs.unshift({
     at: Date.now(),
@@ -4304,21 +4029,15 @@ var PEM_KNOBS = [
   { key:"toAdj",   label:"Turnover regression", min:0, max:1, step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"keep as played", hi:"strip it out",
     help:"Turnovers swing about 4.5 pts of margin each and barely repeat week to week. This removes that luck from the scores the ratings are fitted to. Needs box scores \u2014 use Load box scores." },
-  { key:"priorW",  label:"Trust in SP+", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
-    lo:"results only", hi:"SP+ only",
-    help:"How far each team starts from, and is pulled back toward, the SP+ (or other) sheet you pasted. Only tuned on weeks after a sheet was pasted." },
-  { key:"carry",   label:"Last season carryover", min:0, max:1, step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
-    lo:"fresh start", hi:"same as last year",
-    help:"When there's no SP+ sheet, each team starts from last season's final rating times this. The portal era makes it lower than it used to be; past seasons measure how much." },
+  { key:"priorW",  label:"Trust in prior", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
+    lo:"results only", hi:"prior only",
+    help:"How far each team starts from, and is pulled back toward, its external rating." },
   { key:"lambda",  label:"Shrinkage",      min:0,   max:0.08, step:0.005, fmt:function(v){ return (v*100).toFixed(1) + "%"; },
     lo:"trust results", hi:"heavy pull",
     help:"How hard thin samples get pulled back. Higher means a 2-game team stays near its prior." },
   { key:"cap",     label:"Blowout cap",    min:10,  max:45,   step:1,    fmt:function(v){ return v + " pts"; },
     lo:"10", hi:"45",
     help:"Margins above this are trimmed, so a 63-7 counts as a big win rather than a freak one." },
-  { key:"capSlope", label:"Blowout taper", min:0, max:1, step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
-    lo:"hard cap", hi:"no cap",
-    help:"How much of the margin past the cap still counts. 0% throws it away; 30% means a 49-pt win over a 28-pt cap counts as 34." },
   { key:"recency", label:"Recency tilt",   min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"all equal", hi:"recent games count double",
     help:"Weights later weeks more heavily than week 1." }
@@ -4406,7 +4125,6 @@ function pemPanelInner(){
   // ── Knobs ──
   h += pemAtsCardHtml();
   h += pemAutoCardHtml();
-  h += pemAccCardHtml();
   h += '<div class="pem-knobs"><div class="pem-sechd">Inputs <span>' + (pemAutoOn() ? 'set by auto-tune \u00b7 drag to take over' : 'drag to refit instantly') + '</span></div>';
   PEM_KNOBS.forEach(function(k){
     var v = o[k.key];
@@ -4422,13 +4140,10 @@ function pemPanelInner(){
   h += '<button class="btn btn-gold btn-sm" id="pem-auto">&#9889; Re-tune now</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-reset">Reset</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-rebuild">Rebuild data</button>';
-  if(!pemAutoOn()){
-    h += '<button class="btn btn-ghost btn-sm" id="pem-logrun">&#128221; Log this run</button>';
-    h += '<button class="btn btn-ghost btn-sm" id="pem-setbase">&#128204; ' +
-         (PE.baseline ? 'Replace baseline' : 'Set as baseline') + '</button>';
-  }
+  h += '<button class="btn btn-ghost btn-sm" id="pem-logrun">&#128221; Log this run</button>';
+  h += '<button class="btn btn-ghost btn-sm" id="pem-setbase">&#128204; ' +
+       (PE.baseline ? 'Replace baseline' : 'Set as baseline') + '</button>';
   h += '</div>';
-  if(pemAutoOn()) h += '<div class="pe-note">Auto-tune keeps these settings at the best fit, so nothing is logged. Move a slider to tune by hand and the run log and baseline come back for comparing changes.</div>';
   h += '<div class="pe-note" id="pem-tuned"></div>';
   h += '</div>';
 
@@ -4449,7 +4164,7 @@ function pemPanelInner(){
               : 'Roughly the same scale as the market.')) + '</div>';
   }
 
-  if(!pemAutoOn()) h += pemLogHtml();
+  h += pemLogHtml();
 
   var sos = pemSOS();
   if(sos){
@@ -4578,7 +4293,6 @@ function pemBindPanel(){
     pemRunAutoFit("by hand");
   });
   pemBindAutoCard();
-  pemBindAccCard();
   var lb = document.getElementById("pem-lines");
   if(lb) lb.addEventListener("click", function(){ pemEnsureLines(true); this.disabled = true; this.textContent = "Loading\u2026"; });
 
@@ -4591,9 +4305,7 @@ function pemBindPanel(){
 
   var logBtn = document.getElementById("pem-logrun");
   if(logBtn) logBtn.addEventListener("click", function(){
-    var lr = pemLogRun("manual");
-    if(lr === "dup") toast("Already logged — nothing changed since the last run");
-    else if(lr){ pemRepaint(); toast("Run logged", "ok"); }
+    if(pemLogRun("manual")){ pemRepaint(); toast("Run logged", "ok"); }
     else toast("Build the model first", "warn");
   });
 
@@ -4676,7 +4388,8 @@ function pemAutoTuneAsync(onStep, done){
   var keys = [];
   for(var p=0; p<passes; p++){
     PEM_KNOBS.forEach(function(k){
-      if(!pemKnobTunable(k.key)) return;
+      if(k.key === "priorW" && !PEM.prior) return;
+      if(k.key === "toAdj"  && !PEM.toStats) return;
       keys.push(k);
     });
   }
@@ -4705,9 +4418,7 @@ var PEM_GRID = {
     priorW:  [0,0.2,0.35,0.5,0.65,0.8,1],
     lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07],
     cap:     [14,17,21,24,28,35,45],
-    recency: [0,0.25,0.5,0.75,1],
-    carry:   [0,0.2,0.35,0.5,0.65,0.8,1],
-    capSlope:[0,0.1,0.2,0.35,0.5,0.75,1]
+    recency: [0,0.25,0.5,0.75,1]
 };
 
 function pemAutoTune(){
@@ -4729,7 +4440,8 @@ function pemAutoTune(){
 function pemTuneOne(key){
   var grid = PEM_GRID;
   if(!PEM._games) return null;
-  if(!pemKnobTunable(key)) return null;
+  if(key === "priorW" && !PEM.prior) return null;   // meaningless without one
+  if(key === "toAdj"  && !PEM.toStats) return null; // no box scores loaded
   var vals = grid[key]; if(!vals) return null;
   var best = null;
   (function(k){
@@ -4832,7 +4544,7 @@ function pemAts(){
     var test  = PEM._games.filter(function(g){ return g.week === w && L[g.eventId]; });
     if(train.length < 30){ r.early += test.length; if(test.length) r.earlyWeeks.push(w); return; }
     if(!test.length) return;
-    var fit = pemFit(train, pemPriorAt(w, PEM.opts), PEM.opts), any = false;
+    var fit = pemFit(train, PEM.prior, PEM.opts), any = false;
     test.forEach(function(g){
       var p = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, g.awayId, g.homeId, g.neutral, PEM.opts.oppW);
       if(!p) return;
@@ -4904,54 +4616,38 @@ function pemSnap(v, kd){
   v = Math.round(v / kd.step) * kd.step;
   return +Math.max(kd.min, Math.min(kd.max, v)).toFixed(4);
 }
-// One input, swept then zoomed in. Each setting is scored in its own tick so a
-// phone stays responsive while thousands of past games are replayed.
-function pemTuneBest(key, cb){
+function pemTuneBest(key){
   var kd = pemKnob(key), grid = PEM_GRID[key];
-  if(!kd || !grid || !PEM._games || !pemKnobTunable(key)){ cb(null); return; }
+  if(!kd || !grid || !PEM._games) return null;
+  if(key === "priorW" && !PEM.prior) return null;
+  if(key === "toAdj"  && !PEM.toStats) return null;
   var cur = PEM.opts[key];
   var vals = grid.slice(); if(vals.indexOf(cur) < 0) vals.push(cur);
-  function run(list, done){
-    var out = [], k = 0;
-    (function next(){
-      if(k >= list.length){ done(out); return; }
-      var r = (pemSweep(key, [list[k++]], false) || [])[0]; if(r) out.push(r);
-      setTimeout(next, 0);
-    })();
-  }
-  run(vals, function(res){
-    var bestV = cur, bestM = Infinity;
-    res.forEach(function(r){ if(r.v === cur && r.mae !== null) bestM = r.mae; });
-    // Only move off the current value for a real (if small) improvement.
-    res.forEach(function(r){ if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; } });
-    // Zoom in between the winner's neighbours on the grid.
-    var sorted = vals.slice().sort(function(a, b){ return a - b; }), i = sorted.indexOf(bestV);
-    var lo = i > 0 ? sorted[i-1] : bestV, hi = i < sorted.length - 1 ? sorted[i+1] : bestV, fine = [];
-    for(var f = 1; f <= 4; f++){
-      [pemSnap(bestV + (lo - bestV) * f / 5, kd), pemSnap(bestV + (hi - bestV) * f / 5, kd)].forEach(function(v){
-        if(v !== bestV && vals.indexOf(v) < 0 && fine.indexOf(v) < 0) fine.push(v);
-      });
-    }
-    run(fine, function(res2){
-      res2.forEach(function(r){ if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; } });
-      // Past seasons are the bigger sample, but this season is what gets predicted.
-      // A move they like is refused if it makes this season's games worse by more
-      // than its own error bar.
-      if(bestV !== cur && pemHistUse(key) && PEM._games){
-        var oa = pemOptsSnapshot(), ob = pemOptsSnapshot(); oa[key] = cur; ob[key] = bestV;
-        oa.lr = ob.lr = PEM.opts.lr; oa.epochs = ob.epochs = PEM.opts.epochs;
-        var pd = pemPairedDiff(pemCVErrMap(PEM._games, PEM.prior, ob), pemCVErrMap(PEM._games, PEM.prior, oa));
-        if(pd && pd.se && pd.d > pd.se){ bestV = cur; bestM = null; }
-      }
-      PEM.opts[key] = bestV;
-      cb({ v: bestV, mae: (bestM === Infinity || bestM === null) ? null : bestM, changed: bestV !== cur });
+  var res = pemSweep(key, vals, false) || [];
+  var bestV = cur, bestM = Infinity;
+  res.forEach(function(r){ if(r.v === cur && r.mae !== null) bestM = r.mae; });
+  // Only move off the current value for a real (if small) improvement.
+  res.forEach(function(r){ if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; } });
+  // Zoom in between the winner's neighbours on the grid.
+  var sorted = vals.slice().sort(function(a, b){ return a - b; }), i = sorted.indexOf(bestV);
+  var lo = i > 0 ? sorted[i-1] : bestV, hi = i < sorted.length - 1 ? sorted[i+1] : bestV, fine = [];
+  for(var f = 1; f <= 4; f++){
+    [pemSnap(bestV + (lo - bestV) * f / 5, kd), pemSnap(bestV + (hi - bestV) * f / 5, kd)].forEach(function(v){
+      if(v !== bestV && vals.indexOf(v) < 0 && fine.indexOf(v) < 0) fine.push(v);
     });
+  }
+  if(fine.length) (pemSweep(key, fine, false) || []).forEach(function(r){
+    if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; }
   });
+  PEM.opts[key] = bestV;
+  return { v: bestV, mae: bestM === Infinity ? null : bestM, changed: bestV !== cur };
 }
 function pemAutoFit(onStep, done){
   if(!PEM._games || !PEM._games.length){ done && done(null); return; }
-  var keys = PEM_KNOBS.filter(function(k){ return pemKnobTunable(k.key); }).map(function(k){ return k.key; });
-  var start = pemObjMae(PEM.opts), startM = start ? start.mae : null;
+  var keys = PEM_KNOBS.filter(function(k){
+    return !(k.key === "priorW" && !PEM.prior) && !(k.key === "toAdj" && !PEM.toStats);
+  }).map(function(k){ return k.key; });
+  var start = pemCV(PEM._games, PEM.prior, PEM.opts), startM = start ? start.mae : null;
   var MAXP = 4, pass = 0, i = 0, passStart = startM, cur = startM;
   function step(){
     if(i >= keys.length){
@@ -4960,38 +4656,27 @@ function pemAutoFit(onStep, done){
       passStart = cur;
       if(pass >= MAXP || gain < 0.002){
         pemRefit();
-        var fin = pemObjMae(PEM.opts);
-        done && done({ before: startM, after: fin ? fin.mae : cur, n: fin ? fin.n : 0, passes: pass });
+        done && done({ before: startM, after: PEM.cv ? PEM.cv.mae : cur, n: PEM.cv ? PEM.cv.n : 0, passes: pass });
         return;
       }
     }
-    var key = keys[i++];
+    var key = keys[i++], r = pemTuneBest(key);
+    if(r && r.mae != null) cur = r.mae;
     onStep && onStep(pass * keys.length + i, keys.length * MAXP, (pemKnob(key) || {}).label || key, pass + 1);
-    pemTuneBest(key, function(r){
-      if(r && r.changed){ var m = pemObjMae(PEM.opts); if(m) cur = m.mae; }
-      setTimeout(step, 0);
-    });
+    setTimeout(step, 0);
   }
   setTimeout(step, 0);
 }
 // What the model was last tuned against. When this changes, it tunes again.
 function pemTuneSig(){
   if(!PEM._games) return "";
-  return PEM._games.length + "|" + Object.keys(PE.priors || {}).length + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "") + "|h" + pemHistCount();
-}
-// A knob is only tuned when there's data that can move it.
-function pemKnobTunable(key){
-  if(key === "priorW") return pemHasSheet();
-  if(key === "carry") return pemHistReady() || !!(PEM.prior && PEM.prior._kind === "auto");
-  if(key === "toAdj") return !!PEM.toStats;
-  return true;
+  return PEM._games.length + "|" + (PEM.priorN || 0) + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
 }
 function pemAutoOn(){ return !(PE.tune && PE.tune.auto === false); }
 var PEM_AUTO = { running: false, msg: "" };
 function pemRunAutoFit(reason){
   if(PEM_AUTO.running || !PEM._games || !PEM._games.length) return;
   PEM_AUTO.running = true; PEM_AUTO.msg = "starting";
-  var prevOpts = pemOptsSnapshot(), curBefore = pemCurMae(PEM.opts);
   pemAutoStatus();
   pemAutoFit(function(done, total, label, pass){
     PEM_AUTO.msg = "pass " + pass + " · " + label;
@@ -5000,9 +4685,9 @@ function pemRunAutoFit(reason){
     PEM_AUTO.running = false; PEM_AUTO.msg = "";
     PE.tune = { auto: pemAutoOn(), sig: pemTuneSig(), at: Date.now(),
                 before: res ? res.before : null, after: res ? res.after : null,
-                n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, hist: pemHistUse(), reason: reason || "",
-                noHist: !!(PE.tune && PE.tune.noHist), prev: prevOpts, curBefore: curBefore, curAfter: pemCurMae(PEM.opts) };
+                n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, reason: reason || "" };
     pemSaveOpts();                // saves settings + tune together
+    try{ pemLogRun("auto-fit"); }catch(e){}
     if(SC.screen === "prophescore") renderPoolEdge();
     if(res && res.before != null && res.after != null)
       toast("Model auto-tuned · error " + res.before.toFixed(2) + " → " + res.after.toFixed(2), "ok");
@@ -5013,11 +4698,6 @@ function pemAutoMaybe(){
   pemEnsureFbs();
   if(PEAR._fbsLoading) return;                      // wait: the game set may be about to change
   pemEnsureLines(false);
-  if(PE.ready && PEM._games && !PEM_HIST.tried) pemHistLoad(false, function(){
-    PEM._simP = null; pemRefit();
-    if(SC.screen === "prophescore") renderPoolEdge();
-  });
-  if(PEM_HIST.loading) return;                      // tune once past seasons are in
   if(!pemAutoOn() || PEM_AUTO.running || !PE.ready || !PEM.ratings || !PEM._games) return;
   if(PE.tune && PE.tune.sig === pemTuneSig()) return;
   pemRunAutoFit(PE.tune && PE.tune.sig ? "new results" : "first run");
@@ -5028,27 +4708,17 @@ function pemAutoCardHtml(){
   h += '<div class="pem-autotop"><b>⚡ Auto-tune ' + (on ? "on" : "off") + '</b>' +
        '<button class="btn btn-sm ' + (on ? "btn-ghost" : "btn-gold") + '" id="pem-autotoggle">' + (on ? "Turn off" : "Turn on") + '</button></div>';
   if(PEM_AUTO.running){
-    h += '<div class="pem-autosub">Tuning to all ' + (PEM._games ? PEM._games.length : 0) + ' results' + (pemHistReady() ? ' + ' + pemHistCount().toLocaleString() + ' past-season games' : '') + '… ' + x(PEM_AUTO.msg) + '</div>';
+    h += '<div class="pem-autosub">Tuning to all ' + (PEM._games ? PEM._games.length : 0) + ' results… ' + x(PEM_AUTO.msg) + '</div>';
   } else if(t.at){
     h += '<div class="pem-autosub">Last tuned ' + new Date(t.at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
-         ' on <b>' + (t.games || 0) + '</b> games this season' + (t.hist ? ' + <b>' + pemHistCount().toLocaleString() + '</b> from past seasons' : '') +
-         (t.curBefore == null && t.before != null && t.after != null ? ' · error <b>' + t.before.toFixed(2) + ' → ' + t.after.toFixed(2) + '</b>' : '') +
+         ' on <b>' + (t.games || 0) + '</b> games' +
+         (t.before != null && t.after != null ? ' · error <b>' + t.before.toFixed(2) + ' → ' + t.after.toFixed(2) + '</b>' : '') +
          (on && t.sig !== pemTuneSig() ? ' · new data, retuning shortly' : '') + '</div>';
-    if(t.curBefore != null && t.curAfter != null){
-      var dd = t.curAfter - t.curBefore;
-      h += '<div class="pem-autosub">This season, honest test: <b>' + t.curBefore.toFixed(2) + ' → ' + t.curAfter.toFixed(2) + '</b> pts per game' +
-           ' <b class="' + (dd < -0.005 ? "good" : dd > 0.005 ? "bad" : "same") + '">(' + (dd > 0 ? "+" : "") + dd.toFixed(2) + ')</b></div>';
-    }
-    if(!t.hist && t.curBefore != null) h += '<div class="pem-autonote" style="margin-top:2px">Tuned on this season only: the same games pick the settings and grade them, so this number flatters the model.</div>';
-    var btns = '';
-    if(pemHistReady()) btns += '<button class="btn btn-sm btn-ghost" id="pem-histuse">Past seasons in tuning: ' + (PE.tune && PE.tune.noHist ? 'off' : 'on') + '</button>';
-    if(t.prev && !pemSameOpts(t.prev, pemOptsSnapshot())) btns += '<button class="btn btn-sm btn-ghost" id="pem-undotune">Undo last tune</button>';
-    if(btns) h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' + btns + '</div>';
   } else {
     h += '<div class="pem-autosub">' + (on ? 'Will tune as soon as the model is built.' : 'Off — the inputs stay where you set them.') + '</div>';
   }
   h += '<div class="pem-autonote">' + (on
-      ? 'Whenever new results, box scores or ratings come in, each input below is re-fit to the setting with the lowest error on games the model hadn’t seen yet — this season’s and the last three seasons’ replayed week by week. Moving a slider pauses it.'
+      ? 'Whenever new results, box scores or ratings come in, each input below is re-fit to the setting with the lowest error on games the model hadn’t seen yet. Moving a slider pauses it.'
       : 'Turn it on to have the inputs re-fit to every result automatically.') + '</div>';
   return h + '</div>';
 }
@@ -5057,21 +4727,6 @@ function pemAutoStatus(){
   if(el){ el.outerHTML = pemAutoCardHtml(); pemBindAutoCard(); }
 }
 function pemBindAutoCard(){
-  var hu = document.getElementById("pem-histuse");
-  if(hu) hu.onclick = function(){
-    PE.tune = PE.tune || {}; PE.tune.noHist = !PE.tune.noHist; PE.tune.sig = "";
-    pemSaveOpts(); PEM._simP = null;
-    if(pemAutoOn()) pemRunAutoFit(PE.tune.noHist ? "past seasons off" : "past seasons on"); else pemAutoStatus();
-  };
-  var ut = document.getElementById("pem-undotune");
-  if(ut) ut.onclick = function(){
-    var t = PE.tune || {}, now = pemOptsSnapshot(), cb = pemCurMae(PEM.opts);
-    pemApplyOpts(t.prev);
-    t.prev = now; t.curBefore = cb; t.curAfter = pemCurMae(PEM.opts);
-    PE.tune = t; pemSaveOpts();
-    if(SC.screen === "prophescore") renderPoolEdge();
-    toast("Previous settings restored · tap again to switch back");
-  };
   var b = document.getElementById("pem-autotoggle");
   if(b) b.onclick = function(){
     var on = !pemAutoOn();
@@ -5969,7 +5624,7 @@ function pearFitFor(week){
   var key = week + "|" + PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + (PEM.priorN || 0);
   if(_pearFitCache.key === key) return _pearFitCache.fit;
   var train = PEM._games.filter(function(g){ return g.week < week; });
-  var fit = train.length < 30 ? false : pemFit(train, pemPriorAt(week, PEM.opts), PEM.opts);
+  var fit = train.length < 30 ? false : pemFit(train, PEM.prior, PEM.opts);
   _pearFitCache = { key: key, fit: fit };
   return fit;
 }
@@ -6176,7 +5831,7 @@ function pearPrevRanks(){
   if(_pearPrev.key === key) return _pearPrev;
   var train = PEM._games.filter(function(g){ return g.week < last; });
   var r = null;
-  if(train.length >= 30){ var fit = pemFit(train, pemPriorAt(last, PEM.opts), PEM.opts); r = pearRankOrder(fit.ratings).rank; }
+  if(train.length >= 30){ var fit = pemFit(train, PEM.prior, PEM.opts); r = pearRankOrder(fit.ratings).rank; }
   _pearPrev = { key: key, ranks: r, week: last };
   return _pearPrev;
 }
