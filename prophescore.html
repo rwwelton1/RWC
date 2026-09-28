@@ -349,6 +349,10 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 
 
 .pem-prov{font-size:9px;font-weight:800;color:var(--muted);margin-bottom:2px}
+.pem-trust{border:1.5px dashed var(--border2);border-radius:10px;padding:7px 10px;margin:6px 0;font-size:11px;line-height:1.4}
+.pem-trust b{display:block;font-weight:900;color:var(--text)}
+.pem-trust span{display:block;font-weight:800;color:var(--muted);font-size:10px}
+.pem-trust i{display:block;font-style:normal;font-weight:700;color:var(--gold-dark);font-size:10px;margin-top:3px}
 .pem-sheets{border:2px solid var(--border);border-radius:12px;padding:10px 12px;margin:8px 0;background:#fff;box-shadow:2px 2px 0 var(--border)}
 .pem-sheetshd{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
 .pem-sheetsel{width:100%;padding:8px 10px;border:2px solid var(--border);border-radius:9px;background:var(--cream);font:800 13px 'Nunito',sans-serif;color:var(--text)}
@@ -1891,7 +1895,8 @@ var PEM = {
     scale:    1.0,   // expands ratings back out after shrinkage
     oppW:     1.0,   // how hard to adjust for who the opponent was
     toAdj:    0.0,   // share of the turnover swing to regress away
-    priorW:   0.55,  // 0 = results only, 1 = prior only
+    priorW:   0.35,  // trust in the SP+ sheet going into week 1 (0 = results only, 1 = sheet only)
+    priorW8:  0.75,  // trust by week 8; weeks between follow a log curve
     lambda:   0.020, // shrinkage toward prior
     cap:      28,    // blowout margin cap
     recency:  0.0,   // 0 = all games equal, 1 = heavy tilt to recent
@@ -1899,7 +1904,7 @@ var PEM = {
   }
 };
 
-var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.55, lambda:0.020, cap:28, recency:0.0 };
+var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.35, priorW8:0.75, lambda:0.020, cap:28, recency:0.0 };
 
 function pemCapped(a, b, cap){
   var m = a - b;
@@ -1992,8 +1997,9 @@ function pemPriorAt(w){
   var c = PEM._ppCache[best];
   if(!c || c.at !== st[best].at){
     var e = st[best], r = e.r;
-    if(e.text && PEM.nameMap){ var re = pemParsePaste(e.text, PEM.nameMap); if(re && re.prior && re.matched >= (e.n || 0)){ r = {}; for(var id in re.prior) r[id] = re.prior[id].fpi; } }
-    c = PEM._ppCache[best] = { at: e.at, p: pePriorToModel(r || {}), key: best };
+    var pp = null;
+    if(e.text){ var re = pemParsePaste(e.text, PEM.nameMap || {}); if(re && re.prior && re.matched >= (e.n || 0)) pp = re.prior; }
+    c = PEM._ppCache[best] = { at: e.at, p: pp || pePriorToModel(r || {}), key: best };
   }
   return c.p;
 }
@@ -2018,16 +2024,16 @@ function pePriorToModel(r){
 function pemRestorePrior(){
   var hit = pePriorLatest(pePriorKey());
   if(!hit) return false;
-  var e = hit.e, ratings = e.r;
-  if(e.text && PEM.nameMap){
-    var re = pemParsePaste(e.text, PEM.nameMap);
-    if(re && re.matched >= (e.n || 0)){
+  var e = hit.e, ratings = e.r, parsed = null;
+  if(e.text){
+    var re = pemParsePaste(e.text, PEM.nameMap || {});
+    if(re && re.prior && re.matched >= (e.n || 0)){
       ratings = {};
       for(var id in re.prior) ratings[id] = re.prior[id].fpi;
-      e.r = ratings; e.n = re.matched;
+      e.r = ratings; e.n = re.matched; parsed = re.prior;
     }
   }
-  var model = pePriorToModel(ratings || {});
+  var model = parsed || pePriorToModel(ratings || {});
   if(!model) return false;
   PEM.prior = model;
   PEM.priorN = Object.keys(model).length;
@@ -2539,11 +2545,31 @@ function pemParsePaste(text, nameMap){
     // Genuinely tied on length is ambiguous; leave it unmatched rather than guess.
     if(list[0].words < list[1].words) lookup[key] = list[0].id;
   });
-  var prior = {}, matched = 0, missed = [];
+  var prior = {}, matched = 0, missed = [], H = null, split = {};
+  var isNum = function(c){ return /^[-+]?\d+(\.\d+)?$/.test(c); };
   String(text||"").split(/\n/).forEach(function(line){
     if(!line.trim()) return;
     var name = null, val = NaN;
     if(/[,\t]/.test(line)){
+      var hc = line.split(/\t|,/).map(function(c){ return c.trim(); });
+      // A header naming offense and defense columns ("Team, SP+, Off, Def ...")
+      // means each team can start from its real split instead of half and half.
+      if(!H && !hc.some(isNum) && hc.some(function(c){ return /^off/i.test(c); }) && hc.some(function(c){ return /^def/i.test(c); })){
+        var ix = function(re){ for(var q = 0; q < hc.length; q++) if(re.test(hc[q])) return q; return -1; };
+        H = { team: ix(/^(team|school|name)/i), rating: ix(/sp\+|rating|overall|ovr|^net/i), off: ix(/^off/i), def: ix(/^def/i) };
+        if(H.team < 0) H.team = /^(rk|rank|#)$/i.test(hc[0]) ? 1 : 0;
+        return;
+      }
+      if(H && hc.length > Math.max(H.team, H.off, H.def)){
+        name = hc[H.team];
+        val = H.rating >= 0 && isNum(hc[H.rating]) ? parseFloat(hc[H.rating]) : NaN;
+        if(isNaN(val)) for(var hq = H.team + 1; hq < hc.length; hq++) if(isNum(hc[hq])){ val = parseFloat(hc[hq]); break; }
+        var so = parseFloat(hc[H.off]), sd = parseFloat(hc[H.def]);
+        if(name && !isNaN(val) && !isNaN(so) && !isNaN(sd)) line = null, split[pemNormName(name)] = [so, sd];
+      }
+    }
+    if(line === null){ /* parsed from the header layout above */ }
+    else if(/[,\t]/.test(line)){
       // Spreadsheet/CSV rows: team in the first column, rating in the first
       // numeric column after it ("Ohio State,29.7" or "1\tOhio State\t29.7\t...").
       var cols = line.split(/\t|,/).map(function(c){ return c.trim(); });
@@ -2565,12 +2591,34 @@ function pemParsePaste(text, nameMap){
       var words = name.trim().split(/\s+/);
       for(var w = words.length; w > 0 && !id; w--) id = lookup[norm(words.slice(0,w).join(""))];
     }
-    if(id){ prior[id] = { off: val/2, def: -val/2, fpi: val }; matched++; }
+    if(id){ prior[id] = { off: val/2, def: -val/2, fpi: val }; if(split[key]) prior[id]._sd = split[key]; matched++; }
     else missed.push(name.trim());
   });
-  return { prior: matched ? prior : null, matched: matched, missed: missed };
+  // Offense/defense split: each side measured against the sheet's average, with
+  // whatever is left (special teams, rounding) shared so off - def still equals
+  // the overall rating. Model convention: def > 0 means allowing more points.
+  var sIds = Object.keys(prior).filter(function(id){ return prior[id]._sd; }), nSplit = 0;
+  if(sIds.length >= 20){
+    var mo = 0, md = 0; sIds.forEach(function(id){ mo += prior[id]._sd[0]; md += prior[id]._sd[1]; }); mo /= sIds.length; md /= sIds.length;
+    sIds.forEach(function(id){
+      var P = prior[id], oS = P._sd[0] - mo, dS = -(P._sd[1] - md), r = P.fpi - (oS + dS);
+      P.off = oS + r/2; P.def = -(dS + r/2); nSplit++;
+    });
+  }
+  Object.keys(prior).forEach(function(id){ delete prior[id]._sd; });
+  return { prior: matched ? prior : null, matched: matched, missed: missed, split: nSplit };
 }
 
+// How much the SP+ sheet counts for the week being predicted. Low in week 1,
+// a little more in week 2, then rising on a log curve through week 8 and
+// easing on after it — each weekly sheet has more of the season built into it.
+// Both ends are fitted; the curve can fall instead of rise if the data says so.
+var PEM_TRUST_W = 8;
+function pemTrustAt(o, w){
+  var a = o.priorW, b = (typeof o.priorW8 === "number") ? o.priorW8 : a;
+  var t = a + (b - a) * Math.log(Math.max(1, w)) / Math.log(PEM_TRUST_W);
+  return Math.max(0, Math.min(1, t));
+}
 function pemFit(games, prior, o){
   o = o || PEM.opts;
   prior = prior || {};
@@ -2578,6 +2626,8 @@ function pemFit(games, prior, o){
   var hfa = o.hfa;                         // fixed, never fitted
   var maxWeek = 1;
   games.forEach(function(g){ if(g.week > maxWeek) maxWeek = g.week; });
+  // Fitting on weeks 1..N predicts week N+1, so that week's trust applies.
+  var pw = pemTrustAt(o, games.length ? maxWeek + 1 : 1);
 
   var teams = {}, total = 0, n = 0;
   games.forEach(function(g){
@@ -2585,10 +2635,10 @@ function pemFit(games, prior, o){
       if(!teams[id]){
         var p = prior[id];
         teams[id] = {
-          off:  p ? p.off * o.priorW : 0,
-          def:  p ? p.def * o.priorW : 0,
-          pOff: p ? p.off * o.priorW : 0,
-          pDef: p ? p.def * o.priorW : 0,
+          off:  p ? p.off * pw : 0,
+          def:  p ? p.def * pw : 0,
+          pOff: p ? p.off * pw : 0,
+          pDef: p ? p.def * pw : 0,
           hasPrior: !!p, games: 0
         };
       }
@@ -2626,7 +2676,8 @@ function pemFit(games, prior, o){
     });
     for(var id in teams){
       var t = teams[id];
-      var pull = lambda * (1 / Math.max(1, t.games)) * 4;
+      // Thin samples are pulled back hard; the pull eases on a log curve as games pile up.
+      var pull = lambda * 4 / (1 + Math.log(Math.max(1, t.games)));
       t.off -= (t.off - t.pOff) * pull;
       t.def -= (t.def - t.pDef) * pull;
     }
@@ -2843,7 +2894,7 @@ function pemBuild(cb){
         pemApplyCachedStats(games);
         // A pasted prior is the deliberate choice, so it wins over a live fetch.
         pemRestorePrior();
-        if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
+        if(PEM.prior && typeof PEM.opts.priorW !== "number") PEM.opts.priorW = PEM_DEFAULTS.priorW;
 
         if(PEAR.fbs){
           var _b2 = games.length;
@@ -2862,6 +2913,7 @@ function pemBuild(cb){
 // Refit from cached games — what every slider calls. No network.
 function pemRefit(){
   if(!PEM._games || !PEM._games.length) return false;
+  if(pemTrustHold()) pemSaveOpts();
   var fit = pemFit(PEM._games, PEM.prior, PEM.opts);
   PEM.ratings = fit.ratings; PEM.avg = fit.avg;
   PEM.n = fit.n; PEM.mae = fit.mae; PEM.weeks = fit.weeks;
@@ -2945,7 +2997,7 @@ function pemRestoreSeason(){
   pemApplyCachedStats(games);
   // A pasted rating sheet is the deliberate choice, so it still wins.
   pemRestorePrior();
-  if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
+  if(PEM.prior && typeof PEM.opts.priorW !== "number") PEM.opts.priorW = PEM_DEFAULTS.priorW;
   return pemRefit();
 }
 
@@ -4116,9 +4168,12 @@ var PEM_KNOBS = [
   { key:"toAdj",   label:"Turnover regression", min:0, max:1, step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"keep as played", hi:"strip it out",
     help:"Turnovers swing about 4.5 pts of margin each and barely repeat week to week. This removes that luck from the scores the ratings are fitted to. Needs box scores \u2014 use Load box scores." },
-  { key:"priorW",  label:"Trust in prior", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
+  { key:"priorW",  label:"Trust in SP+ · week 1", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"results only", hi:"prior only",
-    help:"How far each team starts from, and is pulled back toward, its external rating." },
+    help:"How much the SP+ sheet counts going into week 1. Later weeks rise (or fall) from here on a log curve toward the week-8 value." },
+  { key:"priorW8", label:"Trust in SP+ · week 8", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
+    lo:"results only", hi:"prior only",
+    help:"Trust by week 8. Weeks in between follow a log curve from the week-1 value: week 2 moves a third of the way, week 4 two thirds, and it keeps easing the same direction after week 8. Auto-tune fits both ends from weeks that had a sheet saved before them." },
   { key:"lambda",  label:"Shrinkage",      min:0,   max:0.08, step:0.005, fmt:function(v){ return (v*100).toFixed(1) + "%"; },
     lo:"trust results", hi:"heavy pull",
     help:"How hard thin samples get pulled back. Higher means a 2-game team stays near its prior." },
@@ -4156,6 +4211,14 @@ function pemPanelInner(){
   if(PEM.dropped) h += ' &middot; dropped <b>' + PEM.dropped + '</b> non-FBS';
   h += '</div>';
   h += pemSheetsHtml();
+  if(PEM.prior && PEM._games && PEM._games.length){
+    var _nw = 1; PEM._games.forEach(function(g){ if(g.week >= _nw) _nw = g.week + 1; });
+    var _tm = pemTrustMeasurable();
+    h += '<div class="pem-trust"><b>Trust in SP+ for week ' + _nw + ': ' + Math.round(pemTrustAt(PEM.opts, _nw) * 100) + '%</b>' +
+         '<span>' + [1, 2, 3, 4, 6, 8].map(function(w){ return 'wk ' + w + ' ' + Math.round(pemTrustAt(PEM.opts, w) * 100) + '%'; }).join(' · ') + '</span>' +
+         (_tm ? '' : '<i>Can\u2019t be measured yet \u2014 no graded week had a sheet saved before it, so this holds at ' +
+                    Math.round(PEM_DEFAULTS.priorW * 100) + '% \u2192 ' + Math.round(PEM_DEFAULTS.priorW8 * 100) + '%. Paste earlier weeks\u2019 SP+ and auto-tune will fit it.</i>') + '</div>';
+  }
   if(PEM.prior && PEM.priorStale){
     h += '<div class="pe-note" style="margin-top:2px;color:var(--gold-dark)"><b>These are last week\u2019s numbers.</b> Paste the current SP+ when it publishes.</div>';
   }
@@ -4482,7 +4545,7 @@ function pemAutoTuneAsync(onStep, done){
   var keys = [];
   for(var p=0; p<passes; p++){
     PEM_KNOBS.forEach(function(k){
-      if(k.key === "priorW" && !PEM.prior) return;
+      if(!pemTrustTunable(k.key)) return;
       if(k.key === "toAdj"  && !PEM.toStats) return;
       keys.push(k);
     });
@@ -4510,6 +4573,7 @@ var PEM_GRID = {
     oppW:    [0,0.35,0.6,0.85,1,1.2,1.45,1.75],
     toAdj:   [0,0.25,0.5,0.75,1],
     priorW:  [0,0.2,0.35,0.5,0.65,0.8,1],
+    priorW8: [0,0.2,0.35,0.5,0.65,0.8,1],
     lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07],
     cap:     [14,17,21,24,28,35,45],
     recency: [0,0.25,0.5,0.75,1]
@@ -4534,7 +4598,7 @@ function pemAutoTune(){
 function pemTuneOne(key){
   var grid = PEM_GRID;
   if(!PEM._games) return null;
-  if(key === "priorW" && !PEM.prior) return null;   // meaningless without one
+  if(!pemTrustTunable(key)) return null;   // meaningless without a sheet to test against
   if(key === "toAdj"  && !PEM.toStats) return null; // no box scores loaded
   var vals = grid[key]; if(!vals) return null;
   var best = null;
@@ -4713,7 +4777,7 @@ function pemSnap(v, kd){
 function pemTuneBest(key){
   var kd = pemKnob(key), grid = PEM_GRID[key];
   if(!kd || !grid || !PEM._games) return null;
-  if(key === "priorW" && !PEM.prior) return null;
+  if(!pemTrustTunable(key)) return null;
   if(key === "toAdj"  && !PEM.toStats) return null;
   var cur = PEM.opts[key];
   var vals = grid.slice(); if(vals.indexOf(cur) < 0) vals.push(cur);
@@ -4739,7 +4803,7 @@ function pemTuneBest(key){
 function pemAutoFit(onStep, done){
   if(!PEM._games || !PEM._games.length){ done && done(null); return; }
   var keys = PEM_KNOBS.filter(function(k){
-    return !(k.key === "priorW" && !PEM.prior) && !(k.key === "toAdj" && !PEM.toStats);
+    return pemTrustTunable(k.key) && !(k.key === "toAdj" && !PEM.toStats);
   }).map(function(k){ return k.key; });
   var start = pemCV(PEM._games, PEM.prior, PEM.opts), startM = start ? start.mae : null;
   var MAXP = 4, pass = 0, i = 0, passStart = startM, cur = startM;
@@ -4762,9 +4826,32 @@ function pemAutoFit(onStep, done){
   setTimeout(step, 0);
 }
 // What the model was last tuned against. When this changes, it tunes again.
+// True when at least one graded week had an SP+ sheet saved before it, so the
+// trust curve actually changes the score. Otherwise it can't be measured.
+function pemTrustMeasurable(){
+  if(!PEM._games || !PEM._games.length) return false;
+  var ws = pemCVWeeks(PEM._games);
+  for(var i = 0; i < ws.length; i++){
+    var w = ws[i], n = 0;
+    PEM._games.forEach(function(g){ if(g.week < w) n++; });
+    if(n >= 30 && pemPriorAt(w)) return true;
+  }
+  return false;
+}
+function pemTrustTunable(key){
+  if(key !== "priorW" && key !== "priorW8") return true;
+  return !!PEM.prior && pemTrustMeasurable();
+}
+// Unmeasurable trust sits at the neutral curve rather than wherever it drifted.
+function pemTrustHold(){
+  if(pemTrustMeasurable()) return false;
+  if(PEM.opts.priorW === PEM_DEFAULTS.priorW && PEM.opts.priorW8 === PEM_DEFAULTS.priorW8) return false;
+  PEM.opts.priorW = PEM_DEFAULTS.priorW; PEM.opts.priorW8 = PEM_DEFAULTS.priorW8;
+  return true;
+}
 function pemTuneSig(){
   if(!PEM._games) return "";
-  return PEM._games.length + "|" + pemSheetSig() + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
+  return "v2|" + PEM._games.length + "|" + pemSheetSig() + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
 }
 function pemAutoOn(){ return !(PE.tune && PE.tune.auto === false); }
 var PEM_AUTO = { running: false, msg: "" };
@@ -4939,7 +5026,7 @@ function pemShowPasteModal(forWeek){
         // The live model uses the newest sheet for this week or earlier, which
         // may not be the one just pasted (e.g. filling in an old week).
         pemRestorePrior();
-        if(!PEM.opts.priorW) PEM.opts.priorW = 0.55;
+        if(typeof PEM.opts.priorW !== "number") PEM.opts.priorW = PEM_DEFAULTS.priorW;
         pemSaveOpts();
         pemRefit();
         el.remove();
@@ -4948,7 +5035,7 @@ function pemShowPasteModal(forWeek){
         var extra = (res.matched < lines * 0.6)
           ? " \u00b7 more will match once the model is built"
           : (res.missed.length ? (" \u00b7 " + res.missed.length + " unmatched") : "");
-        toast("Week " + _wk + ": " + res.matched + " of " + lines + " teams matched" + extra, "ok");
+        toast("Week " + _wk + ": " + res.matched + " of " + lines + " teams matched" + (res.split ? " · offense/defense split used" : "") + extra, "ok");
       } else {
         // Saved but unmatched: say so plainly rather than losing the paste.
         if(st) st.innerHTML = "<b>Saved, but no names matched yet.</b> " +
