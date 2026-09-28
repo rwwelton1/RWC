@@ -843,6 +843,7 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pp-rk{font-size:10px;font-weight:900;color:#fff;background:#111;border-radius:6px;padding:2px 6px;min-width:34px;text-align:center}
 .pp-rk.dim{background:none;color:var(--dim)}
 
+.pem-autosub b.good{color:var(--green)}.pem-autosub b.bad{color:var(--red2)}.pem-autosub b.same{color:var(--muted)}
 .pem-cal{margin-top:8px;border:1.5px solid var(--border2);border-radius:9px;overflow:hidden;font-size:11px;font-weight:800}
 .pem-calhd,.pem-calrow{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;gap:4px;padding:4px 8px;text-align:center}
 .pem-calhd{background:var(--cream);font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -2904,7 +2905,7 @@ function pemSweep(key, values, wantErrs){
   values.forEach(function(v){
     PEM.opts[key] = v;
     // Past seasons + this season, scored the same way (see pemObjErrs).
-    var r = pemObjMae(PEM.opts);
+    var r = pemObjMae(PEM.opts, key);
     out.push(wantErrs ? { v:v, mae: r ? r.mae : null, errs: r ? r.errs : null } : { v:v, mae: r ? r.mae : null });
   });
   PEM.opts[key] = saved;
@@ -4108,12 +4109,19 @@ function pemBacktest(o){
 }
 // Errors the tuner minimises: past seasons replayed, plus this season's own
 // walk-forward test. One number over thousands of games.
-function pemObjErrs(o){
+// Past seasons start every team from last year's ratings, not from SP+, so the
+// inputs that decide how far to trust the start point (Trust in SP+, Shrinkage)
+// are only ever tuned on this season's games.
+var PEM_TUNE_LOCAL = { priorW: 1, lambda: 1 };
+function pemHistUse(key){ return pemHistReady() && !(PE.tune && PE.tune.noHist) && !(key && PEM_TUNE_LOCAL[key]); }
+function pemObjErrs(o, key){
   var em = PEM._games ? pemCVErrMap(PEM._games, PEM.prior, o) : {};
-  if(pemHistReady()) pemBacktest(o).forEach(function(r){ em[r.id] = Math.abs(r.pred - r.act); });
+  if(pemHistUse(key)) pemBacktest(o).forEach(function(r){ em[r.id] = Math.abs(r.pred - r.act); });
   return em;
 }
-function pemObjMae(o){ var em = pemObjErrs(o), s = 0, n = 0; for(var k in em){ s += em[k]; n++; } return n ? { mae: s / n, n: n, errs: em } : null; }
+function pemObjMae(o, key){ var em = pemObjErrs(o, key), s = 0, n = 0; for(var k in em){ s += em[k]; n++; } return n ? { mae: s / n, n: n, errs: em } : null; }
+// This season's honest error on its own (each week predicted from the weeks before it).
+function pemCurMae(o){ var c = PEM._games ? pemCV(PEM._games, PEM.prior, o) : null; return c ? c.mae : null; }
 
 // ── Accuracy report ──
 function pemAccuracy(){
@@ -4926,8 +4934,17 @@ function pemTuneBest(key, cb){
     }
     run(fine, function(res2){
       res2.forEach(function(r){ if(r.mae !== null && r.mae < bestM - 1e-4){ bestM = r.mae; bestV = r.v; } });
+      // Past seasons are the bigger sample, but this season is what gets predicted.
+      // A move they like is refused if it makes this season's games worse by more
+      // than its own error bar.
+      if(bestV !== cur && pemHistUse(key) && PEM._games){
+        var oa = pemOptsSnapshot(), ob = pemOptsSnapshot(); oa[key] = cur; ob[key] = bestV;
+        oa.lr = ob.lr = PEM.opts.lr; oa.epochs = ob.epochs = PEM.opts.epochs;
+        var pd = pemPairedDiff(pemCVErrMap(PEM._games, PEM.prior, ob), pemCVErrMap(PEM._games, PEM.prior, oa));
+        if(pd && pd.se && pd.d > pd.se){ bestV = cur; bestM = null; }
+      }
       PEM.opts[key] = bestV;
-      cb({ v: bestV, mae: bestM === Infinity ? null : bestM, changed: bestV !== cur });
+      cb({ v: bestV, mae: (bestM === Infinity || bestM === null) ? null : bestM, changed: bestV !== cur });
     });
   });
 }
@@ -4951,7 +4968,7 @@ function pemAutoFit(onStep, done){
     var key = keys[i++];
     onStep && onStep(pass * keys.length + i, keys.length * MAXP, (pemKnob(key) || {}).label || key, pass + 1);
     pemTuneBest(key, function(r){
-      if(r && r.mae != null) cur = r.mae;
+      if(r && r.changed){ var m = pemObjMae(PEM.opts); if(m) cur = m.mae; }
       setTimeout(step, 0);
     });
   }
@@ -4974,6 +4991,7 @@ var PEM_AUTO = { running: false, msg: "" };
 function pemRunAutoFit(reason){
   if(PEM_AUTO.running || !PEM._games || !PEM._games.length) return;
   PEM_AUTO.running = true; PEM_AUTO.msg = "starting";
+  var prevOpts = pemOptsSnapshot(), curBefore = pemCurMae(PEM.opts);
   pemAutoStatus();
   pemAutoFit(function(done, total, label, pass){
     PEM_AUTO.msg = "pass " + pass + " · " + label;
@@ -4982,7 +5000,8 @@ function pemRunAutoFit(reason){
     PEM_AUTO.running = false; PEM_AUTO.msg = "";
     PE.tune = { auto: pemAutoOn(), sig: pemTuneSig(), at: Date.now(),
                 before: res ? res.before : null, after: res ? res.after : null,
-                n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, hist: pemHistReady(), reason: reason || "" };
+                n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, hist: pemHistUse(), reason: reason || "",
+                noHist: !!(PE.tune && PE.tune.noHist), prev: prevOpts, curBefore: curBefore, curAfter: pemCurMae(PEM.opts) };
     pemSaveOpts();                // saves settings + tune together
     if(SC.screen === "prophescore") renderPoolEdge();
     if(res && res.before != null && res.after != null)
@@ -5012,9 +5031,19 @@ function pemAutoCardHtml(){
     h += '<div class="pem-autosub">Tuning to all ' + (PEM._games ? PEM._games.length : 0) + ' results' + (pemHistReady() ? ' + ' + pemHistCount().toLocaleString() + ' past-season games' : '') + '… ' + x(PEM_AUTO.msg) + '</div>';
   } else if(t.at){
     h += '<div class="pem-autosub">Last tuned ' + new Date(t.at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
-         ' on <b>' + (t.n || t.games || 0).toLocaleString() + '</b> test games' + (t.hist ? ' (incl. past seasons)' : '') +
-         (t.before != null && t.after != null ? ' · error <b>' + t.before.toFixed(2) + ' → ' + t.after.toFixed(2) + '</b>' : '') +
+         ' on <b>' + (t.games || 0) + '</b> games this season' + (t.hist ? ' + <b>' + pemHistCount().toLocaleString() + '</b> from past seasons' : '') +
+         (t.curBefore == null && t.before != null && t.after != null ? ' · error <b>' + t.before.toFixed(2) + ' → ' + t.after.toFixed(2) + '</b>' : '') +
          (on && t.sig !== pemTuneSig() ? ' · new data, retuning shortly' : '') + '</div>';
+    if(t.curBefore != null && t.curAfter != null){
+      var dd = t.curAfter - t.curBefore;
+      h += '<div class="pem-autosub">This season, honest test: <b>' + t.curBefore.toFixed(2) + ' → ' + t.curAfter.toFixed(2) + '</b> pts per game' +
+           ' <b class="' + (dd < -0.005 ? "good" : dd > 0.005 ? "bad" : "same") + '">(' + (dd > 0 ? "+" : "") + dd.toFixed(2) + ')</b></div>';
+    }
+    if(!t.hist && t.curBefore != null) h += '<div class="pem-autonote" style="margin-top:2px">Tuned on this season only: the same games pick the settings and grade them, so this number flatters the model.</div>';
+    var btns = '';
+    if(pemHistReady()) btns += '<button class="btn btn-sm btn-ghost" id="pem-histuse">Past seasons in tuning: ' + (PE.tune && PE.tune.noHist ? 'off' : 'on') + '</button>';
+    if(t.prev && !pemSameOpts(t.prev, pemOptsSnapshot())) btns += '<button class="btn btn-sm btn-ghost" id="pem-undotune">Undo last tune</button>';
+    if(btns) h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' + btns + '</div>';
   } else {
     h += '<div class="pem-autosub">' + (on ? 'Will tune as soon as the model is built.' : 'Off — the inputs stay where you set them.') + '</div>';
   }
@@ -5028,6 +5057,21 @@ function pemAutoStatus(){
   if(el){ el.outerHTML = pemAutoCardHtml(); pemBindAutoCard(); }
 }
 function pemBindAutoCard(){
+  var hu = document.getElementById("pem-histuse");
+  if(hu) hu.onclick = function(){
+    PE.tune = PE.tune || {}; PE.tune.noHist = !PE.tune.noHist; PE.tune.sig = "";
+    pemSaveOpts(); PEM._simP = null;
+    if(pemAutoOn()) pemRunAutoFit(PE.tune.noHist ? "past seasons off" : "past seasons on"); else pemAutoStatus();
+  };
+  var ut = document.getElementById("pem-undotune");
+  if(ut) ut.onclick = function(){
+    var t = PE.tune || {}, now = pemOptsSnapshot(), cb = pemCurMae(PEM.opts);
+    pemApplyOpts(t.prev);
+    t.prev = now; t.curBefore = cb; t.curAfter = pemCurMae(PEM.opts);
+    PE.tune = t; pemSaveOpts();
+    if(SC.screen === "prophescore") renderPoolEdge();
+    toast("Previous settings restored · tap again to switch back");
+  };
   var b = document.getElementById("pem-autotoggle");
   if(b) b.onclick = function(){
     var on = !pemAutoOn();
