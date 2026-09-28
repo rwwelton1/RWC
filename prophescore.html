@@ -2501,9 +2501,20 @@ function pemParseFpi(d){
 // Manual ratings paste. SP+ has no public API at all, so pasting is the only
 // route to it — and it works when every endpoint fails.
 // Accepts lines like "Georgia 22.5", "1. Georgia  22.5", "Georgia,22.5".
+// Every FBS team's ESPN id under the names rating sheets use ("Miami-FL",
+// "UL-Lafayette", "USF", "Connecticut", "San Jose State"...). Checked first, so
+// a standard SP+ paste maps completely even before ESPN's team names load.
+var PEM_SHEET_IDS = {"OHIOSTATE":"194","OSU":"194","GEORGIA":"61","UGA":"61","NOTREDAME":"87","INDIANA":"84","OREGON":"2483","TEXAS":"251","MIAMIFL":"2390","MIAMIFLORIDA":"2390","MIAMI":"2390","MIAMIHURRICANES":"2390","MIAMIOH":"193","MIAMIOHIO":"193","MIAMIREDHAWKS":"193","USC":"30","SOUTHERNCALIFORNIA":"30","SOUTHERNCAL":"30","LSU":"99","LOUISIANASTATE":"99","TENNESSEE":"2633","ALABAMA":"333","PENNSTATE":"213","TEXASTECH":"2641","TEXASAM":"245","TAMU":"245","FLORIDA":"57","OKLAHOMA":"201","BYU":"252","BRIGHAMYOUNG":"252","IOWA":"2294","UTAH":"254","OLEMISS":"145","MISSISSIPPI":"145","MICHIGAN":"130","MISSOURI":"142","NEBRASKA":"158","KANSASSTATE":"2306","KSTATE":"2306","LOUISVILLE":"97","SOUTHCAROLINA":"2579","WASHINGTON":"264","VIRGINIATECH":"259","SMU":"2567","SOUTHERNMETHODIST":"2567","MISSISSIPPISTATE":"344","MISSSTATE":"344","AUBURN":"2","TCU":"2628","TEXASCHRISTIAN":"2628","ILLINOIS":"356","HOUSTON":"248","NORTHDAKOTASTATE":"2449","NDSU":"2449","VIRGINIA":"258","PITTSBURGH":"221","PITT":"221","ARIZONA":"12","VANDERBILT":"238","VANDY":"238","UCLA":"26","OKLAHOMASTATE":"197","OKLASTATE":"197","CINCINNATI":"2132","MARYLAND":"120","NORTHWESTERN":"77","CLEMSON":"228","DUKE":"150","BOISESTATE":"68","BAYLOR":"239","KENTUCKY":"96","JAMESMADISON":"256","JMU":"256","MINNESOTA":"135","IOWASTATE":"66","FLORIDASTATE":"52","FSU":"52","UCF":"2116","CENTRALFLORIDA":"2116","ARIZONASTATE":"9","ASU":"9","WISCONSIN":"275","NCSTATE":"152","NORTHCAROLINASTATE":"152","NEWMEXICO":"167","NORTHCAROLINA":"153","UNC":"153","GEORGIATECH":"59","WESTVIRGINIA":"277","WVU":"277","MEMPHIS":"235","WAKEFOREST":"154","KANSAS":"2305","MICHIGANSTATE":"127","USF":"58","SOUTHFLORIDA":"58","CALIFORNIA":"25","CAL":"25","ARMY":"349","SYRACUSE":"183","ARKANSAS":"8","FRESNOSTATE":"278","COLORADO":"38","TULSA":"202","UTSA":"2636","TEXASSANANTONIO":"2636","UTSANANTONIO":"2636","PURDUE":"2509","NAVY":"2426","RUTGERS":"164","SANDIEGOSTATE":"21","SDSU":"21","OREGONSTATE":"204","WESTERNMICHIGAN":"2711","WMU":"2711","AIRFORCE":"2005","LIBERTY":"2335","JACKSONVILLESTATE":"55","JAXSTATE":"55","JACKSONVILLEST":"55","UNLV":"2439","BOSTONCOLLEGE":"103","BC":"103","CONNECTICUT":"41","UCONN":"41","TOLEDO":"2649","TULANE":"2655","WASHINGTONSTATE":"265","WASHSTATE":"265","EASTCAROLINA":"151","ECU":"151","TEXASSTATE":"326","TROY":"2653","APPALACHIANSTATE":"2026","APPSTATE":"2026","APPALACHIANST":"2026","TEMPLE":"218","COLORADOSTATE":"36","OLDDOMINION":"295","ODU":"295","HAWAII":"62","ULLAFAYETTE":"309","LOUISIANA":"309","LOUISIANALAFAYETTE":"309","ULL":"309","FLORIDAATLANTIC":"2226","FAU":"2226","STANFORD":"24","GEORGIASOUTHERN":"290","DELAWARE":"48","LOUISIANATECH":"2348","LATECH":"2348","NORTHTEXAS":"249","UNT":"249","UTAHSTATE":"328","ARKANSASSTATE":"2032","NEVADA":"2440","COASTALCAROLINA":"324","MARSHALL":"276","SOUTHALABAMA":"6","FLORIDAINTERNATIONAL":"2229","FIU":"2229","KENNESAWSTATE":"338","KENNESAWST":"338","OHIO":"195","SANJOSESTATE":"23","SJSU":"23","RICE":"242","CENTRALMICHIGAN":"2117","CMU":"2117","WYOMING":"2751","NEWMEXICOSTATE":"166","NMSU":"166","BUFFALO":"2084","SAMHOUSTON":"2534","SAMHOUSTONSTATE":"2534","WESTERNKENTUCKY":"98","WKU":"98","UAB":"5","ALABAMABIRMINGHAM":"5","MISSOURISTATE":"2623","MIDDLETENNESSEE":"2393","MTSU":"2393","MIDDLETENNESSEESTATE":"2393","EASTERNMICHIGAN":"2199","EMU":"2199","SOUTHERNMISS":"2572","SOUTHERNMISSISSIPPI":"2572","GEORGIASTATE":"2247","NORTHERNILLINOIS":"2459","NIU":"2459","UTEP":"2638","TEXASELPASO":"2638","MASSACHUSETTS":"113","UMASS":"113","AKRON":"2006","SACRAMENTOSTATE":"16","SACSTATE":"16","BOWLINGGREEN":"189","BGSU":"189","CHARLOTTE":"2429","BALLSTATE":"2050","KENTSTATE":"2309","ULMONROE":"2433","LOUISIANAMONROE":"2433","ULM":"2433"};
+var _pemSheetIdSet = null;
+function pemSheetIdSet(){ if(!_pemSheetIdSet){ _pemSheetIdSet = {}; for(var k in PEM_SHEET_IDS) _pemSheetIdSet[PEM_SHEET_IDS[k]] = 1; } return _pemSheetIdSet; }
+function pemNormName(s){
+  s = String(s || "");
+  if(s.normalize) s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");   // José -> Jose
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
 function pemParsePaste(text, nameMap){
-  if(!nameMap) return null;
-  var norm = function(s){ return String(s||"").toUpperCase().replace(/[^A-Z0-9]/g,""); };
+  nameMap = nameMap || {};
+  var norm = pemNormName;
   // Index every leading prefix, not just the full name: SP+ tables say
   // "Alabama", ESPN says "Alabama Crimson Tide". Short prefixes collide though
   // ("Texas" matches Texas, Texas A&M and Texas Tech), so a colliding key goes
@@ -2531,11 +2542,24 @@ function pemParsePaste(text, nameMap){
   var prior = {}, matched = 0, missed = [];
   String(text||"").split(/\n/).forEach(function(line){
     if(!line.trim()) return;
-    var m = line.match(/^\s*(?:\d+[.)]\s*)?(.+?)[\s,\t]+(-?\d+(?:\.\d+)?)\s*$/);
-    if(!m) return;
-    var name = m[1], val = parseFloat(m[2]);
-    if(isNaN(val)) return;
-    var key = norm(name), id = lookup[key];
+    var name = null, val = NaN;
+    if(/[,\t]/.test(line)){
+      // Spreadsheet/CSV rows: team in the first column, rating in the first
+      // numeric column after it ("Ohio State,29.7" or "1\tOhio State\t29.7\t...").
+      var cols = line.split(/\t|,/).map(function(c){ return c.trim(); });
+      if(/^\d+[.)]?$/.test(cols[0]) && cols.length > 2) cols.shift();          // leading rank column
+      name = cols[0];
+      for(var ci = 1; ci < cols.length; ci++){ if(/^[-+]?\d+(\.\d+)?$/.test(cols[ci])){ val = parseFloat(cols[ci]); break; } }
+    } else {
+      var m = line.match(/^\s*(?:\d+[.)]\s*)?(.+?)\s+([-+]?\d+(?:\.\d+)?)\s*$/);
+      if(m){ name = m[1]; val = parseFloat(m[2]); }
+    }
+    if(!name || isNaN(val)) return;                                         // header rows, notes
+    name = name.replace(/^\s*\d+[.)]\s*/, "").replace(/\s*\(\d+-\d+\)\s*$/, "");  // "1. Georgia", "Georgia (4-0)"
+    var key = norm(name), id = PEM_SHEET_IDS[key] || lookup[key];
+    // If ESPN's own names are loaded and disagree with the table, trust ESPN.
+    // (Only toward an id the table doesn't already use for another team.)
+    if(id && PEM_SHEET_IDS[key] && lookup[key] && !nameMap[id] && nameMap[lookup[key]] && !pemSheetIdSet()[lookup[key]]) id = lookup[key];
     if(!id){
       // Try progressively shorter prefixes for "Georgia Bulldogs" style rows.
       var words = name.trim().split(/\s+/);
@@ -4910,7 +4934,7 @@ function pemShowPasteModal(forWeek){
       pePriorSave(txt, ratings, res.matched, "SP+", _key);
       PEM_SHEETWK = _wk;
 
-      var lines = String(txt).split(/\n/).filter(function(s){ return s.trim(); }).length;
+      var lines = String(txt).split(/\n/).filter(function(s){ return /\d/.test(s); }).length;   // header rows don't count
       if(res.matched){
         // The live model uses the newest sheet for this week or earlier, which
         // may not be the one just pasted (e.g. filling in an old week).
