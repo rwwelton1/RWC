@@ -358,6 +358,13 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pem-wkrow small{font-size:9px;font-weight:700;color:var(--muted)}
 .pem-wkrow i{font-style:normal;font-size:7.5px;font-weight:900;background:var(--gold-bg);border:1px solid var(--border2);border-radius:4px;padding:0 3px;margin-top:1px}
 .pem-wkrow b.up{color:#15803d}.pem-wkrow b.dn{color:var(--red2)}
+.pem-ang{margin-top:8px;border:1.5px solid var(--border2);border-radius:9px;overflow:hidden;font-size:11px;font-weight:800}
+.pem-anghd,.pem-angrow{display:grid;grid-template-columns:2.2fr .7fr 1.2fr 1.2fr;gap:4px;padding:5px 8px;align-items:center;text-align:center}
+.pem-anghd{background:var(--cream);font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.pem-angrow{border-top:1px solid var(--border2)}
+.pem-anghd>:first-child,.pem-angrow>:first-child{text-align:left;line-height:1.25}
+.pem-angrow small{font-size:9px;font-weight:700;color:var(--muted)}
+.pem-angrow b.up{color:#15803d}.pem-angrow b.dn{color:var(--red2)}.pem-angrow .few{color:var(--dim)}
 .pem-bk{margin-top:8px;border:1.5px solid var(--border2);border-radius:9px;overflow:hidden;font-size:11px;font-weight:800}
 .pem-bkhd,.pem-bkrow{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:4px;padding:4px 8px;text-align:center}
 .pem-bkhd{background:var(--cream);font-size:8.5px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -903,6 +910,9 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pr-res.win{background:var(--green-bg);color:#15803d}.pr-res.loss{background:var(--red-bg);color:var(--red2)}.pr-res.push{background:#fff;color:var(--muted)}
 .pc-edge{font-size:clamp(10px,2.9vw,12.5px);font-weight:900;margin-top:4px;border:1.5px solid var(--border);border-radius:20px;padding:1px 10px;background:#fff}
 .pc-edge.big{background:#111;color:#fff}
+.pc-warn{font-size:clamp(9.5px,2.7vw,11.5px);font-weight:800;color:#9a3412;background:#fff7ed;border:1.5px solid #fdba74;border-radius:9px;padding:4px 8px;margin-top:6px;line-height:1.35}
+.pr-gfoot b.mvup{color:#15803d;font-weight:900}.pr-gfoot b.mvdn{color:var(--red2);font-weight:900}
+.pr-warn{font-size:11px;font-weight:800;color:#9a3412;background:#fff7ed;border-top:1.5px solid #fdba74;padding:6px 11px;line-height:1.35}
 @media(max-width:400px){.pr-seg button{padding:6px 7px;font-size:10.5px}}
 .pr-pastnote{font-size:10.5px;font-weight:800;color:var(--muted);background:#fff;border:1.5px dashed var(--border2);border-radius:10px;padding:7px 10px;margin:6px 0 4px;line-height:1.45}
 
@@ -1225,7 +1235,7 @@ function peLoad(cb){
       PE.runs = o.runs||[]; PE.baseline = o.baseline||null;
       PE.teamstats = o.teamstats||{};
       PE.tune = o.tune||null;
-      PE.lines = o.lines||{};
+      PE.lines = o.lines||{}; PE.opens = o.opens||{}; PE.gmeta = o.gmeta||{};
     }
   }catch(e){}
   var uid = ME();
@@ -1242,7 +1252,7 @@ function peLoad(cb){
       PE.baseline = v.baseline || PE.baseline || null;
       PE.teamstats = v.teamstats || PE.teamstats || {};
       PE.tune = v.tune || PE.tune || null;
-      PE.lines = v.lines || PE.lines || {};
+      PE.lines = v.lines || PE.lines || {}; PE.opens = v.opens || PE.opens || {}; PE.gmeta = v.gmeta || PE.gmeta || {};
     }
     peAfterLoad();
     PE.ready = true; PE.err = "";
@@ -1307,7 +1317,11 @@ function peSave(){
     // Auto-tune: on/off, and which data it last tuned against.
     tune:      PE.tune      || null,
     // Closing lines by event id, for the record vs Vegas.
-    lines:     PE.lines     || null
+    lines:     PE.lines     || null,
+    // Opening lines (ESPN's, or the first one seen here) and kickoff/rank
+    // details, for line movement and the angle tracker.
+    opens:     PE.opens     || null,
+    gmeta:     PE.gmeta     || null
   });
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
@@ -2319,6 +2333,7 @@ function pemFetchBoxScores(games, progress, cb){
         // The rest of the same response \u2014 free.
         PE.lines = PE.lines || {};
         if(PE.lines[g.eventId] === undefined) PE.lines[g.eventId] = pemParseLine(d);
+        peOpenSet(g.eventId, pemOpenFromSummary(d), "espn");
         g._splitTried = true;
         var st = pemParseTeamStats(d);
         if(st && st[g.awayId] && st[g.homeId]){
@@ -4309,7 +4324,7 @@ var PEM_KNOBS = [
   { key:"priorW8", label:"Trust in SP+ · week 8", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"results only", hi:"prior only",
     help:"Trust by week 8. Weeks in between follow a log curve from the week-1 value: week 2 moves a third of the way, week 4 two thirds, and it keeps easing the same direction after week 8. Auto-tune fits both ends from weeks that had a sheet saved before them." },
-  { key:"lambda",  label:"Shrinkage",      min:0,   max:0.08, step:0.005, fmt:function(v){ return (v*100).toFixed(1) + "%"; },
+  { key:"lambda",  label:"Shrinkage",      min:0,   max:0.2, step:0.005, fmt:function(v){ return (v*100).toFixed(1) + "%"; },
     lo:"trust results", hi:"heavy pull",
     help:"How hard thin samples get pulled back. Higher means a 2-game team stays near its prior." },
   { key:"cap",     label:"Blowout cap",    min:10,  max:45,   step:1,    fmt:function(v){ return v + " pts"; },
@@ -4410,6 +4425,8 @@ function pemPanelInner(){
 
   // ── Knobs ──
   h += pemAtsCardHtml();
+  h += pemClvCardHtml();
+  h += pemAnglesCardHtml();
   h += pemAutoCardHtml();
   h += '<div class="pem-knobs"><div class="pem-sechd">Inputs <span>' + (pemAutoOn() ? 'set by auto-tune \u00b7 drag to take over' : 'drag to refit instantly') + '</span></div>';
   PEM_KNOBS.forEach(function(k){
@@ -4711,7 +4728,7 @@ var PEM_GRID = {
     priorW8: [0,0.2,0.35,0.5,0.65,0.8,1],
     yw:      [0,0.15,0.3,0.45,0.6,0.8],
     mw:      [0,0.5,1,1.5,2,3],
-    lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07],
+    lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07,0.1,0.14,0.2],
     cap:     [14,17,21,24,28,35,45],
     recency: [0,0.25,0.5,0.75,1]
 };
@@ -4814,7 +4831,7 @@ function pemEnsureLines(force){
     function fin(){ PEM_LINES.done++; if(PEM_LINES.done % 25 === 0){ PEM._ats = null; pemAtsRefresh(); } next(); }
     fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event=" + g.eventId)
       .then(function(r){ return r.json(); })
-      .then(function(d){ PE.lines[g.eventId] = pemParseLine(d); fin(); })
+      .then(function(d){ PE.lines[g.eventId] = pemParseLine(d); peOpenSet(g.eventId, pemOpenFromSummary(d), "espn"); fin(); })
       .catch(function(){ fin(); });                   // leave undefined: retried next session
   }, function(){
     PEM_LINES.busy = false; PEM._ats = null;
@@ -4833,7 +4850,7 @@ function pemAts(){
   var ws = Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; });
   var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0, noplay:0,
             total: PEM._games.length, early:0, earlyWeeks:[], noLine:0, pending:0, wfWeeks:0, wfMissing:0,
-            bk: [{ lo:0, hi:3, w:0, l:0, p:0 }, { lo:3, hi:6, w:0, l:0, p:0 }, { lo:6, hi:99, w:0, l:0, p:0 }], byWeek: [] };
+            bk: [{ lo:0, hi:3, w:0, l:0, p:0 }, { lo:3, hi:6, w:0, l:0, p:0 }, { lo:6, hi:99, w:0, l:0, p:0 }], byWeek: [], games: [] };
   PEM._games.forEach(function(g){ var v = L[g.eventId]; if(v === null) r.noLine++; else if(v === undefined) r.pending++; });
   ws.forEach(function(w){
     var train = PEM._games.filter(function(g){ return g.week < w; });
@@ -4857,12 +4874,16 @@ function pemAts(){
       var vHome = -L[g.eventId][0];                 // Vegas' expected home margin
       var pred = p.home - p.away, act = g.hs - g.as;
       r.lined++; any = true;
+      // One row per graded game, for line movement and the angle tracker.
+      var G = { id: g.eventId, g: g, w: w, pred: pred, vh: vHome, act: act, res: null };
+      r.games.push(G);
       if(pred !== 0){ r.suN++; W.suN++; if((pred > 0) === (act > 0)){ r.su++; W.su++; } }
       if(Math.abs(pred - vHome) < 0.05){ r.noplay++; return; }   // model agrees with the line: no play
       var pickHome = pred > vHome, cover = act - vHome, edge = Math.abs(pred - vHome), strong = edge >= 3;
       var b = r.bk[edge < 3 ? 0 : edge < 6 ? 1 : 2];
-      if(cover === 0){ r.p++; b.p++; W.p++; if(strong) r.sp++; return; }
+      if(cover === 0){ r.p++; b.p++; W.p++; G.res = "P"; if(strong) r.sp++; return; }
       var won = (cover > 0) === pickHome;
+      G.res = won ? "W" : "L";
       if(won){ r.w++; b.w++; W.w++; if(strong){ r.sw++; W.sw++; } } else { r.l++; b.l++; W.l++; if(strong){ r.sl++; W.sl++; } }
     });
     if(any) r.weeks++;
@@ -4871,6 +4892,277 @@ function pemAts(){
   r.spct = (r.sw + r.sl) ? r.sw / (r.sw + r.sl) : null;
   PEM._ats = { key: key, games: PEM._games, v: r };
   return r;
+}
+
+// ── OPENING LINES AND LINE MOVEMENT ─────────────────────────────────────────
+// The fastest honest test of a model is whether the market moves toward it:
+// if the model says the opener is 3 points off and the line then closes 2
+// points closer to the model's number, that's value the win-loss record needs
+// hundreds of games to show. Openers come from ESPN when its odds carry them,
+// and otherwise from the first line this page sees for a game.
+function pemNumLine(v){ if(v === null || v === undefined) return null; var n = parseFloat(String(v).replace(/[^\d.+-]/g, "")); return (isFinite(n) && Math.abs(n) < 70) ? n : null; }
+// Opening home spread (negative = home favoured) from an ESPN odds / pickcenter entry.
+function pemParseOpen(pc){
+  if(!pc) return null;
+  var v = null;
+  try{
+    var ps = pc.pointSpread;
+    if(ps && ps.home && ps.home.open) v = pemNumLine(ps.home.open.line);
+    if(v === null && ps && ps.away && ps.away.open){ var a = pemNumLine(ps.away.open.line); if(a !== null) v = -a; }
+    var ho = pc.homeTeamOdds && pc.homeTeamOdds.open;
+    if(v === null && ho){
+      if(ho.pointSpread) v = pemNumLine(ho.pointSpread.american != null ? ho.pointSpread.american : ho.pointSpread.alternateDisplayValue);
+      if(v === null && ho.spread) v = pemNumLine(ho.spread.american != null ? ho.spread.american : (ho.spread.value != null ? ho.spread.value : ho.spread));
+    }
+    var ao = pc.awayTeamOdds && pc.awayTeamOdds.open;
+    if(v === null && ao && ao.pointSpread){ var av = pemNumLine(ao.pointSpread.american != null ? ao.pointSpread.american : ao.pointSpread.alternateDisplayValue); if(av !== null) v = -av; }
+    if(v === null && pc.open && typeof pc.open.spread === "number") v = pc.open.spread;
+  }catch(e){ v = null; }
+  return v;
+}
+function pemOpenFromSummary(d){
+  var pcs = (d && d.pickcenter) || [];
+  for(var i = 0; i < pcs.length; i++){ var v = pemParseOpen(pcs[i]); if(v !== null) return v; }
+  return null;
+}
+// ESPN's opener always wins; a first-seen line is kept only until one arrives.
+function peOpenSet(id, h, src){
+  if(!id || h === null || h === undefined || !isFinite(h)) return false;
+  PE.opens = PE.opens || {};
+  var e = PE.opens[id];
+  if(e && (e.s === "espn" || src !== "espn")) return false;
+  PE.opens[id] = { h: Math.round(h * 2) / 2, s: src, at: Date.now() };
+  return true;
+}
+var _peOpenSave = null;
+function peOpenSaveSoon(){ if(_peOpenSave) clearTimeout(_peOpenSave); _peOpenSave = setTimeout(function(){ _peOpenSave = null; peSave(); }, 1500); }
+// Called with each week's scoreboard: record openers for games not yet played.
+function pearNoteOpens(games){
+  var ch = false;
+  (games || []).forEach(function(g){
+    if(g.vegasOpen !== null && g.vegasOpen !== undefined) ch = peOpenSet(g.id, g.vegasOpen, "espn") || ch;
+    else if(g.state === "pre"){ var vh = pearVegasHome(g); if(vh !== null) ch = peOpenSet(g.id, -vh, "seen") || ch; }
+  });
+  if(ch) peOpenSaveSoon();
+}
+
+// ── GAME DETAILS FOR ANGLES ─────────────────────────────────────────────────
+// Kickoff time and AP ranks for every game (FCS opponents included, so rest
+// days are right), from one scoreboard request per week. Kept by event id.
+var PEM_META = { tried: false, busy: false };
+function pemMetaEnsure(){
+  if(PEM_META.tried || PEM_META.busy || !PEM._games || !PEM._games.length) return;
+  PEM_META.tried = true;
+  var M = PE.gmeta = PE.gmeta || {}, need = {};
+  PEM._games.forEach(function(g){ if(g.eventId && !M[g.eventId]) need[g.week] = 1; });
+  var weeks = Object.keys(need).map(Number); if(!weeks.length) return;
+  var yr = (PE.meta && PE.meta.espnYear) || new Date().getFullYear();
+  PEM_META.busy = true;
+  pemPool(weeks, 4, function(w, next){
+    fetch(PEAR_SCORE + "?groups=80&limit=400&seasontype=2&year=" + yr + "&week=" + w).then(function(r){ return r.json(); }).then(function(d){
+      (d.events || []).forEach(function(ev){
+        var c = (ev.competitions || [])[0] || {}, a = null, h = null;
+        (c.competitors || []).forEach(function(t){ if(t.homeAway === "home") h = t; else a = t; });
+        if(!a || !h) return;
+        var rk = function(t){ var r = t.curatedRank && t.curatedRank.current; return (r && r <= 25) ? r : 0; };
+        M[String(ev.id)] = { d: ev.date || c.date, a: String((a.team || {}).id || ""), h: String((h.team || {}).id || ""), ar: rk(a), hr: rk(h) };
+        var op = pemParseOpen((c.odds || [])[0]); if(op !== null) peOpenSet(String(ev.id), op, "espn");
+      });
+      next();
+    }).catch(function(){ next(); });
+  }, function(){
+    PEM_META.busy = false; PEM._ang = null; peSave();
+    if(SC.screen === "prophescore") renderPoolEdge();
+  });
+}
+// Each team's home time zone, as hours from Eastern during the season
+// (Central -1, Mountain -2, Arizona and Pacific -3, Hawaii -6).
+var PEM_TZ = {"333":-1,"2":-1,"344":-1,"145":-1,"99":-1,"8":-1,"142":-1,"251":-1,"245":-1,"201":-1,"238":-1,"2294":-1,"158":-1,"2306":-1,"2305":-1,"197":-1,"2628":-1,"239":-1,"2641":-1,"248":-1,"2567":-1,"356":-1,"77":-1,"275":-1,"135":-1,"66":-1,"235":-1,"2655":-1,"202":-1,"242":-1,"5":-1,"249":-1,"2636":-1,"326":-1,"2534":-1,"2348":-1,"2393":-1,"98":-1,"55":-1,"2623":-1,"2572":-1,"2653":-1,"6":-1,"2032":-1,"309":-1,"2433":-1,"2459":-1,"2449":-1,"38":-2,"36":-2,"2005":-2,"2751":-2,"254":-2,"252":-2,"328":-2,"68":-2,"167":-2,"166":-2,"2638":-2,"12":-3,"9":-3,"2439":-3,"2440":-3,"278":-3,"21":-3,"23":-3,"24":-3,"25":-3,"26":-3,"30":-3,"2483":-3,"204":-3,"264":-3,"265":-3,"16":-3,"62":-6,"194":0,"61":0,"87":0,"84":0,"2390":0,"193":0,"2633":0,"213":0,"57":0,"130":0,"97":0,"2579":0,"259":0,"258":0,"221":0,"2132":0,"120":0,"228":0,"150":0,"96":0,"256":0,"52":0,"2116":0,"152":0,"153":0,"59":0,"277":0,"154":0,"127":0,"58":0,"349":0,"183":0,"2509":0,"2426":0,"164":0,"2711":0,"2335":0,"103":0,"41":0,"2649":0,"151":0,"2026":0,"218":0,"295":0,"2226":0,"290":0,"48":0,"324":0,"276":0,"2229":0,"338":0,"195":0,"2117":0,"2084":0,"2199":0,"2247":0,"113":0,"2006":0,"189":0,"2429":0,"2050":0,"2309":0};
+var PEM_BRANDS = { "333":1, "194":1, "61":1, "87":1, "130":1, "251":1, "99":1, "30":1, "201":1, "213":1, "52":1, "228":1, "2483":1, "2633":1, "2390":1, "57":1, "2":1, "245":1 };
+function pemEtHour(iso){
+  try{
+    var p = new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false }).split(":");
+    return (+p[0] % 24) + (+p[1] || 0) / 60;
+  }catch(e){ return null; }
+}
+
+// ── LINE MOVEMENT REPORT ──
+function pemClv(){
+  var r = null; try{ r = pemAts(); }catch(e){}
+  if(!r || !r.games) return null;
+  var O = PE.opens || {}, out = { n: 0, toward: 0, away: 0, flat: 0, move: 0, espn: 0, seen: 0, ow: 0, ol: 0, op: 0, cw: 0, cl: 0,
+    bk: [{ lo:0, hi:3, n:0, t:0, a:0 }, { lo:3, hi:6, n:0, t:0, a:0 }, { lo:6, hi:99, n:0, t:0, a:0 }] };
+  r.games.forEach(function(q){
+    var o = O[q.id]; if(!o || q.vh === null) return;
+    var vo = -o.h, dir = q.pred > vo ? 1 : q.pred < vo ? -1 : 0; if(!dir) return;
+    out.n++; if(o.s === "espn") out.espn++; else out.seen++;
+    var mv = (q.vh - vo) * dir, b = out.bk[Math.abs(q.pred - vo) < 3 ? 0 : Math.abs(q.pred - vo) < 6 ? 1 : 2];
+    b.n++; out.move += mv;
+    if(mv > 0.01){ out.toward++; b.t++; } else if(mv < -0.01){ out.away++; b.a++; } else out.flat++;
+    // The same pick graded at the opening number and at the close.
+    var co = q.act - vo; if(co === 0) out.op++; else if((co > 0) === (dir > 0)) out.ow++; else out.ol++;
+    var cc = q.act - q.vh; if(cc !== 0){ if((cc > 0) === (dir > 0)) out.cw++; else out.cl++; }
+  });
+  return out;
+}
+function pemClvCardHtml(){
+  var c = pemClv(), O = PE.opens || {};
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>📈 Line movement</b></div>';
+  if(!c || !c.n){
+    h += '<div class="pem-autosub">No opening lines matched to graded games yet.</div>' +
+         '<div class="pem-autonote">Openers come from ESPN’s odds when they carry them, and otherwise from the first line this page sees for each game (' + Object.keys(O).length + ' recorded so far). Open the Games tab early in the week so upcoming games get their opener saved.</div></div>';
+    return h;
+  }
+  var tp = c.toward + c.away ? c.toward / (c.toward + c.away) : null, cls = function(p){ return p === null ? "" : (p > 0.5 ? "up" : "dn"); };
+  h += '<div class="pem-atsrow"><div><span>Moved toward model</span><b class="' + cls(tp) + '">' + c.toward + '-' + c.away + '</b><i>' + (tp !== null ? (tp * 100).toFixed(1) + '%' : '—') + (c.flat ? ' · ' + c.flat + ' flat' : '') + '</i></div>' +
+       '<div><span>Avg move</span><b class="' + (c.move > 0 ? "up" : "dn") + '">' + (c.move >= 0 ? '+' : '') + (c.move / c.n).toFixed(2) + '</b><i>pts toward model</i></div>' +
+       '<div><span>At open / close</span><b>' + c.ow + '-' + c.ol + '</b><i>vs ' + c.cw + '-' + c.cl + ' at close</i></div></div>';
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Edge vs opener</span><span>Toward–away</span><span>Toward %</span></div>';
+  c.bk.forEach(function(b){ var n = b.t + b.a, p = n ? b.t / n : null;
+    h += '<div class="pem-bkrow"><span>' + (b.hi > 50 ? b.lo + '+ pts' : b.lo + '–' + b.hi + ' pts') + '</span><span>' + b.t + '-' + b.a + '</span><b class="' + cls(p) + '">' + (p !== null ? (p * 100).toFixed(1) + '%' : '—') + '</b></div>'; });
+  h += '</div><div class="pem-atsacct"><b>' + c.n + '</b> graded games with an opener (' + c.espn + ' from ESPN, ' + c.seen + ' first seen here).</div>';
+  h += '<div class="pem-autonote">Each game uses the model’s honest pre-game number. A line that moves toward it more than half the time, and by more than a few tenths on average, is the clearest early sign of a real edge — it needs far fewer games than the win-loss record.</div>';
+  return h + '</div>';
+}
+
+// ── ANGLE TRACKER ──
+// Every graded game is tagged with the situations bettors talk about. For each
+// tag: how the tagged side did against the closing line (is the market mis-
+// pricing it?) and how the model's own picks did in those games.
+var PEM_ANGLES = [
+  { k: "brand",   lab: "Brand-name team vs non-brand" },
+  { k: "ranked",  lab: "AP-ranked team vs unranked" },
+  { k: "bigfav",  lab: "Favorite of 14+" },
+  { k: "homedog", lab: "Home underdog" },
+  { k: "prime",   lab: "Prime-time favorite (7:30 PM ET+)" },
+  { k: "bye",     lab: "Off a bye vs team that played" },
+  { k: "short",   lab: "Short week (under 6 days rest)" },
+  { k: "trip",    lab: "Road team crossed 2+ time zones" },
+  { k: "early",   lab: "Road team, body-clock kickoff before 10 AM" },
+  { k: "late",    lab: "Road team, body-clock kickoff 10 PM or later" },
+  { k: "toluck",  lab: "Coming off a +3 turnover win" },
+  { k: "blowout", lab: "Coming off a 28+ point win" },
+  { k: "g6",      lab: "Group of Six vs Group of Six", noSide: true },
+  { k: "p4",      lab: "Power Four vs Power Four", noSide: true }
+];
+function pemAngles(){
+  var r = null; try{ r = pemAts(); }catch(e){}
+  if(!r || !r.games) return null;
+  var M = PE.gmeta || {}, key = r.games.length + "|" + Object.keys(M).length + "|" + (r.w + r.l);
+  if(PEM._ang && PEM._ang.key === key) return PEM._ang.v;
+  // Each team's dated schedule (FCS games too) and its previous FBS result.
+  var dates = {};
+  Object.keys(M).forEach(function(id){ var m = M[id]; if(!m.d) return; [m.a, m.h].forEach(function(t){ (dates[t] = dates[t] || []).push(new Date(m.d).getTime()); }); });
+  Object.keys(dates).forEach(function(t){ dates[t].sort(function(a, b){ return a - b; }); });
+  function rest(t, when){ var ds = dates[t]; if(!ds) return null; var prev = null; ds.forEach(function(x){ if(x < when - 3600e3) prev = x; }); return prev === null ? null : (when - prev) / 864e5; }
+  var byTeam = {};
+  (PEM._games || []).forEach(function(g){ [g.awayId, g.homeId].forEach(function(t){ (byTeam[t] = byTeam[t] || []).push(g); }); });
+  function prevGame(t, g){ var list = byTeam[t] || [], best = null; list.forEach(function(x){ if(x.week < g.week && (!best || x.week > best.week)) best = x; }); return best; }
+  function lastResult(t, g){
+    var p = prevGame(t, g); if(!p) return null;
+    var home = p.homeId === t, my = home ? p.hs : p.as, th = home ? p.as : p.hs;
+    var to = typeof p.toMargin === "number" ? (home ? p.toMargin : -p.toMargin) : null;   // + = this team won the turnover battle
+    return { margin: my - th, to: to };
+  }
+  var out = {}; PEM_ANGLES.forEach(function(a){ out[a.k] = { lab: a.lab, noSide: !!a.noSide, n: 0, sw: 0, sl: 0, sp: 0, mw: 0, ml: 0, mp: 0 }; });
+  r.games.forEach(function(q){
+    if(q.vh === null) return;
+    var g = q.g, m = M[q.id] || {}, when = m.d ? new Date(m.d).getTime() : null, homeFav = q.vh > 0;
+    var tags = {};
+    var bA = PEM_BRANDS[g.awayId], bH = PEM_BRANDS[g.homeId];
+    if(bA && !bH) tags.brand = "away"; else if(bH && !bA) tags.brand = "home";
+    if(m.ar && !m.hr) tags.ranked = "away"; else if(m.hr && !m.ar) tags.ranked = "home";
+    if(Math.abs(q.vh) >= 14) tags.bigfav = homeFav ? "home" : "away";
+    if(q.vh < 0 && !g.neutral) tags.homedog = "home";
+    if(m.d && q.vh !== 0){ var hr = pemEtHour(m.d); if(hr !== null && hr >= 19.5) tags.prime = homeFav ? "home" : "away"; }
+    if(when){
+      var ra = rest(g.awayId, when), rh = rest(g.homeId, when);
+      if(ra !== null && rh !== null){
+        if(ra >= 12 && rh <= 9) tags.bye = "away"; else if(rh >= 12 && ra <= 9) tags.bye = "home";
+        if(ra < 6 && rh >= 6) tags.short = "away"; else if(rh < 6 && ra >= 6) tags.short = "home";
+      }
+    }
+    // Travel: only true road games (a neutral site has no home time zone to measure from).
+    var tzA = PEM_TZ[g.awayId], tzH = PEM_TZ[g.homeId];
+    if(!g.neutral && typeof tzA === "number" && typeof tzH === "number"){
+      if(Math.abs(tzA - tzH) >= 2) tags.trip = "away";
+      if(m.d && tzA !== tzH){
+        var et = pemEtHour(m.d), body = et === null ? null : et + tzA;     // kickoff on the road team's own clock
+        if(body !== null && tzA < tzH && body < 10) tags.early = "away";
+        if(body !== null && tzA > tzH && body >= 22) tags.late = "away";
+      }
+    }
+    [["away", g.awayId], ["home", g.homeId]].forEach(function(s){
+      var lr = lastResult(s[1], g); if(!lr) return;
+      if(lr.margin > 0 && lr.to !== null && lr.to >= 3 && !tags.toluck) tags.toluck = s[0];
+      if(lr.margin >= 28 && !tags.blowout) tags.blowout = s[0];
+    });
+    var ka = pearConfKind(pearConfOf(g.awayId)), kh = pearConfKind(pearConfOf(g.homeId));
+    if(ka === "g6" && kh === "g6") tags.g6 = true;
+    if(ka === "p4" && kh === "p4") tags.p4 = true;
+    Object.keys(tags).forEach(function(k){
+      var A = out[k]; if(!A) return; A.n++;
+      var cover = q.act - q.vh;
+      if(!A.noSide){
+        var side = tags[k], sideCover = side === "home" ? cover : -cover;
+        if(sideCover > 0) A.sw++; else if(sideCover < 0) A.sl++; else A.sp++;
+      }
+      if(q.res === "W") A.mw++; else if(q.res === "L") A.ml++; else if(q.res === "P") A.mp++;
+    });
+  });
+  PEM._ang = { key: key, v: out };
+  return out;
+}
+function pemAnglesCardHtml(){
+  var A = pemAngles(), M = PE.gmeta || {};
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🧭 Angles</b></div>';
+  if(!A){ return h + '<div class="pem-autosub">Needs graded games with closing lines.</div></div>'; }
+  var cls = function(w, l){ var n = w + l; if(n < 15) return "few"; return w / n >= 0.524 ? "up" : (w / n <= 0.476 ? "dn" : ""); };
+  function rec(w, l, p){ var n = w + l; return w + '-' + l + (p ? '-' + p : '') + (n ? ' <small>' + Math.round(100 * w / n) + '%</small>' : ''); }
+  h += '<div class="pem-ang"><div class="pem-anghd"><span>Situation</span><span>Games</span><span>That side ATS</span><span>Model ATS</span></div>';
+  PEM_ANGLES.forEach(function(a){
+    var x2 = A[a.k]; if(!x2 || !x2.n) return;
+    h += '<div class="pem-angrow"><span>' + x(a.lab) + '</span><span>' + x2.n + '</span>' +
+         (a.noSide ? '<span class="few">—</span>' : '<b class="' + cls(x2.sw, x2.sl) + '">' + rec(x2.sw, x2.sl, x2.sp) + '</b>') +
+         '<b class="' + cls(x2.mw, x2.ml) + '">' + rec(x2.mw, x2.ml, x2.mp) + '</b></div>';
+  });
+  h += '</div>';
+  if(!Object.keys(M).length) h += '<div class="pem-autosub">Loading kickoff times and rankings… (rank, prime-time and rest rows fill in once they arrive)</div>';
+  h += '<div class="pem-autonote">“That side” is the team the situation is about (the brand team, the ranked team, the favorite, the rested team…) against the closing line: below 50% means the market has been overpricing it. “Model ATS” is the model’s own honest picks in those games. Greyed rows have under 15 games — treat everything here as a lead to watch, not a system. Travel rows use each team’s home time zone; body-clock kickoff is the kickoff time on the road team’s own clock (a noon Eastern start is 9 AM for a Pacific team).</div>';
+  return h + '</div>';
+}
+
+// The same honest weeks graded three ways, so it's visible whether leaning less
+// on SP+ would have done better: the tuned blend, the model with SP+ switched
+// off (results only), and the SP+ sheet on its own (rating gap + home edge).
+function pemVersions(){
+  if(!PEM._games || !PEM._games.length) return null;
+  var L = PE.lines || {};
+  var key = PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + Object.keys(L).length + "|" + pemSheetSig() + "|" + JSON.stringify((PE.tune && PE.tune.wf) || {});
+  if(PEM._ver && PEM._ver.key === key) return PEM._ver.v;
+  var V = { blend: { lab: "Tuned blend" }, res: { lab: "Results only (no SP+)" }, sp: { lab: "SP+ sheet alone" } };
+  Object.keys(V).forEach(function(k){ var o = V[k]; o.err = 0; o.n = 0; o.w = 0; o.l = 0; o.p = 0; });
+  function grade(v, g, pred){
+    var act = g.hs - g.as; v.err += Math.abs(pred - act); v.n++;
+    var ln = L[g.eventId]; if(!ln || typeof ln[0] !== "number") return;
+    var vh = -ln[0]; if(Math.abs(pred - vh) < 0.05) return;
+    var cover = act - vh; if(cover === 0){ v.p++; return; }
+    if((cover > 0) === (pred > vh)) v.w++; else v.l++;
+  }
+  pemWFWeeks().forEach(function(w){
+    var train = PEM._games.filter(function(g){ return g.week < w; }), test = PEM._games.filter(function(g){ return g.week === w; });
+    if(!test.length) return;
+    var ow = pemOptsForWeek(w) || PEM.opts, pr = pemPriorAt(w);
+    var oRes = {}; for(var k in ow) oRes[k] = ow[k]; oRes.priorW = 0; oRes.priorW8 = 0;
+    var fB = pemFit(train, pr, ow), fR = pemFit(train, pr, oRes);
+    test.forEach(function(g){
+      var b = pemPredictRaw(fB.ratings, fB.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW); if(b) grade(V.blend, g, b.home - b.away);
+      var r = pemPredictRaw(fR.ratings, fR.avg, ow.hfa, g.awayId, g.homeId, g.neutral, ow.oppW); if(r) grade(V.res, g, r.home - r.away);
+      if(pr && pr[g.homeId] && pr[g.awayId]) grade(V.sp, g, pr[g.homeId].fpi - pr[g.awayId].fpi + (g.neutral ? 0 : ow.hfa));
+    });
+  });
+  PEM._ver = { key: key, v: V };
+  return V;
 }
 // Repaint just the record (card + chip) without re-rendering the page.
 function pemAtsRefresh(){
@@ -4924,6 +5216,18 @@ function pemAtsCardHtml(){
            '<span>' + (W.n ? (W.err / W.n).toFixed(1) : '—') + '<small>pts</small></span></div>';
     });
     h += '</div><div class="pem-autonote" style="margin-top:4px">Miss = average points off the final margin on every game that week, lined or not. SP+ marks weeks that had a sheet saved before them. A single week is ~50 picks, so a week well above or below 52% is mostly luck \u2014 look at the trend across weeks.</div>';
+  }
+  var VV = null; try{ VV = pemVersions(); }catch(e){}
+  if(VV && VV.blend.n){
+    h += '<div class="pem-hd" style="margin-top:12px">Which version wins?</div>';
+    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Version</span><span>Miss</span><span>ATS</span></div>';
+    ["blend", "res", "sp"].forEach(function(k){
+      var v = VV[k]; if(!v.n) return;
+      var n = v.w + v.l, pc = n ? v.w / n : null;
+      h += '<div class="pem-bkrow"><span>' + v.lab + '</span><span>' + (v.err / v.n).toFixed(2) + ' <small>pts</small></span>' +
+           '<b class="' + cls(pc) + '">' + v.w + '-' + v.l + (pc !== null ? ' \u00b7 ' + (pc * 100).toFixed(1) + '%' : '') + '</b></div>';
+    });
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Same weeks, same honest grading. \u201cResults only\u201d is the model with SP+ switched off; \u201cSP+ alone\u201d is the pasted sheet\u2019s rating gap plus home edge. Lower miss is better.</div>';
   }
   var parts = ['<b>' + r.lined + '</b> of ' + r.total + ' games graded across ' + r.weeks + ' week' + (r.weeks === 1 ? '' : 's')];
   if(r.early) parts.push(r.early + ' from week ' + r.earlyWeeks.join(", ") + ' can\u2019t be \u2014 nothing earlier to fit on');
@@ -5179,6 +5483,7 @@ function pemEnsureSplits(){
   });
 }
 function pemAutoMaybe(){
+  if(PE.ready && PEM._games && PEM.ratings) pemMetaEnsure();
   if(PE.ready && PEM._games && PEM.ratings) pemEnsureSplits();
   if(PE.ready && PEM.ratings && !PEM_AUTO.running) setTimeout(pemWFRun, 0);
   pemEnsureFbs();
@@ -6129,7 +6434,8 @@ function pearParseEvent(ev){
            away: side.away, home: side.home,
            vegas: od.details || "", vegasOU: (typeof od.overUnder === "number") ? od.overUnder : null,
            vegasSpread: (typeof od.spread === "number") ? od.spread : null,
-           vegasFav: (od.homeTeamOdds && od.homeTeamOdds.favorite) ? "home" : ((od.awayTeamOdds && od.awayTeamOdds.favorite) ? "away" : null) };
+           vegasFav: (od.homeTeamOdds && od.homeTeamOdds.favorite) ? "home" : ((od.awayTeamOdds && od.awayTeamOdds.favorite) ? "away" : null),
+           vegasOpen: pemParseOpen(od) };
 }
 function pearLoadWeek(year, week){
   var key = (year && week) ? (year + "-" + week) : "current";
@@ -6149,6 +6455,7 @@ function pearLoadWeek(year, week){
     }
     if(key === "current"){ PEAR.curWeek = wk; PEAR.curYear = yr; }
     PEAR.cache[yr + "-" + wk] = PEAR.cache[key] = { year: yr, week: wk, games: games };
+    try{ pearNoteOpens(games); }catch(e){}
     PEAR.year = yr; PEAR.week = wk; PEAR.games = games; PEAR.loading = false;
     pearRepaint();
   }).catch(function(e){
@@ -6233,6 +6540,24 @@ function pearFmt(k, v){
 // Vegas' expected home margin for a scheduled game (home favoured = positive),
 // read from ESPN's odds: the favourite flag when present, else "ABBR -7.5".
 // The saved closing line (from the game summary) for a finished game.
+// Edges this big have been the model's own mistakes more often than Vegas's.
+var PEAR_EDGE_WARN = 6;
+function pearBigEdgeRec(){
+  var r = null; try{ r = pemAts(); }catch(e){}
+  var b = r && r.bk && r.bk[2];
+  return (b && b.w + b.l >= 10) ? ' \u00b7 6+ edges so far: ' + b.w + '-' + b.l : '';
+}
+// "opened TEAM -3 ↗" when the line has moved since it opened; the arrow is
+// green when it moved toward the model's number.
+function pearOpenTxt(g, p){
+  var o = PE.opens && PE.opens[g.id]; if(!o) return "";
+  var vo = -o.h, vc = pearVegasHome(g); if(vc === null || Math.abs(vc - vo) < 0.5) return "";
+  var t = vo === 0 ? "PK" : (pearAbbr(vo > 0 ? g.home.id : g.away.id) + " -" + Math.abs(vo));
+  var arrow = "";
+  if(p){ var dir = p.margin > vo ? 1 : p.margin < vo ? -1 : 0, mv = (vc - vo) * dir;
+    if(dir) arrow = ' <b class="' + (mv > 0 ? 'mvup' : 'mvdn') + '">' + (mv > 0 ? '\u2197 toward model' : '\u2198 away') + '</b>'; }
+  return ' \u00b7 opened ' + x(t) + arrow;
+}
 function pearSavedLine(g){ var L = PE.lines && PE.lines[g.id]; return (L && typeof L[0] === "number") ? L : null; }
 function pearVegasTxt(g){
   if(g.vegas) return g.vegas;
@@ -6352,7 +6677,10 @@ function pearGamesHtml(){
            '<div class="pr-tproj"><b class="' + (p ? (fav ? "fav" : "dog") : "") + '">' + big + '</b><span>' + small + '</span></div></div>';
     });
     h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
-         '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) : '')) + '</span></div>';
+         '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) + pearOpenTxt(g, p) : '')) + '</span></div>';
+    if(o.e && o.e.edge >= PEAR_EDGE_WARN && !o.e.res){
+      h += '<div class="pr-warn">\u26a0 ' + o.e.edge.toFixed(1) + ' pts off the line \u2014 check QB/injury news before trusting it' + pearBigEdgeRec() + '</div>';
+    }
     if(PEAR.filter === "edge" && o.e){
       h += '<div class="pr-take"><span>Model takes <b>' + x(o.e.txt) + '</b></span>' +
            (o.e.res ? '<span class="pr-res ' + o.e.res + '">' + (o.e.res === "win" ? "\u2713 Covered" : o.e.res === "loss" ? "\u2717 Missed" : "Push") + '</span>'
@@ -6970,6 +7298,7 @@ function pearCardHtml(){
   if(g && p && !c.neutral === !g.neutral){
     var ce = pearEdge(g, p);
     if(ce && ce.edge >= 0.5) h += '<div class="pc-edge' + (ce.edge >= PEAR_EDGE_MIN ? " big" : "") + '">Edge ' + ce.edge.toFixed(1) + ' pts \u2192 ' + x(ce.txt) + '</div>';
+    if(ce && ce.edge >= PEAR_EDGE_WARN && g.state === "pre") h += '<div class="pc-warn">\u26a0 A disagreement this big usually means the line knows something (a QB out, injuries). Check the news' + pearBigEdgeRec() + '</div>';
   }
   if(g && g.state !== "pre" && g.away.score !== null){
     var fa = g.away.id === A ? g.away.score : g.home.score, fh = g.home.id === H ? g.home.score : g.away.score;
