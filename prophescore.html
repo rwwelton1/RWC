@@ -2295,7 +2295,7 @@ function pemFetchFbs(cb){
     .then(function(d){
       var names = pemReadTeams(d);
       var n = absorb(names);
-      if(n >= 100){
+      if(n >= 100 && n <= 145){
         var set = {}; Object.keys(names).forEach(function(id){ set[id] = 1; });
         cb(null, set); return;
       }
@@ -5384,29 +5384,53 @@ function pearAbsorbTeam(t){
 // The FBS set comes only from ESPN's FBS team list (groups=80). Schedules can't
 // be used for this: an FBS schedule includes its FCS opponents.
 PEAR.fbs = null;
-function pearLoadFbs(cb){
+function pearLoadFbs(cb, retry){
   if(PEAR.fbs){ if(cb) cb(); return; }
+  if(PEAR._fbsFailed && !retry){ if(cb) cb(); return; }   // don't hammer ESPN; "Try again" retries
+  PEAR._fbsFailed = false;
   try{
-    var c = JSON.parse(localStorage.getItem("pear_fbs") || "null");
-    if(c && c.ts && Date.now() - c.ts < 7*864e5 && c.ids && c.ids.length >= 100){
-      PEAR.fbs = {}; c.ids.forEach(function(id){ PEAR.fbs[id] = 1; }); if(cb) cb(); return;
+    var c = JSON.parse(localStorage.getItem("pear_fbs2") || "null");
+    if(c && c.ts && Date.now() - c.ts < 7*864e5 && c.ids && c.ids.length >= 125 && c.ids.length <= 145){
+      PEAR.fbs = {}; c.ids.forEach(function(id){ PEAR.fbs[id] = 1; }); PEAR.fbsSrc = c.src || ""; if(cb) cb(); return;
     }
   }catch(e){}
+  try{ localStorage.removeItem("pear_fbs"); }catch(e){}
   if(PEAR._fbsLoading){ if(cb) (PEAR._fbsWait = PEAR._fbsWait || []).push(cb); return; }
-  PEAR._fbsLoading = true;
+  PEAR._fbsLoading = true; PEAR.fbsErr = "";
   function finish(){ PEAR._fbsLoading = false; var w = PEAR._fbsWait || []; PEAR._fbsWait = []; if(cb) cb(); w.forEach(function(f){ f(); }); }
-  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?groups=80&limit=900")
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      var lg = ((((d||{}).sports||[])[0]||{}).leagues||[])[0] || {}, ids = [];
-      (lg.teams||[]).forEach(function(w){ var t = w.team || w; if(t && t.id){ ids.push(String(t.id)); pearAbsorbTeam(t); } });
-      if(ids.length >= 100){                        // a thin reply is not trusted as the FBS list
-        PEAR.fbs = {}; ids.forEach(function(id){ PEAR.fbs[id] = 1; });
-        try{ localStorage.setItem("pear_fbs", JSON.stringify({ ts: Date.now(), ids: ids })); }catch(e){}
-      }
+  var BASE = "https://site.api.espn.com/apis/v2/sports/football/college-football/standings";
+  // Every team id in a standings reply, however deeply ESPN nests the conferences.
+  function idsOf(d){
+    var out = {};
+    (function walk(n){
+      if(!n) return;
+      (n.children || []).forEach(walk);
+      ((n.standings && n.standings.entries) || []).forEach(function(e){ var t = e.team || {}; if(t.id){ out[String(t.id)] = 1; pearAbsorbTeam(t); } });
+    })(d);
+    return Object.keys(out);
+  }
+  function ok(ids){ return ids.length >= 125 && ids.length <= 145; }   // FBS is ~136–138; anything else is the wrong list
+  function accept(ids, src){
+    PEAR.fbs = {}; ids.forEach(function(id){ PEAR.fbs[id] = 1; }); PEAR.fbsSrc = src;
+    try{ localStorage.setItem("pear_fbs2", JSON.stringify({ ts: Date.now(), ids: ids, src: src })); }catch(e){}
+    try{ localStorage.removeItem("pear_fbs"); }catch(e){}                  // the old, unfiltered list
+  }
+  // 1. FBS standings in one request.
+  fetch(BASE + "?group=80").then(function(r){ return r.json(); }).then(function(d){
+    var ids = idsOf(d);
+    if(ok(ids)){ accept(ids, "ESPN FBS standings"); finish(); return; }
+    // 2. Each FBS conference on its own, combined.
+    var CONF = [1, 4, 5, 8, 9, 12, 15, 17, 18, 37, 151];
+    Promise.all(CONF.map(function(gid){
+      return fetch(BASE + "?group=" + gid).then(function(r){ return r.json(); }).then(idsOf).catch(function(){ return []; });
+    })).then(function(lists){
+      var set = {}; lists.forEach(function(l){ l.forEach(function(id){ set[id] = 1; }); });
+      var all = Object.keys(set);
+      if(ok(all)) accept(all, "ESPN FBS conference standings");
+      else { PEAR.fbsErr = "FBS team list came back with " + all.length + " teams"; PEAR._fbsFailed = true; }
       finish();
-    })
-    .catch(finish);
+    });
+  }).catch(function(){ PEAR.fbsErr = "couldn\u2019t reach ESPN for the FBS list"; PEAR._fbsFailed = true; finish(); });
 }
 function pearIsFbs(id){ return PEAR.fbs ? !!PEAR.fbs[String(id)] : true; }
 function pearFbsGame(g){ return pearIsFbs(g.away.id) && pearIsFbs(g.home.id); }
@@ -5433,10 +5457,8 @@ function pemEnsureFbs(){
     if(!PEM._games) return;
     var changed = pemFbsOnly();
     PEM._fbsChecked = PEM._games;
-    if(changed){
-      toast("Dropped FCS games \u2014 model refit on " + PEM._games.length + " FBS games", "ok");
-      if(SC.screen === "prophescore") renderPoolEdge();
-    }
+    if(changed) toast("Dropped FCS games \u2014 model refit on " + PEM._games.length + " FBS games", "ok");
+    if((changed || PE.ui.view === "rank") && SC.screen === "prophescore") renderPoolEdge();
   });
 }
 
@@ -5755,7 +5777,8 @@ function pearRankHtml(){
   var cur = pearRankOrder(PEM.ratings), prev = pearPrevRanks();
   var rows = pemCompareRows(), byId = {}; rows.forEach(function(r){ byId[r.id] = r; });
   var R = pemRanks();
-  h += '<div class="pr-h2">Prophescore model · through week ' + (prev ? prev.week : "") + ' · ' + cur.order.length + ' FBS teams</div>';
+  h += '<div class="pr-h2">Prophescore model \u00b7 through week ' + (prev ? prev.week : "") + ' \u00b7 ' + cur.order.length + (PEAR.fbs ? ' FBS teams' : ' teams') + '</div>';
+  if(!PEAR.fbs && !PEAR._fbsLoading) h += '<div class="pr-pastnote">\u26A0\uFE0F Couldn\u2019t confirm the FBS team list' + (PEAR.fbsErr ? ' (' + x(PEAR.fbsErr) + ')' : '') + ', so FCS teams may be included. <button class="pr-link" id="pear-fbsretry">Try again</button></div>';
   h += '<div class="pr-tools"><div class="pr-seg">' +
        '<button class="' + (!PEAR.rankAll ? "on" : "") + '" data-pear-rankall="0">Top 25</button>' +
        '<button class="' + (PEAR.rankAll ? "on" : "") + '" data-pear-rankall="1">All ' + cur.order.length + '</button></div>' +
@@ -6007,8 +6030,12 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry");
   if(!t) return;
+  if(t.id === "pear-fbsretry"){
+    PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
+    pearLoadFbs(function(){ pemEnsureFbs(); if(SC.screen === "prophescore") renderPoolEdge(); }, true); return;
+  }
   if(t.hasAttribute("data-pear-team")){ pearOpenTeam(t.getAttribute("data-pear-team")); return; }
   if(t.hasAttribute("data-pear-rankall")){ PEAR.rankAll = t.getAttribute("data-pear-rankall") === "1"; renderPoolEdge(); return; }
   if(t.hasAttribute("data-pear-teamvs")){
