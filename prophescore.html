@@ -1231,6 +1231,8 @@ function peLoad(cb){
 // Everything derived from what was just loaded. Called from all three exits of
 // peLoad so no path can quietly skip it.
 function peAfterLoad(){
+  if(pemCleanRuns()) setTimeout(function(){ try{ peSave(); }catch(e){} }, 0);   // drop old auto-fit copies for good
+  try{ localStorage.removeItem("ps_hist_v1"); }catch(e){}                        // past-season cache from a removed experiment
   pemApplySavedOpts();
   // A bad cache must not break the page, but swallowing the reason means the
   // model silently fails to restore and the setup bar just says "build to
@@ -3955,7 +3957,7 @@ function pemTeamLogHtml(){
 // ── TUNING LOG ──────────────────────────────────────────────────────────────
 // A settings change is only an improvement if it survives being written down
 // and compared against a fixed reference. Both live in PE so they persist.
-var PE_RUNS_MAX = 24;
+var PE_RUNS_MAX = 10;
 
 function pemOptsSnapshot(){
   var o = {};
@@ -3982,10 +3984,23 @@ function pemApplyOpts(o){
   return pemRefit();
 }
 
+// Auto-tune used to log itself on every pass, which filled the log with copies.
+// Only hand-logged runs are kept, and never the same settings on the same games twice.
+function pemSameOpts(a, b){ for(var k in PEM_DEFAULTS){ if(Math.abs((a && a[k] || 0) - (b && b[k] || 0)) > 1e-9) return false; } return true; }
+function pemCleanRuns(){
+  var before = (PE.runs || []).length, seen = [];
+  PE.runs = (PE.runs || []).filter(function(r){
+    if(!r || r.label === "auto-fit") return false;
+    for(var i = 0; i < seen.length; i++) if(seen[i].n === r.n && pemSameOpts(seen[i].opts, r.opts)) return false;
+    seen.push(r); return true;
+  }).slice(0, PE_RUNS_MAX);
+  return PE.runs.length !== before;
+}
 function pemLogRun(label){
   if(!PEM._games || !PEM.cv) return false;
   PE.runs = PE.runs || [];
   var snap = pemOptsSnapshot();
+  if(PE.runs[0] && PE.runs[0].n === PEM.cv.n && pemSameOpts(PE.runs[0].opts, snap)) return "dup";
   var cmp  = PE.baseline ? pemCompare(snap, PE.baseline.opts) : null;
   PE.runs.unshift({
     at: Date.now(),
@@ -4140,10 +4155,13 @@ function pemPanelInner(){
   h += '<button class="btn btn-gold btn-sm" id="pem-auto">&#9889; Re-tune now</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-reset">Reset</button>';
   h += '<button class="btn btn-ghost btn-sm" id="pem-rebuild">Rebuild data</button>';
-  h += '<button class="btn btn-ghost btn-sm" id="pem-logrun">&#128221; Log this run</button>';
-  h += '<button class="btn btn-ghost btn-sm" id="pem-setbase">&#128204; ' +
-       (PE.baseline ? 'Replace baseline' : 'Set as baseline') + '</button>';
+  if(!pemAutoOn()){
+    h += '<button class="btn btn-ghost btn-sm" id="pem-logrun">&#128221; Log this run</button>';
+    h += '<button class="btn btn-ghost btn-sm" id="pem-setbase">&#128204; ' +
+         (PE.baseline ? 'Replace baseline' : 'Set as baseline') + '</button>';
+  }
   h += '</div>';
+  if(pemAutoOn()) h += '<div class="pe-note">Auto-tune keeps these settings at the best fit, so nothing is logged. Move a slider to tune by hand and the run log and baseline come back for comparing changes.</div>';
   h += '<div class="pe-note" id="pem-tuned"></div>';
   h += '</div>';
 
@@ -4164,7 +4182,7 @@ function pemPanelInner(){
               : 'Roughly the same scale as the market.')) + '</div>';
   }
 
-  h += pemLogHtml();
+  if(!pemAutoOn()) h += pemLogHtml();
 
   var sos = pemSOS();
   if(sos){
@@ -4305,7 +4323,9 @@ function pemBindPanel(){
 
   var logBtn = document.getElementById("pem-logrun");
   if(logBtn) logBtn.addEventListener("click", function(){
-    if(pemLogRun("manual")){ pemRepaint(); toast("Run logged", "ok"); }
+    var lr = pemLogRun("manual");
+    if(lr === "dup") toast("Already logged — nothing changed since the last run");
+    else if(lr){ pemRepaint(); toast("Run logged", "ok"); }
     else toast("Build the model first", "warn");
   });
 
@@ -4687,7 +4707,6 @@ function pemRunAutoFit(reason){
                 before: res ? res.before : null, after: res ? res.after : null,
                 n: res ? res.n : 0, games: PEM._games ? PEM._games.length : 0, reason: reason || "" };
     pemSaveOpts();                // saves settings + tune together
-    try{ pemLogRun("auto-fit"); }catch(e){}
     if(SC.screen === "prophescore") renderPoolEdge();
     if(res && res.before != null && res.after != null)
       toast("Model auto-tuned · error " + res.before.toFixed(2) + " → " + res.after.toFixed(2), "ok");
