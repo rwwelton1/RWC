@@ -2667,6 +2667,11 @@ function pemBuild(cb){
         pemRestorePrior();
         if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
 
+        if(PEAR.fbs){
+          var _b2 = games.length;
+          games = games.filter(function(g){ return PEAR.fbs[String(g.awayId)] && PEAR.fbs[String(g.homeId)]; });
+          if(games.length !== _b2){ PEM.dropped += _b2 - games.length; PEM._games = games; PEM.fbsSrc = "ESPN FBS list"; }
+        }
         if(!games.length){ cb && cb(new Error("no FBS games")); return; }
         pemRefit();
         pemCacheSeason(year, upto);
@@ -4586,6 +4591,8 @@ function pemRunAutoFit(reason){
 }
 // Called after every render: tunes in the background when there is new data.
 function pemAutoMaybe(){
+  pemEnsureFbs();
+  if(PEAR._fbsLoading) return;                      // wait: the game set may be about to change
   pemEnsureLines(false);
   if(!pemAutoOn() || PEM_AUTO.running || !PE.ready || !PEM.ratings || !PEM._games) return;
   if(PE.tune && PE.tune.sig === pemTuneSig()) return;
@@ -5319,6 +5326,66 @@ function pearAbsorbTeam(t){
   };
 }
 // Short names and logos for every FBS team, cached for a week.
+// ── FBS only ─
+// The FBS set comes only from ESPN's FBS team list (groups=80). Schedules can't
+// be used for this: an FBS schedule includes its FCS opponents.
+PEAR.fbs = null;
+function pearLoadFbs(cb){
+  if(PEAR.fbs){ if(cb) cb(); return; }
+  try{
+    var c = JSON.parse(localStorage.getItem("pear_fbs") || "null");
+    if(c && c.ts && Date.now() - c.ts < 7*864e5 && c.ids && c.ids.length >= 100){
+      PEAR.fbs = {}; c.ids.forEach(function(id){ PEAR.fbs[id] = 1; }); if(cb) cb(); return;
+    }
+  }catch(e){}
+  if(PEAR._fbsLoading){ if(cb) (PEAR._fbsWait = PEAR._fbsWait || []).push(cb); return; }
+  PEAR._fbsLoading = true;
+  function finish(){ PEAR._fbsLoading = false; var w = PEAR._fbsWait || []; PEAR._fbsWait = []; if(cb) cb(); w.forEach(function(f){ f(); }); }
+  fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?groups=80&limit=900")
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var lg = ((((d||{}).sports||[])[0]||{}).leagues||[])[0] || {}, ids = [];
+      (lg.teams||[]).forEach(function(w){ var t = w.team || w; if(t && t.id){ ids.push(String(t.id)); pearAbsorbTeam(t); } });
+      if(ids.length >= 100){                        // a thin reply is not trusted as the FBS list
+        PEAR.fbs = {}; ids.forEach(function(id){ PEAR.fbs[id] = 1; });
+        try{ localStorage.setItem("pear_fbs", JSON.stringify({ ts: Date.now(), ids: ids })); }catch(e){}
+      }
+      finish();
+    })
+    .catch(finish);
+}
+function pearIsFbs(id){ return PEAR.fbs ? !!PEAR.fbs[String(id)] : true; }
+function pearFbsGame(g){ return pearIsFbs(g.away.id) && pearIsFbs(g.home.id); }
+// Drop any game with a non-FBS team from the model's data, refit, and re-save
+// the season so it stays dropped. Games already cached from an older build
+// (or one where ESPN's FBS list didn't load) are cleaned up the same way.
+function pemFbsOnly(){
+  if(!PEAR.fbs || !PEM._games || !PEM._games.length) return false;
+  var before = PEM._games.length;
+  var kept = PEM._games.filter(function(g){ return PEAR.fbs[String(g.awayId)] && PEAR.fbs[String(g.homeId)]; });
+  if(kept.length === before) return false;
+  if(kept.length < before * 0.5) return false;      // a wrong list would gut the season \u2014 don't trust it
+  PEM._games = kept;
+  PEM.dropped = (PEM.dropped | 0) + (before - kept.length);
+  PEM.fbsSrc = "ESPN FBS list";
+  PEM._ats = null;
+  pemRefit();
+  if(PE.season) pemCacheSeason(PE.season.year, PE.season.upto);
+  return true;
+}
+function pemEnsureFbs(){
+  if(PEM._fbsChecked === PEM._games) return;
+  pearLoadFbs(function(){
+    if(!PEM._games) return;
+    var changed = pemFbsOnly();
+    PEM._fbsChecked = PEM._games;
+    if(changed){
+      toast("Dropped FCS games \u2014 model refit on " + PEM._games.length + " FBS games", "ok");
+      if(SC.screen === "prophescore") renderPoolEdge();
+    }
+  });
+}
+
 function pearLoadInfo(cb){
   try{
     var c = JSON.parse(localStorage.getItem("pear_teams") || "null");
@@ -5509,7 +5576,7 @@ var PEAR_EDGE_MIN = 3;
 function pearGamesHtml(){
   if(!PEAR.games && !PEAR.loading && !PEAR.err){
     PEAR.loading = true;
-    setTimeout(function(){ pearLoadInfo(); PEAR.loading = false; pearLoadWeek(null, null); }, 0);
+    setTimeout(function(){ pearLoadFbs(); pearLoadInfo(); PEAR.loading = false; pearLoadWeek(null, null); }, 0);
   }
   var h = '<div class="pear">';
   h += '<div class="pr-h1">Week ' + (PEAR.week || "") + ' Games</div>';
@@ -5536,13 +5603,13 @@ function pearGamesHtml(){
   if(PEAR.err) return h + '<div class="pr-empty">' + x(PEAR.err) + ' <button class="pr-link" data-pear-week="' + (PEAR.week||"") + '">Retry</button></div></div>';
   var pastFit = pearFitFor(PEAR.week);          // object: pre-game fit · false: week 1 · null: live
   var list = (PEAR.games || []).map(function(g){
-    var p = pearProject(g.away.id, g.home.id, g.neutral, pastFit || null);
+    var p = pearFbsGame(g) ? pearProject(g.away.id, g.home.id, g.neutral, pastFit || null) : null;
     return { g: g, p: p, e: pastFit === false ? null : pearEdge(g, p) };
   });
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
-    list = list.filter(function(o){ return o.e && o.e.edge >= PEAR_EDGE_MIN; });
+    list = list.filter(function(o){ return o.e && o.e.edge >= PEAR_EDGE_MIN && pearFbsGame(o.g); });
     list.sort(function(a, b){ return b.e.edge - a.e.edge; });
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
     var wk = { w: 0, l: 0, p: 0 };
@@ -5554,7 +5621,7 @@ function pearGamesHtml(){
   }
   if(PEAR.filter === "top") list = list.filter(function(o){ return o.g.away.rank || o.g.home.rank; });
   if(PEAR.filter === "close"){
-    list = list.filter(function(o){ return o.p; });
+    list = list.filter(function(o){ return o.p && pearFbsGame(o.g); });
     list.sort(function(a, b){ return b.p.gqi - a.p.gqi; });
     list = list.slice(0, 15);
   }
@@ -5586,7 +5653,7 @@ function pearGamesHtml(){
            '<div class="pr-tproj"><b class="' + (p ? (fav ? "fav" : "dog") : "") + '">' + big + '</b><span>' + small + '</span></div></div>';
     });
     h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
-         '<span>' + (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) : '') + '</span></div>';
+         '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) : '')) + '</span></div>';
     if(PEAR.filter === "edge" && o.e){
       h += '<div class="pr-take"><span>Model takes <b>' + x(o.e.txt) + '</b></span>' +
            (o.e.res ? '<span class="pr-res ' + o.e.res + '">' + (o.e.res === "win" ? "\u2713 Covered" : o.e.res === "loss" ? "\u2717 Missed" : "Push") + '</span>'
