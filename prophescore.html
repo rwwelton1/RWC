@@ -816,6 +816,8 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pc-pair em{font-style:normal;font-size:clamp(16px,4.5vw,26px);font-weight:900;padding-bottom:2px;color:var(--muted)}
 .pc-kv{display:inline-block;font-size:clamp(11px,3.2vw,14px);font-weight:900;border:1.5px solid var(--border);border-radius:20px;padding:1px 10px;margin-top:5px;background:var(--cream)}
 .pc-kv+.pc-kv{margin-top:3px}
+.pc-mx{font-size:clamp(9.5px,2.8vw,12px);font-weight:800;color:var(--muted);margin-top:5px}
+.pc-mx b{color:var(--text)}
 .pc-line{max-width:100%;overflow-wrap:break-word;font-size:clamp(15px,4.6vw,22px);font-weight:900;margin-top:6px;background:var(--gold);border:2px solid var(--border);border-radius:10px;padding:2px 10px;box-shadow:2px 2px 0 var(--border)}
 .pc-vegas{font-size:clamp(9.5px,2.8vw,12px);font-weight:800;color:var(--muted);margin-top:5px}
 .pc-final{font-size:clamp(11px,3vw,13px);font-weight:900;color:var(--red2);margin-top:2px}
@@ -1913,6 +1915,7 @@ var PEM = {
     priorW:   0.35,  // trust in the SP+ sheet going into week 1 (0 = results only, 1 = sheet only)
     priorW8:  0.75,  // trust by week 8; weeks between follow a log curve
     yw:       0.0,   // share of each score replaced by what its yardage is worth
+    mw:       0.0,   // weight on the run/pass play-mix matchup
     lambda:   0.020, // shrinkage toward prior
     cap:      28,    // blowout margin cap
     recency:  0.0,   // 0 = all games equal, 1 = heavy tilt to recent
@@ -1920,7 +1923,7 @@ var PEM = {
   }
 };
 
-var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.35, priorW8:0.75, lambda:0.020, cap:28, recency:0.0, yw:0.0 };
+var PEM_DEFAULTS = { hfa:2.5, scale:1.0, oppW:1.0, toAdj:0.0, priorW:0.35, priorW8:0.75, lambda:0.020, cap:28, recency:0.0, yw:0.0, mw:0.0 };
 
 function pemCapped(a, b, cap){
   var m = a - b;
@@ -2147,7 +2150,7 @@ function pemParseTurnovers(d){
 // several spellings and falls back to deriving the value. pemStatCoverage then
 // reports what actually parsed, because a stat that silently fails to land is
 // worse than one that is missing outright.
-var PEM_STAT_KEYS = ["yards","plays","ypp","first","td3m","td3a","pen","penYds","poss","to"];
+var PEM_STAT_KEYS = ["yards","plays","ypp","first","td3m","td3a","pen","penYds","poss","to","rAtt","rYds","pAtt","pYds"];
 
 function pemNum(v){
   var n = parseFloat(String(v === undefined || v === null ? "" : v).replace(/[^0-9.\-]/g, ""));
@@ -2188,6 +2191,12 @@ function pemParseTeamStats(d){
     r.ypp   = pemNum(pick("yardsperplay","avgyardsperplay","yardspergame"));
     if(r.ypp === null && r.yards !== null && r.plays) r.ypp = Math.round((r.yards/r.plays)*100)/100;
     r.first = pemNum(pick("firstdowns","totalfirstdowns"));
+    // Run / pass split: rushes and rushing yards, pass attempts and net passing yards.
+    r.rAtt = pemNum(pick("rushingattempts","rushattempts","rushes"));
+    r.rYds = pemNum(pick("rushingyards","rushyards","netrushingyards"));
+    var ca = pemPair(pick("completionattempts","compatt","completionsattempts"));
+    r.pAtt = ca ? ca[1] : pemNum(pick("passingattempts","passattempts"));
+    r.pYds = pemNum(pick("netpassingyards","passingyards","passyards"));
     var th = pemPair(pick("thirddowneff","thirddownefficiency","thirddowns"));
     r.td3m = th ? th[0] : null;
     r.td3a = th ? th[1] : null;
@@ -2292,7 +2301,7 @@ function pemFetchBoxScores(games, progress, cb){
   // either piece is missing, so a season logged before stat lines existed fills
   // itself in on the next run instead of starting over.
   var todo = games.filter(function(g){
-    return g.eventId && (g.toMargin === undefined || (!g.statAway && !g.statHome));
+    return g.eventId && (g.toMargin === undefined || (!g.statAway && !g.statHome) || (!g._splitTried && !(pemHasSplit(g.statAway) && pemHasSplit(g.statHome))));
   });
   var got = 0, gotStats = 0, tried = 0;
   pemPool(todo, 8, function(g, next){
@@ -2310,6 +2319,7 @@ function pemFetchBoxScores(games, progress, cb){
         // The rest of the same response \u2014 free.
         PE.lines = PE.lines || {};
         if(PE.lines[g.eventId] === undefined) PE.lines[g.eventId] = pemParseLine(d);
+        g._splitTried = true;
         var st = pemParseTeamStats(d);
         if(st && st[g.awayId] && st[g.homeId]){
           g.statAway = st[g.awayId];
@@ -2730,8 +2740,81 @@ function pemFit(games, prior, o){
     errSum += Math.abs((p.home - p.away) - (g.hs - g.as)); cnt++;
   });
   var wks = {}; games.forEach(function(g){ wks[g.week] = 1; });
+  if(o.mw){
+    var S = pemFitSplits(games);
+    try{ Object.defineProperty(teams, "_mx", { value: { S: S, w: o.mw }, enumerable: false, configurable: true }); }catch(e){}
+  }
   return { ratings:teams, avg:avg, hfa:hfa, n:games.length, o:o,
            weeks:Object.keys(wks).length, mae: cnt ? errSum/cnt : null };
+}
+
+// ── RUN / PASS SPLITS AND MATCHUPS ──────────────────────────────────────────
+// Every team gets four opponent-adjusted efficiency numbers from the box
+// scores: yards per rush and per pass attempt, gained and allowed. Adding them
+// up would mostly repeat the overall rating, so the model only uses what the
+// overall rating can't see — play mix. A team that runs more than average gets
+// more out of a defence that is weaker against the run than the pass (and the
+// reverse), and that difference, in yards per play times plays, becomes points.
+var PEM_SPLIT_K = 60, PEM_MIX_K = 80;       // attempts of "average" mixed in before a team's own numbers count
+function pemHasSplit(st){ return !!(st && st.rAtt > 0 && st.pAtt > 0 && typeof st.rYds === "number" && typeof st.pYds === "number"); }
+function pemSplitCover(games){ var n = 0; games.forEach(function(g){ if(pemHasSplit(g.statAway) && pemHasSplit(g.statHome)) n++; }); return games.length ? n / games.length : 0; }
+function pemFitSplits(games){
+  if(!games || !games.length) return null;
+  var key = games.length + "|" + games[0].eventId + "|" + games[games.length - 1].eventId;
+  PEM._spCache = PEM._spCache || {};
+  if(PEM._spCache[key] !== undefined) return PEM._spCache[key];
+  var R = [], P = [], mix = {}, sr = 0, sra = 0, sp = 0, spa = 0, pts = 0, yds = 0;
+  games.forEach(function(g){
+    if(!pemHasSplit(g.statAway) || !pemHasSplit(g.statHome)) return;
+    [[g.awayId, g.homeId, g.statAway], [g.homeId, g.awayId, g.statHome]].forEach(function(s){
+      var st = s[2];
+      R.push({ o: s[0], d: s[1], y: st.rYds / st.rAtt, w: st.rAtt });
+      P.push({ o: s[0], d: s[1], y: st.pYds / st.pAtt, w: st.pAtt });
+      sr += st.rYds; sra += st.rAtt; sp += st.pYds; spa += st.pAtt;
+      var m = mix[s[0]] = mix[s[0]] || { r: 0, p: 0, g: 0 };
+      m.r += st.rAtt; m.p += st.pAtt; m.g++;
+    });
+    pts += g.as + g.hs; yds += g.statAway.rYds + g.statAway.pYds + g.statHome.rYds + g.statHome.pYds;
+  });
+  if(R.length < 40){ PEM._spCache[key] = null; return null; }
+  var avgR = sr / sra, avgP = sp / spa;
+  // Opponent-adjusted offence and defence by alternating ridge passes: each
+  // side is solved holding the other fixed, with PEM_SPLIT_K attempts of
+  // league average mixed in so a two-game sample can't run away.
+  function solve(obs, avg){
+    var o = {}, d = {};
+    obs.forEach(function(x){ o[x.o] = 0; d[x.d] = 0; });
+    for(var it = 0; it < 25; it++){
+      var so = {}, wo = {}, sd = {}, wd = {};
+      obs.forEach(function(x){ var r = x.y - avg - d[x.d]; so[x.o] = (so[x.o] || 0) + x.w * r; wo[x.o] = (wo[x.o] || 0) + x.w; });
+      for(var k in o) o[k] = so[k] / (wo[k] + PEM_SPLIT_K);
+      obs.forEach(function(x){ var r = x.y - avg - o[x.o]; sd[x.d] = (sd[x.d] || 0) + x.w * r; wd[x.d] = (wd[x.d] || 0) + x.w; });
+      for(var j in d) d[j] = sd[j] / (wd[j] + PEM_SPLIT_K);
+    }
+    return { o: o, d: d };
+  }
+  var rs = solve(R, avgR), ps = solve(P, avgP);
+  var tr = 0, tp = 0, tg = 0; for(var t in mix){ tr += mix[t].r; tp += mix[t].p; tg += mix[t].g; }
+  var avgRR = tr / (tr + tp), avgPlays = (tr + tp) / tg, out = {};
+  var ids = {}; [rs.o, rs.d, ps.o, ps.d].forEach(function(m){ for(var i in m) ids[i] = 1; });
+  for(var id in ids){
+    var mx = mix[id] || { r: 0, p: 0, g: 0 };
+    out[id] = {
+      ro: rs.o[id] || 0, rd: rs.d[id] || 0, po: ps.o[id] || 0, pd: ps.d[id] || 0,
+      rr: (mx.r + PEM_MIX_K * avgRR) / (mx.r + mx.p + PEM_MIX_K),
+      plays: (mx.r + mx.p + 2 * avgPlays) / (mx.g + 2)
+    };
+  }
+  var res = { t: out, avgR: avgR, avgP: avgP, avgRR: avgRR, avgPlays: avgPlays, ppy: yds ? pts / yds : 0.07 };
+  if(Object.keys(PEM._spCache).length > 200) PEM._spCache = {};
+  PEM._spCache[key] = res;
+  return res;
+}
+// Points the play-mix matchup is worth to `off` against `def` (before the weight).
+function pemMixPts(S, off, def){
+  var a = S && S.t[off], b = S && S.t[def];
+  if(!a || !b) return 0;
+  return a.plays * (a.rr - S.avgRR) * (b.rd - b.pd) * S.ppy;
 }
 
 function pemPredictRaw(teams, avg, hfa, awayId, homeId, neutral, oppW){
@@ -2739,8 +2822,11 @@ function pemPredictRaw(teams, avg, hfa, awayId, homeId, neutral, oppW){
   if(!A || !H) return null;
   var ow = (oppW === undefined) ? 1 : oppW;
   var edge = neutral ? 0 : hfa/2;
-  return { away: avg + A.off + ow * H.def - edge,
-           home: avg + H.off + ow * A.def + edge };
+  var away = avg + A.off + ow * H.def - edge, home = avg + H.off + ow * A.def + edge;
+  // Run/pass matchup, when the fit carries splits and the weight is on.
+  var mx = teams._mx;
+  if(mx && mx.w && mx.S){ away += mx.w * pemMixPts(mx.S, awayId, homeId); home += mx.w * pemMixPts(mx.S, homeId, awayId); }
+  return { away: away, home: home };
 }
 
 function pemPredict(awayId, homeId, neutral){
@@ -2946,6 +3032,7 @@ function pemBuild(cb){
 // Refit from cached games — what every slider calls. No network.
 function pemRefit(){
   if(!PEM._games || !PEM._games.length) return false;
+  PEM.splits = pemFitSplits(PEM._games); PEM._ranks = null;
   if(pemTrustHold()) pemSaveOpts();
   var fit = pemFit(PEM._games, PEM.prior, PEM.opts);
   PEM.ratings = fit.ratings; PEM.avg = fit.avg;
@@ -3449,6 +3536,7 @@ function pemCompareRows(){
     var a = adj[t.id] || {};
     var mr = PEM.ratings && PEM.ratings[t.id];
     var pr = PEM.prior && PEM.prior[t.id];
+    var sp = PEM.splits && PEM.splits.t[t.id];
     out.push({
       id: t.id, name: t.name, rating: t.rating,
       // Split the rating into its halves. The model's defence term is negative
@@ -3464,7 +3552,10 @@ function pemCompareRows(){
       ypp: s.ypp, oppYpp: s.oppYpp, plays: s.plays, oppPlays: s.oppPlays,
       third: s.third, oppThird: s.oppThird,
       appg: a.appg, apapg: a.apapg, aypg: a.aypg, ayapg: a.ayapg,
-      ypgShift: a.ypgShift, ppgShift: a.ppgShift
+      ypgShift: a.ypgShift, ppgShift: a.ppgShift,
+      rOff: sp ? PEM.splits.avgR + sp.ro : null, rDef: sp ? PEM.splits.avgR + sp.rd : null,
+      pOff: sp ? PEM.splits.avgP + sp.po : null, pDef: sp ? PEM.splits.avgP + sp.pd : null,
+      runRate: sp ? sp.rr : null
     });
   });
   return out;
@@ -3649,7 +3740,12 @@ var PEM_STATS = {
   appg:      { lab:"Adj pts/gm",   dir:"high", dp:1 },
   apapg:     { lab:"Adj pts all.", dir:"low",  dp:1 },
   aypg:      { lab:"Adj yds/gm",   dir:"high", dp:0 },
-  ayapg:     { lab:"Adj yds all.", dir:"low",  dp:0 }
+  ayapg:     { lab:"Adj yds all.", dir:"low",  dp:0 },
+  rOff:      { lab:"Adj rush Y/A", dir:"high", dp:2 },
+  rDef:      { lab:"Adj rush Y/A all.", dir:"low", dp:2 },
+  pOff:      { lab:"Adj pass Y/A", dir:"high", dp:2 },
+  pDef:      { lab:"Adj pass Y/A all.", dir:"low", dp:2 },
+  runRate:   { lab:"Run rate", dir:"none", dp:0, pct:true }
 };
 
 // Rank every team on every stat, once per season load.
@@ -4204,6 +4300,9 @@ var PEM_KNOBS = [
   { key:"yw",      label:"Yards blend",    min:0,   max:0.8,  step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"points only", hi:"mostly yards",
     help:"Replaces this share of each team's score with the points its total yards are usually worth. Yards carry less luck than the scoreboard (turnovers, short fields, garbage time). Needs box scores \u2014 use Load box scores." },
+  { key:"mw",      label:"Run/pass matchup", min:0,   max:3,  step:0.1, fmt:function(v){ return v.toFixed(1) + "x"; },
+    lo:"off", hi:"strong",
+    help:"How much the play-mix matchup counts: a run-heavy team facing a defence that is weaker against the run than the pass gains points, and the reverse. 1x is the plain yards-per-play estimate turned into points. Needs run/pass box scores." },
   { key:"priorW",  label:"Trust in SP+ · week 1", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"results only", hi:"prior only",
     help:"How much the SP+ sheet counts going into week 1. Later weeks rise (or fall) from here on a log curve toward the week-8 value." },
@@ -4611,6 +4710,7 @@ var PEM_GRID = {
     priorW:  [0,0.2,0.35,0.5,0.65,0.8,1],
     priorW8: [0,0.2,0.35,0.5,0.65,0.8,1],
     yw:      [0,0.15,0.3,0.45,0.6,0.8],
+    mw:      [0,0.5,1,1.5,2,3],
     lambda:  [0,0.005,0.01,0.02,0.035,0.05,0.07],
     cap:     [14,17,21,24,28,35,45],
     recency: [0,0.25,0.5,0.75,1]
@@ -4893,6 +4993,7 @@ function pemTunableOn(key, games){
   if(key === "priorW" || key === "priorW8") return !!PEM.prior && pemTrustMeasurableOn(games);
   if(key === "toAdj") return !!PEM.toStats;
   if(key === "yw") return pemYardsCover(games) >= 0.5;
+  if(key === "mw") return pemSplitCover(games) >= 0.5;
   return true;
 }
 function pemMeanErr(em){ var s = 0, n = 0; for(var k in em){ s += em[k]; n++; } return n ? s / n : null; }
@@ -4970,7 +5071,7 @@ function pemAutoFit(onStep, done){
 // actually have been made. Finished weeks never change, so each is tuned once
 // and kept.
 function pemWFKey(w){
-  var n = 0, st = 0; (PEM._games || []).forEach(function(g){ if(g.week < w){ n++; if(g.statAway) st++; } });
+  var n = 0, st = 0; (PEM._games || []).forEach(function(g){ if(g.week < w){ n++; if(g.statAway) st++; if(pemHasSplit(g.statAway)) st += 1000; } });
   var sh = Object.keys(PE.priors || {}).filter(function(k){ var q = pePriorWeek(k); return q && q.w <= w; }).sort().map(function(k){ return k + ":" + PE.priors[k].at; }).join(",");
   return "v1|" + n + "|" + st + "|" + (PEM.toStats ? 1 : 0) + "|" + sh;
 }
@@ -5038,7 +5139,7 @@ function pemTrustHold(){
 }
 function pemTuneSig(){
   if(!PEM._games) return "";
-  return "v3|" + PEM._games.length + "|" + pemSheetSig() + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
+  return "v4|" + Math.round(pemSplitCover(PEM._games) * 20) + "|" + PEM._games.length + "|" + pemSheetSig() + "|" + (PEM.toStats ? "to" : "") + "|" + ((PE.season && PE.season.year) || "");
 }
 function pemAutoOn(){ return !(PE.tune && PE.tune.auto === false); }
 var PEM_AUTO = { running: false, msg: "" };
@@ -5063,7 +5164,22 @@ function pemRunAutoFit(reason){
   });
 }
 // Called after every render: tunes in the background when there is new data.
+var PEM_SPLITS = { tried: false, busy: false };
+function pemEnsureSplits(){
+  if(PEM_SPLITS.tried || PEM_SPLITS.busy || !PEM._games || !PEM._games.length) return;
+  PEM_SPLITS.tried = true;
+  var miss = PEM._games.filter(function(g){ return g.eventId && !(pemHasSplit(g.statAway) && pemHasSplit(g.statHome)); });
+  if(!miss.length) return;
+  PEM_SPLITS.busy = true;
+  pemFetchBoxScores(PEM._games, null, function(){
+    PEM_SPLITS.busy = false;
+    if(pemApplyCachedTurnovers(PEM._games)) PEM.toStats = pemTurnoverStats(PEM._games);
+    pemRefit();
+    if(SC.screen === "prophescore") renderPoolEdge();
+  });
+}
 function pemAutoMaybe(){
+  if(PE.ready && PEM._games && PEM.ratings) pemEnsureSplits();
   if(PE.ready && PEM.ratings && !PEM_AUTO.running) setTimeout(pemWFRun, 0);
   pemEnsureFbs();
   if(PEAR._fbsLoading) return;                      // wait: the game set may be about to change
@@ -6837,6 +6953,15 @@ function pearCardHtml(){
     h += '<div class="pc-kv">GQI: ' + p.gqi.toFixed(1) + '</div>';
     h += '<div class="pc-kv">O/U: ' + p.total.toFixed(1) + '</div>';
     h += '<div class="pc-line">' + x(pearLineTxt(A, H, p.margin)) + '</div>';
+    var mxS = PEM.splits;
+    if(mxS && mxS.t[A] && mxS.t[H]){
+      var mxA = pemMixPts(mxS, A, H), mxH = pemMixPts(mxS, H, A), mxNet = mxH - mxA, mw = PEM.opts.mw || 0;
+      if(Math.abs(mxNet) >= 0.05){
+        var fav = mxNet > 0 ? H : A;
+        h += '<div class="pc-mx">Run/pass matchup: <b>' + x(pearName(fav)) + ' +' + Math.abs(mxNet).toFixed(1) + '</b>' +
+             (mw ? (mw !== 1 ? ' \u00d7 ' + mw.toFixed(1) + ' in the line' : ' in the line') : ' \u00b7 not in the line yet (weight 0)') + '</div>';
+      }
+    }
   } else {
     h += '<div class="pc-none">' + (!PEM.ratings ? 'Build the score model to project this game.' : (!pearIsFbs(A) || !pearIsFbs(H)) ? 'FCS teams aren’t rated, so there’s no projection for this one.' : 'One of these teams has no rating yet.') + '</div>';
   }
@@ -6875,7 +7000,8 @@ var PEAR_SIDE = [
   { hd: "RATING", k: "rating" }, { lab: "OFF", k: "off" }, { lab: "DEF", k: "def" },
   { hd: "SCORING" }, { lab: "PPG", k: "ppg" }, { lab: "PA/G", k: "papg" },
   { hd: "ADJUSTED" }, { lab: "aPPG", k: "appg" }, { lab: "aPA/G", k: "apapg" },
-  { hd: "RESUME" }, { lab: "SOS", k: "sos" }, { lab: "MOV", k: "margin" }, { lab: "TO", k: "to" }
+  { hd: "RESUME" }, { lab: "SOS", k: "sos" }, { lab: "MOV", k: "margin" }, { lab: "TO", k: "to" },
+  { hd: "STYLE" }, { lab: "RUN %", k: "runRate" }
 ];
 function pearSide(r, id, ranks, dir){
   var h = '<div class="pc-side ' + dir + '">';
@@ -6891,7 +7017,7 @@ function pearSide(r, id, ranks, dir){
 }
 var PEAR_PAIRS = [
   ["POINTS/GM", "ppg", "papg"], ["ADJ POINTS", "appg", "apapg"], ["YARDS/GM", "ypg", "yapg"],
-  ["ADJ YARDS", "aypg", "ayapg"], ["YARDS/PLAY", "ypp", "oppYpp"], ["3RD DOWN", "third", "oppThird"]
+  ["ADJ YARDS", "aypg", "ayapg"], ["YARDS/PLAY", "ypp", "oppYpp"], ["RUSH Y/ATT", "rOff", "rDef"], ["PASS Y/ATT", "pOff", "pDef"], ["3RD DOWN", "third", "oppThird"]
 ];
 function pearCenter(ra, rh, A, H, ranks){
   function block(title, L, Lid, R, Rid, offLeft){
