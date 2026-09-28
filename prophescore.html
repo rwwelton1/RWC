@@ -450,6 +450,31 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pem-stale b{color:var(--gold-dark)}
 
 .pem-otherdata{font-size:8px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border:2px solid var(--border2);border-radius:5px;padding:0 4px}
+.pe-log{font-size:10px}
+.pe-log th{font-size:8px;white-space:nowrap}
+.pe-log td{padding:5px 4px;vertical-align:top;white-space:nowrap}
+.pe-log td:nth-child(2){white-space:normal;min-width:96px}
+.pe-logdim{color:var(--dim);font-weight:800}
+.pe-logw{color:var(--green);font-weight:900}
+.pe-logl{color:var(--red);font-weight:900}
+select.pe-in{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 52%,calc(100% - 11px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:30px}
+.pe-seg{display:flex;gap:0;margin-bottom:10px;border:2px solid var(--border);border-radius:9px;overflow:hidden;box-shadow:2px 2px 0 var(--border)}
+.pe-segb{flex:1;padding:7px 4px;font-size:10px;font-weight:900;font-family:Nunito,sans-serif;background:var(--card);color:var(--muted);border:0;cursor:pointer}
+.pe-segb+.pe-segb{border-left:2px solid var(--border)}
+.pe-segb.on{background:var(--gold-bg);color:var(--gold-dark)}
+.pe-cmp{font-size:10px}
+.pe-cmp th{font-size:8px;white-space:nowrap}
+.pe-cmp td{padding:5px 4px;white-space:nowrap}
+.pe-cmp td:first-child{white-space:normal;min-width:90px;font-weight:800}
+.pe-num{text-align:right;font-variant-numeric:tabular-nums}
+.pe-sortable{cursor:pointer;user-select:none;-webkit-user-select:none}
+.pe-sortable.on{color:var(--gold-dark)}
+.pe-caret{margin-left:2px}
+.pe-cmprow{cursor:pointer}
+.pe-cmprow.on{background:var(--gold-bg)}
+.pe-cmprow.on td:first-child{box-shadow:inset 3px 0 0 var(--gold-dark)}
+.pe-seg2{margin-top:-2px;margin-bottom:8px}
+.pe-seg2 .pe-segb{font-size:9px;padding:6px 2px}
 
 
 
@@ -849,7 +874,7 @@ function _myGroupIds(u){
 // NOTE: this gate is cosmetic. The code ships to every visitor; the only real
 // protection is the Firebase rule on prophescore/{uid}.
 var PE = { games: [], history: [], meta: null, priors: {}, settings: null, turnovers: {}, season: null,
-           runs: [], baseline: null, ready: false, err: "" };
+           runs: [], baseline: null, teamstats: {}, ready: false, err: "" };
 var PE_KEYNUMS = [3, 7];
 
 function peOwner(){ return isRootMaster(ME()); }
@@ -869,6 +894,7 @@ function peLoad(cb){
       PE.priors = o.priors||{}; PE.settings = o.settings||null; PE.turnovers = o.turnovers||{};
       PE.season = o.season||null;
       PE.runs = o.runs||[]; PE.baseline = o.baseline||null;
+      PE.teamstats = o.teamstats||{};
     }
   }catch(e){}
   var uid = ME();
@@ -883,6 +909,7 @@ function peLoad(cb){
       PE.season = v.season || PE.season || null;
       PE.runs = v.runs || PE.runs || [];
       PE.baseline = v.baseline || PE.baseline || null;
+      PE.teamstats = v.teamstats || PE.teamstats || {};
     }
     peAfterLoad();
     PE.ready = true; PE.err = "";
@@ -903,7 +930,15 @@ function peLoad(cb){
 // peLoad so no path can quietly skip it.
 function peAfterLoad(){
   pemApplySavedOpts();
-  try{ pemRestoreSeason(); }catch(e){}
+  // A bad cache must not break the page, but swallowing the reason means the
+  // model silently fails to restore and the setup bar just says "build to
+  // predict" forever. Keep the message and show it.
+  PEM.restoreErr = "";
+  try{
+    pemRestoreSeason();
+  }catch(e){
+    PEM.restoreErr = (e && (e.message || e.name)) ? String(e.message || e.name) : "unknown error";
+  }
 }
 
 // Firebase rejects any `undefined` outright, which is a common silent cause of
@@ -930,7 +965,10 @@ function peSave(){
     // Tuning history. Without a written record every session starts from
     // scratch and "this feels better" is the only available evidence.
     runs:      PE.runs      || [],
-    baseline:  PE.baseline  || null
+    baseline:  PE.baseline  || null,
+    // Per-game team lines, keyed by event id like the turnover cache, so they
+    // survive a rebuild and only genuinely new games ever cost a request.
+    teamstats: PE.teamstats || null
   });
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
@@ -1721,6 +1759,133 @@ function pemParseTurnovers(d){
   return Object.keys(out).length === 2 ? out : null;
 }
 
+// \u2500\u2500 TEAM STAT LINES \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// The box score request was already being made for one number. Everything else
+// in the response was thrown away. Yardage and efficiency are measured far more
+// precisely than the final score \u2014 a team can outgain an opponent by 200 yards
+// and lose on two returned fumbles \u2014 so a season log built on them says more
+// about how a team is playing than the scoreboard does.
+//
+// ESPN is not consistent about stat names across seasons, so every field tries
+// several spellings and falls back to deriving the value. pemStatCoverage then
+// reports what actually parsed, because a stat that silently fails to land is
+// worse than one that is missing outright.
+var PEM_STAT_KEYS = ["yards","plays","ypp","first","td3m","td3a","pen","penYds","poss","to"];
+
+function pemNum(v){
+  var n = parseFloat(String(v === undefined || v === null ? "" : v).replace(/[^0-9.\-]/g, ""));
+  return isFinite(n) ? n : null;
+}
+// "5-14" -> [5,14];  "7-65" -> [7,65]
+function pemPair(v){
+  var m = String(v||"").match(/(-?\d+)\s*[-\/]\s*(-?\d+)/);
+  return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
+}
+// "31:24" -> 1884 seconds
+function pemClock(v){
+  var m = String(v||"").match(/(\d+):(\d+)/);
+  return m ? (parseInt(m[1],10)*60 + parseInt(m[2],10)) : null;
+}
+
+function pemParseTeamStats(d){
+  var teams = (((d||{}).boxscore||{}).teams) || [];
+  var out = {}, seen = 0;
+  teams.forEach(function(t){
+    var id = String(((t||{}).team||{}).id||"");
+    if(!id) return;
+    var by = {};
+    ((t||{}).statistics||[]).forEach(function(s){
+      var nm = String((s||{}).name || (s||{}).label || "").toLowerCase().replace(/[^a-z0-9]/g,"");
+      if(nm) by[nm] = (s||{}).displayValue;
+    });
+    function pick(){
+      for(var i=0;i<arguments.length;i++){
+        var k = arguments[i];
+        if(by[k] !== undefined && by[k] !== null && by[k] !== "") return by[k];
+      }
+      return null;
+    }
+    var r = {};
+    r.yards = pemNum(pick("totalyards","totalnetyards","netyards"));
+    r.plays = pemNum(pick("totaloffensiveplays","offensiveplays","totalplays","plays"));
+    r.ypp   = pemNum(pick("yardsperplay","avgyardsperplay","yardspergame"));
+    if(r.ypp === null && r.yards !== null && r.plays) r.ypp = Math.round((r.yards/r.plays)*100)/100;
+    r.first = pemNum(pick("firstdowns","totalfirstdowns"));
+    var th = pemPair(pick("thirddowneff","thirddownefficiency","thirddowns"));
+    r.td3m = th ? th[0] : null;
+    r.td3a = th ? th[1] : null;
+    var pn = pemPair(pick("totalpenaltiesyards","penaltiesyards","penalties"));
+    r.pen    = pn ? pn[0] : pemNum(pick("penalties"));
+    r.penYds = pn ? pn[1] : pemNum(pick("penaltyyards"));
+    r.poss = pemClock(pick("possessiontime","timeofpossession"));
+    var tov = pemNum(pick("turnovers","totalturnovers"));
+    if(tov === null){
+      var f = pemNum(pick("fumbleslost")), i2 = pemNum(pick("interceptions","interceptionsthrown"));
+      if(f !== null || i2 !== null) tov = (f||0) + (i2||0);
+    }
+    r.to = tov;
+    var any = false;
+    PEM_STAT_KEYS.forEach(function(k){ if(r[k] !== null && r[k] !== undefined) any = true; });
+    if(any){ out[id] = r; seen++; }
+  });
+  return seen === 2 ? out : null;
+}
+
+// Fixed-position arrays: a third of the bytes of named keys, and this node sits
+// next to the season cache in one Firebase record.
+function pemStatsPack(r){
+  return PEM_STAT_KEYS.map(function(k){
+    var v = r[k];
+    return (typeof v === "number" && isFinite(v)) ? v : null;
+  });
+}
+function pemStatsUnpack(a){
+  if(!a || !a.length) return null;
+  var r = {};
+  PEM_STAT_KEYS.forEach(function(k,i){ r[k] = (typeof a[i] === "number") ? a[i] : null; });
+  return r;
+}
+
+// Hang the stored line on each game so everything downstream reads one shape.
+function pemApplyCachedStats(games){
+  var cache = PE.teamstats || {}, n = 0;
+  games.forEach(function(g){
+    if(!g.eventId) return;
+    var e = cache[g.eventId];
+    if(!e) return;
+    var a = pemStatsUnpack(e.a), h = pemStatsUnpack(e.h);
+    if(a || h){ g.statAway = a; g.statHome = h; n++; }
+  });
+  return n;
+}
+
+function pemCacheStats(games){
+  PE.teamstats = PE.teamstats || {};
+  var n = 0;
+  games.forEach(function(g){
+    if(!g.eventId || (!g.statAway && !g.statHome)) return;
+    PE.teamstats[g.eventId] = { a: pemStatsPack(g.statAway||{}), h: pemStatsPack(g.statHome||{}) };
+    n++;
+  });
+  return n;
+}
+
+// What actually parsed, field by field. A zero here is the signal that ESPN
+// renamed something \u2014 without it the failure is invisible.
+function pemStatCoverage(games){
+  var have = {}, total = 0;
+  PEM_STAT_KEYS.forEach(function(k){ have[k] = 0; });
+  games.forEach(function(g){
+    if(!g.statAway && !g.statHome) return;
+    total++;
+    PEM_STAT_KEYS.forEach(function(k){
+      var a = g.statAway && g.statAway[k], h = g.statHome && g.statHome[k];
+      if(typeof a === "number" || typeof h === "number") have[k]++;
+    });
+  });
+  return { total: total, have: have };
+}
+
 // Paint cached turnovers onto a freshly fetched season before deciding what
 // still needs downloading.
 function pemApplyCachedTurnovers(games){
@@ -1745,8 +1910,14 @@ function pemCacheTurnovers(games){
 
 function pemFetchBoxScores(games, progress, cb){
   pemApplyCachedTurnovers(games);
-  var todo = games.filter(function(g){ return g.eventId && g.toMargin === undefined; });
-  var got = 0, tried = 0;
+  pemApplyCachedStats(games);
+  // One request per game already covered turnovers. A game needs fetching if
+  // either piece is missing, so a season logged before stat lines existed fills
+  // itself in on the next run instead of starting over.
+  var todo = games.filter(function(g){
+    return g.eventId && (g.toMargin === undefined || (!g.statAway && !g.statHome));
+  });
+  var got = 0, gotStats = 0, tried = 0;
   pemPool(todo, 8, function(g, next){
     fetch("https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event=" + g.eventId)
       .then(function(r){ return r.json(); })
@@ -1756,17 +1927,26 @@ function pemFetchBoxScores(games, progress, cb){
           // Positive means the HOME side won the turnover battle.
           g.toMargin = t[g.awayId] - t[g.homeId];
           got++;
-        } else {
+        } else if(g.toMargin === undefined){
           g.toMargin = null;
+        }
+        // The rest of the same response \u2014 free.
+        var st = pemParseTeamStats(d);
+        if(st && st[g.awayId] && st[g.homeId]){
+          g.statAway = st[g.awayId];
+          g.statHome = st[g.homeId];
+          gotStats++;
         }
         tried++;
         if(progress && (tried % 20 === 0)) progress(tried, todo.length);
         next();
       })
-      .catch(function(){ g.toMargin = null; tried++; next(); });
+      .catch(function(){ if(g.toMargin === undefined) g.toMargin = null; tried++; next(); });
   }, function(){
     var saved = pemCacheTurnovers(games);
-    cb(null, { got: got, of: todo.length, cached: saved });
+    var savedStats = pemCacheStats(games);
+    peSave();
+    cb(null, { got: got, of: todo.length, cached: saved, stats: gotStats, statsCached: savedStats });
   });
 }
 
@@ -2278,6 +2458,7 @@ function pemBuild(cb){
         // Turnovers already downloaded are reused; only new games cost anything.
         pemApplySavedOpts();
         if(pemApplyCachedTurnovers(games)) PEM.toStats = pemTurnoverStats(games);
+        pemApplyCachedStats(games);
         // A pasted prior is the deliberate choice, so it wins over a live fetch.
         pemRestorePrior();
         if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
@@ -2374,6 +2555,7 @@ function pemRestoreSeason(){
     }
   }
   if(pemApplyCachedTurnovers(games)) PEM.toStats = pemTurnoverStats(games);
+  pemApplyCachedStats(games);
   // A pasted rating sheet is the deliberate choice, so it still wins.
   pemRestorePrior();
   if(PEM.prior && !PEM.opts.priorW) PEM.opts.priorW = 0.55;
@@ -2486,6 +2668,502 @@ function pemLogHtml(){
   return h;
 }
 
+// ── TEAM SEASON LOG ──────────────────────────────────────────
+// Every game a team has played, in order, with what the box score said rather
+// than only what the scoreboard said. The point of the yardage columns is that
+// they disagree with the result often enough to be worth seeing: a team that
+// keeps outgaining opponents and losing is a different proposition from one
+// that keeps getting outgained and winning.
+
+// Team -> its games, built once per season load. The stored shape stays keyed
+// by game because a game belongs to two teams and writing it under both would
+// double the record and leave two copies to keep in step. Indexing by team is
+// the cheap half of that idea: one pass over the season, then every team lookup
+// is free, and nothing can fall out of sync because there is still one copy.
+function pemTeamIndex(){
+  if(!PEM._games) return null;
+  if(PEM._tidx && PEM._tidxFor === PEM._games) return PEM._tidx;
+  var idx = {};
+  PEM._games.forEach(function(g){
+    if(g.awayId) (idx[g.awayId] = idx[g.awayId] || []).push(g);
+    if(g.homeId) (idx[g.homeId] = idx[g.homeId] || []).push(g);
+  });
+  PEM._tidx = idx;
+  PEM._tidxFor = PEM._games;
+  return idx;
+}
+
+// Season history for one team, oldest first.
+function pemTeamLog(teamId){
+  if(!PEM._games || !teamId) return null;
+  var rows = [];
+  var idx = pemTeamIndex();
+  var mine = (idx && idx[teamId]) ? idx[teamId] : PEM._games;
+  mine.forEach(function(g){
+    var home = (String(g.homeId) === String(teamId));
+    var away = (String(g.awayId) === String(teamId));
+    if(!home && !away) return;
+    var me  = home ? g.statHome : g.statAway;
+    var opp = home ? g.statAway : g.statHome;
+    var myPts  = home ? g.hs : g.as;
+    var oppPts = home ? g.as : g.hs;
+    rows.push({
+      week: g.week, eventId: g.eventId,
+      oppId: home ? g.awayId : g.homeId,
+      oppName: home ? g.awayName : g.homeName,
+      home: home, neutral: !!g.neutral,
+      pts: myPts, oppPts: oppPts,
+      margin: myPts - oppPts,
+      won: myPts > oppPts,
+      // toMargin is stored from the home side's view.
+      toMargin: (typeof g.toMargin === "number") ? (home ? g.toMargin : -g.toMargin) : null,
+      me: me || null, opp: opp || null,
+      yards:    me ? me.yards : null,
+      oppYards: opp ? opp.yards : null,
+      ypp:      me ? me.ypp : null,
+      oppYpp:   opp ? opp.ypp : null,
+      third:   (me && me.td3a) ? (me.td3m / me.td3a) : null,
+      oppThird:(opp && opp.td3a) ? (opp.td3m / opp.td3a) : null
+    });
+  });
+  rows.sort(function(a,b){ return a.week - b.week; });
+  return rows.length ? rows : null;
+}
+
+// Season totals, plus the opponent-quality context that makes them readable.
+function pemTeamSummary(teamId){
+  var rows = pemTeamLog(teamId);
+  if(!rows) return null;
+  var w = 0, l = 0, mg = 0, yd = 0, ydA = 0, ydN = 0, ypN = 0, yp = 0, ypA = 0, to = 0, toN = 0;
+  var sos = 0, sosN = 0;
+  var pf = 0, pa = 0;                       // points for / against
+  var pl = 0, plA = 0, plN = 0;             // plays run / faced
+  var t3m = 0, t3a = 0, t3mA = 0, t3aA = 0; // third downs, both sides
+  rows.forEach(function(r){
+    if(r.won) w++; else l++;
+    mg += r.margin;
+    pf += r.pts; pa += r.oppPts;
+    if(r.yards !== null && r.oppYards !== null){ yd += r.yards; ydA += r.oppYards; ydN++; }
+    if(r.ypp !== null && r.oppYpp !== null){ yp += r.ypp; ypA += r.oppYpp; ypN++; }
+    if(r.me && r.me.plays !== null && r.opp && r.opp.plays !== null){
+      pl += r.me.plays; plA += r.opp.plays; plN++;
+    }
+    if(r.me && r.me.td3a){ t3m += r.me.td3m; t3a += r.me.td3a; }
+    if(r.opp && r.opp.td3a){ t3mA += r.opp.td3m; t3aA += r.opp.td3a; }
+    if(r.toMargin !== null){ to += r.toMargin; toN++; }
+    if(PEM.ratings && PEM.ratings[r.oppId]){
+      var o = PEM.ratings[r.oppId];
+      sos += (o.off + o.def); sosN++;
+    }
+  });
+  var n = rows.length;
+  return {
+    n: n, w: w, l: l,
+    margin: mg / n,
+    // Per-game rates. These are the numbers everyone quotes, and they are also
+    // the ones most contaminated by schedule — see pemAdjRates for versions
+    // that account for who the yards came against.
+    ppg:  pf / n,
+    papg: pa / n,
+    ypg:      ydN ? (yd/ydN)  : null,
+    yapg:     ydN ? (ydA/ydN) : null,
+    yards:    ydN ? (yd/ydN)  : null,
+    oppYards: ydN ? (ydA/ydN) : null,
+    yardMargin: ydN ? ((yd - ydA)/ydN) : null,
+    ypp:    ypN ? (yp/ypN)  : null,
+    oppYpp: ypN ? (ypA/ypN) : null,
+    yppMargin: ypN ? ((yp - ypA)/ypN) : null,
+    plays:    plN ? (pl/plN)  : null,
+    oppPlays: plN ? (plA/plN) : null,
+    third:    t3a  ? (t3m/t3a)   : null,
+    oppThird: t3aA ? (t3mA/t3aA) : null,
+    toMargin: toN ? (to/toN) : null,
+    sos: sosN ? (sos/sosN) : null,
+    rows: rows
+  };
+}
+
+// ── OPPONENT-ADJUSTED RATES ──────────────────────────────────
+// 480 yards a game means one thing behind a soft schedule and another behind a
+// hard one, and in September the schedules are not remotely alike. This asks a
+// narrower question: against each opponent, how did this team do compared with
+// what that opponent normally gives up?
+//
+// The opponent's own average excludes the game in question, or a team that hung
+// 600 on someone would be partly measured against its own performance and every
+// number would drift toward the mean.
+function pemAdjRates(){
+  if(!PEM._games || !PEM._games.length) return null;
+  if(PEM._adj && PEM._adjFor === PEM._games) return PEM._adj;
+
+  var idx = pemTeamIndex();
+  if(!idx) return null;
+
+  // Raw totals per team, one pass.
+  var tot = {};
+  function slot(id){
+    if(!tot[id]) tot[id] = { n:0, pf:0, pa:0, yf:0, ya:0, yn:0 };
+    return tot[id];
+  }
+  PEM._games.forEach(function(g){
+    var a = slot(g.awayId), h = slot(g.homeId);
+    a.n++; h.n++;
+    a.pf += g.as; a.pa += g.hs;
+    h.pf += g.hs; h.pa += g.as;
+    var ay = g.statAway && g.statAway.yards, hy = g.statHome && g.statHome.yards;
+    if(typeof ay === "number" && typeof hy === "number"){
+      a.yf += ay; a.ya += hy; a.yn++;
+      h.yf += hy; h.ya += ay; h.yn++;
+    }
+  });
+
+  // League baselines, so an adjusted figure lands on the same scale as a raw one.
+  var lgP = 0, lgPn = 0, lgY = 0, lgYn = 0;
+  for(var id in tot){
+    lgP += tot[id].pf; lgPn += tot[id].n;
+    lgY += tot[id].yf; lgYn += tot[id].yn;
+  }
+  var avgP = lgPn ? (lgP/lgPn) : 0;
+  var avgY = lgYn ? (lgY/lgYn) : 0;
+
+  // Leave-one-out: what this opponent allows in its OTHER games.
+  function exclAllowed(oppId, minusVal, key, nKey){
+    var o = tot[oppId];
+    if(!o) return null;
+    var n = o[nKey || "n"];
+    if(n <= 1) return null;                       // nothing left after removing this game
+    return (o[key] - minusVal) / (n - 1);
+  }
+
+  var out = {};
+  Object.keys(idx).forEach(function(tid){
+    var games = idx[tid];
+    var dP = 0, dPn = 0, dPd = 0, dPdn = 0;
+    var dY = 0, dYn = 0, dYd = 0, dYdn = 0;
+    games.forEach(function(g){
+      var home = (String(g.homeId) === String(tid));
+      var oppId = home ? g.awayId : g.homeId;
+      var myPts = home ? g.hs : g.as, oppPts = home ? g.as : g.hs;
+
+      // Offence: my points vs what this opponent usually allows.
+      var expAllow = exclAllowed(oppId, myPts, "pa");
+      if(expAllow !== null){ dP += (myPts - expAllow); dPn++; }
+      // Defence: points I gave up vs what this opponent usually scores.
+      var expScore = exclAllowed(oppId, oppPts, "pf");
+      if(expScore !== null){ dPd += (oppPts - expScore); dPdn++; }
+
+      var me  = home ? g.statHome : g.statAway;
+      var opp = home ? g.statAway : g.statHome;
+      if(me && opp && typeof me.yards === "number" && typeof opp.yards === "number"){
+        var eyA = exclAllowed(oppId, me.yards, "ya", "yn");
+        if(eyA !== null){ dY += (me.yards - eyA); dYn++; }
+        var eyF = exclAllowed(oppId, opp.yards, "yf", "yn");
+        if(eyF !== null){ dYd += (opp.yards - eyF); dYdn++; }
+      }
+    });
+    out[tid] = {
+      // Above/below what a typical opponent of theirs concedes, re-centred on
+      // the league average so it reads like an ordinary per-game figure.
+      appg:  dPn  ? (avgP + dP/dPn)   : null,
+      apapg: dPdn ? (avgP + dPd/dPdn) : null,
+      aypg:  dYn  ? (avgY + dY/dYn)   : null,
+      ayapg: dYdn ? (avgY + dYd/dYdn) : null,
+      // The raw-to-adjusted move, which is the schedule talking.
+      ppgShift: dPn  ? (dP/dPn)   : null,
+      ypgShift: dYn  ? (dY/dYn)   : null
+    };
+  });
+
+  out._league = { ppg: avgP, ypg: avgY };
+  PEM._adj = out;
+  PEM._adjFor = PEM._games;
+  return out;
+}
+
+// Teams that have played, strongest first, so the picker is ordered usefully.
+function pemTeamList(){
+  if(!PEM._games) return [];
+  var seen = {};
+  PEM._games.forEach(function(g){
+    if(g.awayId) seen[g.awayId] = g.awayName || g.awayId;
+    if(g.homeId) seen[g.homeId] = g.homeName || g.homeId;
+  });
+  var out = Object.keys(seen).map(function(id){
+    var r = PEM.ratings && PEM.ratings[id];
+    return { id: id, name: seen[id], rating: r ? (r.off + r.def) : null };
+  });
+  out.sort(function(a, b){
+    if(a.rating === null && b.rating === null) return a.name.localeCompare(b.name);
+    if(a.rating === null) return 1;
+    if(b.rating === null) return -1;
+    return b.rating - a.rating;
+  });
+  return out;
+}
+
+function pemFmtSigned(v, dp){
+  if(v === null || v === undefined || !isFinite(v)) return "\u2014";
+  var s = (Math.round(v * Math.pow(10, dp||1)) / Math.pow(10, dp||1));
+  return (s > 0 ? "+" : "") + s.toFixed(dp||1);
+}
+
+// Every team on one sortable table. This is what a per-team view is actually
+// for \u2014 the single-team log answers "how has this team played", and only a
+// table answers "how do these two compare".
+// Six or seven columns is all that fits on a phone, so the table has sets
+// rather than one endless row. "signed" marks a margin, where a leading + or -
+// is the point; a rate like 421 yards a game is not signed.
+var PEM_NAME = { key:"name", lab:"Team", fmt:function(t){ return x(t.name); } };
+var PEM_REC  = { key:"rec",  lab:"W-L",  fmt:function(t){ return t.w + "-" + t.l; },
+                 sort:function(t){ return t.n ? t.w/t.n : -1; } };
+
+var PEM_COLSETS = {
+  overview: { lab:"Overview", note:"Margins and rating. The quickest read on who is actually good.", cols:[
+    PEM_NAME,
+    { key:"rating", lab:"Rtg", dp:1, signed:true, hint:"Model rating: points better than an average FBS team." },
+    PEM_REC,
+    { key:"margin", lab:"Pts", dp:1, signed:true, hint:"Average points margin." },
+    { key:"yppMargin", lab:"Y/P", dp:2, signed:true, hint:"Average yards-per-play margin. Steadier week to week than points." },
+    { key:"to",  lab:"TO",  dp:2, signed:true, hint:"Average turnover margin. Mostly luck \u2014 expect it to regress." },
+    { key:"sos", lab:"Opp", dp:1, signed:true, hint:"Average opponent rating faced so far." }
+  ]},
+  offense: { lab:"Offense", note:"What this team does with the ball. Raw totals, not adjusted for who they played.", cols:[
+    PEM_NAME,
+    { key:"ppg",   lab:"PPG",   dp:1, hint:"Points scored per game." },
+    { key:"ypg",   lab:"YPG",   dp:0, hint:"Yards gained per game." },
+    { key:"ypp",   lab:"Y/P",   dp:2, hint:"Yards per play gained." },
+    { key:"plays", lab:"Plays", dp:1, hint:"Offensive plays run per game \u2014 tempo." },
+    { key:"third", lab:"3rd%",  dp:0, pct:true, hint:"Third downs converted." }
+  ]},
+  defense: { lab:"Defense", note:"What opponents do against them. Raw totals, not adjusted for who they played.", cols:[
+    PEM_NAME,
+    { key:"papg",     lab:"PA/G",  dp:1, hint:"Points allowed per game." },
+    { key:"yapg",     lab:"YA/G",  dp:0, hint:"Yards allowed per game." },
+    { key:"oppYpp",   lab:"Y/P",   dp:2, hint:"Yards per play allowed." },
+    { key:"oppPlays", lab:"Plays", dp:1, hint:"Plays faced per game." },
+    { key:"oppThird", lab:"3rd%",  dp:0, pct:true, hint:"Third downs allowed to convert." }
+  ]},
+  adjusted: { lab:"Adjusted", note:"Same figures, but measured against what each opponent normally gives up. This is the set to compare teams on before the schedules even out.", cols:[
+    PEM_NAME,
+    { key:"appg",     lab:"aPPG", dp:1, hint:"Points per game, adjusted for opponent defences faced." },
+    { key:"apapg",    lab:"aPA/G", dp:1, hint:"Points allowed per game, adjusted for opponent offences faced." },
+    { key:"aypg",     lab:"aYPG", dp:0, hint:"Yards per game, adjusted for opponent defences faced." },
+    { key:"ayapg",    lab:"aYA/G", dp:0, hint:"Yards allowed per game, adjusted for opponent offences faced." },
+    { key:"ypgShift", lab:"Sched", dp:0, signed:true, hint:"How far the schedule moved the raw yardage figure. Large positive means they have been gaining more than their opponents usually allow." }
+  ]}
+};
+
+function pemCompareRows(){
+  var teams = pemTeamList();
+  var adj = pemAdjRates() || {};
+  var out = [];
+  teams.forEach(function(t){
+    var s = pemTeamSummary(t.id);
+    if(!s) return;
+    var a = adj[t.id] || {};
+    out.push({
+      id: t.id, name: t.name, rating: t.rating,
+      n: s.n, w: s.w, l: s.l,
+      margin: s.margin, yppMargin: s.yppMargin, to: s.toMargin, sos: s.sos,
+      ppg: s.ppg, papg: s.papg, ypg: s.ypg, yapg: s.yapg,
+      ypp: s.ypp, oppYpp: s.oppYpp, plays: s.plays, oppPlays: s.oppPlays,
+      third: s.third, oppThird: s.oppThird,
+      appg: a.appg, apapg: a.apapg, aypg: a.aypg, ayapg: a.ayapg,
+      ypgShift: a.ypgShift, ppgShift: a.ppgShift
+    });
+  });
+  return out;
+}
+
+function pemCompareHtml(){
+  var rows = pemCompareRows();
+  if(!rows.length) return '<div class="pe-note">No teams yet.</div>';
+
+  var setKey = PEM_COLSETS[PE.ui.cols] ? PE.ui.cols : "overview";
+  var set = PEM_COLSETS[setKey];
+  var COLS = set.cols;
+
+  var sk = PE.ui.sortKey || "rating";
+  var asc = (PE.ui.sortDir === "asc");
+  var col = null;
+  COLS.forEach(function(c){ if(c.key === sk) col = c; });
+  // Switching sets can strand the sort on a column that is no longer shown.
+  if(!col) { col = COLS[1]; sk = col.key; PE.ui.sortKey = sk; }
+  var val = col.sort || function(t){ var v = t[sk]; return (v === null || v === undefined) ? null : v; };
+  rows.sort(function(a, b){
+    var x1 = val(a), x2 = val(b);
+    // Teams missing a number sort last whichever way the column is pointing:
+    // a blank is not "worst", it is unknown, and it should not lead the table.
+    if(x1 === null && x2 === null) return a.name.localeCompare(b.name);
+    if(x1 === null) return 1;
+    if(x2 === null) return -1;
+    // Descending means best first for a number, A-Z first for a name.
+    if(typeof x1 === "string") return asc ? x1.localeCompare(x2) : x2.localeCompare(x1);
+    return asc ? (x1 - x2) : (x2 - x1);
+  });
+
+  // Teams playing on this week's board, so they are easy to find in 136 rows.
+  var onBoard = {};
+  (PE.games||[]).forEach(function(g){
+    if(g.awayId) onBoard[g.awayId] = 1;
+    if(g.homeId) onBoard[g.homeId] = 1;
+  });
+
+  var h = '<div class="pe-seg pe-seg2">';
+  ["overview","offense","defense","adjusted"].forEach(function(k){
+    h += '<button class="pe-segb' + (k === setKey ? " on" : "") + '" data-pe-cols="' + k + '">' +
+         PEM_COLSETS[k].lab + '</button>';
+  });
+  h += '</div>';
+  h += '<div class="pe-note" style="margin-top:0">' + set.note + '</div>';
+  h += '<table class="pe-tbl pe-cmp"><thead><tr>';
+  COLS.forEach(function(c){
+    var on = (c.key === sk);
+    h += '<th class="pe-sortable' + (on ? " on" : "") + '" data-pe-sort="' + c.key + '"' +
+         (c.hint ? (' title="' + x(c.hint) + '"') : '') + '>' +
+         c.lab + (on ? ('<span class="pe-caret">' + (asc ? "\u25b4" : "\u25be") + '</span>') : '') + '</th>';
+  });
+  h += '</tr></thead><tbody>';
+  rows.forEach(function(t){
+    h += '<tr class="pe-cmprow' + (onBoard[t.id] ? " on" : "") + '" data-pe-team="' + x(t.id) + '">';
+    COLS.forEach(function(c){
+      if(c.fmt){ h += '<td>' + c.fmt(t) + '</td>'; return; }
+      var v = t[c.key];
+      var txt;
+      if(v === null || v === undefined) txt = "\u2014";
+      else if(c.pct) txt = Math.round(v * 100) + "%";
+      else if(c.signed) txt = pemFmtSigned(v, c.dp === 0 ? 0 : (c.dp || 1));
+      else txt = (c.dp === 0) ? String(Math.round(v)) : v.toFixed(c.dp || 1);
+      h += '<td class="pe-num">' + txt + '</td>';
+    });
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  h += '<div class="pe-note">' + rows.length + ' teams.';
+  if(setKey === "overview"){
+    h += ' <b>Y/P</b> is the column to trust when it disagrees with <b>Pts</b> \u2014 yards per play is measured over ~140 snaps a game, points over a dozen possessions.';
+  } else if(setKey === "adjusted"){
+    var lg = (pemAdjRates() || {})._league;
+    if(lg) h += ' League average is ' + lg.ppg.toFixed(1) + ' points and ' + Math.round(lg.ypg) +
+                ' yards a game, so these are centred there.';
+    h += ' <b>Sched</b> is the gap between the raw and adjusted yardage \u2014 how much of the raw number is the schedule.';
+  } else {
+    h += ' Raw per-game figures. Early in the season these say as much about the schedule as the team \u2014 <b>Adjusted</b> accounts for that.';
+  }
+  h += '</div>';
+  return h;
+}
+
+function pemTeamLogHtml(){
+  if(!PEM._games || !PEM._games.length){
+    return '<div class="pe-note" style="margin-top:0">Build the score model first \u2014 the log is drawn from the season it downloads.</div>';
+  }
+  var teams = pemTeamList();
+  if(!teams.length) return '<div class="pe-note">No teams in the season data.</div>';
+
+  var mode = (PE.ui.tmode === "one") ? "one" : "all";
+  var hh = '<div class="pe-seg">' +
+    '<button class="pe-segb' + (mode === "all" ? " on" : "") + '" data-pe-tmode="all">Compare all</button>' +
+    '<button class="pe-segb' + (mode === "one" ? " on" : "") + '" data-pe-tmode="one">One team</button>' +
+    '</div>';
+  if(mode === "all") return hh + pemCompareHtml();
+
+  // Default to the first team on this week's board, so it opens on something
+  // relevant rather than whoever happens to be top-rated.
+  if(!PE.ui.team){
+    var first = null;
+    (PE.games||[]).forEach(function(g){ if(!first && g.homeId) first = g.homeId; });
+    PE.ui.team = first || teams[0].id;
+  }
+  var sel = String(PE.ui.team);
+  if(!teams.some(function(t){ return String(t.id) === sel; })) { sel = String(teams[0].id); PE.ui.team = sel; }
+
+  var cov = pemStatCoverage(PEM._games);
+  var h = hh;
+
+  h += '<select class="pe-in" id="pe-teamsel" style="width:100%;margin-bottom:10px">';
+  teams.forEach(function(t){
+    h += '<option value="' + x(t.id) + '"' + (String(t.id) === sel ? " selected" : "") + '>' +
+         x(t.name) + (t.rating !== null ? ('  \u00b7  ' + pemFmtSigned(t.rating, 1)) : '') + '</option>';
+  });
+  h += '</select>';
+
+  var s = pemTeamSummary(sel);
+  if(!s) return h + '<div class="pe-note">No games logged for that team yet.</div>';
+
+  h += '<div class="pe-stats" style="margin-bottom:8px">';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + s.w + '-' + s.l + '</div><div class="pe-stat-lab">Record</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + pemFmtSigned(s.margin, 1) + '</div><div class="pe-stat-lab">Pts margin</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + (s.yppMargin !== null ? pemFmtSigned(s.yppMargin, 2) : "\u2014") +
+       '</div><div class="pe-stat-lab">Yds/play margin</div></div>';
+  h += '</div>';
+
+  h += '<div class="pe-stats" style="margin-bottom:10px">';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + (s.yardMargin !== null ? pemFmtSigned(s.yardMargin, 0) : "\u2014") +
+       '</div><div class="pe-stat-lab">Yds margin/gm</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + (s.toMargin !== null ? pemFmtSigned(s.toMargin, 2) : "\u2014") +
+       '</div><div class="pe-stat-lab">TO margin</div></div>';
+  h += '<div class="pe-stat"><div class="pe-stat-val">' + (s.sos !== null ? pemFmtSigned(s.sos, 1) : "\u2014") +
+       '</div><div class="pe-stat-lab">Avg opponent</div></div>';
+  h += '</div>';
+
+  // The line worth reading: where the scoreboard and the box score disagree.
+  if(s.yppMargin !== null){
+    var ptsPos = s.margin > 0, effPos = s.yppMargin > 0;
+    if(ptsPos !== effPos){
+      h += '<div class="pem-slope bad">Record and box score disagree. This team is ' +
+           (ptsPos ? 'winning on the scoreboard while being outplayed per snap'
+                   : 'outplaying opponents per snap without the results to show for it') +
+           '. Points margin ' + pemFmtSigned(s.margin,1) + ', yards per play ' + pemFmtSigned(s.yppMargin,2) +
+           '. The second number is the more repeatable of the two.</div>';
+    }
+  }
+
+  h += '<table class="pe-tbl pe-log"><thead><tr>' +
+       '<th>Wk</th><th>Opponent</th><th>Result</th><th>Yds</th><th>Y/P</th><th>3rd</th><th>TO</th>' +
+       '</tr></thead><tbody>';
+  s.rows.forEach(function(r){
+    var oppR = PEM.ratings && PEM.ratings[r.oppId];
+    var oppRating = oppR ? (oppR.off + oppR.def) : null;
+    h += '<tr>';
+    h += '<td>' + r.week + '</td>';
+    h += '<td>' + (r.neutral ? '' : (r.home ? '' : '@ ')) + x(r.oppName) +
+         (oppRating !== null ? ' <span class="pe-logdim">' + pemFmtSigned(oppRating,1) + '</span>' : '') + '</td>';
+    h += '<td class="' + (r.won ? "pe-logw" : "pe-logl") + '">' + (r.won ? "W" : "L") + ' ' +
+         r.pts + '\u2013' + r.oppPts + '</td>';
+    h += '<td>' + (r.yards !== null && r.oppYards !== null
+           ? (r.yards + '<span class="pe-logdim">/' + r.oppYards + '</span>') : "\u2014") + '</td>';
+    h += '<td>' + (r.ypp !== null && r.oppYpp !== null
+           ? (r.ypp.toFixed(1) + '<span class="pe-logdim">/' + r.oppYpp.toFixed(1) + '</span>') : "\u2014") + '</td>';
+    h += '<td>' + (r.third !== null ? Math.round(r.third*100) + '%' : "\u2014") + '</td>';
+    h += '<td>' + (r.toMargin !== null ? pemFmtSigned(r.toMargin, 0) : "\u2014") + '</td>';
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+
+  // Coverage. A column of dashes needs an explanation that is not a guess.
+  if(!cov.total){
+    h += '<div class="pe-note">No box scores loaded yet. <b>Load box scores</b> in Model &amp; adjustments fills the yardage columns \u2014 it uses the same requests the turnover data already needs.</div>';
+  } else {
+    var thin = [];
+    var LABELS = { yards:"yards", plays:"plays", ypp:"yds/play", first:"first downs",
+                   td3m:"3rd down", td3a:"3rd down att", pen:"penalties", penYds:"penalty yds",
+                   poss:"possession", to:"turnovers" };
+    PEM_STAT_KEYS.forEach(function(k){
+      var pct = cov.total ? (cov.have[k] / cov.total) : 0;
+      if(pct < 0.5) thin.push(LABELS[k] || k);
+    });
+    h += '<div class="pem-prov" style="margin-top:8px">Box scores on <b>' + cov.total + '</b> of ' +
+         PEM._games.length + ' games';
+    if(thin.length) h += ' \u00b7 not parsing: <b>' + x(thin.join(", ")) + '</b>';
+    h += '</div>';
+    if(thin.length){
+      h += '<div class="pe-note">Those fields came back empty across the season, which usually means ESPN renamed them. The columns that did land are still sound.</div>';
+    }
+  }
+  return h;
+}
+
 // ── TUNING LOG ──────────────────────────────────────────────────────────────
 // A settings change is only an improvement if it survives being written down
 // and compared against a fixed reference. Both live in PE so they persist.
@@ -2562,7 +3240,7 @@ var PEM_KNOBS = [
     help:"How much the opponent's quality shapes a rating. At 0 a 40-point game counts the same against anyone. At 1 it is a full opponent adjustment. Above 1, beating a good team counts extra." },
   { key:"toAdj",   label:"Turnover regression", min:0, max:1, step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"keep as played", hi:"strip it out",
-    help:"Turnovers swing about 4.5 pts of margin each and barely repeat week to week. This removes that luck from the scores the ratings are fitted to. Needs box scores \u2014 use Load turnovers." },
+    help:"Turnovers swing about 4.5 pts of margin each and barely repeat week to week. This removes that luck from the scores the ratings are fitted to. Needs box scores \u2014 use Load box scores." },
   { key:"priorW",  label:"Trust in prior", min:0,   max:1,    step:0.05, fmt:function(v){ return Math.round(v*100) + "%"; },
     lo:"results only", hi:"prior only",
     help:"How far each team starts from, and is pulled back toward, its external rating." },
@@ -2614,7 +3292,7 @@ function pemPanelInner(){
        (PEM.prior && PEM.priorAt ? 'Update SP+ ratings' : 'Paste SP+ / FPI ratings') + '</button>';
   var _cachedTo = PE.turnovers ? Object.keys(PE.turnovers).length : 0;
   if(!PEM.toStats){
-    h += '<button class="btn btn-ghost btn-sm" id="pem-to">&#127944; Load turnovers' +
+    h += '<button class="btn btn-ghost btn-sm" id="pem-to">&#127944; Load box scores' +
          (_cachedTo ? (' (' + _cachedTo + ' cached)') : '') + '</button>';
   }
   h += '</div>';
@@ -2901,7 +3579,7 @@ function pemBindPanel(){
     }, function(_e, res){
       PEM.toStats = pemTurnoverStats(PEM._games);
       if(!PEM.toStats){
-        b.disabled = false; b.textContent = "Load turnovers";
+        b.disabled = false; b.textContent = "Load box scores";
         toast("No turnover data came back","warn"); return;
       }
       // Default to full regression once the data is actually there.
@@ -3102,7 +3780,8 @@ function pemShowPasteModal(){
 function renderPoolEdge(){
   if(!peOwner()){ SC.screen = "profile"; draw(); return; }
   if(!PE.ready){ peLoad(function(){ if(SC.screen==="prophescore") renderPoolEdge(); }); }
-  PE.ui = PE.ui || { adj:false, calib:false, add:false, open:{} };
+  PE.ui = PE.ui || { adj:false, calib:false, add:false, team:null, log:false,
+                   tmode:"all", cols:"overview", sortKey:"rating", sortDir:"desc", open:{} };
 
   var rows = peBoard();
   var graded = peGraded();
@@ -3162,8 +3841,13 @@ function renderPoolEdge(){
         linesAt ? "ok" : (PE.games.length ? "todo" : "off"));
   var mdlStale = PEM.ratings && pemSeasonStale();
   h += setupRow("pe-buildmodel", "&#129518;", "Score model",
-        PEM.ratings ? (PEM.n + " games fit" + (mdlStale ? " \u00b7 tap to add week" : "")) : "build to predict",
-        PEM.ratings ? (mdlStale ? "warn" : "ok") : "off");
+        PEM.ratings ? (PEM.n + " games fit" + (mdlStale ? " \u00b7 tap to add week" : ""))
+                    : (PEM.restoreErr ? "saved model failed to load" : "build to predict"),
+        PEM.ratings ? (mdlStale ? "warn" : "ok") : (PEM.restoreErr ? "warn" : "off"));
+  if(PEM.restoreErr && !PEM.ratings){
+    h += '<div class="pem-stale" style="margin-top:6px">The saved season is there but would not restore: <b>' +
+         x(PEM.restoreErr) + '</b>. Rebuilding downloads it again.</div>';
+  }
   h += '</div>';
 
   // ── Board ────────────────────────────────────────────────────────────────
@@ -3305,6 +3989,12 @@ function renderPoolEdge(){
       : "build the model first";
   h += fold("pe-fold-adj", "Model &amp; adjustments", adjSub, PE.ui.adj, pemPanelHtml());
 
+  var _tl = PEM._games ? pemStatCoverage(PEM._games) : null;
+  var logSub = !PEM._games ? "build the model first"
+      : ((_tl && _tl.total) ? (_tl.total + " games with box scores")
+                            : (PEM._games.length + " games \u00b7 no box scores yet"));
+  h += fold("pe-fold-log", "Team season logs", logSub, PE.ui.log, pemTeamLogHtml());
+
   var n = graded.length;
   var cal = '<table class="pe-tbl"><thead><tr><th>Confidence tier</th><th>Record</th><th>Hit %</th></tr></thead><tbody>';
   [ {name:"High (top third)",   test:function(v){ return v.conf >  v.max*2/3; }},
@@ -3337,7 +4027,7 @@ function renderPoolEdge(){
   render(h);
 
   // Remember which sections are open, without re-rendering and losing scroll.
-  [["pe-fold-adj","adj"],["pe-fold-calib","calib"],["pe-fold-add","add"]].forEach(function(p){
+  [["pe-fold-adj","adj"],["pe-fold-log","log"],["pe-fold-calib","calib"],["pe-fold-add","add"]].forEach(function(p){
     var el = document.getElementById(p[0]);
     if(el) el.addEventListener("toggle", function(){ PE.ui[p[1]] = el.open; });
   });
@@ -3367,6 +4057,56 @@ function renderPoolEdge(){
     peSave(); renderPoolEdge();
     var f = document.getElementById("pe-fav"); if(f) f.focus();
   });
+
+  // Everything inside the team fold repaints just that fold. A full re-render
+  // collapses the page to the top and loses the scroll position, which makes
+  // sorting a 136-row table unusable.
+  function peRepaintTeams(){
+    var box = document.querySelector("#pe-fold-log .pe-fbody");
+    if(box){ box.innerHTML = pemTeamLogHtml(); peBindTeams(); }
+    else renderPoolEdge();
+  }
+  function peBindTeams(){
+    var t = document.getElementById("pe-teamsel");
+    if(t) t.addEventListener("change", function(){
+      PE.ui.team = this.value;
+      peRepaintTeams();
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-pe-tmode]"), function(b){
+      b.addEventListener("click", function(){
+        PE.ui.tmode = this.getAttribute("data-pe-tmode");
+        peRepaintTeams();
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-pe-cols]"), function(b){
+      b.addEventListener("click", function(){
+        PE.ui.cols = this.getAttribute("data-pe-cols");
+        peRepaintTeams();
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-pe-sort]"), function(th){
+      th.addEventListener("click", function(){
+        var k = this.getAttribute("data-pe-sort");
+        // Same column again flips direction; a new column starts descending,
+        // which is the useful way round for every column except the name.
+        if(PE.ui.sortKey === k) PE.ui.sortDir = (PE.ui.sortDir === "asc") ? "desc" : "asc";
+        else { PE.ui.sortKey = k; PE.ui.sortDir = (k === "name") ? "asc" : "desc"; }
+        peRepaintTeams();
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-pe-team]"), function(tr){
+      tr.addEventListener("click", function(){
+        PE.ui.team = this.getAttribute("data-pe-team");
+        PE.ui.tmode = "one";
+        peRepaintTeams();
+      });
+    });
+  }
+  peBindTeams();
 
   var impBtn = document.getElementById("pe-import");
   if(impBtn) impBtn.addEventListener("click", function(){ showPeImportModal(); });
