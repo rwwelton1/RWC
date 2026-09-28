@@ -856,6 +856,7 @@ details.pe-card[open] .pe-carrow{transform:rotate(90deg)}
 .pc-edge{font-size:clamp(10px,2.9vw,12.5px);font-weight:900;margin-top:4px;border:1.5px solid var(--border);border-radius:20px;padding:1px 10px;background:#fff}
 .pc-edge.big{background:#111;color:#fff}
 @media(max-width:400px){.pr-seg button{padding:6px 7px;font-size:10.5px}}
+.pr-pastnote{font-size:10.5px;font-weight:800;color:var(--muted);background:#fff;border:1.5px dashed var(--border2);border-radius:10px;padding:7px 10px;margin:6px 0 4px;line-height:1.45}
 </style>
 </head>
 <body>
@@ -5399,9 +5400,30 @@ function pearNormCdf(z){
 }
 // Projection for away@home (or neutral). Win chance comes from the same spread
 // the simulation uses, so the list and the card always agree.
-function pearProject(awayId, homeId, neutral){
+// For a week the model already has results for, the honest projection is the
+// one it would have made before kickoff: fitted only on the weeks before it.
+// That is the same fit the record vs Vegas is graded with. Returns null for a
+// current/future week (use the live fit) and false when there is too little
+// earlier data (week 1).
+var _pearFitCache = { key: null, fit: null };
+function pearFitFor(week){
+  if(!PEM._games || !PEM.ratings || !week) return null;
+  if(!PEM._games.some(function(g){ return g.week >= week; })) return null;
+  var key = week + "|" + PEM._games.length + "|" + JSON.stringify(pemOptsSnapshot()) + "|" + (PEM.priorN || 0);
+  if(_pearFitCache.key === key) return _pearFitCache.fit;
+  var train = PEM._games.filter(function(g){ return g.week < week; });
+  var fit = train.length < 30 ? false : pemFit(train, PEM.prior, PEM.opts);
+  _pearFitCache = { key: key, fit: fit };
+  return fit;
+}
+function pearProject(awayId, homeId, neutral, fit){
   if(!PEM.ratings) return null;
-  var p = pemPredict(awayId, homeId, !!neutral);
+  var p;
+  if(fit){
+    var r = pemPredictRaw(fit.ratings, fit.avg, PEM.opts.hfa, awayId, homeId, !!neutral, PEM.opts.oppW);
+    if(!r) return null;
+    p = { away: Math.round(r.away*10)/10, home: Math.round(r.home*10)/10, total: Math.round((r.home + r.away)*10)/10 };
+  } else p = pemPredict(awayId, homeId, !!neutral);
   if(!p) return null;
   var sp = pemSimParams();
   var sd = (sp && sp.sdMargin) || 17.5;
@@ -5444,7 +5466,17 @@ function pearFmt(k, v){
 // ── Edge vs Vegas ─
 // Vegas' expected home margin for a scheduled game (home favoured = positive),
 // read from ESPN's odds: the favourite flag when present, else "ABBR -7.5".
+// The saved closing line (from the game summary) for a finished game.
+function pearSavedLine(g){ var L = PE.lines && PE.lines[g.id]; return (L && typeof L[0] === "number") ? L : null; }
+function pearVegasTxt(g){
+  if(g.vegas) return g.vegas;
+  var L = pearSavedLine(g); if(!L) return "";
+  var vh = -L[0];
+  if(vh === 0) return "EVEN";
+  return pearAbbr(vh > 0 ? g.home.id : g.away.id) + " -" + Math.abs(vh);
+}
 function pearVegasHome(g){
+  if(!g.vegas){ var L = pearSavedLine(g); return L ? -L[0] : null; }
   var d = String(g.vegas || "").trim();
   if(/^(EVEN|PK|PICK)/i.test(d)) return 0;
   if(g.vegasFav && typeof g.vegasSpread === "number"){ var a = Math.abs(g.vegasSpread); return g.vegasFav === "home" ? a : -a; }
@@ -5502,14 +5534,23 @@ function pearGamesHtml(){
        '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>';
   if(PEAR.loading) return h + '<div class="pr-empty">Loading week ' + (PEAR.week||"") + '…</div></div>';
   if(PEAR.err) return h + '<div class="pr-empty">' + x(PEAR.err) + ' <button class="pr-link" data-pear-week="' + (PEAR.week||"") + '">Retry</button></div></div>';
-  var list = (PEAR.games || []).map(function(g){ var p = pearProject(g.away.id, g.home.id, g.neutral); return { g: g, p: p, e: pearEdge(g, p) }; });
+  var pastFit = pearFitFor(PEAR.week);          // object: pre-game fit · false: week 1 · null: live
+  var list = (PEAR.games || []).map(function(g){
+    var p = pearProject(g.away.id, g.home.id, g.neutral, pastFit || null);
+    return { g: g, p: p, e: pastFit === false ? null : pearEdge(g, p) };
+  });
+  if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
+  else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
     list = list.filter(function(o){ return o.e && o.e.edge >= PEAR_EDGE_MIN; });
     list.sort(function(a, b){ return b.e.edge - a.e.edge; });
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
+    var wk = { w: 0, l: 0, p: 0 };
+    list.forEach(function(o){ if(o.e.res === "win") wk.w++; else if(o.e.res === "loss") wk.l++; else if(o.e.res === "push") wk.p++; });
     h += '<div class="pr-edgenote">Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.' +
          (hr && (hr.sw + hr.sl) ? ' The model\u2019s record on 3+ edges so far: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') +
-                                  ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') + '</div>';
+                                  ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
+         ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
   }
   if(PEAR.filter === "top") list = list.filter(function(o){ return o.g.away.rank || o.g.home.rank; });
   if(PEAR.filter === "close"){
@@ -5518,7 +5559,10 @@ function pearGamesHtml(){
     list = list.slice(0, 15);
   }
   if(!list.length) return h + '<div class="pr-empty">' + (PEAR.filter === "edge"
-      ? (PEM.ratings ? 'No game this week has a 3+ point edge on a posted line.' : 'Build the score model to find edges.')
+      ? (!PEM.ratings ? 'Build the score model to find edges.'
+         : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
+         : (pastFit && typeof pemLinesMissing === "function" && pemLinesMissing().length) ? 'Closing lines for past games are still loading \u2014 check back in a moment.'
+         : 'No game this week has a 3+ point edge on a posted line.')
       : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
   var lastDay = "";
   list.forEach(function(o){
@@ -5542,7 +5586,7 @@ function pearGamesHtml(){
            '<div class="pr-tproj"><b class="' + (p ? (fav ? "fav" : "dog") : "") + '">' + big + '</b><span>' + small + '</span></div></div>';
     });
     h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
-         '<span>' + (g.vegas ? 'Vegas: ' + x(g.vegas) : '') + '</span></div>';
+         '<span>' + (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) : '') + '</span></div>';
     if(PEAR.filter === "edge" && o.e){
       h += '<div class="pr-take"><span>Model takes <b>' + x(o.e.txt) + '</b></span>' +
            (o.e.res ? '<span class="pr-res ' + o.e.res + '">' + (o.e.res === "win" ? "\u2713 Covered" : o.e.res === "loss" ? "\u2717 Missed" : "Push") + '</span>'
@@ -5563,7 +5607,7 @@ function pearHost(){
 function pearOpenGame(id){
   var g = null; (PEAR.games||[]).forEach(function(z){ if(z.id === id) g = z; });
   if(!g) return;
-  PEAR.card = { a: g.away.id, h: g.home.id, neutral: g.neutral, game: g };
+  PEAR.card = { a: g.away.id, h: g.home.id, neutral: g.neutral, game: g, week: PEAR.week };
   PEAR.pick = null; pearRenderCard();
 }
 function pearOpenCustom(){
@@ -5583,7 +5627,8 @@ function pearCardGame(){
 }
 function pearCardHtml(){
   var c = PEAR.card, A = c.a, H = c.h, g = pearCardGame();
-  var p = pearProject(A, H, c.neutral);
+  var cFit = (g && c.week) ? pearFitFor(c.week) : null;
+  var p = pearProject(A, H, c.neutral, cFit || null);
   var rows = pemCompareRows(), byId = {}; rows.forEach(function(r){ byId[r.id] = r; });
   var ra = byId[A] || null, rh = byId[H] || null;
   var ranks = PEM.ratings ? pemRanks() : { rank: {}, n: {} };
@@ -5607,7 +5652,8 @@ function pearCardHtml(){
   } else {
     h += '<div class="pc-none">' + (PEM.ratings ? 'One of these teams has no rating yet.' : 'Build the score model to project this game.') + '</div>';
   }
-  if(g && (g.vegas || g.vegasOU != null)) h += '<div class="pc-vegas">Vegas: ' + x(g.vegas || "\u2014") + (g.vegasOU != null ? ' \u00b7 O/U ' + g.vegasOU : '') + '</div>';
+  var _vt = g ? pearVegasTxt(g) : "", _vou = g ? (g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g)||[])[1] != null ? pearSavedLine(g)[1] : null)) : null;
+  if(g && (_vt || _vou != null)) h += '<div class="pc-vegas">Vegas: ' + x(_vt || "\u2014") + (_vou != null ? ' \u00b7 O/U ' + _vou : '') + (cFit ? ' \u00b7 pre-game projection' : '') + '</div>';
   if(g && p && !c.neutral === !g.neutral){
     var ce = pearEdge(g, p);
     if(ce && ce.edge >= 0.5) h += '<div class="pc-edge' + (ce.edge >= PEAR_EDGE_MIN ? " big" : "") + '">Edge ' + ce.edge.toFixed(1) + ' pts \u2192 ' + x(ce.txt) + '</div>';
