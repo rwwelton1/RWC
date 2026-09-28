@@ -825,6 +825,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pc-pair em{font-style:normal;font-size:clamp(16px,4.5vw,26px);font-weight:900;padding-bottom:2px;color:var(--muted)}
 .pc-kv{display:inline-block;font-size:clamp(11px,3.2vw,14px);font-weight:900;border:1.5px solid var(--border);border-radius:20px;padding:1px 10px;margin-top:5px;background:var(--cream)}
 .pc-kv+.pc-kv{margin-top:3px}
+.pc-kv.pc-drv{font-size:clamp(9.5px,2.6vw,11.5px);font-weight:800;border-style:dashed;white-space:normal;line-height:1.35}
 
 
 .pc-line{max-width:100%;overflow-wrap:break-word;font-size:clamp(15px,4.6vw,22px);font-weight:900;margin-top:6px;background:var(--gold);border:2px solid var(--border);border-radius:10px;padding:2px 10px;box-shadow:2px 2px 0 var(--border)}
@@ -1590,6 +1591,13 @@ function pemCompareRows(){
       o.xRush = g2("rush", "O"); o.xRushD = g2("rush", "D"); o.xPass = g2("pass", "O"); o.xPassD = g2("pass", "D");
       o.xSucc = g2("succ", "O"); o.xSuccD = g2("succ", "D"); o.xHav = g2("hav", "O"); o.xHavC = g2("hav", "D");
       o.xFin = g2("fin", "O"); o.xFinD = g2("fin", "D");
+      var rrT = PX.live.tm[id] ? (PX.live.tm[id].rr + 80 * PX.live.mRR) / (PX.live.tm[id].rr + PX.live.tm[id].pp + 80) : PX.live.mRR, rrL = PX.live.mRR;
+      o.xIso = rrT * g2("isoR", "O") + (1 - rrT) * g2("isoP", "O"); o.xIsoD = rrL * g2("isoR", "D") + (1 - rrL) * g2("isoP", "D");
+      o.xSR = g2("succR", "O"); o.xSP = g2("succP", "O");
+      o.xFp = g2("fp", "O"); o.xFpD = g2("fp", "D");
+      var stt = PX.st && PX.st[id];
+      if(stt){ o.xKoR = stt.kN >= 3 ? 100 - stt.kY / stt.kN : null; o.xKoC = stt.cN >= 3 ? 100 - stt.cY / stt.cN : null;
+               o.xPuntN = stt.pN >= 3 ? stt.pY / stt.pN : null; o.xPuntNA = stt.aN >= 3 ? stt.aY / stt.aN : null }
       var tmx = PX.live.tm[id]; o.runRate = tmx ? (tmx.rr + 80 * PX.live.mRR) / (tmx.rr + tmx.pp + 80) : null;
     }
     out.push(o);
@@ -1628,6 +1636,16 @@ var PEM_STATS = {
   xHav:    { lab:"Havoc allowed", dir:"low", dp:0, pct:true },
   xHavC:   { lab:"Havoc created", dir:"high", dp:0, pct:true },
   xFin:    { lab:"Pts per opportunity", dir:"high", dp:2 },
+  xIso:    { lab:"Explosiveness (IsoEPA)", dir:"high", dp:2 },
+  xIsoD:   { lab:"IsoEPA allowed", dir:"low", dp:2 },
+  xSR:     { lab:"Rush success", dir:"high", dp:0, pct:true },
+  xSP:     { lab:"Pass success", dir:"high", dp:0, pct:true },
+  xFp:     { lab:"Drive-start EP", dir:"high", dp:2 },
+  xFpD:    { lab:"Opp drive-start EP", dir:"low", dp:2 },
+  xKoR:    { lab:"KO return start", dir:"high", dp:1 },
+  xKoC:    { lab:"Opp start after KO", dir:"low", dp:1 },
+  xPuntN:  { lab:"Punt net", dir:"high", dp:1 },
+  xPuntNA: { lab:"Punt net allowed", dir:"low", dp:1 },
   xFinD:   { lab:"Pts/opp allowed", dir:"low", dp:2 }
 };
 
@@ -1736,57 +1754,113 @@ var PX_RUSH = /^(rush|rushing touchdown)/i, PX_PASS = /^(pass|passing touchdown|
 var PX_SKIP = /(kickoff|punt|field goal|extra point|two point|penalty|timeout|end of|end period|coin|safety|blocked|uncategorized)/i;
 // One week of plays -> per-game, per-offense sums. Two copies of every sum:
 // leverage-weighted ("w") and every-play-equal ("r").
+// One week of plays -> per-game, per-offense sums, plus the league shapes.
 function pxAggregate(games, plays){
-  var byGame = {}, out = {};
+  var byGame = {}, out = {}, lg = pxLgBlank();
   games.forEach(function(g){ byGame[g.id] = g; });
-  var drives = {};
-  (plays || []).forEach(function(p){
-    var gid = String(pxG(p, "gameId", "game_id")), g = byGame[gid]; if(!g) return;
-    var offName = pxG(p, "offense"), off = pemNormName(offName) === pemNormName(g.hn) ? g.h : (pemNormName(offName) === pemNormName(g.an) ? g.a : pxTeamId(offName));
-    if(off !== g.h && off !== g.a) return;
-    var side = off === g.h ? "h" : "a";
+  // Plays in game order: CFBD's drive and play numbers when present, else feed order.
+  var list = [];
+  (plays || []).forEach(function(p, i){ var gid = String(pxG(p, "gameId", "game_id")); if(byGame[gid]) list.push({ p: p, gid: gid, i: i, dn: +pxG(p, "driveNumber", "drive_number") || 0, pn: +pxG(p, "playNumber", "play_number") || 0 }); });
+  list.sort(function(a, b){ return a.gid < b.gid ? -1 : a.gid > b.gid ? 1 : (a.dn && b.dn && a.dn !== b.dn) ? a.dn - b.dn : (a.dn === b.dn && a.pn && b.pn && a.pn !== b.pn) ? a.pn - b.pn : a.i - b.i; });
+  var drives = {}, order = [], kick = {};                // kick[gid]: the last kickoff or punt, waiting for the next drive
+  function sideOf(g, name){ var n = pemNormName(name); return n === pemNormName(g.hn) ? "h" : n === pemNormName(g.an) ? "a" : (pxTeamId(name) === g.h ? "h" : pxTeamId(name) === g.a ? "a" : null); }
+  list.forEach(function(it){
+    var p = it.p, gid = it.gid, g = byGame[gid];
+    var type = String(pxG(p, "playType", "play_type") || ""), text = String(pxG(p, "playText", "play_text") || "");
+    var ytg = +pxG(p, "yardsToGoal", "yards_to_goal", "yardline");
+    var side = sideOf(g, pxG(p, "offense"));
+    // Special teams: remember the kick so the receiving drive can be tagged with it.
+    if(/kickoff/i.test(type)){ kick[gid] = { k: "ko", tb: /touchback/i.test(text) }; }
+    else if(/punt/i.test(type) && !/block/i.test(type)){ kick[gid] = { k: "punt", y: ytg, side: side }; }
+    if(/field goal/i.test(type) && !/return/i.test(type) && isFinite(ytg)){ var fb = pxFgBucket(ytg + 17); lg.fgA[fb]++; if(/good/i.test(type)) lg.fgM[fb]++; }
+    if(!side) return;
     var A = out[gid] = out[gid] || { h: pxBlank(), a: pxBlank() }, T = A[side];
-    var type = String(pxG(p, "playType", "play_type") || ""), yds = +pxG(p, "yardsGained", "yards_gained") || 0;
-    var down = +pxG(p, "down") || 0, dist = +pxG(p, "distance") || 0, ytg = +pxG(p, "yardsToGoal", "yards_to_goal", "yardline");
+    var yds = +pxG(p, "yardsGained", "yards_gained") || 0;
+    var down = +pxG(p, "down") || 0, dist = +pxG(p, "distance") || 0;
     var dk = gid + "|" + pxG(p, "driveId", "drive_id");
-    var D = drives[dk] = drives[dk] || { side: side, gid: gid, opp: false, pts: 0, scrim: 0 };
+    var D = drives[dk];
+    if(!D){ D = drives[dk] = { side: null, gid: gid, opp: false, pts: 0, scrim: 0, start: null, cause: null }; order.push(dk); }
+    var isRush = !PX_SKIP.test(type) && PX_RUSH.test(type), isPass = !PX_SKIP.test(type) && !isRush && PX_PASS.test(type);
+    if((isRush || isPass) && D.side === null) D.side = side;           // a drive belongs to whoever runs its first snap
     if(/field goal good/i.test(type) && D.side === side) D.pts = Math.max(D.pts, 3);
     if(/(rushing|passing) touchdown/i.test(type) && D.side === side) D.pts = 7;
-    if(PX_SKIP.test(type)) return;
-    var isRush = PX_RUSH.test(type), isPass = !isRush && PX_PASS.test(type);
     if(!isRush && !isPass) return;
+    if(!D.scrim && isFinite(ytg) && ytg >= 1 && ytg <= 99){ D.start = Math.round(ytg); D.cause = kick[gid] || null; kick[gid] = null; }
     D.scrim++; if(isFinite(ytg) && ytg <= 40) D.opp = true;
     var epa = pxG(p, "ppa"); epa = (epa === null || epa === undefined || !isFinite(+epa)) ? null : +epa;
     // Luck out: a lost fumble is scored as a 50% recovery; interceptions pulled 25% toward average.
     var lostFum = /fumble recovery \(opponent\)|fumble return touchdown/i.test(type), pick = /interception/i.test(type);
     if(epa !== null && lostFum) epa *= 0.5;
     if(epa !== null && pick) epa *= 0.75;
+    if(lostFum || pick) T.tO++;
     // Leverage: offense's win probability from margin and time left; plays in decided games fade toward zero.
     var m = (+pxG(p, "offenseScore", "offense_score") || 0) - (+pxG(p, "defenseScore", "defense_score") || 0);
     var per = +pxG(p, "period") || 1, t = per > 4 ? 300 : Math.max(0, (4 - per) * 900 + pxClock(p.clock));
     var wp = pearNormCdf(m / (13 * Math.sqrt(t / 3600) + 0.8)), lev = Math.max(0.05, 4 * wp * (1 - wp));
-    var succ = down === 1 ? yds >= 0.5 * dist : down === 2 ? yds >= 0.7 * dist : yds >= dist;
+    // Success: half the distance on 1st down, 70% on 2nd, all of it on 3rd and 4th.
+    var thr = down === 1 ? 0.5 * dist : down === 2 ? 0.7 * dist : dist;
+    var succ = !lostFum && !pick && (yds >= thr || /touchdown/i.test(type));
     var havoc = /sack/i.test(type) || lostFum || pick || (isRush && yds < 0);
+    var xl = succ ? Math.log(1 + Math.max(0, yds - Math.ceil(thr))) : 0;
     [["w", lev], ["r", 1]].forEach(function(v){
       var S2 = T[v[0]], wt = v[1];
       if(epa !== null){ if(isRush){ S2.rN += wt; S2.rE += wt * epa; } else { S2.pN += wt; S2.pE += wt * epa; } }
       S2.sN += wt; if(succ) S2.sS += wt; if(havoc) S2.hH += wt;
+      if(isRush){ S2.rA += wt; if(succ){ S2.rS += wt; S2.rXL += wt * xl; if(epa !== null){ S2.rIN += wt; S2.rIE += wt * epa; } } }
+      else { S2.pA += wt; if(succ){ S2.pS += wt; S2.pXL += wt * xl; if(epa !== null){ S2.pIN += wt; S2.pIE += wt * epa; } } }
     });
     if(isRush) T.rr++; else T.pp++;
+    // League shapes (every play counts once).
+    var fy = Math.max(-15, Math.min(30, Math.round(yds))) + 15;
+    if(!succ && !lostFum && !pick){ if(isRush) lg.fr[fy]++; else lg.fp[fy]++; }
+    if(succ){ var o6 = isRush ? 0 : 3; lg.xs[o6]++; lg.xs[o6 + 1] += xl; lg.xs[o6 + 2] += xl * xl; }
   });
-  Object.keys(drives).forEach(function(k){
+  order.forEach(function(k){
     var D = drives[k]; if(!D.scrim) return;
     var T = out[D.gid][D.side];
     T.dr++; if(D.opp || D.pts){ T.op++; T.opPts += D.pts; } T.pts += D.pts;
+    if(D.start === null) return;
+    var y = D.start; T.ds++; T.dY += y; T.dY2 += y * y;
+    lg.st[y]++; var e = lg.ep; e[0]++; e[1] += y; e[2] += y * y; e[3] += y * y * y; e[4] += y * y * y * y; e[5] += D.pts; e[6] += D.pts * y; e[7] += D.pts * y * y;
+    var c = D.cause;
+    if(c && c.k === "ko"){ T.koN++; T.koY += y; if(c.tb) T.koTB++; }
+    else if(c && c.k === "punt" && isFinite(c.y) && c.side && c.side !== D.side){ var net = c.y + y - 100; if(net > -20 && net < 90){ T.pnN++; T.pnY += net; } }
   });
-  return out;
+  return { agg: out, lg: lg };
 }
-var PX_AGG_KEYS = ["rN", "rE", "pN", "pE", "sN", "sS", "hH"];
-function pxPack(T){ var a = []; ["w", "r"].forEach(function(v){ PX_AGG_KEYS.forEach(function(k){ a.push(Math.round(T[v][k] * 1000) / 1000); }); }); return a.concat([T.rr, T.pp, T.dr, T.op, T.opPts, T.pts]); }
-function pxUnpack(a){ if(!a || !a.length) return null; if(!Array.isArray(a)) return a; var T = { w: {}, r: {} }, i = 0;
+// Per team-game sums. Two copies of each efficiency sum: leverage-weighted ("w")
+// and every-play-equal ("r").
+//   rN/rE, pN/pE  rush / pass plays with EPA, and their EPA
+//   sN/sS/hH      scrimmage plays, successes, havoc plays
+//   rA/rS, pA/pS  rush / pass attempts and successes (efficiency)
+//   rIN/rIE, pIN/pIE  successful rush / pass plays with EPA, and their EPA (IsoEPA)
+//   rXL, pXL      sum of ln(1 + yards beyond the success line) on successful plays
+var PX_AGG_V = 2;
+var PX_AGG_KEYS = ["rN", "rE", "pN", "pE", "sN", "sS", "hH", "rA", "rS", "pA", "pS", "rIN", "rIE", "pIN", "pIE", "rXL", "pXL"];
+// Raw counts after the two sets: play mix, drives, scoring chances, drive starts
+// (count, sum of yards-to-goal, sum of squares), kickoffs received (count, start
+// sum, touchbacks), punts received (count, net-yard sum) and turnovers lost.
+var PX_AGG_TAIL = ["rr", "pp", "dr", "op", "opPts", "pts", "ds", "dY", "dY2", "koN", "koY", "koTB", "pnN", "pnY", "tO"];
+function pxPack(T){ var a = []; ["w", "r"].forEach(function(v){ PX_AGG_KEYS.forEach(function(k){ a.push(Math.round(T[v][k] * 1000) / 1000); }); }); PX_AGG_TAIL.forEach(function(k){ a.push(Math.round((T[k] || 0) * 1000) / 1000); }); return a; }
+function pxUnpack(a){
+  if(!a || !a.length) return null; if(!Array.isArray(a)) return a;
+  var T = pxBlank(), i = 0;
+  if(a.length === 20){                                   // v1 layout: 7 sums per set, 6 counts
+    ["w", "r"].forEach(function(v){ ["rN", "rE", "pN", "pE", "sN", "sS", "hH"].forEach(function(k){ T[v][k] = a[i++] || 0; }); });
+    ["rr", "pp", "dr", "op", "opPts", "pts"].forEach(function(k){ T[k] = a[i++] || 0; });
+    return T;
+  }
   ["w", "r"].forEach(function(v){ PX_AGG_KEYS.forEach(function(k){ T[v][k] = a[i++] || 0; }); });
-  T.rr = a[i++] || 0; T.pp = a[i++] || 0; T.dr = a[i++] || 0; T.op = a[i++] || 0; T.opPts = a[i++] || 0; T.pts = a[i++] || 0; return T; }
-function pxBlank(){ function s(){ return { rN: 0, rE: 0, pN: 0, pE: 0, sN: 0, sS: 0, hH: 0 }; } return { w: s(), r: s(), rr: 0, pp: 0, dr: 0, op: 0, opPts: 0, pts: 0 }; }
+  PX_AGG_TAIL.forEach(function(k){ T[k] = a[i++] || 0; });
+  return T;
+}
+function pxBlank(){ function s(){ var o = {}; PX_AGG_KEYS.forEach(function(k){ o[k] = 0; }); return o; } var T = { w: s(), r: s() }; PX_AGG_TAIL.forEach(function(k){ T[k] = 0; }); return T; }
+// League-wide play shapes for the simulator, summed per week: drive starts by
+// yards-to-goal, drive points against start (moments for a quadratic fit),
+// yards on unsuccessful plays, yards beyond the success line on successful
+// plays (log moments), and field goals by distance.
+function pxLgBlank(){ var z = function(n){ return new Array(n).fill(0); }; return { st: z(100), ep: z(8), fr: z(46), fp: z(46), xs: z(6), fgA: z(5), fgM: z(5) }; }
+function pxFgBucket(d){ return d < 30 ? 0 : d < 40 ? 1 : d < 50 ? 2 : d < 55 ? 3 : 4; }
 function pxPick(lines){
   var best = null;
   (lines || []).forEach(function(l){
@@ -1797,10 +1871,11 @@ function pxPick(lines){
   return best;
 }
 // Fetch (or reuse) one week: FBS-vs-FBS games, their lines, and aggregated plays.
+// Fetch (or reuse) one week: FBS-vs-FBS games, their lines, and aggregated plays.
 function pxLoadWeek(w, force){
   var S = pxState(), y = pxYear(), key = y + "-" + w, have = S.wk[key];
-  if(have && have.done && !force) return Promise.resolve(have);
-  var W = { y: y, w: w, games: [], agg: {}, lines: {}, done: false, at: Date.now() };
+  if(have && have.done && have.v === PX_AGG_V && !force) return Promise.resolve(have);
+  var W = { y: y, w: w, v: PX_AGG_V, games: [], agg: {}, lg: null, lines: {}, done: false, at: Date.now() };
   return pxCall("/games", { year: y, week: w, seasonType: "regular" }).then(function(gs){
     (gs || []).forEach(function(g){
       var hc = String(pxG(g, "homeClassification", "home_division") || "").toLowerCase(), ac = String(pxG(g, "awayClassification", "away_division") || "").toLowerCase();
@@ -1815,12 +1890,17 @@ function pxLoadWeek(w, force){
     var jobs = [pxCall("/lines", { year: y, week: w, seasonType: "regular" }).catch(function(){ return []; })];
     if(anyDone) jobs.push(pxCall("/plays", { year: y, week: w, seasonType: "regular" }));
     return Promise.all(jobs).then(function(res){
+      // Consensus closing spread and total, and their openers.
       (res[0] || []).forEach(function(L){
         var l = pxPick(pxG(L, "lines")); if(!l) return;
-        var so = pxG(l, "spreadOpen", "spread_open");
-        W.lines[String(pxG(L, "id"))] = { c: +l.spread, o: (so === null || !isFinite(+so)) ? null : +so, t: pxG(l, "overUnder", "over_under") };
+        var num = function(v){ return (v === null || v === undefined || v === "" || !isFinite(+v)) ? null : +v; };
+        W.lines[String(pxG(L, "id"))] = { c: +l.spread, o: num(pxG(l, "spreadOpen", "spread_open")), t: num(pxG(l, "overUnder", "over_under")), to: num(pxG(l, "overUnderOpen", "over_under_open")) };
       });
-      if(anyDone){ var ag = pxAggregate(W.games.filter(function(g){ return g.c; }), res[1]); Object.keys(ag).forEach(function(id){ W.agg[id] = { h: pxPack(ag[id].h), a: pxPack(ag[id].a) }; }); }
+      if(anyDone){
+        var ag = pxAggregate(W.games.filter(function(g){ return g.c; }), res[1]);
+        Object.keys(ag.agg).forEach(function(id){ W.agg[id] = { h: pxPack(ag.agg[id].h), a: pxPack(ag.agg[id].a) }; });
+        W.lg = ag.lg;
+      }
       W.done = W.games.length > 0 && W.games.every(function(g){ return g.c; });
       S.wk[key] = W;
       return W;
@@ -1930,7 +2010,7 @@ function pxSync(force){
     weeks.forEach(function(w){
       chain = chain.then(function(){
         var key = pxYear() + "-" + w, have = S.wk[key];
-        if(have && have.done && !force) return;
+        if(have && have.done && have.v === PX_AGG_V && !force) return;
         PX.msg = "Loading week " + w + " plays…"; pxStatus();
         return pxLoadWeek(w, force);
       });
@@ -1977,39 +2057,166 @@ function pxRidge(rows, get, alpha){
   }
   return { mu: mu, O: O, D: D };
 }
+// ── League play model ───────────────────────────────────────────────────────
+// Everything the drive simulator needs that isn't a team rating, from the
+// weeks before `upto`: where drives start, what a start is worth (drive-start
+// EP), how far unsuccessful plays go, how far successful plays go beyond the
+// line (log-normal, and how that stretches with IsoEPA), field goal range, and
+// league rates. The simulator is then calibrated so a league-average matchup
+// scores what the league actually scores per drive, and summarised by a fitted
+// surface (points per drive from success, explosiveness, turnovers and field
+// position) that grading and tuning can call thousands of times.
+var PX_LG = {};
+function pxSolve3(M, v){
+  var A = [M[0].concat(v[0]), M[1].concat(v[1]), M[2].concat(v[2])];
+  for(var c = 0; c < 3; c++){ var p = c; for(var r = c + 1; r < 3; r++) if(Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r; var t = A[c]; A[c] = A[p]; A[p] = t;
+    if(Math.abs(A[c][c]) < 1e-12) return null; for(var r2 = 0; r2 < 3; r2++){ if(r2 === c) continue; var f = A[r2][c] / A[c][c]; for(var k = c; k < 4; k++) A[r2][k] -= f * A[c][k]; } }
+  return [A[0][3] / A[0][0], A[1][3] / A[1][1], A[2][3] / A[2][2]];
+}
+function pxRng(seed){
+  var s = seed >>> 0, spare = null;
+  var u = function(){ s = (s + 0x6D2B79F5) >>> 0; var t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  return { u: u, n: function(){ if(spare !== null){ var q = spare; spare = null; return q; } var a = u() || 1e-12, b = u(), r = Math.sqrt(-2 * Math.log(a)); spare = r * Math.sin(2 * Math.PI * b); return r * Math.cos(2 * Math.PI * b); } };
+}
+function pxCum(arr){ var c = new Float64Array(arr.length), t = 0; for(var i = 0; i < arr.length; i++){ t += arr[i]; c[i] = t; } if(t > 0) for(var j = 0; j < c.length; j++) c[j] /= t; return c; }
+function pxDraw(cum, u){ var lo = 0, hi = cum.length - 1; while(lo < hi){ var m = (lo + hi) >> 1; if(cum[m] < u) lo = m + 1; else hi = m; } return lo; }
+function pxLeague(upto){
+  var y = pxYear(), key = y + "|" + upto + "|" + pxDataSig();
+  if(PX_LG[key]) return PX_LG[key];
+  var S = pxState(), G = pxLgBlank();
+  Object.keys(S.wk).forEach(function(k){ var W = S.wk[k]; if(W.y !== y || W.w >= upto || !W.lg) return;
+    Object.keys(G).forEach(function(f){ for(var i = 0; i < G[f].length; i++) G[f][i] += W.lg[f][i] || 0; }); });
+  var L = { n: G.ep[0] };
+  // Drive-start EP: expected drive points from a start at y yards to go (quadratic in y).
+  var e = G.ep, ab = null;
+  if(e[0] >= 150) ab = pxSolve3([[e[0], e[1], e[2]], [e[1], e[2], e[3]], [e[2], e[3], e[4]]], [e[5], e[6], e[7]]);
+  L.epK = ab || [6.3, -0.06, 0];
+  L.ep = function(yy){ yy = Math.max(1, Math.min(99, yy)); return L.epK[0] + L.epK[1] * yy + L.epK[2] * yy * yy; };
+  // Where drives start.
+  var st = G.st.slice(), sN = st.reduce(function(a, b){ return a + b; }, 0);
+  if(sN < 150){ st = new Array(100).fill(0); for(var yy = 1; yy < 100; yy++) st[yy] = Math.exp(-Math.pow((yy - 70) / 13, 2) / 2); st[75] += 0.3 * st.reduce(function(a, b){ return a + b; }, 0); }
+  L.stCum = pxCum(st); var sm = 0, sw = 0; st.forEach(function(v, i){ sm += v * i; sw += v; }); L.y0 = sw ? sm / sw : 70;
+  L.epSlope = L.epK[1] + 2 * L.epK[2] * L.y0; if(L.epSlope > -0.02) L.epSlope = -0.02;
+  L.ep0 = L.ep(L.y0);
+  // Unsuccessful-play yards (rush, pass), truncated below each success line.
+  function pool(h, fb){ var t = h.reduce(function(a, b){ return a + b; }, 0); return t >= 200 ? h : fb; }
+  var fbR = [], fbP = []; for(var i = 0; i < 46; i++){ var yd = i - 15; fbR.push(Math.exp(-Math.pow((yd - 1.5) / 2.5, 2) / 2)); fbP.push(yd === 0 ? 8 : Math.exp(-Math.pow((yd - 1) / 5, 2) / 2)); }
+  var fr = pool(G.fr, fbR), fp = pool(G.fp, fbP);
+  L.fail = [[], []];                                    // [rush|pass][success line 1..31] -> cumulative over yards -15..30
+  [fr, fp].forEach(function(h, ty){ for(var th = 1; th <= 31; th++){ var hh = h.map(function(v, j){ return (j - 15) < th ? v : 0; }); if(!hh.some(function(v){ return v > 0; })) hh[Math.min(45, th - 1 + 15)] = 1; L.fail[ty][th] = pxCum(hh); } });
+  // Yards beyond the success line: ln(1 + extra) ~ Normal(mu, sd).
+  var xs = G.xs;
+  L.muR = xs[0] >= 100 ? xs[1] / xs[0] : 1.3; L.sdR = xs[0] >= 100 ? Math.sqrt(Math.max(0.05, xs[2] / xs[0] - L.muR * L.muR)) : 0.95;
+  L.muP = xs[3] >= 100 ? xs[4] / xs[3] : 1.8; L.sdP = xs[3] >= 100 ? Math.sqrt(Math.max(0.05, xs[5] / xs[3] - L.muP * L.muP)) : 1.0;
+  // Field goals by distance, shrunk toward a typical college curve.
+  var fgPrior = [0.93, 0.83, 0.68, 0.55, 0.38]; L.fgP = fgPrior.map(function(p0, b){ return (G.fgM[b] + 10 * p0) / (G.fgA[b] + 10); });
+  L.fgN = G.fgA.reduce(function(a, b){ return a + b; }, 0);
+  // League rates and the IsoEPA -> yards stretch, from team-game rows (every play equal).
+  var rows = pxRows(upto), R = { rA: 0, rS: 0, pA: 0, pS: 0, rr: 0, pp: 0, sN: 0, hH: 0, tO: 0, pts: 0, dr: 0 };
+  var reg = { r: [0, 0, 0, 0, 0], p: [0, 0, 0, 0, 0] };
+  rows.forEach(function(r){ var s = r.s, q = s.r;
+    R.rA += q.rA; R.rS += q.rS; R.pA += q.pA; R.pS += q.pS; R.rr += s.rr; R.pp += s.pp; R.sN += q.sN; R.hH += q.hH; R.tO += s.tO; R.pts += s.pts; R.dr += s.dr;
+    [["r", q.rIN, q.rIE, q.rS, q.rXL], ["p", q.pIN, q.pIE, q.pS, q.pXL]].forEach(function(z){ if(z[1] < 3 || z[3] < 3) return; var xv = z[2] / z[1], yv = z[4] / z[3], wv = z[1], a = reg[z[0]]; a[0] += wv; a[1] += wv * xv; a[2] += wv * yv; a[3] += wv * xv * xv; a[4] += wv * xv * yv; });
+  });
+  function slope(a){ if(a[0] < 200) return 0.35; var vx = a[3] / a[0] - Math.pow(a[1] / a[0], 2), cxy = a[4] / a[0] - (a[1] / a[0]) * (a[2] / a[0]); var b = vx > 1e-6 ? cxy / vx : 0.35; return Math.max(0.05, Math.min(1.5, b)); }
+  L.kR = slope(reg.r); L.kP = slope(reg.p);
+  L.sR = R.rA > 200 ? R.rS / R.rA : 0.43; L.sP = R.pA > 200 ? R.pS / R.pA : 0.41;
+  L.rr = (R.rr + R.pp) > 200 ? R.rr / (R.rr + R.pp) : 0.52;
+  L.tov = R.sN > 500 && R.tO > 0 ? R.tO / R.sN : 0.018; L.hav = R.sN > 500 ? R.hH / R.sN : 0.16;
+  L.ppd = R.dr > 100 ? R.pts / R.dr : 2.2; L.drives = rows.length ? R.dr / rows.length : 12.5;
+  // Calibrate: shift the explosiveness mean until an average matchup scores the league's points per drive.
+  L.c = 0;
+  var base = function(c){ return { rr: L.rr, sR: L.sR, sP: L.sP, muR: L.muR + c, muP: L.muP + c, tov: L.tov, dY: 0 }; };
+  var lo = -2, hi = 2;
+  for(var it = 0; it < 16; it++){ var mid = (lo + hi) / 2; if(pxDrivePPD(base(mid), L, 5000, 7) < L.ppd) lo = mid; else hi = mid; }
+  L.c = (lo + hi) / 2; L.ppdSim = pxDrivePPD(base(L.c), L, 5000, 7);
+  pxSurrogate(L);
+  PX_LG[key] = L;
+  var ks = Object.keys(PX_LG); if(ks.length > 24) delete PX_LG[ks[0]];
+  return L;
+}
+// One simulated drive, play by play. Each snap: run or pass by the offense's
+// mix; a turnover at the matchup's rate; otherwise success at the matchup's
+// success rate for that play type. A successful play gains the success line
+// plus log-normal extra yards (the offense's explosiveness); an unsuccessful
+// one gains a draw from the league's unsuccessful-play yards. Fourth down:
+// field goal in range, go for it on short yardage near midfield, else punt.
+function pxDrive(P, L, R){
+  var ytg = pxDraw(L.stCum, R.u()) + P.dY; ytg = Math.max(1, Math.min(99, Math.round(ytg)));
+  var down = 1, dist = Math.min(10, ytg), k = 0;
+  while(k++ < 40){
+    if(down === 4){
+      if(ytg <= 38){ if(!(dist <= 1 && ytg <= 3)) return R.u() < P.fg(ytg + 17) ? 3 : 0; }
+      else if(!(dist <= 2 && ytg <= 55)) return 0;
+    }
+    var run = R.u() < P.rr;
+    if(R.u() < P.tov) return 0;
+    var thr = down === 1 ? Math.ceil(dist * 0.5) : down === 2 ? Math.ceil(dist * 0.7) : dist; if(thr < 1) thr = 1;
+    var yd;
+    if(R.u() < (run ? P.sR : P.sP)) yd = thr + Math.floor(Math.exp((run ? P.muR : P.muP) + (run ? L.sdR : L.sdP) * R.n()) - 1 + 1e-9);
+    else yd = pxDraw(L.fail[run ? 0 : 1][Math.min(31, thr)], R.u()) - 15;
+    if(yd >= ytg) return 7;
+    ytg -= yd; if(ytg >= 100) return 0;
+    if(yd >= dist){ down = 1; dist = Math.min(10, ytg); } else { down++; dist -= yd; if(down > 4) return 0; }
+  }
+  return 0;
+}
+function pxDriveParamsSim(P, L){ return { rr: P.rr, sR: Math.max(0.08, Math.min(0.85, P.sR)), sP: Math.max(0.08, Math.min(0.85, P.sP)), muR: P.muR, muP: P.muP, tov: Math.max(0.002, Math.min(0.08, P.tov)), dY: P.dY || 0, fg: function(d){ return L.fgP[pxFgBucket(d)]; } }; }
+function pxDrivePPD(P, L, n, seed){ var Q = pxDriveParamsSim(P, L), R = pxRng(seed || 1), t = 0; for(var i = 0; i < n; i++) t += pxDrive(Q, L, R); return t / n; }
+function pxDriveOutcomes(P, L, n, seed){ var Q = pxDriveParamsSim(P, L), R = pxRng(seed || 1), td = 0, fg = 0; for(var i = 0; i < n; i++){ var v = pxDrive(Q, L, R); if(v === 7) td++; else if(v === 3) fg++; } return { td: td / n, fg: fg / n, ppd: (7 * td + 3 * fg) / n }; }
+// Points per drive as a smooth surface over the four things a matchup changes:
+// success rate (dS), explosiveness (dM, shift in the log-yards mean), turnover
+// rate (ratio rT) and field position (dY, yards of starting position).
+function pxSurFeat(dS, dM, lT, dY){ return [1, dS, dM, lT, dY, dS * dS, dM * dM, lT * lT, dY * dY, dS * dM, dS * lT, dS * dY, dM * lT, dM * dY, lT * dY]; }
+function pxSurrogate(L){
+  var rows = [], Rg = pxRng(99), K = 150;
+  for(var i = 0; i < K; i++){
+    var dS = (Rg.u() - 0.5) * 0.2, dM = (Rg.u() - 0.5) * 0.9, lT = (Rg.u() - 0.5) * 1.6, dY = (Rg.u() - 0.5) * 30;
+    var P = { rr: L.rr, sR: L.sR + dS, sP: L.sP + dS, muR: L.muR + L.c + dM, muP: L.muP + L.c + dM, tov: L.tov * Math.exp(lT), dY: dY };
+    rows.push({ x: pxSurFeat(dS, dM, lT, dY), y: pxDrivePPD(P, L, 1500, 11) });
+  }
+  L.sur = pxOls(rows, 1e-6);
+  var m = 0; rows.forEach(function(r){ m += r.y; }); m /= rows.length; var ssr = 0, sst = 0;
+  rows.forEach(function(r){ var f = pxSurEval(L, r.x); ssr += (r.y - f) * (r.y - f); sst += (r.y - m) * (r.y - m); });
+  L.surR2 = sst ? 1 - ssr / sst : 0;
+}
+function pxSurEval(L, f){ var s = 0; for(var i = 0; i < f.length; i++) s += L.sur[i] * f[i]; return s; }
+function pxPPD(L, dS, dM, rT, dY){
+  dS = Math.max(-0.12, Math.min(0.12, dS)); dM = Math.max(-0.6, Math.min(0.6, dM)); var lT = Math.max(-1, Math.min(1, Math.log(rT))); dY = Math.max(-18, Math.min(18, dY));
+  return Math.max(0.1, pxSurEval(L, pxSurFeat(dS, dM, lT, dY)));
+}
+
 function pxFit(upto, o){
   o = o || pxOpts();
   var key = upto + "|" + JSON.stringify(o) + "|" + pxDataSig();
   if(PX.fits[key]) return PX.fits[key];
+  var L = pxLeague(upto);
   var rows = pxRows(upto), last = 0; rows.forEach(function(r){ if(r.wk > last) last = r.wk; });
   var lam = o.half >= 20 ? 0 : Math.LN2 / o.half, lv = o.lev;
   rows.forEach(function(r){ r.dec = Math.exp(-lam * (last - r.wk)); });
-  function mix(r, f){ var w = r.s.w, q = r.s.r; return f(w) * lv + f(q) * (1 - lv); }
-  var al = o.alpha;
+  function mix(r, k){ return r.s.w[k] * lv + r.s.r[k] * (1 - lv); }
+  function pair(n, s){ return function(r){ return [mix(r, n), mix(r, s)]; }; }
+  var al = o.alpha, K = L.epK;
   var F = {
-    rush: pxRidge(rows, function(r){ return [mix(r, function(s){ return s.rN; }), mix(r, function(s){ return s.rE; })]; }, al),
-    pass: pxRidge(rows, function(r){ return [mix(r, function(s){ return s.pN; }), mix(r, function(s){ return s.pE; })]; }, al),
-    succ: pxRidge(rows, function(r){ return [mix(r, function(s){ return s.sN; }), mix(r, function(s){ return s.sS; })]; }, al),
-    hav:  pxRidge(rows, function(r){ return [mix(r, function(s){ return s.sN; }), mix(r, function(s){ return s.hH; })]; }, al),
-    fin:  pxRidge(rows, function(r){ return [r.s.op, r.s.opPts]; }, al / 8)          // points per scoring opportunity (drives inside the 40)
+    rush:  pxRidge(rows, pair("rN", "rE"), al),
+    pass:  pxRidge(rows, pair("pN", "pE"), al),
+    succ:  pxRidge(rows, pair("sN", "sS"), al),
+    hav:   pxRidge(rows, pair("sN", "hH"), al),
+    // Efficiency and explosiveness, run and pass apart.
+    succR: pxRidge(rows, pair("rA", "rS"), al),
+    succP: pxRidge(rows, pair("pA", "pS"), al),
+    isoR:  pxRidge(rows, pair("rIN", "rIE"), al / 2),
+    isoP:  pxRidge(rows, pair("pIN", "pIE"), al / 2),
+    // Field position / special teams: expected points of each drive's start.
+    fp:    pxRidge(rows, function(r){ var s = r.s; return s.ds ? [s.ds, K[0] * s.ds + K[1] * s.dY + K[2] * s.dY2] : null; }, al / 6),
+    fin:   pxRidge(rows, function(r){ return [r.s.op, r.s.opPts]; }, al / 8)          // points per scoring opportunity (display)
   };
   // Tempo and play mix: simple shrunk averages.
   var tm = {}, TD = 0, TG = 0, TR = 0, TP = 0;
   rows.forEach(function(r){ var t = tm[r.o] = tm[r.o] || { dr: 0, g: 0, rr: 0, pp: 0 }; t.dr += r.s.dr; t.g++; t.rr += r.s.rr; t.pp += r.s.pp; TD += r.s.dr; TG++; TR += r.s.rr; TP += r.s.pp; });
   var mDr = TG ? TD / TG : 12, mRR = (TR + TP) ? TR / (TR + TP) : 0.5;
-  // Drive-outcome calibration: how often a drive reaches the opponent 40, as a
-  // function of the game's efficiency (EPA/play, success rate, havoc rate).
-  var cal = [], opT = 0, drT = 0;
-  rows.forEach(function(r){
-    var s = r.s.r, n = s.rN + s.pN, dr = r.s.dr; if(!n || !dr) return;
-    var rate = Math.min(0.97, Math.max(0.03, r.s.op / dr));
-    cal.push({ x: [1, (s.rE + s.pE) / n, s.sS / (s.sN || 1), s.hH / (s.sN || 1)], y: Math.log(rate / (1 - rate)), wgt: dr });
-    opT += r.s.op; drT += dr;
-  });
-  var coef = cal.length >= 40 ? pxOls(cal.map(function(c){ return { x: c.x, y: c.y }; }), 0.5) : null;
-  var fit = { upto: upto, o: o, F: F, tm: tm, mDr: mDr, mRR: mRR, coef: coef, opRate: drT ? opT / drT : 0.42, n: rows.length / 2, last: last,
+  var fit = { upto: upto, o: o, F: F, L: L, tm: tm, mDr: mDr, mRR: mRR, n: rows.length / 2, last: last,
               pw: pxPriorW(o, upto), prior: (pxState().prior || {}).t || {} };
-  // League scoring average for the prior blend.
   var pts = 0; rows.forEach(function(r){ pts += r.s.pts; }); fit.mPts = rows.length ? pts / rows.length : 27;
   fit.teams = pxTeamIds(fit);
   PX.fits[key] = fit;
@@ -2018,26 +2225,37 @@ function pxFit(upto, o){
 function pxTeamIds(fit){ var ids = {}; ["rush", "pass", "succ", "hav", "fin"].forEach(function(k){ for(var a in fit.F[k].O) ids[a] = 1; for(var b in fit.F[k].D) ids[b] = 1; }); for(var p in fit.prior) ids[p] = 1; return Object.keys(ids); }
 // Expected drives, scoring-opportunity rate and points per opportunity for
 // `off` against `def` — facet against facet.
+// Everything one offense-vs-defense side of a game needs: facets meet facets
+// (run success vs run defense, pass explosiveness vs pass defense, havoc
+// allowed vs created, field position for vs against), become simulator
+// parameters, and the fitted surface turns them into points per drive.
 function pxDriveParams(fit, off, def){
-  var F = fit.F, g = function(f, side, id){ var m = F[f][side]; return (m && m[id]) || 0; };
+  var F = fit.F, L = fit.L, g = function(f, side, id){ var m = F[f] && F[f][side]; return (m && m[id]) || 0; };
   var t = fit.tm[off], rr = t ? (t.rr + 80 * fit.mRR) / (t.rr + t.pp + 80) : fit.mRR;
   var eR = F.rush.mu + g("rush", "O", off) + g("rush", "D", def), eP = F.pass.mu + g("pass", "O", off) + g("pass", "D", def);
-  var epa = rr * eR + (1 - rr) * eP;
   var succ = F.succ.mu + g("succ", "O", off) + g("succ", "D", def), hav = F.hav.mu + g("hav", "O", off) + g("hav", "D", def);
-  var o = fit.opRate;
-  if(fit.coef){ var z = fit.coef[0] + fit.coef[1] * epa + fit.coef[2] * succ + fit.coef[3] * hav; o = 1 / (1 + Math.exp(-z)); }
-  var f = Math.max(1, F.fin.mu + g("fin", "O", off) + g("fin", "D", def));
+  // Success (efficiency) and IsoEPA (explosiveness), each as a gap to league average.
+  var dsR = g("succR", "O", off) + g("succR", "D", def), dsP = g("succP", "O", off) + g("succP", "D", def);
+  var diR = g("isoR", "O", off) + g("isoR", "D", def), diP = g("isoP", "O", off) + g("isoP", "D", def);
+  var sR = L.sR + dsR, sP = L.sP + dsP;
+  var muR = L.muR + L.c + L.kR * diR, muP = L.muP + L.c + L.kP * diP;
+  var rT = Math.max(0.4, Math.min(2.5, F.hav.mu > 0 ? hav / F.hav.mu : 1));
+  var fpE = g("fp", "O", off) + g("fp", "D", def), dY = Math.max(-18, Math.min(18, fpE / L.epSlope));
+  var dS = (rr * sR + (1 - rr) * sP) - (L.rr * L.sR + (1 - L.rr) * L.sP);
+  var dM = (rr * muR + (1 - rr) * muP) - (L.rr * L.muR + (1 - L.rr) * L.muP + L.c);
+  var ppd = pxPPD(L, dS, dM, rT, dY);
   var tO = fit.tm[off], tD = fit.tm[def], dO = tO ? (tO.dr + 2 * fit.mDr) / (tO.g + 2) : fit.mDr, dD = tD ? (tD.dr + 2 * fit.mDr) / (tD.g + 2) : fit.mDr;
   var dr = (dO + dD) / 2;
   var have = !!(t || fit.F.rush.D[def] !== undefined);
-  var E = dr * o * f;
+  var E = dr * ppd;
   // Roster prior, fading to nothing by week 7 (and standing in alone for a team with no plays yet).
   var P = fit.prior, po = P[off], pd = P[def];
   var pE = fit.mPts + (po ? po.off : 0) + (pd ? pd.def : 0);
   var w = have ? fit.pw : 1;
   if(!po && !pd) w = 0;
   var Eb = (1 - w) * E + w * pE;
-  return { dr: dr, o: Math.max(0.02, Math.min(0.98, o * (E > 0 ? Eb / E : 1))), f: f, E: Eb, epa: epa, succ: succ, hav: hav, rr: rr, eR: eR, eP: eP };
+  return { dr: dr, ppd: ppd, E: Eb, Eplay: E, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
+           succ: succ, hav: hav, eR: eR, eP: eP, epa: rr * eR + (1 - rr) * eP };
 }
 function pxPredict(fit, awayId, homeId, neutral){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
@@ -2046,29 +2264,38 @@ function pxPredict(fit, awayId, homeId, neutral){
 // 10,000 drive-by-drive games. Each drive reaches the opponent 40 with the
 // matchup's rate; a reached drive becomes a TD, a field goal or nothing in the
 // proportions that give the matchup's points per opportunity.
+// Game simulation. Each side's drive outcomes (touchdown, field goal, nothing)
+// come from simulating thousands of drives play by play with that side's
+// matchup parameters; drive starts are drawn from the league's start
+// distribution shifted by the two teams' field-position ratings. The outcome
+// rates are then scaled so their mean matches the projection (which also
+// carries the roster prior), and 10,000 games are played drive by drive.
 function pxSimulate(fit, awayId, homeId, neutral, n){
   n = n || 10000;
   var sk = fit.upto + "|" + awayId + "|" + homeId + "|" + (neutral ? 1 : 0) + "|" + JSON.stringify(fit.o) + "|" + pxDataSig();
   if(PX.sims[sk]) return PX.sims[sk];
-  var P = pxPredict(fit, awayId, homeId, neutral), hf = neutral ? 0 : fit.o.hfa / 2;
-  function split(f){ var pFG = 0.24, pTD = (f - 3 * pFG) / 7; if(pTD < 0.05){ pTD = 0.05; pFG = Math.max(0, (f - 7 * pTD) / 3); } if(pTD + pFG > 1){ pFG = Math.max(0, 1 - pTD); } return [pTD, pFG]; }
-  var sA = split(P.A.f), sH = split(P.H.f), dr = (P.A.dr + P.H.dr) / 2;
-  var seed = 12345, rnd = function(){ seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
-  var extra = fit.sdExtra || 0, wins = 0, ties = 0, sumM = 0, sumT = 0, sumM2 = 0, margins = new Float32Array(n);
+  var P = pxPredict(fit, awayId, homeId, neutral), hf = neutral ? 0 : fit.o.hfa / 2, L = fit.L;
+  var seed = 7; String(awayId + "|" + homeId).split("").forEach(function(ch){ seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; });
+  function outcomes(D, sd){
+    var o = pxDriveOutcomes(D, L, 6000, sd), target = D.E / D.dr, f = o.ppd > 0 ? target / o.ppd : 1;
+    var td = o.td * f, fg = o.fg * f; if(td + fg > 0.95){ var z = 0.95 / (td + fg); td *= z; fg *= z; }
+    return { td: td, fg: fg, simTd: o.td, simFg: o.fg, simPpd: o.ppd };
+  }
+  var oA = outcomes(P.A, seed), oH = outcomes(P.H, seed + 1), dr = (P.A.dr + P.H.dr) / 2;
+  var R = pxRng(seed + 2);
+  var extra = fit.sdExtra || 0, wins = 0, ties = 0, sumM = 0, sumT = 0, sumM2 = 0, margins = new Float32Array(n), totals = new Float32Array(n);
   for(var i = 0; i < n; i++){
-    var u = rnd() || 1e-9, v = rnd(), z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-    var N = Math.max(6, Math.round(dr + z * 1.3)), a = 0, h = 0;
+    var N = Math.max(6, Math.round(dr + R.n() * 1.3)), a = 0, h = 0;
     for(var d = 0; d < N; d++){
-      var q = rnd(); if(q < P.A.o){ var q2 = rnd(); a += q2 < sA[0] ? 7 : (q2 < sA[0] + sA[1] ? 3 : 0); }
-      q = rnd(); if(q < P.H.o){ var q3 = rnd(); h += q3 < sH[0] ? 7 : (q3 < sH[0] + sH[1] ? 3 : 0); }
+      var q = R.u(); a += q < oA.td ? 7 : (q < oA.td + oA.fg ? 3 : 0);
+      q = R.u(); h += q < oH.td ? 7 : (q < oH.td + oH.fg ? 3 : 0);
     }
-    var u2 = rnd() || 1e-9, v2 = rnd(), z2 = Math.sqrt(-2 * Math.log(u2)) * Math.cos(2 * Math.PI * v2);
-    var m = (h + hf) - (a - hf) + z2 * extra;
-    margins[i] = m; sumM += m; sumM2 += m * m; sumT += a + h;
+    var m = (h + hf) - (a - hf) + R.n() * extra;
+    margins[i] = m; totals[i] = a + h; sumM += m; sumM2 += m * m; sumT += a + h;
     if(m > 0) wins++; else if(m === 0) ties++;
   }
   var mean = sumM / n, sd = Math.sqrt(Math.max(0, sumM2 / n - mean * mean));
-  var out = { homeWin: (wins + ties / 2) / n, meanMargin: mean, sdMargin: sd, total: sumT / n, margins: margins };
+  var out = { homeWin: (wins + ties / 2) / n, meanMargin: mean, sdMargin: sd, total: sumT / n, margins: margins, totals: totals, drA: oA, drH: oH };
   PX.sims[sk] = out;
   var ks = Object.keys(PX.sims); if(ks.length > 400) PX.sims = {};
   return out;
@@ -2131,26 +2358,53 @@ function pxAutoTune(){
 }
 function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length; }
 // Record vs Vegas in the same shape the cards already use.
+// Record vs Vegas, graded walk-forward: every week predicted by the model fit
+// only on the weeks before it. Spreads and totals, errors against the result
+// for the model and for the closing line, and closing line value.
 function pxAts(){
   var S = pxState(), key = pxDataSig() + "|" + JSON.stringify(S.opts) + "|" + JSON.stringify(S.wf || {});
   if(PX._ats && PX._ats.key === key) return PX._ats.v;
   var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0, noplay:0, total:0, early:0, earlyWeeks:[], noLine:0, pending:0, wfWeeks:0, wfMissing:0,
-            bk: [{ lo:0, hi:3, w:0, l:0, p:0 }, { lo:3, hi:6, w:0, l:0, p:0 }, { lo:6, hi:99, w:0, l:0, p:0 }], byWeek: [], games: [] };
+            bk: [{ lo:0, hi:3, w:0, l:0, p:0 }, { lo:3, hi:6, w:0, l:0, p:0 }, { lo:6, hi:99, w:0, l:0, p:0 }], byWeek: [], games: [],
+            ou: { w:0, l:0, p:0, sw:0, sl:0, n:0 },
+            err: { sN:0, sM:0, sM2:0, sV:0, sV2:0, tN:0, tM:0, tM2:0, tV:0, tV2:0 },
+            clv: { n:0, gap:0, move:0, toward:0, tw:0, ta:0, tn:0, tgap:0, tmove:0, ttoward:0, ttw:0, tta:0 } };
   var sd = [];
   pxWeeks().forEach(function(w){
     var list = pxGames().filter(function(x){ return x.W.w === w && x.g.c; });
     r.total += list.length;
     if(w < 2){ r.early += list.length; r.earlyWeeks.push(w); return; }
     var ow = pxOptsForWeek(w); if(ow) r.wfWeeks++; else { r.wfMissing++; ow = S.opts; }
-    var fit = pxFit(w, ow), W = { wk: w, w:0, l:0, p:0, sw:0, sl:0, su:0, suN:0, err:0, n:0, own: !!pxOptsForWeek(w), sheet: fit.pw > 0 }, any = false;
+    var fit = pxFit(w, ow), W = { wk: w, w:0, l:0, p:0, sw:0, sl:0, su:0, suN:0, err:0, n:0, ow:0, ol:0, own: !!pxOptsForWeek(w), sheet: fit.pw > 0 }, any = false;
     r.byWeek.push(W);
     list.forEach(function(x){
-      var g = x.g, p = pxPredict(fit, g.a, g.h, g.n), pred = p.home - p.away, act = g.hs - g.as;
+      var g = x.g, p = pxPredict(fit, g.a, g.h, g.n), pred = p.home - p.away, act = g.hs - g.as, pt = p.home + p.away, at = g.hs + g.as;
       W.err += Math.abs(pred - act); W.n++; sd.push(act - pred);
       var L = x.W.lines[g.id]; if(!L || !isFinite(L.c)){ r.noLine++; return; }
       var vHome = -L.c; r.lined++; any = true;
-      var G = { id: g.id, g: { eventId: g.id, awayId: g.a, homeId: g.h, week: w, neutral: g.n, as: g.as, hs: g.hs }, w: w, pred: pred, vh: vHome, act: act, res: null };
+      var E = r.err; E.sN++; E.sM += Math.abs(pred - act); E.sM2 += (pred - act) * (pred - act); E.sV += Math.abs(vHome - act); E.sV2 += (vHome - act) * (vHome - act);
+      var G = { id: g.id, g: { eventId: g.id, awayId: g.a, homeId: g.h, week: w, neutral: g.n, as: g.as, hs: g.hs, date: g.d || null }, w: w, pred: pred, vh: vHome, act: act, res: null,
+                pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null };
       r.games.push(G);
+      // Closing line value: did the line move from the opener toward the model?
+      var C = r.clv;
+      if(L.o !== null && L.o !== undefined && isFinite(L.o)){
+        var vo = -L.o, dir = pred > vo ? 1 : pred < vo ? -1 : 0;
+        if(dir){ var mv = (vHome - vo) * dir; C.n++; C.gap += Math.abs(pred - vo); C.move += Math.abs(vHome - vo); C.toward += mv; if(mv > 0.01) C.tw++; else if(mv < -0.01) C.ta++; }
+      }
+      // Totals against the closing number.
+      if(G.vt !== null){
+        E.tN++; E.tM += Math.abs(pt - at); E.tM2 += (pt - at) * (pt - at); E.tV += Math.abs(G.vt - at); E.tV2 += (G.vt - at) * (G.vt - at);
+        if(L.to !== null && L.to !== undefined && isFinite(L.to)){
+          var td = pt > L.to ? 1 : pt < L.to ? -1 : 0;
+          if(td){ var tmv = (G.vt - L.to) * td; C.tn++; C.tgap += Math.abs(pt - L.to); C.tmove += Math.abs(G.vt - L.to); C.ttoward += tmv; if(tmv > 0.01) C.ttw++; else if(tmv < -0.01) C.tta++; }
+        }
+        if(Math.abs(pt - G.vt) >= 0.05){
+          var over = pt > G.vt, tc = at - G.vt, O = r.ou; O.n++;
+          if(tc === 0){ O.p++; G.tres = "P"; }
+          else { var tw = (tc > 0) === over; G.tres = tw ? "W" : "L"; if(tw){ O.w++; W.ow++; if(Math.abs(pt - G.vt) >= 3) O.sw++; } else { O.l++; W.ol++; if(Math.abs(pt - G.vt) >= 3) O.sl++; } }
+        }
+      }
       if(pred !== 0){ r.suN++; W.suN++; if((pred > 0) === (act > 0)){ r.su++; W.su++; } }
       if(Math.abs(pred - vHome) < 0.05){ r.noplay++; return; }
       var pickHome = pred > vHome, cover = act - vHome, edge = Math.abs(pred - vHome), strong = edge >= 3, b = r.bk[edge < 3 ? 0 : edge < 6 ? 1 : 2];
@@ -2162,10 +2416,43 @@ function pxAts(){
   });
   r.pct = (r.w + r.l) ? r.w / (r.w + r.l) : null;
   r.spct = (r.sw + r.sl) ? r.sw / (r.sw + r.sl) : null;
+  r.ou.pct = (r.ou.w + r.ou.l) ? r.ou.w / (r.ou.w + r.ou.l) : null;
   // Residual spread of the honest predictions, for the simulation's extra noise.
   if(sd.length >= 40){ var m = 0; sd.forEach(function(v){ m += v; }); m /= sd.length; var ss = 0; sd.forEach(function(v){ ss += (v - m) * (v - m); }); r.sdObs = Math.sqrt(ss / (sd.length - 1)); }
   PX._ats = { key: key, v: r };
   return r;
+}
+// Model vs market: errors, records and closing line value in one card.
+function pxEvalCardHtml(){
+  var r = pxAts(); if(!r) return "";
+  var E = r.err, C = r.clv, O = r.ou;
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>📏 Model vs market</b></div>';
+  if(!E.sN) return h + '<div class="pem-autosub">Needs graded games with closing lines.</div></div>';
+  var f = function(v, n){ return n ? (v / n).toFixed(2) : '—'; }, rm = function(v, n){ return n ? Math.sqrt(v / n).toFixed(2) : '—'; };
+  var better = function(a, b){ return a < b ? "up" : "dn"; };
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Error vs result</span><span>Model</span><span>Vegas close</span></div>';
+  [["Spread MAE", E.sM, E.sV, E.sN, f], ["Spread RMSE", E.sM2, E.sV2, E.sN, rm], ["Total MAE", E.tM, E.tV, E.tN, f], ["Total RMSE", E.tM2, E.tV2, E.tN, rm]].forEach(function(z){
+    if(!z[3]) return;
+    h += '<div class="pem-bkrow"><span>' + z[0] + '</span><b class="' + better(z[1], z[2]) + '">' + z[4](z[1], z[3]) + '</b><span>' + z[4](z[2], z[3]) + '</span></div>';
+  });
+  h += '</div>';
+  var cls = function(w, l){ var n = w + l; return !n ? "" : (w / n >= 0.524 ? "up" : "dn"); };
+  var pc = function(w, l){ return (w + l) ? ' <small>' + (100 * w / (w + l)).toFixed(1) + '%</small>' : ''; };
+  h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Vs closing line</span><span>All picks</span><span>Edge 3+</span></div>' +
+       '<div class="pem-bkrow"><span>Spread</span><b class="' + cls(r.w, r.l) + '">' + r.w + '-' + r.l + (r.p ? '-' + r.p : '') + pc(r.w, r.l) + '</b><b class="' + cls(r.sw, r.sl) + '">' + r.sw + '-' + r.sl + pc(r.sw, r.sl) + '</b></div>' +
+       '<div class="pem-bkrow"><span>Total (O/U)</span><b class="' + cls(O.w, O.l) + '">' + O.w + '-' + O.l + (O.p ? '-' + O.p : '') + pc(O.w, O.l) + '</b><b class="' + cls(O.sw, O.sl) + '">' + O.sw + '-' + O.sl + pc(O.sw, O.sl) + '</b></div></div>';
+  if(C.n || C.tn){
+    h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Closing line value</span><span>Spread</span><span>Total</span></div>';
+    var cell = function(v, n, dp){ return n ? (v / n).toFixed(dp) : '—'; };
+    h += '<div class="pem-bkrow"><span>Model vs opener <small>avg |gap|</small></span><span>' + cell(C.gap, C.n, 1) + '</span><span>' + cell(C.tgap, C.tn, 1) + '</span></div>';
+    h += '<div class="pem-bkrow"><span>Line move <small>avg |close − open|</small></span><span>' + cell(C.move, C.n, 1) + '</span><span>' + cell(C.tmove, C.tn, 1) + '</span></div>';
+    h += '<div class="pem-bkrow"><span>Move toward model <small>avg pts</small></span><b class="' + (C.toward > 0 ? "up" : "dn") + '">' + (C.n ? (C.toward >= 0 ? '+' : '') + (C.toward / C.n).toFixed(2) : '—') + '</b><b class="' + (C.ttoward > 0 ? "up" : "dn") + '">' + (C.tn ? (C.ttoward >= 0 ? '+' : '') + (C.ttoward / C.tn).toFixed(2) : '—') + '</b></div>';
+    h += '<div class="pem-bkrow"><span>Moved toward–away</span><span>' + C.tw + '-' + C.ta + '</span><span>' + C.ttw + '-' + C.tta + '</span></div>';
+    h += '<div class="pem-bkrow"><span>Share of gap closed</span><b class="' + (C.toward > 0 ? "up" : "dn") + '">' + (C.gap ? (100 * C.toward / C.gap).toFixed(0) + '%' : '—') + '</b><b class="' + (C.ttoward > 0 ? "up" : "dn") + '">' + (C.tgap ? (100 * C.ttoward / C.tgap).toFixed(0) + '%' : '—') + '</b></div></div>';
+  }
+  h += '<div class="pem-atsacct"><b>' + E.sN + '</b> games with a closing spread · <b>' + E.tN + '</b> with a closing total · ' + C.n + ' with a spread opener</div>';
+  h += '<div class="pem-autonote">Green error = the model beat the closing line on that measure. The closing line is the sharpest public number, so matching it is already good; beating it on MAE over a season would be a real edge. Closing line value: when the model disagrees with the opener, how far the market then moved its way (positive = toward the model). Share of gap closed is that move as a percent of the model’s disagreement. All picks are honest, pre-game projections.</div>';
+  return h + '</div>';
 }
 
 // ── Wiring into the rest of the page ────────────────────────────────────────
@@ -2194,6 +2481,12 @@ function pxRebuild(){
     var o = pxDriveParams(fit, id, avgId), d = pxDriveParams(fit, avgId, id);
     R[id] = { off: o.E - fit.mPts, def: d.E - fit.mPts, games: (fit.tm[id] || {}).g || 0, px: { o: o, d: d } };
   });
+  // Special teams, raw: kickoff return start (own yard line), kickoff coverage (opponent's start), punt net and punt net allowed.
+  var st = {};
+  pxGames().forEach(function(x){ var A = x.W.agg[x.g.id]; if(!x.g.c || !A) return; var sh = pxUnpack(A.h), sa = pxUnpack(A.a); if(!sh || !sa) return;
+    [[x.g.h, sh, sa], [x.g.a, sa, sh]].forEach(function(z){ var t = st[z[0]] = st[z[0]] || { kN: 0, kY: 0, kTB: 0, cN: 0, cY: 0, pN: 0, pY: 0, aN: 0, aY: 0 };
+      t.kN += z[1].koN; t.kY += z[1].koY; t.kTB += z[1].koTB; t.cN += z[2].koN; t.cY += z[2].koY; t.aN += z[1].pnN; t.aY += z[1].pnY; t.pN += z[2].pnN; t.pY += z[2].pnY; }); });
+  PX.st = st;
   PEM.ratings = R; PEM.avg = fit.mPts; PEM.n = games.length; PEM.opts.hfa = S.opts.hfa; PEM.opts.oppW = 1;
   PEM._ranks = null; PEM._ats = null;
   // Closing and opening lines into the shared stores (line movement, edges).
@@ -2206,7 +2499,9 @@ function pxRebuild(){
 function pxMaybe(){
   if(!pxKey()) return;
   var S = pxState();
-  if(!PX.synced && !PX.busy){ PX.synced = true; pxRebuild(); var stale = !S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3; if(stale || !PX.active) pxSync(false); }
+  if(!PX.synced && !PX.busy){ PX.synced = true; pxRebuild();
+    var old = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && W.v !== PX_AGG_V; });
+    var stale = !S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3; if(stale || old || !PX.active) pxSync(false); }
   if(PX.active && !PX_T.running && S.tuneSig !== pxTuneSig()) pxAutoTune();
 }
 function pxStatus(){ var el = document.getElementById("px-data"); if(el){ el.outerHTML = pxDataCardHtml(); pxBind(); } }
@@ -2247,14 +2542,33 @@ function pxKnobsHtml(){
   h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (two standard errors, game by game). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
   return h + '</div>';
 }
+// What the play simulator learned from the league, and how well it matches.
+function pxSimCardHtml(){
+  var fit = PX.live; if(!fit || !fit.L) return "";
+  var L = fit.L, yl = function(y){ var own = 100 - y; return own <= 50 ? 'own ' + Math.round(own) : 'opp ' + Math.round(y); };
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🧪 Play simulator</b></div>';
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>League, from ' + L.n + ' drives</span><span>Run</span><span>Pass</span></div>' +
+       '<div class="pem-bkrow"><span>Success rate</span><span>' + Math.round(L.sR * 100) + '%</span><span>' + Math.round(L.sP * 100) + '%</span></div>' +
+       '<div class="pem-bkrow"><span>Typical yards past the line on a success</span><span>' + (Math.exp(L.muR + L.c) - 1).toFixed(1) + '</span><span>' + (Math.exp(L.muP + L.c) - 1).toFixed(1) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Yards stretch per +0.1 IsoEPA</span><span>×' + Math.exp(0.1 * L.kR).toFixed(2) + '</span><span>×' + Math.exp(0.1 * L.kP).toFixed(2) + '</span></div></div>';
+  h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Field position</span><span>Start</span><span>Drive EP</span></div>' +
+       '<div class="pem-bkrow"><span>Average drive start</span><span>' + yl(L.y0) + '</span><span>' + L.ep(L.y0).toFixed(2) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Touchback</span><span>own 25</span><span>' + L.ep(75).toFixed(2) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Short field</span><span>opp 40</span><span>' + L.ep(40).toFixed(2) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Each yard of field position</span><span>—</span><span>' + (-L.epSlope).toFixed(3) + '</span></div></div>';
+  h += '<div class="pem-autosub" style="margin-top:8px">Points per drive: league <b>' + L.ppd.toFixed(2) + '</b> · simulator <b>' + L.ppdSim.toFixed(2) + '</b> · fitted surface R² <b>' + L.surR2.toFixed(3) + '</b>' + (L.fgN ? ' · ' + L.fgN + ' field goals' : '') + '</div>';
+  h += '<div class="pem-autonote">Each simulated drive starts from the league’s drive-start distribution, shifted by both teams’ field-position ratings (drive-start EP for and against, which carries kickoffs, punts, returns and the short fields a defense creates). Every snap is a run or pass by the offense’s mix; it succeeds at the matchup’s success rate for that play type, and a success gains the success line plus log-normal extra yards stretched by the matchup’s IsoEPA. Turnovers follow the matchup’s havoc; fourth downs kick, go or punt by field position. The simulator is calibrated so an average matchup scores what the league does per drive.</div>';
+  return h + '</div>';
+}
 function pxPanelHtml(){
   var h = '<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>';
   h += pxDataCardHtml();
   if(PX.active){
     h += pemAtsCardHtml();
-    h += pemClvCardHtml();
+    h += pxEvalCardHtml();
     h += pemAnglesCardHtml();
     h += pxKnobsHtml();
+    h += pxSimCardHtml();
     h += pxPriorCardHtml();
   }
   return h;
@@ -2334,45 +2648,6 @@ function pemEtHour(iso){
     var p = new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false }).split(":");
     return (+p[0] % 24) + (+p[1] || 0) / 60;
   }catch(e){ return null; }
-}
-
-// ── LINE MOVEMENT REPORT ──
-function pemClv(){
-  var r = null; try{ r = pemAts(); }catch(e){}
-  if(!r || !r.games) return null;
-  var O = PE.opens || {}, out = { n: 0, toward: 0, away: 0, flat: 0, move: 0, espn: 0, seen: 0, ow: 0, ol: 0, op: 0, cw: 0, cl: 0,
-    bk: [{ lo:0, hi:3, n:0, t:0, a:0 }, { lo:3, hi:6, n:0, t:0, a:0 }, { lo:6, hi:99, n:0, t:0, a:0 }] };
-  r.games.forEach(function(q){
-    var o = O[q.id]; if(!o || q.vh === null) return;
-    var vo = -o.h, dir = q.pred > vo ? 1 : q.pred < vo ? -1 : 0; if(!dir) return;
-    out.n++; if(o.s === "espn") out.espn++; else out.seen++;
-    var mv = (q.vh - vo) * dir, b = out.bk[Math.abs(q.pred - vo) < 3 ? 0 : Math.abs(q.pred - vo) < 6 ? 1 : 2];
-    b.n++; out.move += mv;
-    if(mv > 0.01){ out.toward++; b.t++; } else if(mv < -0.01){ out.away++; b.a++; } else out.flat++;
-    // The same pick graded at the opening number and at the close.
-    var co = q.act - vo; if(co === 0) out.op++; else if((co > 0) === (dir > 0)) out.ow++; else out.ol++;
-    var cc = q.act - q.vh; if(cc !== 0){ if((cc > 0) === (dir > 0)) out.cw++; else out.cl++; }
-  });
-  return out;
-}
-function pemClvCardHtml(){
-  var c = pemClv(), O = PE.opens || {};
-  var h = '<div class="pem-ats"><div class="pem-autotop"><b>📈 Line movement</b></div>';
-  if(!c || !c.n){
-    h += '<div class="pem-autosub">No opening lines matched to graded games yet.</div>' +
-         '<div class="pem-autonote">Openers come from ESPN’s odds when they carry them, and otherwise from the first line this page sees for each game (' + Object.keys(O).length + ' recorded so far). Open the Games tab early in the week so upcoming games get their opener saved.</div></div>';
-    return h;
-  }
-  var tp = c.toward + c.away ? c.toward / (c.toward + c.away) : null, cls = function(p){ return p === null ? "" : (p > 0.5 ? "up" : "dn"); };
-  h += '<div class="pem-atsrow"><div><span>Moved toward model</span><b class="' + cls(tp) + '">' + c.toward + '-' + c.away + '</b><i>' + (tp !== null ? (tp * 100).toFixed(1) + '%' : '—') + (c.flat ? ' · ' + c.flat + ' flat' : '') + '</i></div>' +
-       '<div><span>Avg move</span><b class="' + (c.move > 0 ? "up" : "dn") + '">' + (c.move >= 0 ? '+' : '') + (c.move / c.n).toFixed(2) + '</b><i>pts toward model</i></div>' +
-       '<div><span>At open / close</span><b>' + c.ow + '-' + c.ol + '</b><i>vs ' + c.cw + '-' + c.cl + ' at close</i></div></div>';
-  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Edge vs opener</span><span>Toward–away</span><span>Toward %</span></div>';
-  c.bk.forEach(function(b){ var n = b.t + b.a, p = n ? b.t / n : null;
-    h += '<div class="pem-bkrow"><span>' + (b.hi > 50 ? b.lo + '+ pts' : b.lo + '–' + b.hi + ' pts') + '</span><span>' + b.t + '-' + b.a + '</span><b class="' + cls(p) + '">' + (p !== null ? (p * 100).toFixed(1) + '%' : '—') + '</b></div>'; });
-  h += '</div><div class="pem-atsacct"><b>' + c.n + '</b> graded games with an opener (' + c.espn + ' from ESPN, ' + c.seen + ' first seen here).</div>';
-  h += '<div class="pem-autonote">Each game uses the model’s honest pre-game number. A line that moves toward it more than half the time, and by more than a few tenths on average, is the clearest early sign of a real edge — it needs far fewer games than the win-loss record.</div>';
-  return h + '</div>';
 }
 
 // ── TRAVEL AND TIME ZONES ──
@@ -3706,6 +3981,8 @@ function pearCardHtml(){
     h += '<div class="pc-kv">GQI: ' + p.gqi.toFixed(1) + '</div>';
     h += '<div class="pc-kv">O/U: ' + p.total.toFixed(1) + '</div>';
     h += '<div class="pc-line">' + x(pearLineTxt(A, H, p.margin)) + '</div>';
+    if(p.sim && p.sim.drA){ var _dp = function(o){ return 'TD ' + Math.round(o.td * 100) + '% · FG ' + Math.round(o.fg * 100) + '%'; };
+      h += '<div class="pc-kv pc-drv">Per drive: ' + x(pearAbbr(A)) + ' ' + _dp(p.sim.drA) + ' · ' + x(pearAbbr(H)) + ' ' + _dp(p.sim.drH) + '</div>'; }
   } else {
     h += '<div class="pc-none">' + (!PEM.ratings ? 'Add your CFBD key (or an SP+ sheet) in the Model tab to project this game.' : (!pearIsFbs(A) || !pearIsFbs(H)) ? 'FCS teams aren’t rated, so there’s no projection for this one.' : 'One of these teams has no rating yet.') + '</div>';
   }
@@ -3714,6 +3991,9 @@ function pearCardHtml(){
   if(g && p && !c.neutral === !g.neutral){
     var ce = pearEdge(g, p);
     if(ce && ce.edge >= 0.5) h += '<div class="pc-edge' + (ce.edge >= PEAR_EDGE_MIN ? " big" : "") + '">Edge ' + ce.edge.toFixed(1) + ' pts \u2192 ' + x(ce.txt) + '</div>';
+    var _vtot = g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g) || [])[1] != null ? pearSavedLine(g)[1] : null);
+    if(_vtot != null && isFinite(_vtot) && Math.abs(p.total - _vtot) >= 0.5){ var te = Math.abs(p.total - _vtot);
+      h += '<div class="pc-edge' + (te >= PEAR_EDGE_MIN ? " big" : "") + '">Total edge ' + te.toFixed(1) + ' pts \u2192 ' + (p.total > _vtot ? 'Over ' : 'Under ') + _vtot + '</div>'; }
     if(ce && ce.edge >= PEAR_EDGE_WARN && g.state === "pre") h += '<div class="pc-warn">\u26a0 A disagreement this big usually means the line knows something (a QB out, injuries). Check the news' + pearBigEdgeRec() + '</div>';
   }
   if(g && g.state !== "pre" && g.away.score !== null){
@@ -3762,7 +4042,8 @@ function pearSide(r, id, ranks, dir){
 }
 
 var PX_PAIRS = [["POINTS/GM", "ppg", "papg"], ["RUSH EPA", "xRush", "xRushD"], ["PASS EPA", "xPass", "xPassD"], ["SUCCESS", "xSucc", "xSuccD"],
-                ["HAVOC", "xHav", "xHavC"], ["PTS/OPP", "xFin", "xFinD"]];
+                ["EXPLOSIVE", "xIso", "xIsoD"], ["HAVOC", "xHav", "xHavC"], ["PTS/OPP", "xFin", "xFinD"], ["START EP", "xFp", "xFpD"],
+                ["KO RETURN", "xKoR", "xKoC"], ["PUNT NET", "xPuntN", "xPuntNA"]];
 function pearCenter(ra, rh, A, H, ranks){
   function block(title, L, Lid, R, Rid, offLeft){
     var s = '<div class="pc-chd">' + title + '</div>';
