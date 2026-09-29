@@ -1734,7 +1734,7 @@ function pemRanks(){
 // Graded out of sample against the closing line, week by week.
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 4 };
+var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 4, sp: 0.5 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1744,6 +1744,8 @@ var PX_KNOBS = [
     help: "How much the roster composite counts in week 1. It fades to 0% by the fade week below." },
   { key: "fade", label: "Priors gone by", min: 2, max: 8, step: 1, fmt: function(v){ return "week " + v; }, lo: "plays only, fast", hi: "lean on last season longer",
     help: "The week from which only this season's plays count: both the roster prior's share of the projection and its pull on small samples (tier anchoring) fade to nothing by then. In the NIL and portal era last season says less, so the default is week 4; the tuner tries 3 to 7 against real results." },
+  { key: "sp", label: "SP+ sheet weight", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "play-by-play only", hi: "SP+ only",
+    help: "Share of each projection taken from the SP+ sheet you pasted for that week (its offense and defense ratings, as points against each other). Only sheets saved for that week or earlier are used, so graded weeks stay honest. Teams missing from the sheet use the play-by-play model alone. The tuner tries 0\u2013100% against your results." },
   { key: "hfa", label: "Home field", min: 0, max: 6, step: 0.25, fmt: function(v){ return v.toFixed(2) + " pts"; }, lo: "none", hi: "6 pts",
     help: "Points added to the home side after the simulation. Neutral sites get none." },
   { key: "lev", label: "Leverage weighting", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "every play equal", hi: "full leverage",
@@ -1753,7 +1755,7 @@ var PX_KNOBS = [
   { key: "stretch", label: "Spread stretch", min: 0, max: 2, step: 0.05, fmt: function(v){ return v ? "×" + v.toFixed(2) : "auto"; }, lo: "auto", hi: "wider spreads",
     help: "Auto: before each week, every earlier prediction is lined up against how the game actually ended; if the model has been too tight (or too wide), this week's spreads are scaled by exactly that much, trusted more as games pile up. A number fixes the scale by hand instead." }
 ];
-var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [0, 1, 1.25, 1.5], fade: [3, 4, 5, 7] };
+var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [0, 1, 1.25, 1.5], fade: [3, 4, 5, 7], sp: [0, 0.25, 0.5, 0.75, 1] };
 function pxState(){
   PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
   for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
@@ -2382,6 +2384,7 @@ function pxFit(upto, o){
               pw: pxPriorW(o, upto), prior: (pxState().prior || {}).t || {} };
   var pts = 0; rows.forEach(function(r){ pts += r.s.pts; }); fit.mPts = rows.length ? pts / rows.length : 27;
   fit.teams = pxTeamIds(fit);
+  fit.spSheet = (o.sp > 0 && typeof pemPriorAt === "function") ? pemPriorAt(upto) : null;   // SP+ saved for this week or earlier
   PX.fits[key] = fit;
   var sc = o.stretch > 0 ? { st: o.stretch, n: 0, b: null } : pxAutoStretch(upto, o);
   fit.st = sc.st; fit.stN = sc.n; fit.stB = sc.b; fit.stSE = sc.se; fit.stV = sc.vb;
@@ -2455,7 +2458,10 @@ function pxDriveParams(fit, off, def){
   var w = have ? fit.pw * ((po ? pxPriorRel(po) : 1) + (pd ? pxPriorRel(pd) : 1)) / 2 : 1;   // a less reliable prior gives way to plays sooner
   if(!po && !pd) w = 0;
   var Eb = (1 - w) * E + w * pE;
-  return { dr: dr, ppd: ppd, E: Eb, Eplay: E, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
+  // SP+ blend: that week's pasted sheet, offense against defense, as points.
+  var ws = fit.o.sp || 0, SPS = fit.spSheet, spE = null;
+  if(ws && SPS && SPS[off] && SPS[def]){ spE = fit.mPts + SPS[off].off + SPS[def].def; Eb = (1 - ws) * Eb + ws * spE; }
+  return { dr: dr, ppd: ppd, E: Eb, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
            succ: succ, hav: hav, eR: eR, eP: eP, epa: rr * eR + (1 - rr) * eP };
 }
 function pxPredict(fit, awayId, homeId, neutral){
@@ -2500,7 +2506,9 @@ function pxSimulate(fit, awayId, homeId, neutral, n){
   var ks = Object.keys(PX.sims); if(ks.length > 400) PX.sims = {};
   return out;
 }
-function pxDataSig(){ var S = pxState(); return Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0); }
+function pxDataSig(){ var S = pxState(); return (Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0)) + "|sp:" + pxSheetSig(); }
+// Changes whenever a sheet is pasted, replaced or deleted, so fits and tuning refresh.
+function pxSheetSig(){ var P = PE.priors || {}; return Object.keys(P).sort().map(function(k){ return k + (P[k] && P[k].at); }).join(","); }
 
 // ── Grading (walk-forward, against the closing line) ─────────────────────────
 function pxGames(){
@@ -2521,7 +2529,7 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v7|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v8|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -2559,7 +2567,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m8|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m9|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -3012,14 +3020,17 @@ function pemAnglesCardHtml(){
 // sheet on its own (rating gap + home edge) and the roster prior on its own.
 function pxVersions(){
   var r = pxAts(); if(!r) return null;
-  var L = PE.lines || {}, V = { blend: { lab: "Prophescore" }, sp: { lab: "SP+ sheet alone" }, pri: { lab: "Roster prior alone" } };
+  var L = PE.lines || {}, V = { blend: { lab: "Prophescore" }, pbp: { lab: "Play-by-play alone" }, sp: { lab: "SP+ sheet alone" }, pri: { lab: "Roster prior alone" } };
   Object.keys(V).forEach(function(k){ var o = V[k]; o.err = 0; o.n = 0; o.w = 0; o.l = 0; o.p = 0; });
   function grade(v, q, pred){ v.err += Math.abs(pred - q.act); v.n++; if(Math.abs(pred - q.vh) < 0.05) return; var c = q.act - q.vh; if(c === 0){ v.p++; return; } if((c > 0) === (pred > q.vh)) v.w++; else v.l++; }
-  var P = (pxState().prior || {}).t || {}, hfa = pxOpts().hfa;
+  var P = (pxState().prior || {}).t || {}, hfa = pxOpts().hfa, S = pxState(), pf = {};
+  // The same honest fit for each week with the SP+ sheet switched off.
+  function pbpFit(w){ if(!pf[w]){ var ow = pxOptsForWeek(w) || S.opts; pf[w] = pxFit(w, Object.assign({}, ow, { sp: 0 })); } return pf[w]; }
   r.games.forEach(function(q){
     var g = q.g, sp = pemPriorAt(g.week), ph = P[g.homeId], pa = P[g.awayId];
     if(!sp || !sp[g.homeId] || !sp[g.awayId] || !ph || !pa) return;                     // same games for every row
     grade(V.blend, q, q.pred);
+    var pp = pxPredict(pbpFit(q.w), g.awayId, g.homeId, g.neutral); grade(V.pbp, q, pp.home - pp.away);
     grade(V.sp, q, sp[g.homeId].fpi - sp[g.awayId].fpi + (g.neutral ? 0 : hfa));
     grade(V.pri, q, ph.r - pa.r + (g.neutral ? 0 : hfa));
   });
@@ -3148,13 +3159,13 @@ function pemAtsCardHtml(){
   if(VV && VV.blend.n){
     h += '<div class="pem-hd" style="margin-top:12px">Which version wins?</div>';
     h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Version</span><span>Miss</span><span>ATS</span></div>';
-    ["blend", "sp", "pri"].forEach(function(k){
+    ["blend", "pbp", "sp", "pri"].forEach(function(k){
       var v = VV[k]; if(!v || !v.n) return;
       var n = v.w + v.l, pc = n ? v.w / n : null;
       h += '<div class="pem-bkrow"><span>' + v.lab + '</span><span>' + (v.err / v.n).toFixed(2) + ' <small>pts</small></span>' +
            '<b class="' + cls(pc) + '">' + v.w + '-' + v.l + (pc !== null ? ' \u00b7 ' + (pc * 100).toFixed(1) + '%' : '') + '</b></div>';
     });
-    h += '</div><div class="pem-autonote" style="margin-top:4px">Same ' + VV.blend.n + ' games for every row. \u201cSP+ sheet alone\u201d is the SP+ you pasted before each week, as a benchmark; \u201cRoster prior alone\u201d is the preseason composite with no plays. Lower miss is better.</div>';
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Same ' + VV.blend.n + ' games for every row. Prophescore blends the play-by-play model with the SP+ you pasted before each week (weight in Model settings); the next two rows are each half on its own. \u201cRoster prior alone\u201d is the preseason composite with no plays. Lower miss is better.</div>';
   }
   h += '<div class="pem-atsacct"><b>' + r.lined + '</b> of ' + r.total + ' games graded across ' + r.weeks + ' week' + (r.weeks === 1 ? '' : 's') + '</div>';
   h += '<div class="pem-autonote">' + (r.wfMissing
@@ -3217,7 +3228,7 @@ function pemSheetsHtml(){
   h += '</div><div class="pem-sheetbtns"><button class="btn btn-ghost btn-sm" id="pem-sheetpaste">&#128203; ' + (cur ? 'Replace' : 'Paste') + ' week ' + sel + '</button>' +
        (cur ? '<button class="btn btn-ghost btn-sm" id="pem-sheetdel">Delete</button>' : '') + '</div>';
   h += '<div class="pe-note" style="margin-top:6px">' + (PX.active
-      ? 'Benchmark only: \u201cWhich version wins?\u201d grades each week with the sheet you had going into it, next to the play-by-play model.'
+      ? 'Blended into every projection at the SP+ sheet weight in Model settings (now ' + Math.round((pxOpts().sp || 0) * 100) + '%). Each week uses only the sheet saved for that week or earlier, so the record stays honest \u2014 paste each new SP+ before that week\u2019s games.'
       : 'Until the play-by-play data loads, projections use the newest sheet for this week or earlier (rating gap plus home edge).') + '</div>';
   return h + '</div>';
 }
@@ -3350,7 +3361,7 @@ function renderPoolEdge(){
     }
     if(PEM.restoreErr) h += '<div class="pem-stale">The saved data would not load: <b>' + x(PEM.restoreErr) + '</b>.</div>';
     h += pxKey() ? pxPanelHtml() : ('<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>' + pxDataCardHtml());
-    h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'benchmark' : 'projections until CFBD data loads') + '</span></div>' +
+    h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
          '<div class="admin-panel">' + pemSheetsHtml() + '</div>';
   }
   h += '</div>';
