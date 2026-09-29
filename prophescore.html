@@ -1737,7 +1737,7 @@ function pemRanks(){
 //    drive-by-drive simulations give the spread, total and win probability.
 // Graded out of sample against the closing line, week by week.
 //
-// Model fixes (data v4, tune m14):
+// Model fixes (data v4, tune m15):
 //  - a side with no FBS plays is projected from its prior alone (was ≥20% league average)
 //  - lost fumbles counted (they were dropped: CFBD types them "Fumble Recovery (Opponent)")
 //  - havoc keeps its tier anchoring (a negative slope was being clamped to zero)
@@ -1750,6 +1750,8 @@ function pemRanks(){
 //  - week 1 is data only: its games feed every later fit, but its prior-only
 //    projections are never graded, tuned on, or used to calibrate stretch, totals or odds
 //  - SP+ sheet moves the spread only (totals stay with the drive model); default weight 75%
+//  - defaults tuned on 2023–25 history; totals use their own fit (alphaT/levT); SP+ weight by week
+//  - roster priors that failed to fit (CFBD history calls rate-limited) are detected and retried
 //  - tried and dropped: a home-field term inside the opponent adjustment (see pxRidge)
 
 // First week whose projections count for grading, tuning and calibration. Week 1 has no
@@ -1758,7 +1760,11 @@ function pemRanks(){
 var PX_FIRST_GRADED = 2;
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 6, sp: 0.75, sit: 1 };
+// Defaults tuned on 2023 + 2024 (weeks 6+; 2024's saved prior was a placeholder) and checked on
+// 2025, which they never saw: spread error 12.99 -> 12.75 a game there, totals 12.91 -> 12.74.
+// alphaT / levT: the totals fit's own shrink and leverage (totals want more shrink, every play equal).
+// sp / spLate: SP+ weight in weeks 1–3 and from week 6 (linear in between), from 2024's weekly SP+.
+var PX_DEFAULTS = { alpha: 25, half: 10, prior: 1, hfa: 3, lev: 1, tier: 1, stretch: 0, fade: 10, sp: 1, spLate: 0.5, sit: 1, alphaT: 75, levT: 0 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1767,9 +1773,11 @@ var PX_KNOBS = [
   { key: "prior", label: "Roster prior weight (week 1)", min: 0, max: 1, step: 0.05, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "plays only", hi: "roster only",
     help: "How much the roster composite counts in week 1. It fades to 0% by the fade week below." },
   { key: "fade", label: "Priors gone by", min: 2, max: 10, step: 1, fmt: function(v){ return "week " + v; }, lo: "plays only, fast", hi: "lean on last season longer",
-    help: "The week from which only this season's plays count: both the roster prior's share of the projection and its pull on small samples (tier anchoring) fade to nothing by then. Preseason information keeps paying off well into the season even in the portal era (with only 3 games a team’s own numbers are still mostly noise), so the default is week 6; the tuner tries 4 to 8 against real results." },
-  { key: "sp", label: "SP+ sheet weight", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "play-by-play only", hi: "SP+ only",
-    help: "Share of each projection taken from the SP+ sheet you pasted for that week (its offense and defense ratings, as points against each other). Only sheets saved for that week or earlier are used, so graded weeks stay honest. Teams missing from the sheet use the play-by-play model alone. The default is 75%: on 2026 weeks 2\u20134 the play-by-play side alone missed by 12.7 a game against SP+\u2019s 10.9, since a few games of plays are still mostly noise. It moves the spread only; totals come from the play-by-play model, which ran better on totals than SP+. The tuner tries 0\u2013100% against your results." },
+    help: "The week from which only this season\u2019s plays count: both the roster prior\u2019s share of the projection and its pull on small samples (tier anchoring) fade to nothing by then. On 2023\u20132025 later was better at every step tested (week 4 worst, week 10 best), so the default is week 10; the tuner tries 4 to 10." },
+  { key: "sp", label: "SP+ sheet weight, weeks 1\u20133", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "play-by-play only", hi: "SP+ only",
+    help: "Share of each spread taken from the SP+ sheet you pasted for that week, early in the season. It eases to the week-6 weight below by week 6. On 2023\u20132025 history the play-by-play side needs about five weeks of games before it adds anything to SP+, so the default is 100%. Spreads only: totals always come from the play-by-play model, which ran better on totals. Teams missing from the sheet use the play-by-play model alone." },
+  { key: "spLate", label: "SP+ sheet weight, week 6 on", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "play-by-play only", hi: "SP+ only",
+    help: "From week 6, once teams have enough games of plays. On 2024\u2019s weekly SP+, a 50/50 blend beat both SP+ alone and the model alone from week 5 on, and from week 9 it was as accurate as the closing line. The tuner tries 25\u2013100%." },
   { key: "hfa", label: "Home field", min: 0, max: 6, step: 0.25, fmt: function(v){ return v.toFixed(2) + " pts"; }, lo: "none", hi: "6 pts",
     help: "Points added to the home side after the simulation. Neutral sites get none." },
   { key: "sit", label: "Situational spots", min: 0, max: 1.5, step: 0.25, fmt: function(v){ return v ? Math.round(v * 100) + "%" : "off"; }, lo: "off", hi: "150%",
@@ -1781,7 +1789,7 @@ var PX_KNOBS = [
   { key: "stretch", label: "Spread stretch", min: 0, max: 2, step: 0.05, fmt: function(v){ return v ? "×" + v.toFixed(2) : "auto"; }, lo: "auto", hi: "wider spreads",
     help: "Auto: before each week, every earlier prediction is lined up against how the game actually ended; if the model has been too tight (or too wide), this week's spreads are scaled by exactly that much, trusted more as games pile up. A number fixes the scale by hand instead." }
 ];
-var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0, 0.5, 0.75, 1], stretch: [0, 1, 1.25, 1.5], fade: [4, 5, 6, 8], sp: [0, 0.25, 0.5, 0.75, 1], sit: [0, 0.5, 1, 1.5] };
+var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0, 0.5, 0.75, 1], stretch: [0, 1, 1.25, 1.5], fade: [4, 6, 8, 10], spLate: [0.25, 0.5, 0.75, 1], sp: [0, 0.25, 0.5, 0.75, 1], sit: [0, 0.5, 1, 1.5] };
 function pxState(){
   PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
   for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
@@ -2130,8 +2138,23 @@ function pxPriorRel(t){ if(!t) return 1; return (t.imp ? 0.5 : 1) * (t.nc ? 0.6 
 // Falls back to fixed weights if the history can't be fetched.
 function pxLoadPrior(force){
   var S = pxState(), y = pxYear();
-  if(S.prior && S.prior.y === y && S.prior.v === 3 && !force) return Promise.resolve(pxPriorFix(S.prior));
-  return pxBuildPrior(y, pxCall).then(function(out){ S.prior = pxPriorFix(out); return out; });
+  var bad = S.prior && !pxPriorOk(S.prior), stale = !S.prior || !S.prior.at || Date.now() - S.prior.at > 12 * 3600e3;
+  if(S.prior && S.prior.y === y && S.prior.v === 3 && !force && !(bad && stale)) return Promise.resolve(pxPriorFix(S.prior));
+  return pxBuildPrior(y, pxCall).then(function(out){
+    out.at = Date.now();
+    if(!pxPriorOk(out) && S.prior && S.prior.y === y && pxPriorOk(S.prior)) return S.prior;     // keep a good one over a failed rebuild
+    S.prior = pxPriorFix(out);
+    if(!pxPriorOk(out)) PX.err = "Roster prior: CFBD\u2019s SP+ history didn\u2019t come through (rate limit?), so the prior is a placeholder. It will retry on a later refresh.";
+    return out;
+  });
+}
+// A usable prior was fitted on past seasons and has last season's SP+ for most teams. Every
+// CFBD input is fetched with a soft catch, so a rate limit used to produce a flat placeholder
+// prior silently (2024's saved history was one); this is the check that catches it.
+function pxPriorOk(P){
+  if(!P || !P.t) return false;
+  var ids = Object.keys(P.t), real = ids.filter(function(id){ var t = P.t[id]; return !t.imp && typeof t.sp === "number" && isFinite(t.sp); }).length;
+  return (P.n || 0) >= 150 && real >= 0.8 * ids.length;
 }
 // The roster prior for season y (fitted on y-3..y-1), without touching saved state.
 function pxBuildPrior(y, call){
@@ -2263,7 +2286,7 @@ function pxHistLoadIdx(){
 function pxHistCallsLeft(){
   var I = PXH.idx || {}, n = 0;
   PX_HIST_YEARS.forEach(function(y){ var e = I["y" + y] || {}, have = e.wk ? Object.keys(e.wk).length : 0, all = e.weeks ? e.weeks.length : 15;
-    n += 3 * Math.max(0, all - have) + (e.teams ? 0 : 1) + (e.weeks ? 0 : 1) + (e.prior ? 0 : 12); });
+    n += 3 * Math.max(0, all - have) + (e.teams ? 0 : 1) + (e.weeks ? 0 : 1) + (e.prior && e.priorFit >= 150 ? 0 : 12); });
   return n;
 }
 function pxHistSync(){
@@ -2310,12 +2333,16 @@ function pxHistSeason(y, idx, call){
       return saveIdx();
     }).catch(function(){ I.weeks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]; return saveIdx(); });
   }).then(function(){
-    // Roster prior as it would have stood before that season.
-    if(I.prior) return null;
+    // Roster prior as it would have stood before that season. One saved before the fit
+    // was checked (no priorFit on record) or that failed the check is rebuilt.
+    if(I.prior && I.priorFit >= 150) return null;
     say(y + " roster prior", y + ": roster prior (fitted on " + (y - 3) + "–" + (y - 1) + ")…");
     return (teams ? Promise.resolve(teams) : pxHistGet("hist/" + k + "/teams")).then(function(T){
       return pxBuildPrior(y, call).then(function(P){ return pxPriorFix(P, T || {}); });
-    }).then(function(P){ return pxHistPut("hist/" + k + "/prior", P).then(function(){ I.prior = Object.keys(P.t || {}).length; return saveIdx(); }); });
+    }).then(function(P){
+      if(!pxPriorOk(P)) throw new Error("CFBD\u2019s SP+ history didn\u2019t come through (rate limit?) \u2014 wait a minute and press Resume");
+      return pxHistPut("hist/" + k + "/prior", P).then(function(){ I.prior = Object.keys(P.t || {}).length; I.priorFit = P.n; return saveIdx(); });
+    });
   }).then(function(){
     // Every regular-season week: games, every book's lines, aggregated plays.
     I.wk = I.wk || {};
@@ -2336,10 +2363,10 @@ function pxHistCardHtml(){
   if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(pxHistStatus, pxHistStatus); }
   var S = pxState(), I = PXH.idx || {};
   var h = '<div class="pem-ats" id="px-hist"><div class="pem-autotop"><b>📚 Past seasons for backtesting</b>' +
-          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? 'Resume' : 'Download')) + '</button>' : '') + '</div>';
+          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? (pxHistCallsLeft() ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Season</span><span>Weeks saved</span><span>Prior</span></div>';
   PX_HIST_YEARS.forEach(function(y){ var e = I["y" + y] || {}, have = e.wk ? Object.keys(e.wk).length : 0, all = e.weeks ? e.weeks.length : null;
-    h += '<div class="pem-bkrow"><span>' + y + '</span><span>' + (e.done ? '<b class="up">all ' + have + '</b>' : (have + (all ? ' of ' + all : ''))) + '</span><b>' + (e.prior ? '✓ ' + e.prior + ' teams' : '—') + '</b></div>'; });
+    h += '<div class="pem-bkrow"><span>' + y + '</span><span>' + (e.done && e.priorFit >= 150 ? '<b class="up">all ' + have + '</b>' : (have + (all ? ' of ' + all : ''))) + '</span><b>' + (e.prior && e.priorFit >= 150 ? '✓ ' + e.prior + ' teams' : (e.prior ? 'needs rebuild' : '—')) + '</b></div>'; });
   h += '</div>';
   if(PXH.busy) h += '<div class="pem-autosub">' + x(PXH.msg) + '</div>';
   if(PXH.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXH.err) + ' Everything saved so far is kept — Resume continues from there.</div>';
@@ -2436,6 +2463,8 @@ function pxRows(upto){
 }
 // Share of the roster prior for predicting week w: o.prior in week 1, easing to 0 by the fade week.
 function pxPriorFade(o, w){ var E = (o && o.fade) || PX_DEFAULTS.fade; if(w >= E) return 0; if(w <= 1) return 1; var k = 0.5, e0 = Math.exp(-(E - 1) * k); return (Math.exp(-k * (w - 1)) - e0) / (1 - e0); }
+// SP+ sheet weight for week w: o.sp through week 3, o.spLate from week 6, linear in between.
+function pxSpW(o, w){ var a = typeof o.sp === "number" ? o.sp : 0, b = typeof o.spLate === "number" ? o.spLate : a; return w <= 3 ? a : w >= 6 ? b : a + (b - a) * (w - 3) / 3; }
 function pxPriorW(o, w){ return o.prior * pxPriorFade(o, w); }
 // Ridge regression by alternating updates: y = mu + O[off] + D[def], each team
 // starting from `alpha` units of its centre C (league average when no centre).
@@ -2657,8 +2686,10 @@ function pxFit(upto, o){
               pw: pxPriorW(o, upto), prior: (pxState().prior || {}).t || {} };
   var pts = 0; rows.forEach(function(r){ pts += r.s.pts; }); fit.mPts = rows.length ? pts / rows.length : 27;
   fit.teams = pxTeamIds(fit);
-  fit.spSheet = (o.sp > 0 && typeof pemPriorAt === "function") ? pemPriorAt(upto) : null;   // SP+ saved for this week or earlier
+  fit.spSheet = (pxSpW(o, upto) > 0 && typeof pemPriorAt === "function") ? pemPriorAt(upto) : null;   // SP+ saved for this week or earlier
   PX.fits[key] = fit;
+  // Totals get their own fit: same data and settings but more shrink and every play equal.
+  if(!o._tot && (o.alphaT !== o.alpha || o.levT !== o.lev)) fit.tf = pxFit(upto, Object.assign({}, o, { alpha: o.alphaT, lev: o.levT, sp: 0, spLate: 0, _tot: 1 }));
   var sc = pxAutoStretch(upto, o);
   if(o.stretch > 0){ sc.st = o.stretch; sc.n = 0; sc.b = null; }
   fit.st = sc.st; fit.stN = sc.n; fit.stB = sc.b; fit.stSE = sc.se; fit.stV = sc.vb; fit.tb = sc.tb || 0;
@@ -2749,7 +2780,7 @@ function pxDriveParams(fit, off, def){
   // margin only: tested on 2026 games, SP+ sharpens spreads but pulls totals the wrong way
   // (its totals ran behind the drive model's, and an overall-only paste flattens every
   // total toward league average), so totals stay with the model (Etot).
-  var ws = fit.o.sp || 0, SPS = fit.spSheet, spE = null;
+  var ws = pxSpW(fit.o, fit.upto), SPS = fit.spSheet, spE = null;
   var AVG0 = { off: 0, def: 0 }, so = off === "__avg__" ? AVG0 : SPS && SPS[off], sd = def === "__avg__" ? AVG0 : SPS && SPS[def];
   if(ws && SPS && so && sd && !(so === AVG0 && sd === AVG0)){ spE = fit.mPts + so.off + sd.def; Eb = (1 - ws) * Eb + ws * spE; }
   return { dr: dr, ppd: ppd, E: Eb, Etot: Etot, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
@@ -2821,8 +2852,9 @@ function pxSitParts(awayId, homeId, neutral, date, gid){
 }
 function pxPredict(fit, awayId, homeId, neutral, ctx){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
-  var st = fit.st || 1, mid = (A.Etot + H.Etot) / 2, half = (H.E - A.E) / 2 * st;       // margin with the SP+ blend, total without it
-  var tb = (fit.tb || 0) / 2;                                                      // walk-forward totals correction, half to each side
+  var ft = fit.tf || fit, At = ft === fit ? A : pxDriveParams(ft, awayId, homeId), Ht = ft === fit ? H : pxDriveParams(ft, homeId, awayId);
+  var st = fit.st || 1, mid = (At.Etot + Ht.Etot) / 2, half = (H.E - A.E) / 2 * st;     // margin from the main fit (with the SP+ blend), total from the totals fit
+  var tb = (ft.tb || 0) / 2;                                                       // walk-forward totals correction, half to each side
   var eA = Math.max(3, mid - half + tb), eH = Math.max(3, mid + half + tb);       // points before home field, spread stretched
   // A real game's spot: weather slows both sides, rest / travel / altitude / crowd tilt it.
   var sw = fit.o.sit || 0, sit = null;
@@ -2902,7 +2934,7 @@ function pxCVErr(o, weeksUpTo){
 }
 function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v13|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v14|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -2940,7 +2972,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m14|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m15|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -3074,8 +3106,9 @@ function pxPowerRatings(fit){
   if(fit._pr) return fit._pr;
   var ids = fit.teams.filter(function(id){ return id !== "__avg__" && pearIsFbs(id); }), st = fit.st || 1, out = {};
   ids.forEach(function(id){
-    var o = pxDriveParams(fit, id, "__avg__"), d = pxDriveParams(fit, "__avg__", id);
-    var off0 = (o.Etot - fit.mPts) * st, def0 = (d.Etot - fit.mPts) * st, sum = 0, n = 0;
+    var o = pxDriveParams(fit, id, "__avg__"), d = pxDriveParams(fit, "__avg__", id), ft = fit.tf || fit;
+    var ot = ft === fit ? o : pxDriveParams(ft, id, "__avg__"), dt = ft === fit ? d : pxDriveParams(ft, "__avg__", id);
+    var off0 = (ot.Etot - ft.mPts) * st, def0 = (dt.Etot - ft.mPts) * st, sum = 0, n = 0;
     ids.forEach(function(j){ if(j === id) return; var p = pxPredict(fit, j, id, true); sum += p.home - p.away; n++; });
     var rr = n ? sum / n : off0 - def0, dl = rr - (off0 - def0);
     out[id] = { off: off0 + dl / 2, def: def0 - dl / 2, rr: rr, o: o, d: d };
@@ -3117,7 +3150,7 @@ function pxRebuild(){
       t.g++; t.dr += a.dr; t.pts += a.pts; t.op += a.op; t.opPts += a.opPts; t.ds += a.ds; t.dY += a.dY;
       t.oDr += b.dr; t.oPts += b.pts; t.oOp += b.op; t.oOpPts += b.opPts; t.oDs += b.ds; t.oDY += b.dY; }); });
   PX.st = st;
-  PEM.ratings = R; PEM.avg = fit.mPts + (fit.tb || 0) / 2; PEM.n = games.length; PEM.opts.hfa = S.opts.hfa; PEM.opts.oppW = 1;
+  PEM.ratings = R; PEM.avg = (fit.tf || fit).mPts + ((fit.tf || fit).tb || 0) / 2; PEM.n = games.length; PEM.opts.hfa = S.opts.hfa; PEM.opts.oppW = 1;
   PEM._ranks = null; PEM._ats = null;
   // Closing and opening lines into the shared stores (line movement, edges).
   PE.lines = PE.lines || {}; PE.opens = PE.opens || {};
@@ -3457,7 +3490,7 @@ function pxVersions(){
   function grade(v, q, pred){ v.err += Math.abs(pred - q.act); v.n++; if(Math.abs(pred - q.vh) < 0.05) return; var c = q.act - q.vh; if(c === 0){ v.p++; return; } if((c > 0) === (pred > q.vh)) v.w++; else v.l++; }
   var P = (pxState().prior || {}).t || {}, hfa = pxOpts().hfa, S = pxState(), pf = {};
   // The same honest fit for each week with the SP+ sheet switched off.
-  function pbpFit(w){ if(!pf[w]){ var ow = w < 2 ? pxWeek1Opts() : (pxOptsForWeek(w) || S.opts); pf[w] = pxFit(w, Object.assign({}, ow, { sp: 0 })); } return pf[w]; }
+  function pbpFit(w){ if(!pf[w]){ var ow = w < 2 ? pxWeek1Opts() : (pxOptsForWeek(w) || S.opts); pf[w] = pxFit(w, Object.assign({}, ow, { sp: 0, spLate: 0 })); } return pf[w]; }
   r.games.forEach(function(q){
     var g = q.g, sp = pemPriorAt(g.week), ph = P[g.homeId], pa = P[g.awayId];
     if(!sp || !sp[g.homeId] || !sp[g.awayId] || !ph || !pa) return;                     // same games for every row
@@ -3643,7 +3676,7 @@ function pemSheetsHtml(){
   h += '</div><div class="pem-sheetbtns"><button class="btn btn-ghost btn-sm" id="pem-sheetpaste">&#128203; ' + (cur ? 'Replace' : 'Paste') + ' week ' + sel + '</button>' +
        (cur ? '<button class="btn btn-ghost btn-sm" id="pem-sheetdel">Delete</button>' : '') + '</div>';
   h += '<div class="pe-note" style="margin-top:6px">' + (PX.active
-      ? 'Blended into every projection at the SP+ sheet weight in Model settings (now ' + Math.round((pxOpts().sp || 0) * 100) + '%). Each week uses only the sheet saved for that week or earlier, so the record stays honest \u2014 paste each new SP+ before that week\u2019s games.'
+      ? 'Blended into every projection at the SP+ sheet weight in Model settings (now ' + Math.round((pxOpts().sp || 0) * 100) + '% in weeks 1\u20133, easing to ' + Math.round((pxOpts().spLate || 0) * 100) + '% from week 6). Each week uses only the sheet saved for that week or earlier, so the record stays honest \u2014 paste each new SP+ before that week\u2019s games.'
       : 'Until the play-by-play data loads, projections use the newest sheet for this week or earlier (rating gap plus home edge).') + '</div>';
   return h + '</div>';
 }
