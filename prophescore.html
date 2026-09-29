@@ -2460,7 +2460,8 @@ function pxDriveParams(fit, off, def){
   var Eb = (1 - w) * E + w * pE;
   // SP+ blend: that week's pasted sheet, offense against defense, as points.
   var ws = fit.o.sp || 0, SPS = fit.spSheet, spE = null;
-  if(ws && SPS && SPS[off] && SPS[def]){ spE = fit.mPts + SPS[off].off + SPS[def].def; Eb = (1 - ws) * Eb + ws * spE; }
+  var AVG0 = { off: 0, def: 0 }, so = off === "__avg__" ? AVG0 : SPS && SPS[off], sd = def === "__avg__" ? AVG0 : SPS && SPS[def];
+  if(ws && SPS && so && sd && !(so === AVG0 && sd === AVG0)){ spE = fit.mPts + so.off + sd.def; Eb = (1 - ws) * Eb + ws * spE; }
   return { dr: dr, ppd: ppd, E: Eb, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
            succ: succ, hav: hav, eR: eR, eP: eP, epa: rr * eR + (1 - rr) * eP };
 }
@@ -2687,6 +2688,24 @@ function pxEvalCardHtml(){
 // ── Wiring into the rest of the page ────────────────────────────────────────
 // Once PX has data it becomes the model: the Games list, cards, rankings, team
 // sheets, playoff odds and the Vegas record all read from it.
+// Power rating: each team's average projected margin against every other FBS
+// team on a neutral field, using exactly the projection the matchup cards use
+// (play-by-play, SP+ blend, prior, spread scale). A team rated higher is favored
+// over the field as a whole. Offense and defense keep their "against an average
+// team" split, shifted so offense minus defense equals the power rating.
+function pxPowerRatings(fit){
+  if(fit._pr) return fit._pr;
+  var ids = fit.teams.filter(function(id){ return id !== "__avg__" && pearIsFbs(id); }), st = fit.st || 1, out = {};
+  ids.forEach(function(id){
+    var o = pxDriveParams(fit, id, "__avg__"), d = pxDriveParams(fit, "__avg__", id);
+    var off0 = (o.E - fit.mPts) * st, def0 = (d.E - fit.mPts) * st, sum = 0, n = 0;
+    ids.forEach(function(j){ if(j === id) return; var p = pxPredict(fit, j, id, true); sum += p.home - p.away; n++; });
+    var rr = n ? sum / n : off0 - def0, dl = rr - (off0 - def0);
+    out[id] = { off: off0 + dl / 2, def: def0 - dl / 2, rr: rr, o: o, d: d };
+  });
+  fit._pr = out;
+  return out;
+}
 function pxRebuild(){
   var S = pxState(), ws = pxWeeks();
   if(S.prior) pxPriorFix(S.prior);
@@ -2706,12 +2725,9 @@ function pxRebuild(){
   Object.keys(S.teams || {}).forEach(function(id){ var t = S.teams[id]; names[id] = names[id] || (t.s + (t.m ? " " + t.m : "")); });
   PEM._games = games; PEM.nameMap = Object.assign(PEM.nameMap || {}, names);
   // Ratings: points scored / allowed per game against an average opponent on a neutral field.
-  var R = {}, avgId = "__avg__";
-  fit.teams.forEach(function(id){
-    var o = pxDriveParams(fit, id, avgId), d = pxDriveParams(fit, avgId, id);
-    var st = fit.st || 1;                                   // ratings carry the same stretch as the spreads
-    R[id] = { off: (o.E - fit.mPts) * st, def: (d.E - fit.mPts) * st, games: (fit.tm[id] || {}).g || 0, px: { o: o, d: d } };
-  });
+  var R = {}, PR = pxPowerRatings(fit);
+  Object.keys(PR).forEach(function(id){ var q = PR[id];
+    R[id] = { off: q.off, def: q.def, games: (fit.tm[id] || {}).g || 0, px: { o: q.o, d: q.d } }; });
   // Special teams, raw: kickoff return start (own yard line), kickoff coverage (opponent's start), punt net and punt net allowed.
   var st = {};
   pxGames().forEach(function(x){ var A = x.g.c && x.W.agg && x.W.agg[x.g.id]; if(!A) return; var sh = pxUnpack(A.h), sa = pxUnpack(A.a); if(!sh || !sa) return;
@@ -3076,33 +3092,32 @@ function pemSpreadRecHtml(r){
   h += '</div><div class="pem-autonote" style="margin-top:4px">Games grouped by the closing spread. <b>Took fav / took dog</b>: the model\u2019s record when its pick was the Vegas favorite or the underdog. <b>Model \u00b7 real</b>: the average margin for the Vegas favorite, projected vs what actually happened (Vegas\u2019s number underneath). A model number well below the real one in a band means favorites that size are underrated there \u2014 and \u201ctook dog\u201d losing in that band is the cost. Bands with under 8 decided picks aren\u2019t colored.</div>';
   return h;
 }
-// Proven edge on the record: the slopes it runs on now, and how picks made by
-// proven edge would have done, each week using only the weeks before it.
+// Proven edge on the record: how each kind of pick has done, and whether
+// ranking by it would have helped, each week using only the weeks before it.
 function pemProvenHtml(r){
   var M = pemEdgeModel(null); if(!r || !r.games) return "";
-  var h = '<div class="pem-hd" style="margin-top:12px">Proven edge</div>';
-  if(!M) return h + '<div class="pem-autosub">Needs 40 graded games with lines.</div>';
+  var h = '<div class="pem-hd" style="margin-top:12px">Which picks win</div>';
+  if(!M) return h + '<div class="pem-autosub">Needs 40 graded picks.</div>';
   var lab = { sf: "Spread under 14.5 \u00b7 model higher on favorite", sd: "Spread under 14.5 \u00b7 model higher on dog", bf: "Spread 14.5+ \u00b7 model higher on favorite", bd: "Spread 14.5+ \u00b7 model higher on dog" };
-  h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Kind of pick</span><span>Games</span><span>Real share</span></div>';
-  ["sf", "sd", "bf", "bd"].forEach(function(k){ var b = M.b[k];
-    h += '<div class="pem-bkrow"><span>' + lab[k] + '</span><span>' + M.ng[k] + '</span><b class="' + (b > 0.15 ? 'up' : b < 0 ? 'dn' : '') + '">' + Math.round(b * 100) + '%</b></div>'; });
-  h += '</div><div class="pem-autonote" style="margin-top:4px">Real share: of each point the model disagrees with Vegas, how many points have actually shown up in results for that kind of pick (all ' + M.n + ' graded games; ' + Math.round(M.ball * 100) + '% overall). Negative means results went the other way \u2014 fade the model there. Thin groups are pulled toward the overall share.</div>';
-  // Walk-forward: proven picks each week from the weeks before it.
-  var B = [{ lo: 0, hi: 1, w: 0, l: 0 }, { lo: 1, hi: 2, w: 0, l: 0 }, { lo: 2, hi: 99, w: 0, l: 0 }], T = { w: 0, l: 0 }, F = { w: 0, l: 0 };
+  var cls = function(p){ return p >= 0.524 ? "up" : p < 0.476 ? "dn" : ""; };
+  h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Kind of pick</span><span>Record</span><span>Proven rate</span></div>';
+  ["sf", "sd", "bf", "bd"].forEach(function(k){ var q = M.raw[k], n = q.w + q.l;
+    h += '<div class="pem-bkrow"><span>' + lab[k] + '</span><span>' + q.w + '-' + q.l + (n ? ' <small>' + Math.round(100 * q.w / n) + '%</small>' : '') + '</span><b class="' + cls(M.p[k]) + '">' + (M.p[k] * 100).toFixed(1) + '%</b></div>'; });
+  h += '</div><div class="pem-autonote" style="margin-top:4px">Proven rate: the record pulled toward the model\u2019s overall rate (' + (M.pall * 100).toFixed(1) + '% from ' + M.n + ' picks, itself pulled toward 50%) by about 60 games\u2019 worth, so a group needs a real sample before it stands apart. Best edge is ranked by it; it never flips a pick to fade the model.</div>';
+  // Walk-forward check: did the higher-rated kinds actually win more?
+  var hi = { w: 0, l: 0 }, lo = { w: 0, l: 0 };
   r.games.forEach(function(q){
-    var Mw = pemEdgeModel(q.w), C = Mw ? pemCalEdge(Mw, q.pred - q.vh, q.vh) : null; if(!C) return;
-    var cv = q.act - q.vh; if(cv === 0) return;
-    var won = (cv > 0) === C.pickHome, b = B[C.pts < 1 ? 0 : C.pts < 2 ? 1 : 2];
-    if(won){ b.w++; T.w++; if(C.flip) F.w++; } else { b.l++; T.l++; if(C.flip) F.l++; }
+    if(q.res !== "W" && q.res !== "L") return;
+    var Mw = pemEdgeModel(q.w); if(!Mw) return;
+    var p = Mw.p[pemEdgeGroup(q.pred - q.vh, q.vh)], t = p >= Mw.pall ? hi : lo;
+    if(q.res === "W") t.w++; else t.l++;
   });
-  var cls = function(w, l){ var n = w + l; return !n ? "" : n < 8 ? "" : (w / n >= 0.524 ? "up" : "dn"); };
-  var pc = function(w, l){ var n = w + l; return n ? (100 * w / n).toFixed(1) + '%' : '\u2014'; };
-  if(T.w + T.l){
-    h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Proven edge</span><span>Record</span><span>Win %</span></div>';
-    B.forEach(function(b){ h += '<div class="pem-bkrow"><span>' + (b.hi > 50 ? b.lo + '+ pts' : b.lo + '\u2013' + b.hi + ' pts') + '</span><span>' + b.w + '-' + b.l + '</span><b class="' + cls(b.w, b.l) + '">' + pc(b.w, b.l) + '</b></div>'; });
-    h += '<div class="pem-bkrow"><span><b>All proven picks</b></span><span>' + T.w + '-' + T.l + '</span><b class="' + cls(T.w, T.l) + '">' + pc(T.w, T.l) + '</b></div>';
-    if(F.w + F.l) h += '<div class="pem-bkrow"><span>\u2026 of which fades of the model</span><span>' + F.w + '-' + F.l + '</span><b class="' + cls(F.w, F.l) + '">' + pc(F.w, F.l) + '</b></div>';
-    h += '</div><div class="pem-autonote" style="margin-top:4px">Each week\u2019s picks here use real shares learned only from the weeks before it (from week 3 on, once 40 games are graded), so this record is one you could actually have had. If bigger proven edges win more often, the ranking is working \u2014 Best edge on the Games tab is sorted this way.</div>';
+  var pc = function(t){ var n = t.w + t.l; return n ? (100 * t.w / n).toFixed(1) + '%' : '\u2014'; };
+  if(hi.w + hi.l + lo.w + lo.l){
+    h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Honest check</span><span>Record</span><span>Win %</span></div>' +
+         '<div class="pem-bkrow"><span>Kinds rated above the model\u2019s average</span><span>' + hi.w + '-' + hi.l + '</span><b class="' + cls(hi.w / ((hi.w + hi.l) || 1)) + '">' + pc(hi) + '</b></div>' +
+         '<div class="pem-bkrow"><span>Kinds rated at or below it</span><span>' + lo.w + '-' + lo.l + '</span><b class="' + cls(lo.w / ((lo.w + lo.l) || 1)) + '">' + pc(lo) + '</b></div></div>' +
+         '<div class="pem-autonote" style="margin-top:4px">Each week rated only from the weeks before it (from week 3). If the first row keeps beating the second, the ranking is finding something; if not, treat every model pick about the same.</div>';
   }
   return h;
 }
@@ -3663,13 +3678,13 @@ function pearVegasHome(g){
 function pearSpreadTxt(v){ v = Math.round(v * 10) / 10; return v === 0 ? "PK" : (v > 0 ? "+" + v : String(v)); }
 // Where the model disagrees with Vegas, and which side it would take at Vegas' number.
 // ── Proven edge ──
-// How much of the model's disagreement with Vegas has actually shown up in
-// results, learned only from graded games before week \`upto\`. For each kind of
-// pick (smaller vs bigger spreads, model higher on the favorite vs on the dog):
-// regress (result − Vegas) on (model − Vegas). A slope of 0.3 means 30% of each
-// point of disagreement has been real. Groups are shrunk toward the overall
-// slope, and that toward zero, so thin evidence can't make an edge look big.
-var PEM_EDGE_LAMBDA = 1000;                                // about 30 games of typical disagreement
+// How often each kind of model pick has actually covered, from graded games
+// before week \`upto\` only. Kinds: spread under 14.5 vs 14.5+, and whether the
+// model is higher than Vegas on the favorite or on the dog. Win rates, not
+// margins: a handful of huge misses can't swing it, and it never flips a pick
+// to fade the model. Each group is pulled toward the model's overall rate, and
+// that toward 50%, so a few lucky weeks can't make a kind of pick look proven.
+var PEM_EDGE_K = 60, PEM_EDGE_K0 = 100;                    // pseudo-games of shrinkage
 function pemEdgeGroup(x, vh){ var sg = vh >= 0 ? 1 : -1; return (Math.abs(vh) >= 14.5 ? "b" : "s") + (x * sg > 0 ? "f" : "d"); }
 var _pemEM = {};
 function pemEdgeModel(upto){
@@ -3677,26 +3692,27 @@ function pemEdgeModel(upto){
   var r = pxAts(); if(!r || !r.games) return null;
   var key = upto + "|" + (PX._ats && PX._ats.key);
   if(_pemEM.key === key) return _pemEM.v;
-  var A = { sxy: 0, sxx: 0, n: 0, ss: 0 }, G = { sf: { sxy: 0, sxx: 0, n: 0 }, sd: { sxy: 0, sxx: 0, n: 0 }, bf: { sxy: 0, sxx: 0, n: 0 }, bd: { sxy: 0, sxx: 0, n: 0 } };
+  var A = { w: 0, l: 0 }, G = { sf: { w: 0, l: 0 }, sd: { w: 0, l: 0 }, bf: { w: 0, l: 0 }, bd: { w: 0, l: 0 } };
   r.games.forEach(function(q){
     if(upto && q.w >= upto) return;
-    var x = q.pred - q.vh, y = q.act - q.vh, g = G[pemEdgeGroup(x, q.vh)];
-    A.sxy += x * y; A.sxx += x * x; A.n++; A.ss += y * y; g.sxy += x * y; g.sxx += x * x; g.n++;
+    if(q.res !== "W" && q.res !== "L") return;
+    var g = G[pemEdgeGroup(q.pred - q.vh, q.vh)], won = q.res === "W";
+    if(won){ A.w++; g.w++; } else { A.l++; g.l++; }
   });
-  var v = null;
-  if(A.n >= 40){
-    var ball = A.sxy / (A.sxx + PEM_EDGE_LAMBDA), b = {};
-    Object.keys(G).forEach(function(k){ var q = G[k]; b[k] = (q.sxy + PEM_EDGE_LAMBDA * ball) / (q.sxx + PEM_EDGE_LAMBDA); });
-    v = { b: b, ball: ball, n: A.n, ng: { sf: G.sf.n, sd: G.sd.n, bf: G.bf.n, bd: G.bd.n }, sigma: Math.sqrt(A.ss / A.n) || 14 };
+  var v = null, N = A.w + A.l;
+  if(N >= 40){
+    var pall = (A.w + 0.5 * PEM_EDGE_K0) / (N + PEM_EDGE_K0), p = {}, raw = {};
+    Object.keys(G).forEach(function(k){ var q = G[k], n = q.w + q.l; p[k] = (q.w + PEM_EDGE_K * pall) / (n + PEM_EDGE_K); raw[k] = { w: q.w, l: q.l }; });
+    v = { p: p, pall: pall, raw: raw, all: A, n: N };
   }
   _pemEM = { key: key, v: v };
   return v;
 }
-// A raw disagreement (model home margin − Vegas home margin) turned into a proven one.
+// The model's pick in this game, with the proven cover rate for its kind.
 function pemCalEdge(M, x, vh){
-  if(!M || !isFinite(x)) return null;
-  var b = M.b[pemEdgeGroup(x, vh)], pts = b * x;           // expected home cover margin
-  return { pts: Math.abs(pts), prob: pearNormCdf(Math.abs(pts) / M.sigma), pickHome: pts > 0, flip: (pts > 0) !== (x > 0) && Math.abs(pts) > 0.05, b: b };
+  if(!M || !isFinite(x) || Math.abs(x) < 0.05) return null;
+  var p = M.p[pemEdgeGroup(x, vh)];
+  return { prob: p, pickHome: x > 0, flip: false, pts: Math.min(Math.abs(x), 7) };
 }
 function pearEdge(g, p, wk){
   if(!p) return null;
@@ -3760,13 +3776,14 @@ function pearGamesHtml(){
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
-    list = list.filter(function(o){ return o.e && pearFbsGame(o.g) && (o.e.cal ? o.e.cal.pts >= 1 || o.e.edge >= PEAR_EDGE_MIN : o.e.edge >= PEAR_EDGE_MIN); });
+    list = list.filter(function(o){ return o.e && pearFbsGame(o.g) && o.e.edge >= PEAR_EDGE_MIN; });
     var byCal = list.some(function(o){ return o.e.cal; });
-    list.sort(function(a, b){ return byCal ? ((b.e.cal ? b.e.cal.pts : 0) - (a.e.cal ? a.e.cal.pts : 0)) : (b.e.edge - a.e.edge); });
+    list.sort(function(a, b){ var pa = a.e.cal ? a.e.cal.prob : 0.5, pb = b.e.cal ? b.e.cal.prob : 0.5;
+      return byCal && Math.abs(pb - pa) > 0.001 ? pb - pa : Math.min(b.e.edge, 7) - Math.min(a.e.edge, 7); });
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
     var wk = { w: 0, l: 0, p: 0 };
     list.forEach(function(o){ if(o.e.res === "win") wk.w++; else if(o.e.res === "loss") wk.l++; else if(o.e.res === "push") wk.p++; });
-    h += '<div class="pr-edgenote">' + (byCal ? 'Ranked by <b>proven edge</b>: how much of the model\u2019s disagreement with Vegas has actually shown up in results for that kind of pick (graded games before this week only). Shown when the proven edge is 1+ point or the raw edge is ' + PEAR_EDGE_MIN + '+.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
+    h += '<div class="pr-edgenote">' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
          (hr && (hr.sw + hr.sl) ? ' The model\u2019s record on 3+ edges so far: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') +
                                   ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
@@ -3791,7 +3808,7 @@ function pearGamesHtml(){
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
-         (PEAR.filter === "edge" && o.e ? '<span class="pr-edgepill">' + (o.e.cal ? 'PROVEN ' + o.e.cal.pts.toFixed(1) + ' \u00b7 RAW ' + o.e.edge.toFixed(1) : 'EDGE ' + o.e.edge.toFixed(1)) + '</span>'
+         (PEAR.filter === "edge" && o.e ? '<span class="pr-edgepill">EDGE ' + o.e.edge.toFixed(1) + (o.e.cal ? ' \u00b7 ' + Math.round(o.e.cal.prob * 100) + '%' : '') + '</span>'
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -3810,10 +3827,10 @@ function pearGamesHtml(){
     }
     if(PEAR.filter === "edge" && o.e){
       var ce = o.e.cal, pk = ce ? ce : o.e, rs = ce ? ce.res : o.e.res;
-      h += '<div class="pr-take"><span>' + (ce && ce.flip ? 'Results say fade the model: <b>' : 'Take <b>') + x(pk.txt) + '</b>' +
-           (ce ? '<small> \u00b7 ' + Math.round(ce.prob * 100) + '% to cover</small>' : '') + '</span>' +
+      h += '<div class="pr-take"><span>Model takes <b>' + x(pk.txt) + '</b>' +
+           (ce ? '<small> \u00b7 picks like this: ' + Math.round(ce.prob * 100) + '%</small>' : '') + '</span>' +
            (rs ? '<span class="pr-res ' + rs + '">' + (rs === "win" ? "\u2713 Covered" : rs === "loss" ? "\u2717 Missed" : "Push") + '</span>'
-               : '<span>' + (ce ? ce.pts.toFixed(1) + ' pts proven' : o.e.edge.toFixed(1) + ' pts of value') + '</span>') + '</div>';
+               : '<span>' + o.e.edge.toFixed(1) + ' pts of value</span>') + '</div>';
     }
     h += '</button>';
   });
@@ -3840,7 +3857,7 @@ function pearPrevRanks(){
   var key = PEM._games.length + "|" + JSON.stringify(pxOpts());
   if(_pearPrev.key === key) return _pearPrev;
   var pf = pxFit(last, pxOpts()), pr2 = {};
-  pf.teams.forEach(function(id){ var o = pxDriveParams(pf, id, "__avg__"), d = pxDriveParams(pf, "__avg__", id); pr2[id] = { off: o.E, def: d.E }; });
+  var PR2 = pxPowerRatings(pf); Object.keys(PR2).forEach(function(id){ pr2[id] = { off: PR2[id].off, def: PR2[id].def }; });
   _pearPrev = { key: key, ranks: pearRankOrder(pr2).rank, week: last };
   return _pearPrev;
 }
@@ -3876,7 +3893,7 @@ function pearRankHtml(){
   });
   h += '<div class="pr-empty" id="rk-none" style="display:none">No team by that name</div>';
   h += '</div>';
-  h += '<div class="pr-foot">Rating = points better than an average FBS team on a neutral field. Off/Def/SOS show each team’s rank; ' + (prev ? 'movement is since the model fitted through week ' + (prev.week - 1) + '.' : '') + '</div>';
+  h += '<div class="pr-foot">Rating = average projected margin against every other FBS team on a neutral field, from the same projection as the matchup cards \u2014 so a higher-rated team is favored over the field as a whole. Off/Def/SOS show each team’s rank; ' + (prev ? 'movement is since the model fitted through week ' + (prev.week - 1) + '.' : '') + '</div>';
   return h + '</div>';
 }
 function pearBindRank(){
@@ -4445,7 +4462,7 @@ function pearCardHtml(){
   if(g && p && !c.neutral === !g.neutral){
     var ce = pearEdge(g, p, c.week);
     if(ce && ce.edge >= 0.5) h += '<div class="pc-edge' + (ce.edge >= PEAR_EDGE_MIN ? " big" : "") + '">Edge ' + ce.edge.toFixed(1) + ' pts \u2192 ' + x(ce.txt) + '</div>';
-    if(ce && ce.cal) h += '<div class="pc-kv pc-drv">Proven edge ' + ce.cal.pts.toFixed(1) + ' pts \u2192 ' + x(ce.cal.txt) + ' \u00b7 ' + Math.round(ce.cal.prob * 100) + '% to cover' + (ce.cal.flip ? ' (results say fade the model here)' : '') + '</div>';
+    if(ce && ce.cal) h += '<div class="pc-kv pc-drv">Picks like this have covered ' + Math.round(ce.cal.prob * 100) + '% (' + (Math.abs(p.margin - pearVegasHome(g)) ? (Math.abs(pearVegasHome(g)) >= 14.5 ? 'spread 14.5+' : 'spread under 14.5') + ', model higher on the ' + (((p.margin - pearVegasHome(g)) * (pearVegasHome(g) >= 0 ? 1 : -1)) > 0 ? 'favorite' : 'dog') : '') + ')</div>';
     var _vtot = g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g) || [])[1] != null ? pearSavedLine(g)[1] : null);
     if(_vtot != null && isFinite(_vtot) && Math.abs(p.total - _vtot) >= 0.5){ var te = Math.abs(p.total - _vtot);
       h += '<div class="pc-edge' + (te >= PEAR_EDGE_MIN ? " big" : "") + '">Total edge ' + te.toFixed(1) + ' pts \u2192 ' + (p.total > _vtot ? 'Over ' : 'Under ') + _vtot + '</div>'; }
