@@ -1730,7 +1730,7 @@ function pemRanks(){
 // Graded out of sample against the closing line, week by week.
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 50, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1.5, stretch: 1 };
+var PX_DEFAULTS = { alpha: 50, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 1 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -2001,9 +2001,29 @@ function pxSeasonInputs(y){
 // Fit the composite on past seasons (inputs for year y against how SP+ finished
 // year y), then apply it to this season. Falls back to fixed weights if the
 // history can't be fetched.
+// A team with no SP+ last season (moving up from FCS) is not an average FBS
+// team, which is what a missing rating used to count as. It starts at the 10th
+// percentile of last season's FBS ratings instead, and anchors half as hard
+// (the "imp" flag) because that guess is rougher than a real rating. Works on a
+// saved prior too, so nothing needs re-downloading.
+function pxPriorFix(P){
+  if(!P || !P.t || P.fx === 2) return P;
+  var S = pxState(), fbs = S.teams || {}, c = P.coef || [0, 0.55, 0.6, 3.0, 0.15];
+  var spv = Object.keys(P.t).map(function(id){ return P.t[id].sp; }).filter(function(v){ return typeof v === "number" && isFinite(v); }).sort(function(a, b){ return a - b; });
+  var spNew = spv.length >= 20 ? spv[Math.floor(spv.length * 0.1)] : -15;
+  Object.keys(fbs).forEach(function(id){
+    var t = P.t[id];
+    if(t && typeof t.sp === "number" && isFinite(t.sp)) return;
+    if(!t) t = P.t[id] = { r: c[0], ret: null, tal: null, port: 0 };                 // no roster data at all
+    var r = t.r + c[1] * spNew + c[2] * spNew * ((t.ret != null ? t.ret : 0.5) - 0.5);
+    t.r = r; t.off = r / 2; t.def = -r / 2; t.sp = spNew; t.imp = 1;
+  });
+  P.fx = 2;
+  return P;
+}
 function pxLoadPrior(force){
   var S = pxState(), y = pxYear();
-  if(S.prior && S.prior.y === y && !force) return Promise.resolve(S.prior);
+  if(S.prior && S.prior.y === y && !force) return Promise.resolve(pxPriorFix(S.prior));
   var hist = [y - 3, y - 2, y - 1];
   return Promise.all([pxSeasonInputs(y)].concat(hist.map(function(h){
     return Promise.all([pxSeasonInputs(h), pxCall("/ratings/sp", { year: h }).catch(function(){ return []; })]);
@@ -2036,7 +2056,7 @@ function pxLoadPrior(force){
       }
       out.t[id] = { r: r, off: r * share, def: -r * (1 - share), ret: o.ret, tal: o.tal, port: o.port || 0, sp: o.sp };
     });
-    S.prior = out;
+    S.prior = pxPriorFix(out);
     return out;
   });
 }
@@ -2277,7 +2297,7 @@ function pxFit(upto, o){
       if(f0.O[id] !== undefined && w["o" + id]){ xo += w["o" + id] * f0.O[id] * p.off; xxo += w["o" + id] * p.off * p.off; }
       if(f0.D[id] !== undefined && w["d" + id]){ xd += w["d" + id] * f0.D[id] * p.def; xxd += w["d" + id] * p.def * p.def; } });
     var bO = xxo ? Math.max(0, xo / xxo) : 0, bD = xxd ? Math.max(0, xd / xxd) : 0, C = { O: {}, D: {} };
-    Object.keys(PT).forEach(function(id){ C.O[id] = tw * bO * PT[id].off; C.D[id] = tw * bD * PT[id].def; });
+    Object.keys(PT).forEach(function(id){ var rel = PT[id].imp ? 0.5 : 1; C.O[id] = rel * tw * bO * PT[id].off; C.D[id] = rel * tw * bD * PT[id].def; });
     var f = pxRidge(rows, get, a, C); f.bO = bO; f.bD = bD;
     // A team with no FBS plays yet (an FCS opener, a bye) starts at its tier, not at league average.
     Object.keys(C.O).forEach(function(id){ if(f.O[id] === undefined) f.O[id] = C.O[id]; if(f.D[id] === undefined) f.D[id] = C.D[id]; });
@@ -2389,7 +2409,7 @@ function pxSimulate(fit, awayId, homeId, neutral, n){
   var ks = Object.keys(PX.sims); if(ks.length > 400) PX.sims = {};
   return out;
 }
-function pxDataSig(){ var S = pxState(); return Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n : 0); }
+function pxDataSig(){ var S = pxState(); return Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0); }
 
 // ── Grading (walk-forward, against the closing line) ─────────────────────────
 function pxGames(){
@@ -2410,7 +2430,7 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v3|" + n + "|" + (S.prior ? S.prior.n : 0); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v4|" + n + "|" + (S.prior ? S.prior.n : 0); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 function pxTune(weeksUpTo, done){
@@ -2445,7 +2465,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m3"; }          // m3: model version, forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m4"; }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2567,6 +2587,7 @@ function pxEvalCardHtml(){
 // sheets, playoff odds and the Vegas record all read from it.
 function pxRebuild(){
   var S = pxState(), ws = pxWeeks();
+  if(S.prior) pxPriorFix(S.prior);
   PX.active = !!(pxKey() && ws.length);
   if(!PX.active) return false;
   var next = ws[ws.length - 1] + 1, fit = pxFit(next, S.opts);
@@ -2646,6 +2667,8 @@ function pxPriorCardHtml(){
   h += '<div class="pem-autosub">Weight this week: <b>' + w + '%</b> (fades to 0% by week 7) · ' + (P.n >= 150 ? 'fitted on ' + P.n + ' team-seasons' : 'fixed weights (not enough history to fit)') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Team</span><span>Prior</span><span>Returning · Portal</span></div>';
   list.slice(0, 10).forEach(function(z){ h += '<div class="pem-bkrow"><span>' + x(pearName(z.id)) + '</span><span>' + pemFmtSigned(z.t.r, 1) + '</span><b>' + (z.t.ret != null ? Math.round(z.t.ret * 100) + '%' : '—') + ' · ' + (z.t.port >= 0 ? '+' : '') + z.t.port.toFixed(1) + '</b></div>'; });
+  var newbies = Object.keys(P.t).filter(function(id){ return P.t[id].imp && pearIsFbs(id); });
+  if(newbies.length) h += '</div><div class="pem-autosub" style="margin-top:6px">No SP+ last season (new to FBS): <b>' + newbies.map(function(id){ return x(pearName(id)); }).join(', ') + '</b> \u2014 started near the bottom of FBS and anchored half as hard.';
   h += '</div><div class="pem-autonote">Prior = last season’s SP+, regressed by how much production returns (QB-weighted), plus recruiting talent and position-weighted net transfer value (QB ×2.5, O-line ×2, pass rush ×1.5), with weights fitted on the previous three seasons. CFBD’s returning production covers offense only, so defensive continuity comes through last season’s rating and the portal.</div>';
   return h + '</div>';
 }
