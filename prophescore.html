@@ -364,6 +364,9 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pem-angrow small{font-size:9px;font-weight:700;color:var(--muted)}
 .pem-angrow b.up{color:#15803d}.pem-angrow b.dn{color:var(--red2)}.pem-angrow .few{color:var(--dim)}
 .px-knob{border-top:1px dashed var(--border2);padding:7px 0}
+.px-pick{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;font-weight:900}
+.px-pick select{flex:1;padding:7px 8px;border:2px solid var(--border);border-radius:9px;font:800 13px 'Nunito',sans-serif;background:var(--cream);color:var(--text)}
+.pem-bkrow.px-cur{background:var(--cream)}
 .px-knob div{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px}
 .px-knob span{font-weight:900}
 .px-knob small{display:block;font-size:10px;font-weight:700;color:var(--muted);line-height:1.35;margin-top:2px}
@@ -1739,7 +1742,7 @@ var PX_KNOBS = [
     help: "A game this many weeks old counts half as much as this week's. Lets teams change through the season (injuries, QB changes, development)." },
   { key: "prior", label: "Roster prior weight (week 1)", min: 0, max: 1, step: 0.05, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "plays only", hi: "roster only",
     help: "How much the roster composite counts in week 1. It fades to 0% by the fade week below." },
-  { key: "fade", label: "Priors gone by week", min: 2, max: 8, step: 1, fmt: function(v){ return "week " + v; }, lo: "plays only, fast", hi: "lean on last season longer",
+  { key: "fade", label: "Priors gone by", min: 2, max: 8, step: 1, fmt: function(v){ return "week " + v; }, lo: "plays only, fast", hi: "lean on last season longer",
     help: "The week from which only this season's plays count: both the roster prior's share of the projection and its pull on small samples (tier anchoring) fade to nothing by then. In the NIL and portal era last season says less, so the default is week 4; the tuner tries 3 to 7 against real results." },
   { key: "hfa", label: "Home field", min: 0, max: 6, step: 0.25, fmt: function(v){ return v.toFixed(2) + " pts"; }, lo: "none", hi: "6 pts",
     help: "Points added to the home side after the simulation. Neutral sites get none." },
@@ -2503,12 +2506,14 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v7|" + n + "|" + (S.prior ? S.prior.n : 0); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v7|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
+// Settings you've set by hand. The tuner starts from them and never moves them.
+function pxLocks(){ return pxState().lock || {}; }
 function pxTune(weeksUpTo, done){
-  var o = {}; for(var k in PX_DEFAULTS) o[k] = PX_DEFAULTS[k];
-  var cur = pxCVErr(o, weeksUpTo), keys = Object.keys(PX_GRID), pass = 0, acc = 0, ki = 0;
+  var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k];
+  var cur = pxCVErr(o, weeksUpTo), keys = Object.keys(PX_GRID).filter(function(k0){ return LK[k0] === undefined; }), pass = 0, acc = 0, ki = 0;
   if(Object.keys(cur).length < 40){ done(o, []); return; }
   (function step(){
     if(ki >= keys.length){ pass++; ki = 0; if(!acc || pass >= 3){ done(o, keys.filter(function(k2){ return o[k2] !== PX_DEFAULTS[k2]; })); return; } acc = 0; }
@@ -2526,9 +2531,10 @@ function pxTune(weeksUpTo, done){
 var PX_T = { running: false, msg: "" };
 function pxAutoTune(){
   if(PX_T.running || !PX.active) return;
-  var S = pxState(); PX_T.running = true; pxStatus();
+  var S = pxState(), sig0 = pxTuneSig(); PX_T.running = true; pxStatus();
   pxTune(null, function(o, moved){
-    S.opts = o; S.moved = moved; S.tunedAt = Date.now(); S.tuneSig = pxTuneSig();
+    // Signature from the start: a lock changed mid-run leaves it stale, so the next check re-tunes.
+    S.opts = Object.assign(o, pxLocks()); S.moved = moved; S.tunedAt = Date.now(); S.tuneSig = sig0;
     // Then settings for each past week, tuned only on the weeks before it.
     var ws = pxWeeks().filter(function(w){ return w >= 2 && !pxOptsForWeek(w); });
     (function next(){
@@ -2538,7 +2544,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m7"; }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m7|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2754,12 +2760,57 @@ function pxPriorCardHtml(){
   h += '</div><div class="pem-autonote">Prior = last season’s SP+, regressed by how much production returns (QB-weighted), plus recruiting talent and position-weighted net transfer value (QB ×2.5, O-line ×2, pass rush ×1.5), with weights fitted on the previous three seasons. CFBD’s returning production covers offense only, so defensive continuity comes through last season’s rating and the portal.</div>';
   return h + '</div>';
 }
+// How each "priors gone by" week would have done: every past week predicted
+// only from the weeks before it, with that cutoff and the other settings as tuned.
+var PX_FADES = [2, 3, 4, 5, 6, 7, 8];
+function pxFadeCompare(){
+  var S = pxState(), key = pxDataSig() + "|" + JSON.stringify(S.opts) + "|" + JSON.stringify(S.wf || {});
+  if(PX._fc && PX._fc.key === key) return PX._fc.v;
+  var out = PX_FADES.map(function(E){
+    var r = { E: E, err: 0, n: 0, w: 0, l: 0, sw: 0, sl: 0, byWk: {} };
+    pxWeeks().forEach(function(w){
+      if(w < 2) return;
+      var o = Object.assign({}, pxOptsForWeek(w) || S.opts, { fade: E }), fit = pxFit(w, o), e = 0, k = 0;
+      pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
+        var p = pxPredict(fit, x.g.a, x.g.h, x.g.n), pred = p.home - p.away, act = x.g.hs - x.g.as;
+        r.err += Math.abs(pred - act); r.n++; e += Math.abs(pred - act); k++;
+        var L = x.W.lines[x.g.id]; if(!L || !isFinite(L.c)) return;
+        var vh = -L.c, c = act - vh; if(Math.abs(pred - vh) < 0.05 || c === 0) return;
+        var won = (c > 0) === (pred > vh); if(won) r.w++; else r.l++;
+        if(Math.abs(pred - vh) >= 3){ if(won) r.sw++; else r.sl++; } });
+      if(k) r.byWk[w] = e / k;
+    });
+    return r;
+  });
+  PX._fc = { key: key, v: out };
+  return out;
+}
+function pxFadeCardHtml(){
+  var S = pxState(), lk = pxLocks().fade, cur = S.opts.fade || 7;
+  var h = '<div class="pem-ats" id="px-fadecard"><div class="pem-autotop"><b>\u23f3 When priors stop counting</b></div>';
+  h += '<div class="px-pick"><label for="px-fade">Priors gone by</label><select id="px-fade"><option value="">Auto (tuner picks \u2014 now week ' + cur + ')</option>';
+  PX_FADES.forEach(function(E){ h += '<option value="' + E + '"' + (lk === E ? ' selected' : '') + '>Week ' + E + ' (locked)</option>'; });
+  h += '</select></div>';
+  if(!PX._fcShow){ return h + '<button class="btn btn-sm btn-ghost" id="px-fadecmp" style="margin-top:8px">Compare every week on my games</button><div class="pem-autonote">Locking a week keeps it for every past and future week in the record, so the record vs Vegas shows exactly what that choice would have done. The other settings re-tune around it.</div></div>'; }
+  var R = null; try{ R = pxFadeCompare(); }catch(e){}
+  if(R && R[0].n){
+    var best = R.reduce(function(a, b){ return b.err / b.n < a.err / a.n ? b : a; }), ws = pxWeeks().filter(function(w){ return w >= 2; });
+    var cls = function(w, l){ var n = w + l; return !n ? "" : (w / n >= 0.524 ? "up" : "dn"); };
+    h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Gone by</span><span>Avg miss</span><span>ATS \u00b7 3+ edges</span></div>';
+    R.forEach(function(r){
+      h += '<div class="pem-bkrow' + (r.E === cur ? ' px-cur' : '') + '"><span>Week ' + r.E + (r.E === cur ? ' <small>in use</small>' : '') + '</span><span><b class="' + (r === best ? 'up' : '') + '">' + (r.err / r.n).toFixed(2) + '</b> <small>' + ws.map(function(w){ return r.byWk[w] !== undefined ? r.byWk[w].toFixed(1) : '\u2014'; }).join(' / ') + '</small></span>' +
+           '<span><b class="' + cls(r.w, r.l) + '">' + r.w + '-' + r.l + '</b> \u00b7 <b class="' + cls(r.sw, r.sl) + '">' + r.sw + '-' + r.sl + '</b></span></div>';
+    });
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Avg miss: points off the final margin, every game from week 2 on; the small numbers are week by week (' + ws.map(function(w){ return 'wk ' + w; }).join(' / ') + '). Each week is predicted only from the weeks before it. Weeks before the cutoff are the only ones that differ, so late cutoffs can only be judged once those weeks have been played.</div>';
+  }
+  return h + '</div>';
+}
 function pxKnobsHtml(){
   var S = pxState(), o = S.opts;
   var h = '<div class="pem-ats"><div class="pem-autotop"><b>⚙️ Model settings</b><button class="btn btn-sm btn-ghost" id="px-tune">' + (PX_T.running ? 'Tuning…' : 'Re-tune') + '</button></div>';
   h += '<div class="pem-autosub">' + (S.moved ? (S.moved.length ? 'Moved off default by cross-validation: <b>' + S.moved.map(function(k){ var kd = null; PX_KNOBS.forEach(function(z){ if(z.key === k) kd = z; }); return x(kd.label) + ' ' + kd.fmt(o[k]); }).join(' · ') + '</b>' : 'Every setting held at its default (no change beat the noise)') : 'Tunes itself once data is loaded.') + '</div>';
   PX_KNOBS.forEach(function(k){
-    h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span>' + k.fmt(o[k.key]) + '</span></div><small>' + x(k.help) + '</small></div>';
+    h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span>' + k.fmt(o[k.key]) + (pxLocks()[k.key] !== undefined ? ' \ud83d\udd12' : '') + '</span></div><small>' + x(k.help) + '</small></div>';
   });
   if(PX.live && PX.live.stN) h += '<div class="pem-autosub" style="margin-top:6px">Spread scale this week: <b>×' + PX.live.st.toFixed(2) + '</b> \u2014 from ' + PX.live.stN + ' earlier games' + (PX.live.stB ? ', where real margins ran ×' + PX.live.stB.toFixed(2) + ' of the unscaled predictions' : '') + '.</div>';
   h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (two standard errors, game by game). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
@@ -2790,6 +2841,7 @@ function pxPanelHtml(){
     h += pemAtsCardHtml();
     h += pxEvalCardHtml();
     h += pemAnglesCardHtml();
+    h += pxFadeCardHtml();
     h += pxKnobsHtml();
     h += pxSimCardHtml();
     h += pxPriorCardHtml();
@@ -2806,6 +2858,16 @@ function pxBind(){
   };
   var sy = document.getElementById("px-sync");
   if(sy) sy.onclick = function(){ PX.err = ""; pxSync(false); };            // finished weeks are kept; this week and anything missing are fetched
+  var fd = document.getElementById("px-fade");
+  if(fd) fd.onchange = function(){
+    var S = pxState(), v = this.value; S.lock = S.lock || {};
+    if(v){ S.lock.fade = +v; S.opts.fade = +v; } else delete S.lock.fade;
+    S.wf = {}; S.tuneSig = ""; PX.fits = {}; PX._ats = null; PX._fc = null; PX.sims = {};
+    pxRebuild(); peSave(); pemRepaint(); pxAutoTune();
+    toast(v ? "Priors gone by week " + v + " · re-tuning the rest" : "Back to auto · re-tuning");
+  };
+  var fc = document.getElementById("px-fadecmp");
+  if(fc) fc.onclick = function(){ this.disabled = true; this.textContent = "Comparing\u2026"; var self = this; setTimeout(function(){ PX._fcShow = true; var c = document.getElementById("px-fadecard"); if(c){ c.outerHTML = pxFadeCardHtml(); pxBind(); } }, 30); };
   var tu = document.getElementById("px-tune");
   if(tu) tu.onclick = function(){ pxState().tuneSig = ""; pxAutoTune(); pxStatus(); renderPoolEdge(); };
 }
