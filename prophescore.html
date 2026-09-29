@@ -4307,6 +4307,90 @@ function pearEdge(g, p, wk){
 }
 var PEAR_EDGE_MIN = 3;
 
+
+// ── Edge rating (1–10) and pool picks ───────────────────────────────────────
+// Chance a pick covers a FIXED line (your pool's line, or the opener), from what has
+// actually predicted covers: fitted on 2023–25 (2,098 games), checked season by season,
+// with the SP+ term from 2024's weekly SP+ checked on 2026 and vice versa.
+//   z = 0.105 × line move since that line (points toward the side, capped at 4)
+//     + 0.0085 × SP+'s edge over that line (capped at 10)
+//     + 0.038 × the play-by-play model's edge over that line, week 9 on (capped at 10)
+// Held out, picks the formula put at 58%+ covered 59%; ones near 50% covered about 52%.
+// Nothing here is a lock: the strongest picks run about 60%.
+var PX_PICK = { mv: 0.105, sp: 0.0085, pbp: 0.038, late: 9, hfa: 2.5 };
+function pxEdgeRating(chance){ return Math.max(1, Math.min(10, 1 + Math.floor((chance - 0.5) / 0.011))); }
+// PBP-only fit for this week (no SP+), cached with the live fit.
+function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0 })); return F._pbp; }
+// ref: the line you're picking against (home margin, + = home favoured); now: the market's
+// current line, same units (null if unknown). Returns the pick, its chance and the reasons.
+function pxPickSide(awayId, homeId, neutral, ref, now, week, fit){
+  if(ref === null || ref === undefined || !isFinite(ref)) return null;
+  var clip = function(v, a){ return Math.max(-a, Math.min(a, v)); }, parts = { mv: 0, sp: 0, pbp: 0 }, z = 0;
+  if(now !== null && now !== undefined && isFinite(now)){ parts.mvPts = now - ref; parts.mv = PX_PICK.mv * clip(now - ref, 4); z += parts.mv; }
+  var SPS = (typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
+  if(SPS && SPS[homeId] && SPS[awayId]){ var spm = SPS[homeId].fpi - SPS[awayId].fpi + (neutral ? 0 : PX_PICK.hfa); parts.spPts = spm - ref; parts.sp = PX_PICK.sp * clip(spm - ref, 10); z += parts.sp; }
+  if(week >= PX_PICK.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = PX_PICK.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
+  if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
+  var p = 1 / (1 + Math.exp(-Math.abs(z)));
+  return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now };
+}
+function pxPickWhy(k, homeAbbr, awayAbbr){
+  var s = [], side = function(v){ return v > 0 ? homeAbbr : awayAbbr; };
+  if(k.parts.mvPts !== undefined && Math.abs(k.parts.mvPts) >= 0.5) s.push('line moved ' + Math.abs(k.parts.mvPts).toFixed(1) + ' toward ' + side(k.parts.mvPts));
+  else if(k.parts.mvPts !== undefined) s.push('line hasn’t moved');
+  if(k.parts.spPts !== undefined && Math.abs(k.parts.spPts) >= 0.5) s.push('SP+ ' + Math.abs(k.parts.spPts).toFixed(1) + ' higher on ' + side(k.parts.spPts));
+  if(k.parts.pbpPts !== undefined && Math.abs(k.parts.pbpPts) >= 0.5) s.push('model ' + Math.abs(k.parts.pbpPts).toFixed(1) + ' higher on ' + side(k.parts.pbpPts));
+  return s.join(' · ');
+}
+// Your pool's games (imported on the hub), matched to this week's ESPN games.
+function pxPoolGames(){
+  var pool = PE.games || [], cur = PEAR.cache && (PEAR.cache.current || null), out = [];
+  var espn = (cur && cur.games) || (PEAR.week === PEAR.curWeek ? PEAR.games : null) || [];
+  pool.forEach(function(pg){
+    if(!pg || !pg.homeId || !pg.awayId || typeof pg.pool !== "number") return;
+    var g = null; espn.forEach(function(e){ if(e.home.id === String(pg.homeId) && e.away.id === String(pg.awayId)) g = e; });
+    var ref = (pg.favIsHome ? 1 : -1) * pg.pool;                       // pool line as a home margin
+    var now = g && g.vegas ? pearVegasHome(g) : null;
+    if(now === null && typeof pg.mkt === "number") now = (pg.favIsHome ? 1 : -1) * pg.mkt;
+    out.push({ pg: pg, g: g, ref: ref, now: now, neutral: g ? g.neutral : false });
+  });
+  return out;
+}
+// Edge for any ESPN game: against your pool's line if it's a pool game, else the opener.
+function pxGameEdge(g){
+  if(!g || !g.home || !g.away) return null;
+  var week = (typeof g.week === "number" && g.week) || PEAR.week || (PE.meta && PE.meta.espnWeek) || 1, pool = null;
+  (PE.games || []).forEach(function(pg){ if(pg && String(pg.homeId) === g.home.id && String(pg.awayId) === g.away.id && typeof pg.pool === "number") pool = (pg.favIsHome ? 1 : -1) * pg.pool; });
+  var op = PE.opens && PE.opens[g.id], ref = pool !== null ? pool : (op ? -op.h : null);
+  var now = g.state === "pre" ? (g.vegas ? pearVegasHome(g) : null) : (pearSavedLine(g) ? -pearSavedLine(g)[0] : (g.vegas ? pearVegasHome(g) : null));
+  var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null); if(k) k.pool = pool !== null;
+  return k;
+}
+function pxPoolCardHtml(){
+  var list = pxPoolGames(); if(!list.length) return "";
+  var week = (PE.meta && PE.meta.espnWeek) || PEAR.curWeek || 1;
+  list.forEach(function(o){ o.k = pxPickSide(o.pg.awayId, o.pg.homeId, o.neutral, o.ref, o.now, week); });
+  var rated = list.filter(function(o){ return o.k && !o.k.none; }).sort(function(a, b){ return b.k.chance - a.k.chance; });
+  var n = list.length, h = '<div class="pem-ats" style="margin-bottom:12px"><div class="pem-autotop"><b>🎯 Your pool — week ' + week + '</b>' + (PEAR.loading ? '<span style="font-size:12px;opacity:.7">updating lines…</span>' : '') + '</div>';
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Conf · pick</span><span>Chance</span><span>Edge</span></div>';
+  rated.forEach(function(o, i){
+    var k = o.k, pg = o.pg, home = String(pg.homeId), away = String(pg.awayId);
+    var team = k.pickHome ? home : away, line = k.pickHome ? -o.ref : o.ref;
+    var tot = '';
+    if(o.g && o.g.vegasOU != null && PX.active && week >= 2 && week <= 8){
+      var q = pearProject(away, home, o.neutral, null, o.g); if(q && Math.abs(q.total - o.g.vegasOU) >= 1) tot = ' · O/U lean <b>' + (q.total > o.g.vegasOU ? 'Over' : 'Under') + ' ' + o.g.vegasOU + '</b> (model ' + q.total.toFixed(1) + ')';
+    }
+    h += '<div class="pem-bkrow" style="align-items:flex-start"><span><b style="display:inline-block;min-width:22px">' + (n - i) + '</b> ' + x(pearName(team)) + ' ' + pearSpreadTxt(line) +
+         '<br><small style="opacity:.75">' + x(pxPickWhy(k, pearAbbr(home), pearAbbr(away))) + (o.now !== null ? ' · market ' + x(pearLineTxt(away, home, o.now)) : '') + tot + '</small></span>' +
+         '<b>' + Math.round(k.chance * 100) + '%</b><b class="' + (k.rating >= 7 ? 'up' : '') + '">' + k.rating + '/10</b></div>';
+  });
+  list.filter(function(o){ return !o.k || o.k.none; }).forEach(function(o){
+    h += '<div class="pem-bkrow"><span><b style="display:inline-block;min-width:22px">–</b> ' + x(o.pg.fav || '') + ' vs ' + x(o.pg.dog || '') + '<br><small style="opacity:.75">no signal yet (line unchanged, no SP+ sheet for this week)</small></span><span>50%</span><span>—</span></div>';
+  });
+  h += '</div><div class="pem-autonote" style="margin-top:4px">Confidence points in order of chance to cover <b>your pool’s line</b>. The chance comes from how often picks like it covered on 2023–25 history (checked on seasons it wasn’t fitted to): the line moving since your pool set its line counts most, then SP+, then from week 9 the play-by-play model. <b>Nothing is a lock</b> — the strongest picks have covered about 60%. Edge rating: 1 is a coin flip, 10 is 60%+. Lines refresh from ESPN when this page loads; check again close to lock.</div>';
+  return h + '</div>';
+}
+
 // ── Games list ───────────────────────────────────────────────────────────────
 function pearGamesHtml(){
   if(!PEAR.games && !PEAR.loading && !PEAR.err){
@@ -4334,6 +4418,7 @@ function pearGamesHtml(){
        '<button class="' + (PEAR.filter === "close" ? "on" : "") + '" data-pear-filter="close">Best games</button>' +
        '<button class="' + (PEAR.filter === "edge" ? "on" : "") + '" data-pear-filter="edge">Best edge</button></div>' +
        '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>';
+  if(PEAR.week === PEAR.curWeek || !PEAR.week){ try{ h += pxPoolCardHtml(); }catch(e){} }
   if(PEAR.loading) return h + '<div class="pr-empty">Loading week ' + (PEAR.week||"") + '…</div></div>';
   if(PEAR.err) return h + '<div class="pr-empty">' + x(PEAR.err) + ' <button class="pr-link" data-pear-week="' + (PEAR.week||"") + '">Retry</button></div></div>';
   var pastFit = pearFitFor(PEAR.week);          // object: pre-game fit · false: week 1 · null: live
@@ -4344,14 +4429,14 @@ function pearGamesHtml(){
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
-    list = list.filter(function(o){ return o.e && pearFbsGame(o.g) && o.e.edge >= PEAR_EDGE_MIN; });
-    var byCal = list.some(function(o){ return o.e.cal; });
-    list.sort(function(a, b){ var pa = a.e.cal ? a.e.cal.prob : 0.5, pb = b.e.cal ? b.e.cal.prob : 0.5;
-      return byCal && Math.abs(pb - pa) > 0.001 ? pb - pa : Math.min(b.e.edge, 7) - Math.min(a.e.edge, 7); });
+    list.forEach(function(o){ o.k = pxGameEdge(o.g); });
+    list = list.filter(function(o){ return o.k && !o.k.none && pearFbsGame(o.g); });
+    list.sort(function(a, b){ return b.k.chance - a.k.chance; });
+    var byCal = false;
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
     var wk = { w: 0, l: 0, p: 0 };
     list.forEach(function(o){ if(o.e.res === "win") wk.w++; else if(o.e.res === "loss") wk.l++; else if(o.e.res === "push") wk.p++; });
-    h += '<div class="pr-edgenote">' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
+    h += '<div class="pr-edgenote">Every game rated 1\u201310 on its chance to cover <b>the opening line</b> (your pool\u2019s line for pool games): the line\u2019s move since then counts most, then SP+, then from week 9 the play-by-play model. 10 is 60%+, not a lock. ' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
          (hr && (hr.sw + hr.sl) ? ' The model\u2019s record on 3+ edges so far: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') +
                                   ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
@@ -4376,7 +4461,7 @@ function pearGamesHtml(){
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
-         (PEAR.filter === "edge" && o.e ? '<span class="pr-edgepill">EDGE ' + o.e.edge.toFixed(1) + (o.e.cal ? ' \u00b7 ' + Math.round(o.e.cal.prob * 100) + '%' : '') + '</span>'
+         (PEAR.filter === "edge" && o.k ? '<span class="pr-edgepill">EDGE ' + o.k.rating + '/10 \u00b7 ' + Math.round(o.k.chance * 100) + '%</span>'
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -4390,12 +4475,11 @@ function pearGamesHtml(){
     });
     h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
          '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) + pearOpenTxt(g, p) : '')) + '</span></div>';
-    if(PEAR.filter === "edge" && o.e){
-      var ce = o.e.cal, pk = ce ? ce : o.e, rs = ce ? ce.res : o.e.res;
-      h += '<div class="pr-take"><span>Model takes <b>' + x(pk.txt) + '</b>' +
-           (ce ? '<small> \u00b7 picks like this: ' + Math.round(ce.prob * 100) + '%</small>' : '') + '</span>' +
-           (rs ? '<span class="pr-res ' + rs + '">' + (rs === "win" ? "\u2713 Covered" : rs === "loss" ? "\u2717 Missed" : "Push") + '</span>'
-               : '<span>' + o.e.edge.toFixed(1) + ' pts of value</span>') + '</div>';
+    if(PEAR.filter === "edge" && o.k){
+      var K = o.k, pt = K.pickHome ? g.home.id : g.away.id, pl = K.pickHome ? -K.ref : K.ref, rs = null;
+      if(g.state === "post" && g.home.score !== null && g.away.score !== null){ var cv = (g.home.score - g.away.score) - K.ref; rs = cv === 0 ? "push" : ((cv > 0) === K.pickHome ? "win" : "loss"); }
+      h += '<div class="pr-take"><span>Takes <b>' + x(pearName(pt) + ' ' + pearSpreadTxt(pl)) + '</b><small> \u00b7 ' + x(pxPickWhy(K, pearAbbr(g.home.id), pearAbbr(g.away.id))) + '</small></span>' +
+           (rs ? '<span class="pr-res ' + rs + '">' + (rs === "win" ? "\u2713 Covered" : rs === "loss" ? "\u2717 Missed" : "Push") + '</span>' : '<span>' + Math.round(K.chance * 100) + '%</span>') + '</div>';
     }
     h += '</button>';
   });
@@ -5029,8 +5113,11 @@ function pearCardHtml(){
   if(g && (_vt || _vou != null)) h += '<div class="pc-vegas">Vegas: ' + x(_vt || "\u2014") + (_vou != null ? ' \u00b7 O/U ' + _vou : '') + (cFit ? ' \u00b7 pre-game projection' : '') + '</div>';
   if(g && p && !c.neutral === !g.neutral){
     var ce = pearEdge(g, p, c.week);
-    if(ce && ce.edge >= 0.5) h += '<div class="pc-edge' + (ce.edge >= PEAR_EDGE_MIN ? " big" : "") + '">Edge ' + ce.edge.toFixed(1) + ' pts \u2192 ' + x(ce.txt) + '</div>';
-    if(ce && ce.cal) h += '<div class="pc-kv pc-drv">Picks like this have covered ' + Math.round(ce.cal.prob * 100) + '% (' + (Math.abs(p.margin - pearVegasHome(g)) ? (Math.abs(pearVegasHome(g)) >= 14.5 ? 'spread 14.5+' : 'spread under 14.5') + ', model higher on the ' + (((p.margin - pearVegasHome(g)) * (pearVegasHome(g) >= 0 ? 1 : -1)) > 0 ? 'favorite' : 'dog') : '') + ')</div>';
+    var KR = pxGameEdge(g);
+    if(KR && !KR.none){ var kt = KR.pickHome ? g.home.id : g.away.id, kl = KR.pickHome ? -KR.ref : KR.ref;
+      h += '<div class="pc-edge' + (KR.rating >= 7 ? " big" : "") + '">Edge ' + KR.rating + '/10 \u2192 ' + x(pearName(kt) + ' ' + pearSpreadTxt(kl)) + ' \u00b7 ' + Math.round(KR.chance * 100) + '% to cover</div>' +
+           '<div class="pc-kv pc-drv">' + x(pxPickWhy(KR, pearAbbr(g.home.id), pearAbbr(g.away.id))) + ' \u00b7 vs ' + (KR.pool ? 'your pool\u2019s line' : 'the opening line') + '</div>'; }
+    // (the old 'picks like this' rate is replaced by the edge rating above)
     var _vtot = g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g) || [])[1] != null ? pearSavedLine(g)[1] : null);
     if(_vtot != null && isFinite(_vtot) && Math.abs(p.total - _vtot) >= 0.5){ var te = Math.abs(p.total - _vtot);
       h += '<div class="pc-edge' + (te >= PEAR_EDGE_MIN ? " big" : "") + '">Total edge ' + te.toFixed(1) + ' pts \u2192 ' + (p.total > _vtot ? 'Over ' : 'Under ') + _vtot + '</div>'; }
