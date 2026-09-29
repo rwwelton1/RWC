@@ -1730,9 +1730,9 @@ function pemRanks(){
 // Graded out of sample against the closing line, week by week.
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 200, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 1 };
+var PX_DEFAULTS = { alpha: 50, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1.5, stretch: 1 };
 var PX_KNOBS = [
-  { key: "alpha", label: "Opponent-adjustment shrink", min: 25, max: 1600, step: 25, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
+  { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
   { key: "half", label: "Time decay (half-life)", min: 1, max: 20, step: 1, fmt: function(v){ return v >= 20 ? "none" : v + " wk"; }, lo: "recent only", hi: "all games equal",
     help: "A game this many weeks old counts half as much as this week's. Lets teams change through the season (injuries, QB changes, development)." },
@@ -1742,12 +1742,12 @@ var PX_KNOBS = [
     help: "Points added to the home side after the simulation. Neutral sites get none." },
   { key: "lev", label: "Leverage weighting", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "every play equal", hi: "full leverage",
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
-  { key: "tier", label: "Tier anchoring", min: 0, max: 1.5, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
-    help: "Small samples get shrunk. 0% shrinks every team toward the league average (which flattens elite teams); 100% shrinks each team toward what its roster prior says it should be, so an elite team stays elite until its plays say otherwise." },
+  { key: "tier", label: "Tier anchoring", min: 0, max: 2, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
+    help: "Small samples get shrunk. 0% shrinks every team toward the league average (which flattens elite teams); 100% shrinks each team toward what its roster prior says it should be, so an elite team stays elite until its plays say otherwise. Above 100% makes up for the prior being a noisy guess, which always understates the gap between tiers." },
   { key: "stretch", label: "Spread stretch", min: 1, max: 2, step: 0.05, fmt: function(v){ return "×" + v.toFixed(2); }, lo: "as fitted", hi: "wider spreads",
     help: "Widens every projected margin around the game's projected total. Only moves off ×1.00 when honest week-by-week predictions show the fitted spreads are systematically too tight." }
 ];
-var PX_GRID = { alpha: [50, 100, 200, 400, 800, 1600], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0, 0.5, 1, 1.5], stretch: [1, 1.1, 1.2, 1.35, 1.5, 1.75] };
+var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [1, 1.1, 1.2, 1.35, 1.5, 1.75] };
 function pxState(){
   PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
   for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
@@ -2269,7 +2269,8 @@ function pxFit(upto, o){
   // offense / defense ratings across teams, then the real fit centred there.
   function tiered(get, a){
     if(!tw) return pxRidge(rows, get, a);
-    var f0 = pxRidge(rows, get, a / 4), w = {};
+    // Slope from nearly unshrunk estimates: noise in them doesn't bias it, shrinkage would.
+    var f0 = pxRidge(rows, get, Math.min(2, a)), w = {};
     rows.forEach(function(r){ var v = get(r); if(v && v[0]){ var n = v[0] * r.dec; w["o" + r.o] = (w["o" + r.o] || 0) + n; w["d" + r.d] = (w["d" + r.d] || 0) + n; } });
     var xo = 0, xxo = 0, xd = 0, xxd = 0;
     Object.keys(PT).forEach(function(id){ var p = PT[id];
@@ -2277,7 +2278,10 @@ function pxFit(upto, o){
       if(f0.D[id] !== undefined && w["d" + id]){ xd += w["d" + id] * f0.D[id] * p.def; xxd += w["d" + id] * p.def * p.def; } });
     var bO = xxo ? Math.max(0, xo / xxo) : 0, bD = xxd ? Math.max(0, xd / xxd) : 0, C = { O: {}, D: {} };
     Object.keys(PT).forEach(function(id){ C.O[id] = tw * bO * PT[id].off; C.D[id] = tw * bD * PT[id].def; });
-    var f = pxRidge(rows, get, a, C); f.bO = bO; f.bD = bD; return f;
+    var f = pxRidge(rows, get, a, C); f.bO = bO; f.bD = bD;
+    // A team with no FBS plays yet (an FCS opener, a bye) starts at its tier, not at league average.
+    Object.keys(C.O).forEach(function(id){ if(f.O[id] === undefined) f.O[id] = C.O[id]; if(f.D[id] === undefined) f.D[id] = C.D[id]; });
+    return f;
   }
   var v3 = function(get){ return function(r){ return r.v >= 3 ? get(r) : null; }; };
   var F = {
@@ -2406,7 +2410,7 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v2|" + n + "|" + (S.prior ? S.prior.n : 0); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v3|" + n + "|" + (S.prior ? S.prior.n : 0); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 function pxTune(weeksUpTo, done){
@@ -2441,7 +2445,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length; }
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m3"; }          // m3: model version, forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
