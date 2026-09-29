@@ -2384,7 +2384,7 @@ function pxFit(upto, o){
   fit.teams = pxTeamIds(fit);
   PX.fits[key] = fit;
   var sc = o.stretch > 0 ? { st: o.stretch, n: 0, b: null } : pxAutoStretch(upto, o);
-  fit.st = sc.st; fit.stN = sc.n; fit.stB = sc.b;
+  fit.st = sc.st; fit.stN = sc.n; fit.stB = sc.b; fit.stSE = sc.se; fit.stV = sc.vb;
   return fit;
 }
 // Recalibration. Every game before \`upto\` was predicted honestly (by the fit of
@@ -2393,20 +2393,35 @@ function pxFit(upto, o){
 // above 1, the model has been too tight. That slope, trusted more as the games
 // pile up, stretches this week's spreads.
 function pxAutoStretch(upto, o){
-  var xs = [], ys = [], ws = [];
+  var xs = [], ys = [], ws = [], vx = [], vy = [], vw = [];
   pxWeeks().forEach(function(w){
     if(w >= upto) return;
     var f = pxFit(w, o), rw = Math.pow(0.5, (upto - 1 - w) / 1.5);      // recent weeks count more: the model's scale changes as plays replace the prior
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
       var A = pxDriveParams(f, x.g.a, x.g.h), H = pxDriveParams(f, x.g.h, x.g.a);
-      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa)); ws.push(rw); });
+      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa)); ws.push(rw);
+      // Reference only, never used: how wide the closing lines ran against the same predictions.
+      var L = x.W.lines[x.g.id]; if(L && isFinite(L.c)){ vx.push(H.E - A.E); vy.push(-L.c - (x.g.n ? 0 : o.hfa)); vw.push(rw); } });
   });
+  // Weighted slope of y on x, with its standard error.
+  function fitSlope(X, Y, Wt){
+    var n = X.length, W = 0, mx = 0, my = 0; for(var i = 0; i < n; i++){ W += Wt[i]; mx += Wt[i] * X[i]; my += Wt[i] * Y[i]; } mx /= W; my /= W;
+    var sxy = 0, sxx = 0; for(var j = 0; j < n; j++){ sxy += Wt[j] * (X[j] - mx) * (Y[j] - my); sxx += Wt[j] * (X[j] - mx) * (X[j] - mx); }
+    if(sxx <= 0) return null;
+    var b = sxy / sxx, a = my - b * mx, rr = 0, v = 0;
+    for(var k = 0; k < n; k++){ var e = Y[k] - a - b * X[k]; rr += Wt[k] * e * e; }
+    var s2 = rr / W;                                       // weighted residual variance
+    for(var q = 0; q < n; q++) v += Wt[q] * Wt[q] * (X[q] - mx) * (X[q] - mx);
+    return { b: b, se: Math.sqrt(s2 * v) / sxx };
+  }
   var n = xs.length; if(n < 20) return { st: 1, n: n, b: null };
-  var W = 0, W2 = 0, mx = 0, my = 0; for(var i = 0; i < n; i++){ W += ws[i]; W2 += ws[i] * ws[i]; mx += ws[i] * xs[i]; my += ws[i] * ys[i]; } mx /= W; my /= W;
-  var sxy = 0, sxx = 0; for(var j = 0; j < n; j++){ sxy += ws[j] * (xs[j] - mx) * (ys[j] - my); sxx += ws[j] * (xs[j] - mx) * (xs[j] - mx); }
-  if(sxx <= 0) return { st: 1, n: n, b: null };
-  var nEff = W * W / W2, b = sxy / sxx, trust = nEff / (nEff + 40), st = 1 + (b - 1) * trust;
-  return { st: Math.max(0.85, Math.min(2.2, st)), n: n, b: b };
+  var R = fitSlope(xs, ys, ws); if(!R) return { st: 1, n: n, b: null };
+  var V = vx.length >= 20 ? fitSlope(vx, vy, vw) : null;
+  // Results are the only judge. How far to move toward what they say depends on
+  // how precisely they say it: a slope known to ±0.12 is applied almost in full,
+  // one known to ±0.4 (a single early week) only partly. Prior belief: ×1.00 ± 0.30.
+  var tau2 = 0.09, trust = tau2 / (tau2 + R.se * R.se), st = 1 + (R.b - 1) * trust;
+  return { st: Math.max(0.85, Math.min(2.2, st)), n: n, b: R.b, se: R.se, vb: V ? V.b : null };
 }
 function pxTeamIds(fit){ var ids = {}; ["rush", "pass", "succ", "hav", "fin"].forEach(function(k){ for(var a in fit.F[k].O) ids[a] = 1; for(var b in fit.F[k].D) ids[b] = 1; }); for(var p in fit.prior) ids[p] = 1; return Object.keys(ids); }
 // Expected drives, scoring-opportunity rate and points per opportunity for
@@ -2544,7 +2559,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m7|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m8|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2812,7 +2827,10 @@ function pxKnobsHtml(){
   PX_KNOBS.forEach(function(k){
     h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span>' + k.fmt(o[k.key]) + (pxLocks()[k.key] !== undefined ? ' \ud83d\udd12' : '') + '</span></div><small>' + x(k.help) + '</small></div>';
   });
-  if(PX.live && PX.live.stN) h += '<div class="pem-autosub" style="margin-top:6px">Spread scale this week: <b>×' + PX.live.st.toFixed(2) + '</b> \u2014 from ' + PX.live.stN + ' earlier games' + (PX.live.stB ? ', where real margins ran ×' + PX.live.stB.toFixed(2) + ' of the unscaled predictions' : '') + '.</div>';
+  if(PX.live && PX.live.stN){ var LV = PX.live;
+    h += '<div class="pem-autosub" style="margin-top:6px">Spread scale this week: <b>×' + LV.st.toFixed(2) + '</b>' +
+         (LV.stB ? ' \u2014 results say <b>×' + LV.stB.toFixed(2) + (LV.stSE ? ' \u00b1 ' + LV.stSE.toFixed(2) : '') + '</b> from ' + LV.stN + ' earlier games (recent weeks count most)' : ' \u2014 not enough games yet') +
+         (LV.stV ? '. Closing lines imply \u00d7' + LV.stV.toFixed(2) + ' <small>(reference only, not used)</small>' : '') + '.</div>'; }
   h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (two standard errors, game by game). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
   return h + '</div>';
 }
