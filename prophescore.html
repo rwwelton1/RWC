@@ -1732,7 +1732,7 @@ function pemRanks(){
 // Graded out of sample against the closing line, week by week.
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 4, sp: 0.5 };
+var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 4, sp: 0.5, sit: 1 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1746,6 +1746,8 @@ var PX_KNOBS = [
     help: "Share of each projection taken from the SP+ sheet you pasted for that week (its offense and defense ratings, as points against each other). Only sheets saved for that week or earlier are used, so graded weeks stay honest. Teams missing from the sheet use the play-by-play model alone. The tuner tries 0\u2013100% against your results." },
   { key: "hfa", label: "Home field", min: 0, max: 6, step: 0.25, fmt: function(v){ return v.toFixed(2) + " pts"; }, lo: "none", hi: "6 pts",
     help: "Points added to the home side after the simulation. Neutral sites get none." },
+  { key: "sit", label: "Situational spots", min: 0, max: 1.5, step: 0.25, fmt: function(v){ return v ? Math.round(v * 100) + "%" : "off"; }, lo: "off", hi: "150%",
+    help: "Rest, travel, altitude, crowd and weather on top of home field: home off a bye vs a visitor who played last week +1.8 (and the reverse), lowland visitor at 5,000 ft+ +1.2, 88,000+ stadium +0.8, visitor travelling 1,500+ miles +0.5, visitor\u2019s 3rd straight road game +1.0. Wind over 15 mph and rain slow the pace and cut scoring (only when your CFBD key includes weather). 100% uses those sizes; the tuner tries 0\u2013150% against your results." },
   { key: "lev", label: "Leverage weighting", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "every play equal", hi: "full leverage",
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
   { key: "tier", label: "Tier anchoring", min: 0, max: 2, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
@@ -1753,7 +1755,7 @@ var PX_KNOBS = [
   { key: "stretch", label: "Spread stretch", min: 0, max: 2, step: 0.05, fmt: function(v){ return v ? "×" + v.toFixed(2) : "auto"; }, lo: "auto", hi: "wider spreads",
     help: "Auto: before each week, every earlier prediction is lined up against how the game actually ended; if the model has been too tight (or too wide), this week's spreads are scaled by exactly that much, trusted more as games pile up. A number fixes the scale by hand instead." }
 ];
-var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [0, 1, 1.25, 1.5], fade: [3, 4, 5, 7], sp: [0, 0.25, 0.5, 0.75, 1] };
+var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [0, 1, 1.25, 1.5], fade: [3, 4, 5, 7], sp: [0, 0.25, 0.5, 0.75, 1], sit: [0, 0.5, 1, 1.5] };
 function pxState(){
   PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
   for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
@@ -1802,18 +1804,22 @@ function pxTeamId(name){
 }
 function pxLoadTeams(){
   var S = pxState(), y = pxYear();
-  if(S.teams && S.teamsYear === y) return Promise.resolve();
+  if(S.teams && S.teamsYear === y && S.teamsV === 2) return Promise.resolve();
   return pxCall("/teams/fbs", { year: y }).then(function(list){
     S.teams = {}; S.names = {};
     (list || []).forEach(function(t){
       var id = String(pxG(t, "id")), school = pxG(t, "school");
       if(!id || !school) return;
       S.teams[id] = { s: school, m: pxG(t, "mascot") || "", c: pxG(t, "conference") || "" };
+      // Home stadium: where it is, how high, how big (rest/travel/altitude spots).
+      var loc = t.location || {}, lf = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; }, Lc = {};
+      [["la", "latitude"], ["lo", "longitude"], ["el", "elevation"], ["cap", "capacity"]].forEach(function(f){ var v = lf(loc[f[1]]); if(v !== null) Lc[f[0]] = v; });
+      if(Lc.la !== undefined && Lc.lo !== undefined) S.teams[id].loc = Lc;
       S.names[pemNormName(school)] = id;
       (pxG(t, "alternateNames", "alt_name_1") && Array.isArray(t.alternateNames) ? t.alternateNames : []).forEach(function(a){ S.names[pemNormName(a)] = id; });
       ["alt_name1", "alt_name2", "alt_name3", "abbreviation"].forEach(function(f){ if(t[f]) S.names[pemNormName(t[f])] = S.names[pemNormName(t[f])] || id; });
     });
-    S.teamsYear = y;
+    S.teamsYear = y; S.teamsV = 2;
   });
 }
 function pxClock(c){ if(!c) return 0; return (+(c.minutes || 0)) * 60 + (+(c.seconds || 0)); }
@@ -1941,11 +1947,38 @@ function pxPick(lines){
 }
 // Fetch (or reuse) one week: FBS-vs-FBS games, their lines, and aggregated plays.
 // Fetch (or reuse) one week: FBS-vs-FBS games, their lines, and aggregated plays.
+// Every team's game dates that week, FCS opponents included, for rest and road
+// trips: team -> [[day, 1 home / 0 away / 2 neutral]].
+function pxSchFrom(gs){
+  var sch = { _: 1 };
+  (gs || []).forEach(function(g){
+    var t = Date.parse(pxG(g, "startDate", "start_date")); if(!isFinite(t)) return;
+    var day = Math.round(t / 864e5 * 100) / 100, n = !!pxG(g, "neutralSite", "neutral_site");
+    var h = String(pxG(g, "homeId", "home_id")), a = String(pxG(g, "awayId", "away_id"));
+    (sch[h] = sch[h] || []).push([day, n ? 2 : 1]); (sch[a] = sch[a] || []).push([day, n ? 2 : 0]);
+  });
+  return sch;
+}
+// Game weather, when the CFBD key's tier includes it. One refusal switches it off for the month.
+function pxLoadWx(W){
+  var S = pxState(), mon = new Date().toISOString().slice(0, 7);
+  if(W.wx || (S.wxOff && S.wxOff.m === mon)) return Promise.resolve();
+  return pxCall("/games/weather", { year: W.y, week: W.w, seasonType: "regular" }).then(function(list){
+    var wx = { _: 1 };
+    (list || []).forEach(function(r){
+      var id = String(pxG(r, "id")), ws = parseFloat(pxG(r, "windSpeed", "wind_speed")), pr = parseFloat(pxG(r, "precipitation"));
+      var cond = String(pxG(r, "weatherCondition", "weather_condition") || "");
+      wx[id] = [isFinite(ws) ? Math.round(ws) : 0, ((isFinite(pr) && pr > 0.01) || /rain|snow|storm|shower|drizzle|sleet/i.test(cond)) ? 1 : 0, pxG(r, "gameIndoors", "game_indoors") ? 1 : 0];
+    });
+    W.wx = wx; S.wxOff = null;
+  }).catch(function(e){ if(e && e.fatal) S.wxOff = { m: mon, why: e.message }; });
+}
 function pxLoadWeek(w, force){
   var S = pxState(), y = pxYear(), key = y + "-" + w, have = S.wk[key];
   if(have && have.done && have.v === PX_AGG_V && !force) return Promise.resolve(have);
   var W = { y: y, w: w, v: PX_AGG_V, games: [], agg: {}, lg: null, lines: {}, done: false, at: Date.now() };
   return pxCall("/games", { year: y, week: w, seasonType: "regular" }).then(function(gs){
+    W.sch = pxSchFrom(gs);
     (gs || []).forEach(function(g){
       var hc = String(pxG(g, "homeClassification", "home_division") || "").toLowerCase(), ac = String(pxG(g, "awayClassification", "away_division") || "").toLowerCase();
       if(hc !== "fbs" || ac !== "fbs") return;
@@ -2144,9 +2177,12 @@ function pxSync(force){
     weeks.forEach(function(w){
       chain = chain.then(function(){
         var key = pxYear() + "-" + w, have = S.wk[key];
-        if(have && have.done && have.v === PX_AGG_V && !force) return;
+        // Weeks saved before the schedule and weather were kept: one light /games call fills the schedule in.
+        function extras(){ var W = S.wk[key]; if(!W) return; return (W.sch ? Promise.resolve() : pxCall("/games", { year: W.y, week: W.w, seasonType: "regular" }).then(function(gs){ W.sch = pxSchFrom(gs); }).catch(function(){}))
+          .then(function(){ return pxLoadWx(W); }).then(function(){ peSave(); }); }
+        if(have && have.done && have.v === PX_AGG_V && !force) return extras();
         PX.msg = "Loading week " + w + " plays…"; PX.step = "Week " + w; pxStatus();
-        return pxLoadWeek(w, force).then(function(){ peSave(); });
+        return pxLoadWeek(w, force).then(function(){ peSave(); return extras(); });
       });
     });
     return chain;
@@ -2400,7 +2436,8 @@ function pxAutoStretch(upto, o){
     var f = pxFit(w, o), rw = Math.pow(0.5, (upto - 1 - w) / 1.5);      // recent weeks count more: the model's scale changes as plays replace the prior
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
       var A = pxDriveParams(f, x.g.a, x.g.h), H = pxDriveParams(f, x.g.h, x.g.a);
-      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa)); ws.push(rw);
+      var cx = o.sit ? pxCtx(x.g) : null, sp = cx ? pxSitParts(x.g.a, x.g.h, x.g.n, cx.d, cx.id).pts * o.sit : 0;
+      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa) - sp); ws.push(rw);
       // Reference only, never used: how wide the closing lines ran against the same predictions.
       var L = x.W.lines[x.g.id]; if(L && isFinite(L.c)){ vx.push(H.E - A.E); vy.push(-L.c - (x.g.n ? 0 : o.hfa)); vw.push(rw); } });
   });
@@ -2463,11 +2500,82 @@ function pxDriveParams(fit, off, def){
   return { dr: dr, ppd: ppd, E: Eb, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
            succ: succ, hav: hav, eR: eR, eP: eP, epa: rr * eR + (1 - rr) * eP };
 }
-function pxPredict(fit, awayId, homeId, neutral){
+// ── Situational spots: rest, travel, altitude, crowd, weather ──
+// A real game's date and id (CFBD or ESPN shape), or null for a hypothetical matchup.
+function pxCtx(g){ if(!g) return null; var d = g.d || g.date; return d ? { d: d, id: String(g.id || g.eventId || "") } : null; }
+// Every stored week's schedule and weather, indexed by team and by game.
+function pxSchIndex(){
+  var sig = pxDataSig(); if(PX._sch && PX._sch.sig === sig) return PX._sch;
+  var S = pxState(), y = pxYear(), T = {}, WX = {};
+  Object.keys(S.wk).forEach(function(k){ var W = S.wk[k]; if(W.y !== y) return;
+    if(W.sch) Object.keys(W.sch).forEach(function(id){ if(id === "_" || !Array.isArray(W.sch[id])) return; W.sch[id].forEach(function(e){ if(Array.isArray(e)) (T[id] = T[id] || []).push(e); }); });
+    if(W.wx) Object.keys(W.wx).forEach(function(id){ if(id !== "_" && Array.isArray(W.wx[id])) WX[id] = W.wx[id]; }); });
+  Object.keys(T).forEach(function(id){ T[id].sort(function(a, b){ return a[0] - b[0]; }); });
+  var mx = 0, TM = S.teams || {}; Object.keys(TM).forEach(function(id){ var l = TM[id].loc; if(l && l.el > mx) mx = l.el; });
+  PX._sch = { sig: sig, t: T, wx: WX, ft: mx > 4000, cache: {} };        // elevation in feet if anything tops 4,000
+  return PX._sch;
+}
+function pxMiles(a, b){
+  var r = Math.PI / 180, dLa = (b.la - a.la) * r, dLo = (b.lo - a.lo) * r;
+  var q = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.la * r) * Math.cos(b.la * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
+  return 3959 * 2 * Math.atan2(Math.sqrt(q), Math.sqrt(1 - q));
+}
+// Points to the home side (before the Situational weight), what each came from,
+// and the weather's pace and scoring hit for both sides.
+function pxSitParts(awayId, homeId, neutral, date, gid){
+  var I = pxSchIndex(), ck = awayId + "|" + homeId + "|" + (neutral ? 1 : 0) + "|" + date + "|" + gid;
+  if(I.cache[ck]) return I.cache[ck];
+  var TM = pxState().teams || {}, LA = TM[awayId] && TM[awayId].loc, LH = TM[homeId] && TM[homeId].loc;
+  var out = { pts: 0, parts: [], tags: {}, pace: 1, eff: 0, ws: null, pr: 0 };
+  function add(lab, v, tag){ out.pts += v; out.parts.push([lab, v]); out.tags[tag] = 1; }
+  var m = function(v){ return I.ft ? v * 0.3048 : v; };
+  if(!neutral && LA && LH){
+    if(LH.el !== undefined && LA.el !== undefined && m(LH.el) >= 1500 && m(LA.el) < 900) add("altitude", 1.2, "alt");
+    if(LH.cap >= 88000) add("88k+ crowd", 0.8, "crowd");
+    var mi = pxMiles(LA, LH); out.mi = mi;
+    if(mi > 1500) add(Math.round(mi / 100) * 100 + "-mile trip", 0.5, "far");
+  }
+  var day = Date.parse(date) / 864e5;
+  if(isFinite(day)){
+    var before = function(id){ return (I.t[id] || []).filter(function(e){ return e[0] < day - 0.5; }); };
+    var bH = before(homeId), bA = before(awayId);
+    var rH = bH.length ? day - bH[bH.length - 1][0] : null, rA = bA.length ? day - bA[bA.length - 1][0] : null;
+    out.restH = rH; out.restA = rA;
+    if(rH !== null && rA !== null){
+      if(rH >= 12 && rA <= 7.5) add("off a bye", 1.8, "restH");
+      else if(rA >= 12 && rH <= 7.5) add("off a bye", -1.8, "restA");
+    }
+    // Road trip: this game plus the away games right before it (a bye ends the trip).
+    if(!neutral){
+      var run = 1, last = day;
+      for(var i = bA.length - 1; i >= 0; i--){ var e = bA[i]; if(last - e[0] > 10 || e[1] === 1) break; run++; last = e[0]; }
+      out.road = run;
+      if(run >= 3) add((run === 3 ? "3rd" : run + "th") + " straight road game", 1.0, "road3");
+    }
+  }
+  var W = gid && I.wx[gid];
+  if(W && !W[2]){
+    out.ws = W[0]; out.pr = W[1];
+    if(W[0] > 15){ out.pace -= (W[0] - 15) * 0.008; out.eff -= (W[0] - 15) * 0.04; }
+    if(W[1]){ out.pace -= 0.03; out.eff -= 0.15; }
+    out.pace = Math.max(0.85, out.pace);
+    if(out.pace < 1) out.tags.wx = 1;
+  }
+  I.cache[ck] = out;
+  return out;
+}
+function pxPredict(fit, awayId, homeId, neutral, ctx){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
   var st = fit.st || 1, mid = (A.E + H.E) / 2, half = (H.E - A.E) / 2 * st;
   var eA = Math.max(3, mid - half), eH = Math.max(3, mid + half);                 // points before home field, spread stretched
-  return { away: eA - hf, home: eH + hf, A: A, H: H, eA: eA, eH: eH };
+  // A real game's spot: weather slows both sides, rest / travel / altitude / crowd tilt it.
+  var sw = fit.o.sit || 0, sit = null;
+  if(ctx && sw){
+    sit = pxSitParts(awayId, homeId, neutral, ctx.d, ctx.id);
+    var pace = 1 + (sit.pace - 1) * sw, eff = sit.eff * sw;
+    eA = Math.max(0, eA * pace + eff - sit.pts * sw / 2); eH = Math.max(0, eH * pace + eff + sit.pts * sw / 2);
+  }
+  return { away: eA - hf, home: eH + hf, A: A, H: H, eA: eA, eH: eH, sit: sit, sitW: sw };
 }
 // Game simulation. Each side's drive outcomes (touchdown, field goal, nothing)
 // come from simulating thousands of drives play by play with that side's
@@ -2475,11 +2583,11 @@ function pxPredict(fit, awayId, homeId, neutral){
 // distribution shifted by the two teams' field-position ratings. The outcome
 // rates are then scaled so their mean matches the projection (which also
 // carries the roster prior), and 10,000 games are played drive by drive.
-function pxSimulate(fit, awayId, homeId, neutral, n){
+function pxSimulate(fit, awayId, homeId, neutral, n, ctx){
   n = n || 10000;
-  var sk = fit.upto + "|" + awayId + "|" + homeId + "|" + (neutral ? 1 : 0) + "|" + JSON.stringify(fit.o) + "|" + pxDataSig();
+  var sk = fit.upto + "|" + awayId + "|" + homeId + "|" + (neutral ? 1 : 0) + "|" + JSON.stringify(fit.o) + "|" + pxDataSig() + (ctx ? "|" + ctx.d + ctx.id : "");
   if(PX.sims[sk]) return PX.sims[sk];
-  var P = pxPredict(fit, awayId, homeId, neutral), hf = neutral ? 0 : fit.o.hfa / 2, L = fit.L;
+  var P = pxPredict(fit, awayId, homeId, neutral, ctx), hf = neutral ? 0 : fit.o.hfa / 2, L = fit.L;
   var seed = 7; String(awayId + "|" + homeId).split("").forEach(function(ch){ seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; });
   function outcomes(D, sd, E){
     var o = pxDriveOutcomes(D, L, 6000, sd), target = E / D.dr, f = o.ppd > 0 ? target / o.ppd : 1;
@@ -2523,12 +2631,12 @@ function pxCVErr(o, weeksUpTo){
     if(w < 2 || (weeksUpTo && w >= weeksUpTo)) return;
     var fit = pxFit(w, o);
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
-      var p = pxPredict(fit, x.g.a, x.g.h, x.g.n); em[x.g.id] = Math.abs((p.home - p.away) - (x.g.hs - x.g.as)); });
+      var p = pxPredict(fit, x.g.a, x.g.h, x.g.n, pxCtx(x.g)); em[x.g.id] = Math.abs((p.home - p.away) - (x.g.hs - x.g.as)); });
   });
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v8|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v9|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -2566,7 +2674,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m9|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m10|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2589,13 +2697,14 @@ function pxAts(){
     var fit = pxFit(w, ow), W = { wk: w, w:0, l:0, p:0, sw:0, sl:0, su:0, suN:0, err:0, n:0, ow:0, ol:0, own: !!pxOptsForWeek(w), sheet: fit.pw > 0 }, any = false;
     r.byWeek.push(W);
     list.forEach(function(x){
-      var g = x.g, p = pxPredict(fit, g.a, g.h, g.n), pred = p.home - p.away, act = g.hs - g.as, pt = p.home + p.away, at = g.hs + g.as;
+      var g = x.g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), pred = p.home - p.away, act = g.hs - g.as, pt = p.home + p.away, at = g.hs + g.as;
       W.err += Math.abs(pred - act); W.n++; sd.push(act - pred);
       var L = x.W.lines[g.id]; if(!L || !isFinite(L.c)){ r.noLine++; return; }
       var vHome = -L.c; r.lined++; any = true; r.cal.push([pred, act, vHome]);
       var E = r.err; E.sN++; E.sM += Math.abs(pred - act); E.sM2 += (pred - act) * (pred - act); E.sV += Math.abs(vHome - act); E.sV2 += (vHome - act) * (vHome - act);
       var G = { id: g.id, g: { eventId: g.id, awayId: g.a, homeId: g.h, week: w, neutral: g.n, as: g.as, hs: g.hs, date: g.d || null }, w: w, pred: pred, vh: vHome, act: act, res: null,
-                pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null };
+                pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null, sit: p.sit };
+      if(p.sit){ var p0 = pxPredict(fit, g.a, g.h, g.n); G.pns = p0.home - p0.away; G.tns = p0.home + p0.away; }     // the same pick without the spot
       r.games.push(G);
       // Closing line value: did the line move from the opener toward the model?
       var C = r.clv;
@@ -2809,7 +2918,7 @@ function pxFadeCompare(){
       if(w < 2) return;
       var o = Object.assign({}, pxOptsForWeek(w) || S.opts, { fade: E }), fit = pxFit(w, o), e = 0, k = 0;
       pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
-        var p = pxPredict(fit, x.g.a, x.g.h, x.g.n), pred = p.home - p.away, act = x.g.hs - x.g.as;
+        var p = pxPredict(fit, x.g.a, x.g.h, x.g.n, pxCtx(x.g)), pred = p.home - p.away, act = x.g.hs - x.g.as;
         r.err += Math.abs(pred - act); r.n++; e += Math.abs(pred - act); k++;
         var L = x.W.lines[x.g.id]; if(!L || !isFinite(L.c)) return;
         var vh = -L.c, c = act - vh; if(Math.abs(pred - vh) < 0.05 || c === 0) return;
@@ -2982,25 +3091,46 @@ function pemEtHour(iso){
 var PEM_ANGLES = [
   { k: "trip",  lab: "Road team crossed 2+ time zones" },
   { k: "early", lab: "Road team, body-clock kickoff before 10 AM" },
-  { k: "late",  lab: "Road team, body-clock kickoff 10 PM or later" }
+  { k: "late",  lab: "Road team, body-clock kickoff 10 PM or later" },
+  { k: "far",   lab: "Road team travelled 1,500+ miles" },
+  { k: "alt",   lab: "Lowland road team at 5,000 ft+" },
+  { k: "crowd", lab: "Road team in an 88,000+ stadium" },
+  { k: "road3", lab: "Road team\u2019s 3rd+ straight road game" },
+  { k: "restH", lab: "Home off a bye, road team played last week" },
+  { k: "restA", lab: "Road team off a bye, home played last week" }
 ];
 function pemAngles(){
   var r = null; try{ r = pemAts(); }catch(e){}
   if(!r || !r.games) return null;
-  var key = r.games.length + "|" + (r.w + r.l);
+  var key = r.games.length + "|" + (r.w + r.l) + "|" + pxDataSig() + "|" + pxOpts().sit;
   if(PEM._ang && PEM._ang.key === key) return PEM._ang.v;
   var out = {}; PEM_ANGLES.forEach(function(a){ out[a.k] = { lab: a.lab, n: 0, sw: 0, sl: 0, sp: 0, mw: 0, ml: 0, mp: 0 }; });
+  // The honest check: every graded game with a spot, picked with it and without it.
+  var cmp = { n: 0, w: 0, l: 0, w0: 0, l0: 0, e: 0, e0: 0, flip: 0, wx: { n: 0, un: 0, ov: 0, w: 0, l: 0, w0: 0, l0: 0 } };
+  function ats(pred, q){ if(Math.abs(pred - q.vh) < 0.05) return 0; var c = q.act - q.vh; if(!c) return 0; return ((c > 0) === (pred > q.vh)) ? 1 : -1; }
+  function ou(t, q){ if(q.vt === null || Math.abs(t - q.vt) < 0.05) return 0; var c = q.at - q.vt; if(!c) return 0; return ((c > 0) === (t > q.vt)) ? 1 : -1; }
   r.games.forEach(function(q){
     if(q.vh === null) return;
     var g = q.g, d = g.date, tags = {};
-    // Only true road games: a neutral site has no home time zone to measure from.
+    var S0 = d ? pxSitParts(g.awayId, g.homeId, g.neutral, d, String(g.eventId)) : null;
+    if(S0) for(var t0 in S0.tags) if(t0 !== "wx") tags[t0] = 1;
+    if(q.pns !== undefined && (S0 && S0.parts.length)){
+      var a1 = ats(q.pred, q), a0 = ats(q.pns, q); cmp.n++;
+      if(a1 > 0) cmp.w++; else if(a1 < 0) cmp.l++; if(a0 > 0) cmp.w0++; else if(a0 < 0) cmp.l0++;
+      cmp.e += Math.abs(q.pred - q.act); cmp.e0 += Math.abs(q.pns - q.act);
+      if((q.pred > q.vh) !== (q.pns > q.vh)) cmp.flip++;
+    }
+    if(S0 && S0.tags.wx && q.vt !== null){ var X = cmp.wx; X.n++; if(q.at < q.vt) X.un++; else if(q.at > q.vt) X.ov++;
+      var o1 = ou(q.pt, q), o0 = q.tns !== undefined ? ou(q.tns, q) : o1; if(o1 > 0) X.w++; else if(o1 < 0) X.l++; if(o0 > 0) X.w0++; else if(o0 < 0) X.l0++; }
+    // Time zones only for true road games: a neutral site has no home time zone to measure from.
     var tzA = PEM_TZ[g.awayId], tzH = PEM_TZ[g.homeId];
-    if(g.neutral || typeof tzA !== "number" || typeof tzH !== "number") return;
-    if(Math.abs(tzA - tzH) >= 2) tags.trip = 1;
-    if(d && tzA !== tzH){
-      var et = pemEtHour(d), body = et === null ? null : et + tzA;     // kickoff on the road team's own clock
-      if(body !== null && tzA < tzH && body < 10) tags.early = 1;
-      if(body !== null && tzA > tzH && body >= 22) tags.late = 1;
+    if(!g.neutral && typeof tzA === "number" && typeof tzH === "number"){
+      if(Math.abs(tzA - tzH) >= 2) tags.trip = 1;
+      if(d && tzA !== tzH){
+        var et = pemEtHour(d), body = et === null ? null : et + tzA;     // kickoff on the road team's own clock
+        if(body !== null && tzA < tzH && body < 10) tags.early = 1;
+        if(body !== null && tzA > tzH && body >= 22) tags.late = 1;
+      }
     }
     Object.keys(tags).forEach(function(k){
       var A = out[k]; A.n++;
@@ -3009,12 +3139,13 @@ function pemAngles(){
       if(q.res === "W") A.mw++; else if(q.res === "L") A.ml++; else if(q.res === "P") A.mp++;
     });
   });
+  out._cmp = cmp;
   PEM._ang = { key: key, v: out };
   return out;
 }
 function pemAnglesCardHtml(){
   var A = pemAngles();
-  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🧭 Travel &amp; time zones</b></div>';
+  var h = '<div class="pem-ats"><div class="pem-autotop"><b>🧭 Travel, rest &amp; altitude</b></div>';
   if(!A) return h + '<div class="pem-autosub">Needs graded games with closing lines.</div></div>';
   var cls = function(w, l){ var n = w + l; if(n < 15) return "few"; return w / n >= 0.524 ? "up" : (w / n <= 0.476 ? "dn" : ""); };
   function rec(w, l, p){ var n = w + l; return w + '-' + l + (p ? '-' + p : '') + (n ? ' <small>' + Math.round(100 * w / n) + '%</small>' : ''); }
@@ -3026,7 +3157,17 @@ function pemAnglesCardHtml(){
          '<b class="' + cls(x2.mw, x2.ml) + '">' + rec(x2.mw, x2.ml, x2.mp) + '</b></div>';
   });
   h += '</div>';
-  h += '<div class="pem-autonote">“Road team ATS” is the travelling team against the closing line: below 50% means the market hasn’t been pricing the trip enough. “Model ATS” is the model’s own honest picks in those games. Uses each team’s home time zone; body-clock kickoff is the kickoff on the road team’s own clock (a noon Eastern start is 9 AM for a Pacific team). Greyed rows have under 15 games \u2014 a lead to watch, not a system.</div>';
+  var C = A._cmp, sw = pxOpts().sit;
+  if(C && C.n){
+    var pc = function(w, l){ return (w + l) ? ' <small>' + (100 * w / (w + l)).toFixed(1) + '%</small>' : ''; };
+    h += '<div class="pem-hd" style="margin-top:10px">Do the spot adjustments help?</div>';
+    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Picks</span><span>Miss</span><span>ATS</span></div>' +
+         '<div class="pem-bkrow"><span>With spots (' + Math.round(sw * 100) + '%)</span><span>' + (C.e / C.n).toFixed(2) + ' <small>pts</small></span><b class="' + cls(C.w, C.l) + '">' + C.w + '-' + C.l + pc(C.w, C.l) + '</b></div>' +
+         '<div class="pem-bkrow"><span>Without</span><span>' + (C.e0 / C.n).toFixed(2) + ' <small>pts</small></span><b class="' + cls(C.w0, C.l0) + '">' + C.w0 + '-' + C.l0 + pc(C.w0, C.l0) + '</b></div></div>';
+    h += '<div class="pem-autonote" style="margin-top:4px">The ' + C.n + ' graded games that had a rest, travel, altitude or crowd spot, picked honestly both ways. The spot flipped the pick in ' + C.flip + '.' + (C.wx.n ? ' Wind/rain games: ' + C.wx.n + ', went under the close ' + C.wx.un + '-' + C.wx.ov + '; model totals ' + C.wx.w + '-' + C.wx.l + ' with weather, ' + C.wx.w0 + '-' + C.wx.l0 + ' without.' : '') + '</div>';
+  } else if(!sw) h += '<div class="pem-autonote">Situational spots are switched off in Model settings.</div>';
+  var WS = pxState().wxOff;
+  h += '<div class="pem-autonote">“Road team ATS” is the travelling team against the closing line: below 50% means the market hasn’t been pricing it enough. “Model ATS” is the model’s own honest picks in those games. Time zones use each team’s home time zone; body-clock kickoff is the kickoff on the road team’s own clock (a noon Eastern start is 9 AM for a Pacific team). Rest, travel, altitude and stadium size come from CFBD\u2019s schedule and stadium data' + (WS ? '; weather isn\u2019t included with your CFBD key\u2019s tier, so it\u2019s left out' : '') + '. Greyed rows have under 15 games \u2014 a lead to watch, not a system.</div>';
   return h + '</div>';
 }
 
@@ -3044,7 +3185,7 @@ function pxVersions(){
     var g = q.g, sp = pemPriorAt(g.week), ph = P[g.homeId], pa = P[g.awayId];
     if(!sp || !sp[g.homeId] || !sp[g.awayId] || !ph || !pa) return;                     // same games for every row
     grade(V.blend, q, q.pred);
-    var pp = pxPredict(pbpFit(q.w), g.awayId, g.homeId, g.neutral); grade(V.pbp, q, pp.home - pp.away);
+    var pp = pxPredict(pbpFit(q.w), g.awayId, g.homeId, g.neutral, pxCtx(g)); grade(V.pbp, q, pp.home - pp.away);
     grade(V.sp, q, sp[g.homeId].fpi - sp[g.awayId].fpi + (g.neutral ? 0 : hfa));
     grade(V.pri, q, ph.r - pa.r + (g.neutral ? 0 : hfa));
   });
@@ -3583,14 +3724,14 @@ function pearFitFor(week){
 }
 // Projection for away@home (or neutral): the play-by-play drive simulation, or
 // with only an SP+ sheet, its rating gap with a normal spread around it.
-function pearProject(awayId, homeId, neutral, fit){
+function pearProject(awayId, homeId, neutral, fit, game){
   if(PX.active && PX.live){
-    var f = (fit && fit.F) ? fit : PX.live;
+    var f = (fit && fit.F) ? fit : PX.live, cx = pxCtx(game);
     if(!f.sdExtra) f.sdExtra = PX.live.sdExtra;
-    var q = pxPredict(f, awayId, homeId, !!neutral), sim = pxSimulate(f, awayId, homeId, !!neutral);
+    var q = pxPredict(f, awayId, homeId, !!neutral, cx), sim = pxSimulate(f, awayId, homeId, !!neutral, 0, cx);
     var hw = sim.homeWin;
     return { away: Math.round(q.away*10)/10, home: Math.round(q.home*10)/10, total: Math.round((q.home + q.away)*10)/10, margin: Math.round((q.home - q.away)*10)/10,
-             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim };
+             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim, sit: q.sit, sitW: q.sitW };
   }
   var p = pemPredict(awayId, homeId, !!neutral);
   if(!p) return null;
@@ -3761,7 +3902,7 @@ function pearGamesHtml(){
   if(PEAR.err) return h + '<div class="pr-empty">' + x(PEAR.err) + ' <button class="pr-link" data-pear-week="' + (PEAR.week||"") + '">Retry</button></div></div>';
   var pastFit = pearFitFor(PEAR.week);          // object: pre-game fit · false: week 1 · null: live
   var list = (PEAR.games || []).map(function(g){
-    var p = pearFbsGame(g) ? pearProject(g.away.id, g.home.id, g.neutral, pastFit || null) : null;
+    var p = pearFbsGame(g) ? pearProject(g.away.id, g.home.id, g.neutral, pastFit || null, g) : null;
     return { g: g, p: p, e: pastFit === false ? null : pearEdge(g, p) };
   });
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
@@ -4059,7 +4200,7 @@ function pearSimSeason(){
     if(g.ccg && a != null && h != null && c && c === pearConfOf(g.home.id)){
       var fx = ccgFixed[c] = { a: a, h: h, neutral: g.neutral, done: g.done };
       if(g.done) fx.winner = (g.home.score > g.away.score) ? h : a;
-      else { var pp = pearProject(g.away.id, g.home.id, g.neutral); fx.m = pp ? pp.margin : (base[h] - base[a] + (g.neutral ? 0 : hfa)); }
+      else { var pp = pearProject(g.away.id, g.home.id, g.neutral, null, g); fx.m = pp ? pp.margin : (base[h] - base[a] + (g.neutral ? 0 : hfa)); }
       return;
     }
     if(g.done) return;
@@ -4067,7 +4208,7 @@ function pearSimSeason(){
     var e = { a: a == null ? -1 : a, h: h == null ? -1 : h };
     if(a == null || h == null){ e.fcs = true; e.p = PEAR_FCS_WIN; }          // p = the FBS side wins
     else {
-      var p = pearProject(g.away.id, g.home.id, g.neutral);
+      var p = pearProject(g.away.id, g.home.id, g.neutral, null, g);
       e.m = p ? p.margin : (base[h] - base[a] + (g.neutral ? 0 : hfa));
       var ca = pearConfOf(g.away.id);
       e.conf = g.confGame === true || (g.confGame == null && ca && ca === pearConfOf(g.home.id) && pearConfKind(ca) !== "ind");
@@ -4173,7 +4314,7 @@ function pearSimEnsure(cb){
 function pearGameChance(id, g){
   if(!pearIsFbs(g.oppId)) return { p: PEAR_FCS_WIN, est: true };
   var a = g.home ? g.oppId : id, h = g.home ? id : g.oppId;
-  var p = pearProject(a, h, g.neutral);
+  var p = pearProject(a, h, g.neutral, null, g);
   if(!p) return null;
   return { p: g.home ? p.homeWin : p.awayWin, proj: p, myPts: g.home ? p.home : p.away, oppPts: g.home ? p.away : p.home,
            line: pearLineTxt(a, h, p.margin) };
@@ -4416,7 +4557,7 @@ function pearCardGame(){
 function pearCardHtml(){
   var c = PEAR.card, A = c.a, H = c.h, g = pearCardGame();
   var cFit = (g && c.week) ? pearFitFor(c.week) : null;
-  var p = pearProject(A, H, c.neutral, cFit || null);
+  var p = pearProject(A, H, c.neutral, cFit || null, (g && g.away.id === A && g.home.id === H && !c.neutral === !g.neutral) ? g : null);
   var rows = pemCompareRows(), byId = {}; rows.forEach(function(r){ byId[r.id] = r; });
   var ra = byId[A] || null, rh = byId[H] || null;
   var ranks = PEM.ratings ? pemRanks() : { rank: {}, n: {} };
@@ -4442,6 +4583,9 @@ function pearCardHtml(){
     h += '<div class="pc-line">' + x(pearLineTxt(A, H, p.margin)) + '</div>';
     if(p.sim && p.sim.drA){ var _dp = function(o){ return 'TD ' + Math.round(o.td * 100) + '% · FG ' + Math.round(o.fg * 100) + '%'; };
       h += '<div class="pc-kv pc-drv">Per drive: ' + x(pearAbbr(A)) + ' ' + _dp(p.sim.drA) + ' · ' + x(pearAbbr(H)) + ' ' + _dp(p.sim.drH) + '</div>'; }
+    if(p.sit && p.sitW){ var _sp = p.sit.parts.map(function(q){ var v = q[1] * p.sitW; return x(pearAbbr(v > 0 ? H : A)) + ' +' + Math.abs(v).toFixed(1) + ' ' + x(q[0]); });
+      if(p.sit.tags.wx) _sp.push((p.sit.ws > 15 ? 'wind ' + p.sit.ws + ' mph' : '') + (p.sit.ws > 15 && p.sit.pr ? ' + ' : '') + (p.sit.pr ? 'rain' : '') + ' slows it');
+      if(_sp.length) h += '<div class="pc-kv pc-drv">Spot: ' + _sp.join(' · ') + '</div>'; }
   } else {
     h += '<div class="pc-none">' + (!PEM.ratings ? 'Add your CFBD key (or an SP+ sheet) in the Model tab to project this game.' : (!pearIsFbs(A) || !pearIsFbs(H)) ? 'FCS teams aren’t rated, so there’s no projection for this one.' : 'One of these teams has no rating yet.') + '</div>';
   }
