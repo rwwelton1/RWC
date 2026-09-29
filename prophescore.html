@@ -1741,7 +1741,13 @@ function pemRanks(){
 //    (already in the prior's regression, it was being applied two more times)
 //  - turnovers follow havoc by a fitted slope, not in full proportion (sacks were counted twice)
 //  - totals get a walk-forward bias correction; win odds get per-game noise
-//  - priors fade by week 6 by default (tuner tries 4–8); week 1 is graded
+//  - priors fade by week 6 by default (tuner tries 4–8)
+//  - week 1 is data only: its games feed every later fit, but its prior-only
+//    projections are never graded, tuned on, or used to calibrate stretch, totals or odds
+// First week whose projections count for grading, tuning and calibration. Week 1 has no
+// in-season data behind it (the roster prior alone, and a guessed league scoring level), so
+// judging the play-by-play model on it would tune and calibrate the wrong predictor.
+var PX_FIRST_GRADED = 2;
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
 var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 6, sp: 0.5, sit: 1 };
@@ -2472,7 +2478,7 @@ function pxFit(upto, o){
 function pxAutoStretch(upto, o){
   var xs = [], ys = [], ws = [], vx = [], vy = [], vw = [], tS = 0, tW = 0;
   pxWeeks().forEach(function(w){
-    if(w >= upto) return;
+    if(w >= upto || w < PX_FIRST_GRADED) return;
     var f = pxFit(w, o), rw = Math.pow(0.5, (upto - 1 - w) / 1.5);      // recent weeks count more: the model's scale changes as plays replace the prior
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
       var A = pxDriveParams(f, x.g.a, x.g.h), H = pxDriveParams(f, x.g.h, x.g.a);
@@ -2495,10 +2501,9 @@ function pxAutoStretch(upto, o){
     for(var q = 0; q < n; q++) v += Wt[q] * Wt[q] * (X[q] - mx) * (X[q] - mx);
     return { b: b, se: Math.sqrt(s2 * v) / sxx };
   }
-  // Totals bias, shrunk by ~25 games' worth toward zero. The model only counts offensive
-  // drive points (7 per touchdown), so return and defensive scores, safeties and missed or
-  // two-point tries all fall outside it; this puts totals back on the real scoring level,
-  // honestly (only games before this week), and it was never tuned before.
+  // Totals bias, shrunk by ~25 games' worth toward zero, from graded weeks before this one
+  // only (not week 1, whose totals rest on a guessed league scoring level). The model counts
+  // only offensive drive points (7 per touchdown); this puts totals on the real scoring level.
   var tb = tW ? Math.max(-10, Math.min(10, tS / (tW + 25))) : 0;
   var n = xs.length; if(n < 20) return { st: 1, n: n, b: null, tb: tb };
   var R = fitSlope(xs, ys, ws); if(!R) return { st: 1, n: n, b: null, tb: tb };
@@ -2691,7 +2696,7 @@ function pxWeeks(){ var ws = {}; pxGames().forEach(function(x){ if(x.g.c) ws[x.W
 function pxCVErr(o, weeksUpTo){
   var em = {};
   pxWeeks().forEach(function(w){
-    if((w < 2 && !pxState().prior) || (weeksUpTo && w >= weeksUpTo)) return;
+    if(w < PX_FIRST_GRADED || (weeksUpTo && w >= weeksUpTo)) return;
     var fit = pxFit(w, o);
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
       var p = pxPredict(fit, x.g.a, x.g.h, x.g.n, pxCtx(x.g)); em[x.g.id] = Math.abs((p.home - p.away) - (x.g.hs - x.g.as)); });
@@ -2700,7 +2705,7 @@ function pxCVErr(o, weeksUpTo){
 }
 function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v10|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v11|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -2730,7 +2735,7 @@ function pxAutoTune(){
     // Signature from the start: a lock changed mid-run leaves it stale, so the next check re-tunes.
     S.opts = Object.assign(o, pxLocks()); S.moved = moved; S.tunedAt = Date.now(); S.tuneSig = sig0;
     // Then settings for each past week, tuned only on the weeks before it.
-    var ws = pxWeeks().filter(function(w){ return w >= 2 && !pxOptsForWeek(w); });
+    var ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED && !pxOptsForWeek(w); });
     (function next(){
       if(!ws.length){ PX_T.running = false; pxRebuild(); peSave(); if(SC.screen === "prophescore") renderPoolEdge(); return; }
       var w = ws.shift();
@@ -2738,7 +2743,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m11|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m12|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2756,10 +2761,9 @@ function pxAts(){
   pxWeeks().forEach(function(w){
     var list = pxGames().filter(function(x){ return x.W.w === w && x.g.c; });
     r.total += list.length;
-    // Week 1 is graded too when there is a roster prior: it is set before the season, so those
-    // picks are honest. No earlier weeks exist to tune on, so week 1 uses the defaults.
-    if(w < 2 && !S.prior){ r.early += list.length; r.earlyWeeks.push(w); return; }
-    var ow = w < 2 ? pxWeek1Opts() : pxOptsForWeek(w); if(ow) r.wfWeeks++; else { r.wfMissing++; ow = S.opts; }
+    // Week 1 is data, not a graded week (see PX_FIRST_GRADED).
+    if(w < PX_FIRST_GRADED){ r.early += list.length; r.earlyWeeks.push(w); return; }
+    var ow = pxOptsForWeek(w); if(ow) r.wfWeeks++; else { r.wfMissing++; ow = S.opts; }
     var fit = pxFit(w, ow), W = { wk: w, w:0, l:0, p:0, sw:0, sl:0, su:0, suN:0, err:0, n:0, ow:0, ol:0, own: !!pxOptsForWeek(w), sheet: fit.pw > 0 }, any = false;
     r.byWeek.push(W);
     list.forEach(function(x){
@@ -2985,7 +2989,7 @@ function pxFadeCompare(){
   var out = PX_FADES.map(function(E){
     var r = { E: E, err: 0, n: 0, w: 0, l: 0, sw: 0, sl: 0, byWk: {} };
     pxWeeks().forEach(function(w){
-      if(w < 2) return;
+      if(w < PX_FIRST_GRADED) return;
       var o = Object.assign({}, pxOptsForWeek(w) || S.opts, { fade: E }), fit = pxFit(w, o), e = 0, k = 0;
       pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
         var p = pxPredict(fit, x.g.a, x.g.h, x.g.n, pxCtx(x.g)), pred = p.home - p.away, act = x.g.hs - x.g.as;
@@ -3010,7 +3014,7 @@ function pxFadeCardHtml(){
   if(!PX._fcShow){ return h + '<button class="btn btn-sm btn-ghost" id="px-fadecmp" style="margin-top:8px">Compare every week on my games</button><div class="pem-autonote">Locking a week keeps it for every past and future week in the record, so the record vs Vegas shows exactly what that choice would have done. The other settings re-tune around it.</div></div>'; }
   var R = null; try{ R = pxFadeCompare(); }catch(e){}
   if(R && R[0].n){
-    var best = R.reduce(function(a, b){ return b.err / b.n < a.err / a.n ? b : a; }), ws = pxWeeks().filter(function(w){ return w >= 2; });
+    var best = R.reduce(function(a, b){ return b.err / b.n < a.err / a.n ? b : a; }), ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; });
     var cls = function(w, l){ var n = w + l; return !n ? "" : (w / n >= 0.524 ? "up" : "dn"); };
     h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Gone by</span><span>Avg miss</span><span>ATS \u00b7 3+ edges</span></div>';
     R.forEach(function(r){
@@ -3378,7 +3382,7 @@ function pemAtsCardHtml(){
   h += '<div class="pem-autonote">' + (r.wfMissing
         ? 'Tuning past weeks one at a time\u2026 until then some weeks use today\u2019s settings, which flatters the record. '
         : 'Each week was predicted by the model fitted only on the weeks before it, with settings tuned only on those weeks too \u2014 so every pick is one it could actually have made. ') +
-       (r.noplay ? r.noplay + ' game' + (r.noplay === 1 ? '' : 's') + ' landed exactly on the line (no pick). ' : '') + 'Break-even at standard odds is 52.4%.</div>';
+       (r.noplay ? r.noplay + ' game' + (r.noplay === 1 ? '' : 's') + ' landed exactly on the line (no pick). ' : '') + (r.early ? 'Week 1 (' + r.early + ' games) is the model\u2019s starting data, not a graded week: those picks came from the roster prior alone. ' : '') + 'Break-even at standard odds is 52.4%.</div>';
   return h + '</div>';
 }
 function pemMeanErr(em){ var s = 0, n = 0; for(var k in em){ s += em[k]; n++; } return n ? s / n : null; }
