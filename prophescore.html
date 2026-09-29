@@ -1782,6 +1782,10 @@ var PX_KNOBS = [
     help: "Points added to the home side after the simulation. Neutral sites get none." },
   { key: "sit", label: "Situational spots", min: 0, max: 1.5, step: 0.25, fmt: function(v){ return v ? Math.round(v * 100) + "%" : "off"; }, lo: "off", hi: "150%",
     help: "Rest, travel, altitude, crowd and weather on top of home field: home off a bye vs a visitor who played last week +1.8 (and the reverse), lowland visitor at 5,000 ft+ +1.2, 88,000+ stadium +0.8, visitor travelling 1,500+ miles +0.5, visitor\u2019s 3rd straight road game +1.0. Wind over 15 mph and rain slow the pace and cut scoring (only when your CFBD key includes weather). 100% uses those sizes; the tuner tries 0\u2013150% against your results." },
+  { key: "alphaT", label: "Totals: opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
+    help: "The totals fit\u2019s own shrink (spreads use the one above). Totals ran best with much more shrink than spreads on 2023\u20132025 (75 vs 25). Set by hand; the tuner judges spreads only, so it leaves this alone." },
+  { key: "levT", label: "Totals: leverage weighting", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "every play equal", hi: "full leverage",
+    help: "The totals fit\u2019s leverage weighting. Garbage-time plays still score points, so totals ran best counting every play equally (0%). Set by hand, like the one above." },
   { key: "lev", label: "Leverage weighting", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "every play equal", hi: "full leverage",
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
   { key: "tier", label: "Tier anchoring", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
@@ -3094,6 +3098,124 @@ function pxEvalCardHtml(){
   return h + '</div>';
 }
 
+
+// ── Your tune: a sandbox for every setting ──────────────────────────────────
+// Move the sliders, then Test: this season's graded weeks are predicted again with your
+// settings (each week from the weeks before it, same as the record) and set beside the
+// model as it runs now and the closing line, game for game. "Use my tune" locks every
+// setting to yours; "Back to auto" clears all locks and lets the tuner choose again.
+PX.ut = { o: null, res: null, busy: false, msg: "", stale: false };
+function pxUTInit(){ if(!PX.ut.o){ var o = {}, S = pxState(); for(var k in PX_DEFAULTS) o[k] = S.opts[k]; PX.ut.o = o; } return PX.ut.o; }
+// Per-game results of the model as it runs now (the walk-forward record).
+function pxUTCurrent(){
+  var r = pxAts(), out = {};
+  (r && r.games || []).forEach(function(q){ out[q.id] = { pred: q.pred, act: q.act, vh: q.vh, pt: q.pt, at: q.at, vt: q.vt, w: q.w }; });
+  return out;
+}
+function pxUTSummary(G){
+  var s = { n: 0, e: 0, ev: 0, w: 0, l: 0, sw: 0, sl: 0, tn: 0, te: 0, tv: 0, ow: 0, ol: 0, wk: {} };
+  Object.keys(G).forEach(function(id){ var q = G[id]; if(q.vh === null || q.vh === undefined) return;
+    s.n++; s.e += Math.abs(q.pred - q.act); s.ev += Math.abs(q.vh - q.act);
+    var W = s.wk[q.w] = s.wk[q.w] || { n: 0, e: 0 }; W.n++; W.e += Math.abs(q.pred - q.act);
+    if(Math.abs(q.pred - q.vh) >= 0.05 && q.act !== q.vh){ var won = (q.act > q.vh) === (q.pred > q.vh); if(won) s.w++; else s.l++; if(Math.abs(q.pred - q.vh) >= 3){ if(won) s.sw++; else s.sl++; } }
+    if(q.vt !== null && q.vt !== undefined && isFinite(q.vt)){ s.tn++; s.te += Math.abs(q.pt - q.at); s.tv += Math.abs(q.vt - q.at);
+      if(Math.abs(q.pt - q.vt) >= 0.05 && q.at !== q.vt){ if((q.at > q.vt) === (q.pt > q.vt)) s.ow++; else s.ol++; } } });
+  return s;
+}
+// Game-by-game difference in miss (yours minus now), with its noise level.
+function pxUTPaired(A, B, tot){
+  var d = [];
+  Object.keys(A).forEach(function(id){ var a = A[id], b = B[id]; if(!b || a.vh === null || a.vh === undefined) return;
+    if(tot){ if(a.vt === null || a.vt === undefined) return; d.push(Math.abs(a.pt - a.at) - Math.abs(b.pt - b.at)); }
+    else d.push(Math.abs(a.pred - a.act) - Math.abs(b.pred - b.act)); });
+  if(d.length < 10) return null;
+  var m = 0; d.forEach(function(v){ m += v; }); m /= d.length; var ss = 0; d.forEach(function(v){ ss += (v - m) * (v - m); });
+  var se = Math.sqrt(ss / (d.length - 1) / d.length); return { d: m, se: se, t: se > 0 ? m / se : 0, n: d.length };
+}
+function pxUTTest(){
+  if(PX.ut.busy || !PX.active) return;
+  var o = Object.assign({}, pxUTInit()), weeks = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; }), G = {}, i = 0;
+  PX.ut.busy = true; PX.ut.stale = false; PX.ut.res = null;
+  (function step(){
+    if(i >= weeks.length){ PX.ut.busy = false; PX.ut.msg = ""; PX.ut.res = { o: o, games: G, at: Date.now() }; pxUTStatus(); return; }
+    var w = weeks[i++]; PX.ut.msg = "Testing week " + w + " (" + i + " of " + weeks.length + ")…"; pxUTStatus();
+    setTimeout(function(){
+      try{
+        var fit = pxFit(w, o);
+        pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return; var g = x.g, L = x.W.lines[g.id];
+          var p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g));
+          G[g.id] = { pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as, w: w,
+                      vh: (L && isFinite(L.c)) ? -L.c : null, vt: (L && L.t !== null && isFinite(L.t)) ? L.t : null }; });
+      }catch(e){ PX.ut.busy = false; PX.ut.msg = "Test failed: " + (e.message || e); pxUTStatus(); return; }
+      step();
+    }, 30);
+  })();
+}
+function pxUTRefresh(msg){
+  var S = pxState(); S.wf = {}; S.tuneSig = ""; PX.fits = {}; PX._ats = null; PX._fc = null; PX.sims = {};
+  pxRebuild(); peSave(); pemRepaint(); pxAutoTune(); toast(msg, "ok");
+}
+function pxUTApply(){
+  var S = pxState(), o = pxUTInit(); S.lock = {}; for(var k in o) S.lock[k] = o[k]; S.opts = Object.assign({}, S.opts, o);
+  pxUTRefresh("Your tune is in use · every setting locked");
+}
+function pxUTReset(){ var S = pxState(); S.lock = {}; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
+function pxUTHtml(){
+  if(!PX.active) return "";
+  var o = pxUTInit(), S = pxState(), LK = pxLocks(), allLocked = PX_KNOBS.every(function(k){ return LK[k.key] !== undefined; });
+  var h = '<div class="pem-ats" id="px-ut"><div class="pem-autotop"><b>🎛️ Your tune</b><button class="btn btn-sm btn-gold" id="px-ut-test"' + (PX.ut.busy ? ' disabled' : '') + '>' + (PX.ut.busy ? 'Testing…' : 'Test') + '</button></div>';
+  h += '<div class="pem-autosub">' + (allLocked ? 'Your tune is <b>in use</b> (every setting locked).' : 'Sandbox — nothing changes until you tap <b>Use my tune</b>.') + ' Move a slider, then Test to see how this season would have gone with it.</div>';
+  PX_KNOBS.forEach(function(k){
+    var v = o[k.key]; if(typeof v !== "number") v = PX_DEFAULTS[k.key];
+    var changed = Math.abs(v - S.opts[k.key]) > 1e-9;
+    h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span id="ut-v-' + k.key + '"' + (changed ? ' style="color:var(--gold2,#b8860b)"' : '') + '>' + k.fmt(v) + (changed ? ' <small>(now ' + k.fmt(S.opts[k.key]) + ')</small>' : '') + '</span></div>' +
+         '<input type="range" id="ut-' + k.key + '" min="' + k.min + '" max="' + k.max + '" step="' + k.step + '" value="' + v + '" style="width:100%;accent-color:#1a4fd6;margin:4px 0 0">' +
+         '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:.65"><span>' + x(k.lo || '') + '</span><span>' + x(k.hi || '') + '</span></div></div>';
+  });
+  if(PX.ut.busy) h += '<div class="pem-autosub">' + x(PX.ut.msg) + '</div>';
+  else if(PX.ut.msg) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PX.ut.msg) + '</div>';
+  var R = PX.ut.res;
+  if(R){
+    var cur = pxUTCurrent(), A = pxUTSummary(R.games), B = pxUTSummary(cur);
+    var f2 = function(a, n){ return n ? (a / n).toFixed(2) : '—'; }, rec = function(w, l){ var n = w + l; return w + '-' + l + (n ? ' <small>' + (100 * w / n).toFixed(1) + '%</small>' : ''); };
+    var better = function(a, b){ return a < b - 1e-9 ? 'up' : (a > b + 1e-9 ? 'dn' : ''); };
+    h += '<div class="pem-bk" style="margin-top:10px"><div class="pem-bkhd"><span>' + (PX.ut.stale ? 'Last test (sliders moved since)' : 'This season, weeks ' + PX_FIRST_GRADED + '+') + '</span><span>Your tune</span><span>Now</span></div>' +
+         '<div class="pem-bkrow"><span>Spread miss <small>(Vegas ' + f2(A.ev, A.n) + ')</small></span><b class="' + better(A.e / A.n, B.e / B.n) + '">' + f2(A.e, A.n) + '</b><span>' + f2(B.e, B.n) + '</span></div>' +
+         '<div class="pem-bkrow"><span>Against the spread</span><b>' + rec(A.w, A.l) + '</b><span>' + rec(B.w, B.l) + '</span></div>' +
+         '<div class="pem-bkrow"><span>Edges of 3+</span><b>' + rec(A.sw, A.sl) + '</b><span>' + rec(B.sw, B.sl) + '</span></div>' +
+         '<div class="pem-bkrow"><span>Total miss <small>(Vegas ' + f2(A.tv, A.tn) + ')</small></span><b class="' + better(A.te / A.tn, B.te / B.tn) + '">' + f2(A.te, A.tn) + '</b><span>' + f2(B.te, B.tn) + '</span></div>' +
+         '<div class="pem-bkrow"><span>Over/under</span><b>' + rec(A.ow, A.ol) + '</b><span>' + rec(B.ow, B.ol) + '</span></div></div>';
+    var wks = Object.keys(A.wk).map(Number).sort(function(a, b){ return a - b; });
+    if(wks.length) h += '<div class="pem-autonote" style="margin-top:4px">Spread miss by week — yours / now: ' + wks.map(function(w){ var a = A.wk[w], b = B.wk[w]; return 'wk ' + w + ' <b>' + (a.e / a.n).toFixed(1) + '</b> / ' + (b ? (b.e / b.n).toFixed(1) : '—'); }).join(' · ') + '</div>';
+    var say = function(p, what){ if(!p) return ''; var sign = p.d < 0 ? 'better' : 'worse';
+      return '<b>' + what + ':</b> ' + Math.abs(p.d).toFixed(2) + ' pts a game ' + sign + ' (±' + p.se.toFixed(2) + ') — ' + (Math.abs(p.t) >= 2 ? '<b class="' + (p.d < 0 ? 'up' : 'dn') + '">a real difference</b>' : 'within the noise on ' + p.n + ' games'); };
+    var ps = pxUTPaired(R.games, cur, false), pt = pxUTPaired(R.games, cur, true);
+    h += '<div class="pem-autonote" style="margin-top:4px">' + [say(ps, 'Spreads'), say(pt, 'Totals')].filter(Boolean).join('<br>') + '</div>';
+    h += '<div class="pem-autonote">One season is a small sample: most slider moves land "within the noise" here even when they matter over three seasons. The defaults were tuned on 2023–2025 (about 2,000 games), so treat a gain here as a lead, not proof.</div>';
+  }
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">' +
+       '<button class="btn btn-sm btn-gold" id="px-ut-apply"' + (PX.ut.busy ? ' disabled' : '') + '>Use my tune</button>' +
+       '<button class="btn btn-sm btn-ghost" id="px-ut-load">Start from current</button>' +
+       '<button class="btn btn-sm btn-ghost" id="px-ut-def">Start from defaults</button>' +
+       '<button class="btn btn-sm btn-ghost" id="px-ut-reset">Back to auto</button></div>';
+  return h + '</div>';
+}
+function pxUTStatus(){ var el = document.getElementById("px-ut"); if(el){ el.outerHTML = pxUTHtml(); pxBind(); } }
+function pxUTBind(){
+  PX_KNOBS.forEach(function(k){
+    var el = document.getElementById("ut-" + k.key); if(!el) return;
+    el.oninput = function(){ var v = parseFloat(this.value), o = pxUTInit(), S = pxState(); o[k.key] = v; if(PX.ut.res) PX.ut.stale = true;
+      var lab = document.getElementById("ut-v-" + k.key), changed = Math.abs(v - S.opts[k.key]) > 1e-9;
+      if(lab){ lab.innerHTML = k.fmt(v) + (changed ? ' <small>(now ' + k.fmt(S.opts[k.key]) + ')</small>' : ''); lab.style.color = changed ? 'var(--gold2,#b8860b)' : ''; } };
+  });
+  var b;
+  if((b = document.getElementById("px-ut-test"))) b.onclick = function(){ pxUTTest(); };
+  if((b = document.getElementById("px-ut-apply"))) b.onclick = function(){ pxUTApply(); };
+  if((b = document.getElementById("px-ut-reset"))) b.onclick = function(){ pxUTReset(); };
+  if((b = document.getElementById("px-ut-load"))) b.onclick = function(){ PX.ut.o = null; PX.ut.res = null; pxUTInit(); pxUTStatus(); };
+  if((b = document.getElementById("px-ut-def"))) b.onclick = function(){ PX.ut.o = Object.assign({}, PX_DEFAULTS); PX.ut.res = null; pxUTStatus(); };
+}
+
 // ── Wiring into the rest of the page ────────────────────────────────────────
 // Once PX has data it becomes the model: the Games list, cards, rankings, team
 // sheets, playoff odds and the Vegas record all read from it.
@@ -3298,6 +3420,7 @@ function pxPanelHtml(){
     h += pemAnglesCardHtml();
     h += pxFadeCardHtml();
     h += pxKnobsHtml();
+    h += pxUTHtml();
     h += pxSimCardHtml();
     h += pxPriorCardHtml();
   }
@@ -3327,6 +3450,7 @@ function pxBind(){
   if(hg) hg.onclick = function(){ pxHistSync(); };
   var sg = document.getElementById("px-snapgo");
   if(sg) sg.onclick = function(){ pxSnapLines(); };
+  pxUTBind();
   var tu = document.getElementById("px-tune");
   if(tu) tu.onclick = function(){ pxState().tuneSig = ""; pxAutoTune(); pxStatus(); renderPoolEdge(); };
 }
