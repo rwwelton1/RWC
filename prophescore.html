@@ -1730,7 +1730,7 @@ function pemRanks(){
 // Graded out of sample against the closing line, week by week.
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 50, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 1 };
+var PX_DEFAULTS = { alpha: 50, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1744,10 +1744,10 @@ var PX_KNOBS = [
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
   { key: "tier", label: "Tier anchoring", min: 0, max: 2, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
     help: "Small samples get shrunk. 0% shrinks every team toward the league average (which flattens elite teams); 100% shrinks each team toward what its roster prior says it should be, so an elite team stays elite until its plays say otherwise. Above 100% makes up for the prior being a noisy guess, which always understates the gap between tiers." },
-  { key: "stretch", label: "Spread stretch", min: 1, max: 2, step: 0.05, fmt: function(v){ return "×" + v.toFixed(2); }, lo: "as fitted", hi: "wider spreads",
-    help: "Widens every projected margin around the game's projected total. Only moves off ×1.00 when honest week-by-week predictions show the fitted spreads are systematically too tight." }
+  { key: "stretch", label: "Spread stretch", min: 0, max: 2, step: 0.05, fmt: function(v){ return v ? "×" + v.toFixed(2) : "auto"; }, lo: "auto", hi: "wider spreads",
+    help: "Auto: before each week, every earlier prediction is lined up against how the game actually ended; if the model has been too tight (or too wide), this week's spreads are scaled by exactly that much, trusted more as games pile up. A number fixes the scale by hand instead." }
 ];
-var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [1, 1.1, 1.2, 1.35, 1.5, 1.75] };
+var PX_GRID = { alpha: [10, 25, 50, 100, 200, 400], half: [2, 3, 4, 6, 10, 20], prior: [0, 0.25, 0.5, 0.8, 1], hfa: [1, 1.5, 2, 2.5, 3, 3.5, 4], lev: [0, 0.5, 1], tier: [0.5, 1, 1.5, 2], stretch: [0, 1, 1.25, 1.5] };
 function pxState(){
   PE.px = PE.px || {}; var S = PE.px; S.wk = S.wk || {}; S.opts = S.opts || {};
   for(var k in PX_DEFAULTS) if(typeof S.opts[k] !== "number") S.opts[k] = PX_DEFAULTS[k];
@@ -2330,7 +2330,30 @@ function pxFit(upto, o){
   var pts = 0; rows.forEach(function(r){ pts += r.s.pts; }); fit.mPts = rows.length ? pts / rows.length : 27;
   fit.teams = pxTeamIds(fit);
   PX.fits[key] = fit;
+  var sc = o.stretch > 0 ? { st: o.stretch, n: 0, b: null } : pxAutoStretch(upto, o);
+  fit.st = sc.st; fit.stN = sc.n; fit.stB = sc.b;
   return fit;
+}
+// Recalibration. Every game before \`upto\` was predicted honestly (by the fit of
+// its own week, which only saw earlier weeks; week 1 is the roster prior alone).
+// The slope of actual margin on predicted margin says how far off the scale is:
+// above 1, the model has been too tight. That slope, trusted more as the games
+// pile up, stretches this week's spreads.
+function pxAutoStretch(upto, o){
+  var xs = [], ys = [], ws = [];
+  pxWeeks().forEach(function(w){
+    if(w >= upto) return;
+    var f = pxFit(w, o), rw = Math.pow(0.5, (upto - 1 - w) / 1.5);      // recent weeks count more: the model's scale changes as plays replace the prior
+    pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
+      var A = pxDriveParams(f, x.g.a, x.g.h), H = pxDriveParams(f, x.g.h, x.g.a);
+      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa)); ws.push(rw); });
+  });
+  var n = xs.length; if(n < 20) return { st: 1, n: n, b: null };
+  var W = 0, W2 = 0, mx = 0, my = 0; for(var i = 0; i < n; i++){ W += ws[i]; W2 += ws[i] * ws[i]; mx += ws[i] * xs[i]; my += ws[i] * ys[i]; } mx /= W; my /= W;
+  var sxy = 0, sxx = 0; for(var j = 0; j < n; j++){ sxy += ws[j] * (xs[j] - mx) * (ys[j] - my); sxx += ws[j] * (xs[j] - mx) * (xs[j] - mx); }
+  if(sxx <= 0) return { st: 1, n: n, b: null };
+  var nEff = W * W / W2, b = sxy / sxx, trust = nEff / (nEff + 40), st = 1 + (b - 1) * trust;
+  return { st: Math.max(0.85, Math.min(2.2, st)), n: n, b: b };
 }
 function pxTeamIds(fit){ var ids = {}; ["rush", "pass", "succ", "hav", "fin"].forEach(function(k){ for(var a in fit.F[k].O) ids[a] = 1; for(var b in fit.F[k].D) ids[b] = 1; }); for(var p in fit.prior) ids[p] = 1; return Object.keys(ids); }
 // Expected drives, scoring-opportunity rate and points per opportunity for
@@ -2369,7 +2392,7 @@ function pxDriveParams(fit, off, def){
 }
 function pxPredict(fit, awayId, homeId, neutral){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
-  var st = fit.o.stretch || 1, mid = (A.E + H.E) / 2, half = (H.E - A.E) / 2 * st;
+  var st = fit.st || 1, mid = (A.E + H.E) / 2, half = (H.E - A.E) / 2 * st;
   var eA = Math.max(3, mid - half), eH = Math.max(3, mid + half);                 // points before home field, spread stretched
   return { away: eA - hf, home: eH + hf, A: A, H: H, eA: eA, eH: eH };
 }
@@ -2430,7 +2453,7 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v4|" + n + "|" + (S.prior ? S.prior.n : 0); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v5|" + n + "|" + (S.prior ? S.prior.n : 0); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 function pxTune(weeksUpTo, done){
@@ -2465,7 +2488,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m4"; }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m5"; }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2607,7 +2630,7 @@ function pxRebuild(){
   var R = {}, avgId = "__avg__";
   fit.teams.forEach(function(id){
     var o = pxDriveParams(fit, id, avgId), d = pxDriveParams(fit, avgId, id);
-    var st = S.opts.stretch || 1;                           // ratings carry the same stretch as the spreads
+    var st = fit.st || 1;                                   // ratings carry the same stretch as the spreads
     R[id] = { off: (o.E - fit.mPts) * st, def: (d.E - fit.mPts) * st, games: (fit.tm[id] || {}).g || 0, px: { o: o, d: d } };
   });
   // Special teams, raw: kickoff return start (own yard line), kickoff coverage (opponent's start), punt net and punt net allowed.
@@ -2679,6 +2702,7 @@ function pxKnobsHtml(){
   PX_KNOBS.forEach(function(k){
     h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span>' + k.fmt(o[k.key]) + '</span></div><small>' + x(k.help) + '</small></div>';
   });
+  if(PX.live && PX.live.stN) h += '<div class="pem-autosub" style="margin-top:6px">Spread scale this week: <b>×' + PX.live.st.toFixed(2) + '</b> \u2014 from ' + PX.live.stN + ' earlier games' + (PX.live.stB ? ', where real margins ran ×' + PX.live.stB.toFixed(2) + ' of the unscaled predictions' : '') + '.</div>';
   h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (two standard errors, game by game). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
   return h + '</div>';
 }
