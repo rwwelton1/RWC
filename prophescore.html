@@ -3015,6 +3015,38 @@ function pemAtsChip(){
   if(!r || !(r.w + r.l)) return "";
   return ' · <span class="pr-ats ' + (r.pct >= 0.524 ? "up" : "dn") + '">vs Vegas ' + pemAtsTxt(r) + ' (' + (r.pct*100).toFixed(1) + '%)</span>';
 }
+// Record by the size of the Vegas spread: where the model's picks win, which
+// side it takes in each band, and whether it under- or over-rates favorites there.
+var PEM_SPREAD_BANDS = [[0, 3, "PK\u20133"], [3.5, 7, "3.5\u20137"], [7.5, 10, "7.5\u201310"], [10.5, 14, "10.5\u201314"], [14.5, 21, "14.5\u201321"], [21.5, 28, "21.5\u201328"], [28.5, 99, "28.5+"]];
+function pemSpreadRecHtml(r){
+  if(!r || !r.games || !r.games.length) return "";
+  var B = PEM_SPREAD_BANDS.map(function(b){ return { lab: b[2], lo: b[0], hi: b[1], n: 0, w: 0, l: 0, p: 0, fw: 0, fl: 0, dw: 0, dl: 0, m: 0, a: 0, v: 0 }; });
+  r.games.forEach(function(q){
+    var f = Math.abs(q.vh), b = null; B.forEach(function(x){ if(!b && f <= x.hi + 0.01) b = x; }); if(!b) return;
+    var sg = q.vh >= 0 ? 1 : -1;
+    b.n++; b.v += f; b.m += q.pred * sg; b.a += q.act * sg;
+    if(!q.res) return;
+    if(q.res === "P"){ b.p++; return; }
+    var won = q.res === "W", tookFav = f > 0 && ((q.pred > q.vh) === (q.vh > 0));
+    if(won) b.w++; else b.l++;
+    if(f > 0){ if(tookFav){ if(won) b.fw++; else b.fl++; } else { if(won) b.dw++; else b.dl++; } }
+  });
+  var cls = function(w, l){ var n = w + l; return !n ? "" : n < 8 ? "" : (w / n >= 0.524 ? "up" : "dn"); };
+  var pc = function(w, l){ var n = w + l; return n ? Math.round(100 * w / n) + '%' : '\u2014'; };
+  var h = '<div class="pem-hd" style="margin-top:12px">By Vegas spread</div>';
+  h += '<div class="pem-wk"><div class="pem-wkhd"><span>Spread</span><span>ATS</span><span>Took fav</span><span>Took dog</span><span>Model \u00b7 real</span></div>';
+  B.forEach(function(b){
+    if(!b.n) return;
+    var gap = (b.m - b.a) / b.n;
+    h += '<div class="pem-wkrow"><span>' + b.lab + '<small>' + b.n + ' gm</small></span>' +
+         '<span><b class="' + cls(b.w, b.l) + '">' + b.w + '-' + b.l + (b.p ? '-' + b.p : '') + '</b><small>' + pc(b.w, b.l) + '</small></span>' +
+         '<span><b class="' + cls(b.fw, b.fl) + '">' + b.fw + '-' + b.fl + '</b><small>' + pc(b.fw, b.fl) + '</small></span>' +
+         '<span><b class="' + cls(b.dw, b.dl) + '">' + b.dw + '-' + b.dl + '</b><small>' + pc(b.dw, b.dl) + '</small></span>' +
+         '<span><b class="' + (Math.abs(gap) >= 3 ? 'dn' : '') + '">' + (b.m / b.n).toFixed(1) + ' \u00b7 ' + (b.a / b.n).toFixed(1) + '</b><small>Vegas ' + (b.v / b.n).toFixed(1) + '</small></span></div>';
+  });
+  h += '</div><div class="pem-autonote" style="margin-top:4px">Games grouped by the closing spread. <b>Took fav / took dog</b>: the model\u2019s record when its pick was the Vegas favorite or the underdog. <b>Model \u00b7 real</b>: the average margin for the Vegas favorite, projected vs what actually happened (Vegas\u2019s number underneath). A model number well below the real one in a band means favorites that size are underrated there \u2014 and \u201ctook dog\u201d losing in that band is the cost. Bands with under 8 decided picks aren\u2019t colored.</div>';
+  return h;
+}
 function pemAtsCardHtml(){
   if(!PX.active) return "";
   var r = pemAts();
@@ -3031,6 +3063,7 @@ function pemAtsCardHtml(){
          '<b class="' + cls(pc) + '">' + (pc !== null ? (pc * 100).toFixed(1) + '%' : '—') + '</b></div>';
   });
   h += '</div>';
+  h += pemSpreadRecHtml(r);
   var BW = r.byWeek.filter(function(W){ return W.w + W.l + W.p || W.n; });
   if(BW.length){
     h += '<div class="pem-hd" style="margin-top:12px">Week by week</div>';
