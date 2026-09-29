@@ -3065,6 +3065,53 @@ function pemSpreadRecHtml(r){
   h += '</div><div class="pem-autonote" style="margin-top:4px">Games grouped by the closing spread. <b>Took fav / took dog</b>: the model\u2019s record when its pick was the Vegas favorite or the underdog. <b>Model \u00b7 real</b>: the average margin for the Vegas favorite, projected vs what actually happened (Vegas\u2019s number underneath). A model number well below the real one in a band means favorites that size are underrated there \u2014 and \u201ctook dog\u201d losing in that band is the cost. Bands with under 8 decided picks aren\u2019t colored.</div>';
   return h;
 }
+// Gap-adjusted picks. In lopsided games the model sits below Vegas almost
+// every time (Vegas knows things the model doesn't), so raw edges there say
+// "dog" whatever the matchup. Before each week, the typical gap is measured on
+// the weeks already played: the model's margin for the favorite runs about c x
+// the spread below Vegas. That share is taken out, and the side is picked on what
+// is left: is the model higher or lower on this favorite than it usually is?
+function pemGapAdj(r){
+  if(!r || !r.games || !r.games.length) return null;
+  var wks = {}; r.games.forEach(function(q){ (wks[q.w] = wks[q.w] || []).push(q); });
+  var W = Object.keys(wks).map(Number).sort(function(a, b){ return a - b; });
+  var V = { raw: { w: 0, l: 0, p: 0, bw: 0, bl: 0, ew: 0, el: 0 }, adj: { w: 0, l: 0, p: 0, bw: 0, bl: 0, ew: 0, el: 0 }, dog: { w: 0, l: 0, p: 0, bw: 0, bl: 0, ew: 0, el: 0 } };
+  var sxy = 0, sxx = 0, c = 0, n = 0;
+  function grade(v, pickHome, q, edge){
+    var cover = q.act - q.vh; if(cover === 0){ v.p++; return; }
+    var won = (cover > 0) === pickHome, big = Math.abs(q.vh) >= 14.5;
+    if(won) v.w++; else v.l++;
+    if(big){ if(won) v.bw++; else v.bl++; }
+    if(edge >= 3){ if(won) v.ew++; else v.el++; }
+  }
+  W.forEach(function(w){
+    c = sxx > 0 ? sxy / sxx : 0;                          // gap share learned from earlier weeks only
+    wks[w].forEach(function(q){
+      var sg = q.vh >= 0 ? 1 : -1, f = Math.abs(q.vh);
+      if(q.res) grade(V.raw, q.pred > q.vh, q, Math.abs(q.pred - q.vh));
+      if(f > 0){
+        var adj = q.pred - c * f * sg;                     // put back the gap the model usually leaves
+        if(Math.abs(adj - q.vh) >= 0.05) grade(V.adj, adj > q.vh, q, Math.abs(adj - q.vh));
+        grade(V.dog, q.vh < 0, q, 0);
+      }
+    });
+    wks[w].forEach(function(q){ var f = Math.abs(q.vh); if(!f) return; var sg = q.vh >= 0 ? 1 : -1; sxy += (q.pred * sg - f) * f; sxx += f * f; n++; });
+  });
+  var cNow = sxx > 0 ? sxy / sxx : 0;
+  return { V: V, c: cNow, n: n };
+}
+function pemGapAdjHtml(r){
+  var G = pemGapAdj(r); if(!G) return "";
+  var V = G.V, cls = function(w, l){ var n = w + l; return !n ? "" : n < 8 ? "" : (w / n >= 0.524 ? "up" : "dn"); };
+  var cell = function(w, l){ var n = w + l; return '<b class="' + cls(w, l) + '">' + w + '-' + l + '</b><small>' + (n ? Math.round(100 * w / n) + '%' : '\u2014') + '</small>'; };
+  var h = '<div class="pem-hd" style="margin-top:12px">Gap-adjusted picks <small style="font-weight:700;color:var(--muted)">(trial)</small></div>';
+  h += '<div class="pem-autosub">Right now the model\u2019s margin for the favorite runs <b>' + Math.round(-G.c * 100) + '%</b> ' + (G.c <= 0 ? 'below' : 'above') + ' the Vegas spread on average (from ' + G.n + ' graded games).</div>';
+  h += '<div class="pem-wk" style="margin-top:4px"><div class="pem-wkhd" style="grid-template-columns:1.3fr 1fr 1fr 1fr"><span>Picks</span><span>All</span><span>Spread 14.5+</span><span>Edge 3+</span></div>';
+  [["raw", "Model as is"], ["adj", "Gap-adjusted"], ["dog", "Every dog"]].forEach(function(z){ var v = V[z[0]];
+    h += '<div class="pem-wkrow" style="grid-template-columns:1.3fr 1fr 1fr 1fr"><span>' + z[1] + '</span><span>' + cell(v.w, v.l) + '</span><span>' + cell(v.bw, v.bl) + '</span><span>' + (z[0] === "dog" ? '<small>\u2014</small>' : cell(v.ew, v.el)) + '</span></div>'; });
+  h += '</div><div class="pem-autonote" style="margin-top:4px">Gap-adjusted: before each week, the share the model usually sits below Vegas (measured only on weeks already played) is added back, and the side is picked on what\u2019s left \u2014 is the model higher or lower on this favorite than it usually is? That turns the blanket \u201calways the dog\u201d lean in big spreads into real picks. \u201cEvery dog\u201d is the no-model baseline. Nothing on the Games tab changes; this is here to see whether it earns its place.</div>';
+  return h;
+}
 function pemAtsCardHtml(){
   if(!PX.active) return "";
   var r = pemAts();
@@ -3082,6 +3129,7 @@ function pemAtsCardHtml(){
   });
   h += '</div>';
   h += pemSpreadRecHtml(r);
+  h += pemGapAdjHtml(r);
   var BW = r.byWeek.filter(function(W){ return W.w + W.l + W.p || W.n; });
   if(BW.length){
     h += '<div class="pem-hd" style="margin-top:12px">Week by week</div>';
