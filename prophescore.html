@@ -1153,9 +1153,12 @@ function peLoad(cb){
   }catch(e){}
   var uid = ME();
   if(!DB || !uid){ peAfterLoad(); PE.ready = true; if(cb) cb(); return; }
-  DB.ref("prophescore/"+uid).once("value", function(sn){
-    var v = sn.val();
-    if(v){ PE._hadOld = ["settings", "turnovers", "season", "runs", "baseline", "teamstats", "tune", "gmeta"].some(function(k){ return v[k] != null; }); peTake(v, true); }
+  // One read per piece, not the whole record: past seasons (hist) and daily line
+  // snapshots (snaps) live under the same path and would otherwise download every visit.
+  Promise.all(PE_KEYS.map(function(k){ return DB.ref("prophescore/" + uid + "/" + k).once("value").then(function(sn){ return [k, sn.val()]; }); })).then(function(pairs){
+    var v = {}, any = false;
+    pairs.forEach(function(q){ if(q[1] !== null && q[1] !== undefined){ v[q[0]] = q[1]; any = true; } });
+    if(any) peTake(v, true);
     peAfterLoad();
     PE.ready = true; PE.err = "";
     if(cb) cb();
@@ -1189,6 +1192,7 @@ function peClean(o){
   catch(e){ return null; }
 }
 
+var PE_LEGACY_NULLS = { settings: null, turnovers: null, season: null, runs: null, baseline: null, teamstats: null, tune: null, gmeta: null };
 function peSave(){
   var payload = peClean({
     // The old weekly pick board, kept as it was saved.
@@ -1215,7 +1219,9 @@ function peSave(){
     if(was !== PE.err && SC.screen === "prophescore") renderPoolEdge();
   }
   try{
-    DB.ref("prophescore/"+uid).set(payload, function(err){
+    // update(), not set(): set() replaced the whole record and would wipe the past
+    // seasons and line snapshots saved beside it. The old model's leftover keys go too.
+    DB.ref("prophescore/"+uid).update(Object.assign({}, payload, PE_LEGACY_NULLS), function(err){
       if(err){ fail(err); return; }
       PE.err = "";
       if(was !== PE.err && SC.screen === "prophescore") renderPoolEdge();
@@ -1731,11 +1737,10 @@ function pemRanks(){
 //    drive-by-drive simulations give the spread, total and win probability.
 // Graded out of sample against the closing line, week by week.
 //
-// Model fixes (data v4, tune m11):
+// Model fixes (data v4, tune m14):
 //  - a side with no FBS plays is projected from its prior alone (was ≥20% league average)
 //  - lost fumbles counted (they were dropped: CFBD types them "Fumble Recovery (Opponent)")
 //  - havoc keeps its tier anchoring (a negative slope was being clamped to zero)
-//  - home field estimated inside the opponent adjustment, so ratings are neutral-site
 //  - leverage uses garbage-time cut-offs instead of a curve that faded 3-score 1st-half leads
 //  - tier anchoring capped at 100%; the new-coach / returning-production discount removed
 //    (already in the prior's regression, it was being applied two more times)
@@ -1744,13 +1749,16 @@ function pemRanks(){
 //  - priors fade by week 6 by default (tuner tries 4–8)
 //  - week 1 is data only: its games feed every later fit, but its prior-only
 //    projections are never graded, tuned on, or used to calibrate stretch, totals or odds
+//  - SP+ sheet moves the spread only (totals stay with the drive model); default weight 75%
+//  - tried and dropped: a home-field term inside the opponent adjustment (see pxRidge)
+
 // First week whose projections count for grading, tuning and calibration. Week 1 has no
 // in-season data behind it (the roster prior alone, and a guessed league scoring level), so
 // judging the play-by-play model on it would tune and calibrate the wrong predictor.
 var PX_FIRST_GRADED = 2;
 var PX_BASE = "https://api.collegefootballdata.com";
 var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, live: null };
-var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 6, sp: 0.5, sit: 1 };
+var PX_DEFAULTS = { alpha: 10, half: 4, prior: 0.8, hfa: 2.5, lev: 1, tier: 1, stretch: 0, fade: 6, sp: 0.75, sit: 1 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1761,7 +1769,7 @@ var PX_KNOBS = [
   { key: "fade", label: "Priors gone by", min: 2, max: 10, step: 1, fmt: function(v){ return "week " + v; }, lo: "plays only, fast", hi: "lean on last season longer",
     help: "The week from which only this season's plays count: both the roster prior's share of the projection and its pull on small samples (tier anchoring) fade to nothing by then. Preseason information keeps paying off well into the season even in the portal era (with only 3 games a team’s own numbers are still mostly noise), so the default is week 6; the tuner tries 4 to 8 against real results." },
   { key: "sp", label: "SP+ sheet weight", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "play-by-play only", hi: "SP+ only",
-    help: "Share of each projection taken from the SP+ sheet you pasted for that week (its offense and defense ratings, as points against each other). Only sheets saved for that week or earlier are used, so graded weeks stay honest. Teams missing from the sheet use the play-by-play model alone. The tuner tries 0\u2013100% against your results." },
+    help: "Share of each projection taken from the SP+ sheet you pasted for that week (its offense and defense ratings, as points against each other). Only sheets saved for that week or earlier are used, so graded weeks stay honest. Teams missing from the sheet use the play-by-play model alone. The default is 75%: on 2026 weeks 2\u20134 the play-by-play side alone missed by 12.7 a game against SP+\u2019s 10.9, since a few games of plays are still mostly noise. It moves the spread only; totals come from the play-by-play model, which ran better on totals than SP+. The tuner tries 0\u2013100% against your results." },
   { key: "hfa", label: "Home field", min: 0, max: 6, step: 0.25, fmt: function(v){ return v.toFixed(2) + " pts"; }, lo: "none", hi: "6 pts",
     help: "Points added to the home side after the simulation. Neutral sites get none." },
   { key: "sit", label: "Situational spots", min: 0, max: 1.5, step: 0.25, fmt: function(v){ return v ? Math.round(v * 100) + "%" : "off"; }, lo: "off", hi: "150%",
@@ -2004,8 +2012,13 @@ function pxLoadWx(W){
 function pxLoadWeek(w, force){
   var S = pxState(), y = pxYear(), key = y + "-" + w, have = S.wk[key];
   if(have && have.done && have.v === PX_AGG_V && !force) return Promise.resolve(have);
-  var W = { y: y, w: w, v: PX_AGG_V, games: [], agg: {}, lg: null, lines: {}, done: false, at: Date.now() };
-  return pxCall("/games", { year: y, week: w, seasonType: "regular" }).then(function(gs){
+  return pxFetchWeek(y, w, pxCall).then(function(W){ S.wk[key] = W; return W; });
+}
+// One week of any season (the current one, or a past one for backtesting): FBS-vs-FBS
+// games, lines, and aggregated plays. `call` is pxCall or a memoised wrapper of it.
+function pxFetchWeek(y, w, call){
+  var W = { y: y, w: w, v: PX_AGG_V, games: [], agg: {}, lg: null, lines: {}, linesAll: {}, done: false, at: Date.now() };
+  return call("/games", { year: y, week: w, seasonType: "regular" }).then(function(gs){
     W.sch = pxSchFrom(gs);
     (gs || []).forEach(function(g){
       var hc = String(pxG(g, "homeClassification", "home_division") || "").toLowerCase(), ac = String(pxG(g, "awayClassification", "away_division") || "").toLowerCase();
@@ -2017,13 +2030,17 @@ function pxLoadWeek(w, force){
         c: !!pxG(g, "completed") || (hp !== null && ap !== null) });
     });
     var anyDone = W.games.some(function(g){ return g.c; });
-    var jobs = [pxCall("/lines", { year: y, week: w, seasonType: "regular" }).catch(function(){ return []; })];
-    if(anyDone) jobs.push(pxCall("/plays", { year: y, week: w, seasonType: "regular" }));
+    var jobs = [call("/lines", { year: y, week: w, seasonType: "regular" }).catch(function(){ return []; })];
+    if(anyDone) jobs.push(call("/plays", { year: y, week: w, seasonType: "regular" }));
     return Promise.all(jobs).then(function(res){
       // Consensus closing spread and total, and their openers.
+      var num = function(v){ return (v === null || v === undefined || v === "" || !isFinite(+v)) ? null : +v; };
       (res[0] || []).forEach(function(L){
+        // Every sportsbook's numbers too, for line-movement work: [book, spread, spread open, total, total open].
+        var all = (pxG(L, "lines") || []).map(function(q){ return [String(pxG(q, "provider") || ""), num(pxG(q, "spread")), num(pxG(q, "spreadOpen", "spread_open")), num(pxG(q, "overUnder", "over_under")), num(pxG(q, "overUnderOpen", "over_under_open"))]; })
+          .filter(function(a){ return a[1] !== null || a[3] !== null; });
+        if(all.length) W.linesAll[String(pxG(L, "id"))] = all;
         var l = pxPick(pxG(L, "lines")); if(!l) return;
-        var num = function(v){ return (v === null || v === undefined || v === "" || !isFinite(+v)) ? null : +v; };
         W.lines[String(pxG(L, "id"))] = { c: +l.spread, o: num(pxG(l, "spreadOpen", "spread_open")), t: num(pxG(l, "overUnder", "over_under")), to: num(pxG(l, "overUnderOpen", "over_under_open")) };
       });
       if(anyDone){
@@ -2032,7 +2049,6 @@ function pxLoadWeek(w, force){
         W.lg = ag.lg;
       }
       W.done = W.games.length > 0 && W.games.every(function(g){ return g.c; });
-      S.wk[key] = W;
       return W;
     });
   });
@@ -2040,12 +2056,13 @@ function pxLoadWeek(w, force){
 // Roster composite for one season: last season's SP+, returning production,
 // recruiting talent and net transfer portal value, per team.
 var PX_POS_W = { QB: 2.5, OT: 2, OG: 2, IOL: 2, OL: 2, C: 2, EDGE: 1.5, DL: 1.5, DE: 1.5, DT: 1.5 };
-function pxSeasonInputs(y){
+function pxSeasonInputs(y, call){
+  call = call || pxCall;
   return Promise.all([
-    pxCall("/ratings/sp", { year: y - 1 }).catch(function(){ return []; }),
-    pxCall("/player/returning", { year: y }).catch(function(){ return []; }),
-    pxCall("/talent", { year: y }).catch(function(){ return []; }),
-    pxCall("/player/portal", { year: y }).catch(function(){ return []; })
+    call("/ratings/sp", { year: y - 1 }).catch(function(){ return []; }),
+    call("/player/returning", { year: y }).catch(function(){ return []; }),
+    call("/talent", { year: y }).catch(function(){ return []; }),
+    call("/player/portal", { year: y }).catch(function(){ return []; })
   ]).then(function(r){
     var T = {};
     function t(name){ var id = pxTeamId(name); if(!id) return null; return (T[id] = T[id] || {}); }
@@ -2069,9 +2086,9 @@ function pxSeasonInputs(y){
 // team, which is what a missing rating used to count as. It starts at the 10th
 // percentile of last season's FBS ratings instead (flagged "imp" for display).
 // Works on a saved prior too, so nothing needs re-downloading.
-function pxPriorFix(P){
+function pxPriorFix(P, teams){
   if(!P || !P.t || P.fx === 2) return P;
-  var S = pxState(), fbs = S.teams || {}, c = P.coef || [0, 0.55, 0.6, 3.0, 0.15];
+  var fbs = teams || pxState().teams || {}, c = P.coef || [0, 0.55, 0.6, 3.0, 0.15];
   var spv = Object.keys(P.t).map(function(id){ return P.t[id].sp; }).filter(function(v){ return typeof v === "number" && isFinite(v); }).sort(function(a, b){ return a - b; });
   var spNew = spv.length >= 20 ? spv[Math.floor(spv.length * 0.1)] : -15;
   Object.keys(fbs).forEach(function(id){
@@ -2114,9 +2131,14 @@ function pxPriorRel(t){ if(!t) return 1; return (t.imp ? 0.5 : 1) * (t.nc ? 0.6 
 function pxLoadPrior(force){
   var S = pxState(), y = pxYear();
   if(S.prior && S.prior.y === y && S.prior.v === 3 && !force) return Promise.resolve(pxPriorFix(S.prior));
+  return pxBuildPrior(y, pxCall).then(function(out){ S.prior = pxPriorFix(out); return out; });
+}
+// The roster prior for season y (fitted on y-3..y-1), without touching saved state.
+function pxBuildPrior(y, call){
+  call = call || pxCall;
   var hist = [y - 3, y - 2, y - 1], REC = {}; REC[y - 1] = 1; REC[y - 2] = 0.7; REC[y - 3] = 0.5;
-  return Promise.all([pxSeasonInputs(y), pxCall("/coaches", { minYear: y - 4, maxYear: y }).catch(function(){ return []; })].concat(hist.map(function(h){
-    return Promise.all([pxSeasonInputs(h), pxCall("/ratings/sp", { year: h }).catch(function(){ return []; })]);
+  return Promise.all([pxSeasonInputs(y, call), call("/coaches", { minYear: y - 4, maxYear: y }).catch(function(){ return []; })].concat(hist.map(function(h){
+    return Promise.all([pxSeasonInputs(h, call), call("/ratings/sp", { year: h }).catch(function(){ return []; })]);
   }))).then(function(res){
     var cur = res[0], CO = pxCoachIndex(res[1]), H = res.slice(2), rows = [];
     // Standardise talent across teams in each season.
@@ -2167,7 +2189,6 @@ function pxLoadPrior(force){
       out.t[id] = { r: r, off: r * share, def: -r * (1 - share), ret: o.ret, tal: o.tal, port: o.port || 0, sp: o.sp };
       if(cf.nc){ var t = out.t[id]; t.nc = 1; t.coach = cf.coach; t.prevCoach = cf.prevCoach; t.cvaNew = cf.cvaNew; t.cvaOld = cf.cvaOld; t.coachAdj = coef[5] * cf.gap + coef[6] * cf.cvd; }
     });
-    S.prior = pxPriorFix(out);
     return out;
   });
 }
@@ -2224,6 +2245,180 @@ function pxSync(force){
   });
 }
 
+// ── Past seasons for backtesting ────────────────────────────────────────────
+// 2023–2025 (post-COVID, NIL era), each saved to prophescore/<uid>/hist/y<year> a week
+// at a time, with a small index at histIdx. Resumable: a stopped download continues from
+// the last saved week. Never loaded when the page opens; it is there for the export.
+var PX_HIST_YEARS = [2023, 2024, 2025];
+var PXH = { busy: false, msg: "", err: "", step: "", idx: null, loading: false };
+function pxHistRef(sub){ return DB.ref("prophescore/" + ME() + "/" + sub); }
+function pxHistPut(sub, val){ return new Promise(function(res, rej){ pxHistRef(sub).set(peClean(val), function(err){ if(err) rej(err); else res(); }); }); }
+function pxHistGet(sub){ return pxHistRef(sub).once("value").then(function(sn){ return sn.val(); }); }
+function pxHistLoadIdx(){
+  if(!DB || !ME()) return Promise.resolve({});
+  PXH.loading = true;
+  return pxHistGet("histIdx").then(function(v){ PXH.idx = v || {}; PXH.loading = false; return PXH.idx; }, function(e){ PXH.loading = false; PXH.idx = {}; throw e; });
+}
+// Calls still needed: 3 per missing week, ~2 for teams + calendar, ~12 for a prior.
+function pxHistCallsLeft(){
+  var I = PXH.idx || {}, n = 0;
+  PX_HIST_YEARS.forEach(function(y){ var e = I["y" + y] || {}, have = e.wk ? Object.keys(e.wk).length : 0, all = e.weeks ? e.weeks.length : 15;
+    n += 3 * Math.max(0, all - have) + (e.teams ? 0 : 1) + (e.weeks ? 0 : 1) + (e.prior ? 0 : 12); });
+  return n;
+}
+function pxHistSync(){
+  if(PXH.busy) return;
+  if(!pxKey()){ PXH.err = "Save your CFBD key first."; pxHistStatus(); return; }
+  if(!DB || !ME()){ PXH.err = "Needs the Firebase connection (sign in on the hub)."; pxHistStatus(); return; }
+  if(PX.busy){ PXH.err = "Wait for this season’s refresh to finish, then try again."; pxHistStatus(); return; }
+  PXH.busy = true; PXH.err = ""; PXH.msg = "Checking what’s already saved…"; pxHistStatus();
+  var memo = {}, call = function(path, params){ var k = path + "?" + JSON.stringify(params || {}); if(!memo[k]) memo[k] = pxCall(path, params).catch(function(e){ delete memo[k]; throw e; }); return memo[k]; };
+  pxHistLoadIdx().then(function(idx){
+    var chain = Promise.resolve();
+    PX_HIST_YEARS.forEach(function(y){ chain = chain.then(function(){ return pxHistSeason(y, idx, call); }); });
+    return chain;
+  }).then(function(){
+    PXH.busy = false; PXH.msg = ""; PXH.step = ""; peSave(); pxHistStatus(); toast("Past seasons saved", "ok");
+  }).catch(function(e){
+    PXH.busy = false; PXH.msg = ""; PXH.err = (PXH.step ? PXH.step + ": " : "") + ((e && (e.message || e.code)) || String(e)); PXH.step = ""; peSave(); pxHistStatus();
+  });
+}
+function pxHistSeason(y, idx, call){
+  var k = "y" + y, I = idx[k] = idx[k] || {}, teams = null;
+  var saveIdx = function(){ I.v = PX_AGG_V; I.at = Date.now(); return pxHistPut("histIdx/" + k, I); };
+  var say = function(step, msg){ PXH.step = step; PXH.msg = msg; pxHistStatus(); };
+  return Promise.resolve().then(function(){
+    // FBS teams that season (names, conference, stadium).
+    if(I.teams) return null;
+    say(y + " teams", y + ": FBS teams…");
+    return call("/teams/fbs", { year: y }).then(function(list){
+      var T = {};
+      (list || []).forEach(function(t){ var id = String(pxG(t, "id")), school = pxG(t, "school"); if(!id || !school) return;
+        var loc = t.location || {}, lf = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; }, L = {};
+        [["la", "latitude"], ["lo", "longitude"], ["el", "elevation"], ["cap", "capacity"]].forEach(function(f){ var v = lf(loc[f[1]]); if(v !== null) L[f[0]] = v; });
+        T[id] = { s: school, m: pxG(t, "mascot") || "", c: pxG(t, "conference") || "" }; if(L.la !== undefined) T[id].loc = L; });
+      teams = T;
+      return pxHistPut("hist/" + k + "/teams", T).then(function(){ I.teams = Object.keys(T).length; return saveIdx(); });
+    });
+  }).then(function(){
+    // Regular-season weeks from CFBD's calendar (1–15 if it won't say).
+    if(I.weeks) return null;
+    say(y + " calendar", y + ": season calendar…");
+    return call("/calendar", { year: y }).then(function(cal){
+      var ws = (cal || []).filter(function(e){ return /regular/i.test(String(pxG(e, "seasonType", "season_type") || "")); }).map(function(e){ return +pxG(e, "week"); }).filter(function(n){ return n > 0; });
+      I.weeks = ws.length ? ws.sort(function(a, b){ return a - b; }) : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+      return saveIdx();
+    }).catch(function(){ I.weeks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]; return saveIdx(); });
+  }).then(function(){
+    // Roster prior as it would have stood before that season.
+    if(I.prior) return null;
+    say(y + " roster prior", y + ": roster prior (fitted on " + (y - 3) + "–" + (y - 1) + ")…");
+    return (teams ? Promise.resolve(teams) : pxHistGet("hist/" + k + "/teams")).then(function(T){
+      return pxBuildPrior(y, call).then(function(P){ return pxPriorFix(P, T || {}); });
+    }).then(function(P){ return pxHistPut("hist/" + k + "/prior", P).then(function(){ I.prior = Object.keys(P.t || {}).length; return saveIdx(); }); });
+  }).then(function(){
+    // Every regular-season week: games, every book's lines, aggregated plays.
+    I.wk = I.wk || {};
+    var chain = Promise.resolve();
+    I.weeks.forEach(function(w){
+      chain = chain.then(function(){
+        if(I.wk["w" + w]) return null;
+        say(y + " week " + w, y + " week " + w + " of " + I.weeks[I.weeks.length - 1] + ": games, lines and plays…");
+        return pxFetchWeek(y, w, call).then(function(W){
+          return pxHistPut("hist/" + k + "/wk/w" + w, W).then(function(){ I.wk["w" + w] = W.games.length; return saveIdx(); });
+        });
+      });
+    });
+    return chain;
+  }).then(function(){ I.done = 1; return saveIdx(); });
+}
+function pxHistCardHtml(){
+  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(pxHistStatus, pxHistStatus); }
+  var S = pxState(), I = PXH.idx || {};
+  var h = '<div class="pem-ats" id="px-hist"><div class="pem-autotop"><b>📚 Past seasons for backtesting</b>' +
+          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? 'Resume' : 'Download')) + '</button>' : '') + '</div>';
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Season</span><span>Weeks saved</span><span>Prior</span></div>';
+  PX_HIST_YEARS.forEach(function(y){ var e = I["y" + y] || {}, have = e.wk ? Object.keys(e.wk).length : 0, all = e.weeks ? e.weeks.length : null;
+    h += '<div class="pem-bkrow"><span>' + y + '</span><span>' + (e.done ? '<b class="up">all ' + have + '</b>' : (have + (all ? ' of ' + all : ''))) + '</span><b>' + (e.prior ? '✓ ' + e.prior + ' teams' : '—') + '</b></div>'; });
+  h += '</div>';
+  if(PXH.busy) h += '<div class="pem-autosub">' + x(PXH.msg) + '</div>';
+  if(PXH.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXH.err) + ' Everything saved so far is kept — Resume continues from there.</div>';
+  var left = pxHistCallsLeft();
+  h += '<div class="pem-autonote">' + (PXH.idx ? (left ? 'About <b>' + left + '</b> CFBD calls still to go' : 'All three seasons are saved') : 'Checking what’s saved…') + (S.calls ? ' · ' + S.calls.n + ' used this month (free tier ≈ 1,000)' : '') + '. Saved to Firebase under <b>prophescore/→hist</b>, a week at a time, so it comes along when you export prophescore. It never loads when this page opens. Keep this tab in front while it runs — a phone pauses background tabs.</div>';
+  return h + '</div>';
+}
+function pxHistStatus(){ var el = document.getElementById("px-hist"); if(el){ el.outerHTML = pxHistCardHtml(); pxBind(); } }
+
+// ── Daily line snapshots (ESPN) ─────────────────────────────────────────────
+// Once per day (Eastern) while this page is open, every upcoming FBS game's spread and
+// total from ESPN go to prophescore/<uid>/snaps/<game id>:
+//   d20260929: [home spread (negative = home favoured), total, time]
+//   o: [opening spread, opening total]     m: [away id, home id, kickoff, neutral, book]
+var PXS = { busy: false, err: "" };
+function pxEtDay(){ try{ return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }); }catch(e){ return new Date().toISOString().slice(0, 10); } }
+// Home spread, negative = home favoured, from ESPN's odds on one event (null if none).
+function pxEvHomeSpread(ev){
+  var c = (ev.competitions || [])[0] || {}, od = (c.odds || [])[0] || {};
+  var hf = od.homeTeamOdds && od.homeTeamOdds.favorite, af = od.awayTeamOdds && od.awayTeamOdds.favorite;
+  if((hf || af) && typeof od.spread === "number"){ var a = Math.abs(od.spread); return hf ? -a : a; }
+  var d = String(od.details || "").trim(); if(!d) return null;
+  if(/^(EVEN|PK|PICK)/i.test(d)) return 0;
+  var m = d.match(/^\s*([A-Za-z0-9&.'-]+)\s+(-?\d+(?:\.\d+)?)/); if(!m) return null;
+  var ab = m[1].toUpperCase(), v = Math.abs(parseFloat(m[2])), side = null;
+  (c.competitors || []).forEach(function(t){ var tm = t.team || {}; if(String(tm.abbreviation || "").toUpperCase() === ab) side = t.homeAway; });
+  return side === "home" ? -v : side === "away" ? v : null;
+}
+function pxEvOpenTotal(od){
+  var n = function(v){ if(v && typeof v === "object") v = v.line != null ? v.line : v.value; var f = parseFloat(String(v == null ? "" : v).replace(/[^\d.]/g, "")); return (isFinite(f) && f > 20 && f < 130) ? f : null; }, v = null;
+  try{
+    if(od.total && od.total.over && od.total.over.open) v = n(od.total.over.open.line);
+    if(v === null && od.open && od.open.overUnder != null) v = n(od.open.overUnder);
+  }catch(e){}
+  return v;
+}
+function pxSnapMaybe(){
+  if(!PE.ready || PXS.busy || !DB || !ME()) return;
+  if(pxState().snapDay === pxEtDay()) return;
+  pxSnapLines();
+}
+function pxSnapLines(){
+  if(PXS.busy || !DB || !ME()) return Promise.resolve();
+  PXS.busy = true; PXS.err = ""; pxSnapStatus();
+  var day = pxEtDay(), dk = "d" + day.replace(/-/g, ""), now = Date.now();
+  var y = PE.meta && PE.meta.espnYear, w = PE.meta && PE.meta.espnWeek;
+  var urls = [PEAR_SCORE + "?groups=80&limit=400"];
+  if(y && w && w < 16) urls.push(PEAR_SCORE + "?groups=80&limit=400&seasontype=2&year=" + y + "&week=" + (w + 1));   // next week's lines once they're posted
+  return Promise.all(urls.map(function(u){ return fetch(u).then(function(r){ return r.json(); }).catch(function(){ return null; }); })).then(function(ds){
+    var up = {}, n = 0, seen = {};
+    ds.forEach(function(d){ ((d && d.events) || []).forEach(function(ev){
+      var g = pearParseEvent(ev); if(!g || seen[g.id] || g.state !== "pre") return; seen[g.id] = 1;
+      var c = (ev.competitions || [])[0] || {}, od = (c.odds || [])[0] || {};
+      var sp = pxEvHomeSpread(ev), tt = (typeof od.overUnder === "number") ? od.overUnder : null;
+      if(sp === null && tt === null) return;
+      var base = "snaps/" + g.id + "/";
+      up[base + dk] = [sp, tt, now];
+      up[base + "m"] = [g.away.id, g.home.id, g.date || null, g.neutral ? 1 : 0, (od.provider && od.provider.name) || ""];
+      var so = pemParseOpen(od), to = pxEvOpenTotal(od);
+      if(so !== null || to !== null) up[base + "o"] = [so, to];
+      n++;
+    }); });
+    if(!ds.some(Boolean)) throw new Error("Couldn’t reach ESPN");
+    if(!n){ var S0 = pxState(); S0.snapDay = day; S0.snapN = 0; S0.snapAt = now; peSave(); return; }
+    return new Promise(function(res, rej){ DB.ref("prophescore/" + ME()).update(peClean(up), function(err){ if(err) rej(err); else res(); }); }).then(function(){
+      var S = pxState(); S.snapDay = day; S.snapN = n; S.snapAt = now; S.snapDays = (S.snapDays || 0) + 1; peSave();
+    });
+  }).then(function(){ PXS.busy = false; pxSnapStatus(); }, function(e){ PXS.busy = false; PXS.err = (e && (e.message || e.code)) || String(e); pxSnapStatus(); });
+}
+function pxSnapCardHtml(){
+  var S = pxState();
+  var h = '<div class="pem-ats" id="px-snap"><div class="pem-autotop"><b>📈 Line tracking (ESPN)</b><button class="btn btn-sm btn-ghost" id="px-snapgo"' + (PXS.busy ? ' disabled' : '') + '>' + (PXS.busy ? 'Saving…' : 'Snapshot now') + '</button></div>';
+  h += '<div class="pem-autosub">' + (S.snapDay ? 'Last snapshot <b>' + x(S.snapDay) + '</b>' + (S.snapAt ? ' at ' + new Date(S.snapAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : '') + ' · ' + (S.snapN || 0) + ' games' + (S.snapDays ? ' · ' + S.snapDays + ' days tracked' : '') : 'No snapshots yet.') + '</div>';
+  if(PXS.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXS.err) + '</div>';
+  h += '<div class="pem-autonote">Every upcoming FBS game’s spread and over/under, saved once a day while this page is open (it checks hourly), plus ESPN’s openers. Stored under <b>prophescore/→snaps</b> for the export; days the page isn’t opened are skipped. CFBD’s opening and closing lines from every book are saved with each week as well.</div>';
+  return h + '</div>';
+}
+function pxSnapStatus(){ var el = document.getElementById("px-snap"); if(el){ el.outerHTML = pxSnapCardHtml(); pxBind(); } }
+
 // ── Model ───────────────────────────────────────────────────────────────────
 // Team-game rows from every stored week before `upto`.
 function pxRows(upto){
@@ -2246,21 +2441,20 @@ function pxPriorW(o, w){ return o.prior * pxPriorFade(o, w); }
 // starting from `alpha` units of its centre C (league average when no centre).
 function pxRidge(rows, get, alpha, C){
   var sN = 0, sS = 0; rows.forEach(function(r){ var v = get(r); if(v){ sN += v[0] * r.dec; sS += v[1] * r.dec; } });
-  var mu = sN ? sS / sN : 0, O = {}, D = {}, hf = 0;
+  var mu = sN ? sS / sN : 0, O = {}, D = {};
   rows.forEach(function(r){ O[r.o] = 0; D[r.d] = 0; });
-  // y = mu + O[off] + D[def] + hf * home (home +1 / away -1 / neutral 0). Without the home
-  // term a team that opened with more home games than road games had home field baked into
-  // its ratings, and then got home field again on top at prediction time.
+  // No home term here on purpose. Tried and measured on real 2026 games: early in the season
+  // the stronger team usually hosts (home sides averaged a 10-point prior edge in week 1), so
+  // an unshrunk home term soaked up team strength (3–4 points of success rate, several times
+  // a realistic home edge) and compressed every spread. Home field is added at prediction.
   for(var it = 0; it < 20; it++){
-    var so = {}, no = {}, sd = {}, nd = {}, sh = 0, nh = 0;
-    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; so[r.o] = (so[r.o] || 0) + (v[1] * r.dec - n * (mu + D[r.d] + hf * (r.home || 0))); no[r.o] = (no[r.o] || 0) + n; });
+    var so = {}, no = {}, sd = {}, nd = {};
+    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; so[r.o] = (so[r.o] || 0) + (v[1] * r.dec - n * (mu + D[r.d])); no[r.o] = (no[r.o] || 0) + n; });
     for(var a in O) O[a] = ((so[a] || 0) + alpha * ((C && C.O[a]) || 0)) / ((no[a] || 0) + alpha);
-    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; sd[r.d] = (sd[r.d] || 0) + (v[1] * r.dec - n * (mu + O[r.o] + hf * (r.home || 0))); nd[r.d] = (nd[r.d] || 0) + n; });
+    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; sd[r.d] = (sd[r.d] || 0) + (v[1] * r.dec - n * (mu + O[r.o])); nd[r.d] = (nd[r.d] || 0) + n; });
     for(var b in D) D[b] = ((sd[b] || 0) + alpha * ((C && C.D[b]) || 0)) / ((nd[b] || 0) + alpha);
-    rows.forEach(function(r){ var v = get(r); if(!v || !v[0] || !r.home) return; var n = v[0] * r.dec; sh += r.home * (v[1] * r.dec - n * (mu + O[r.o] + D[r.d])); nh += n; });
-    hf = nh ? sh / nh : 0;
   }
-  return { mu: mu, O: O, D: D, n: sN, hf: hf };
+  return { mu: mu, O: O, D: D, n: sN };
 }
 // ── League play model ───────────────────────────────────────────────────────
 // Everything the drive simulator needs that isn't a team rating, from the
@@ -2485,7 +2679,7 @@ function pxAutoStretch(upto, o){
       var cx = o.sit ? pxCtx(x.g) : null, SP0 = cx ? pxSitParts(x.g.a, x.g.h, x.g.n, cx.d, cx.id) : null, sp = SP0 ? SP0.pts * o.sit : 0;
       xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa) - sp); ws.push(rw);
       // Totals: how far real scoring has run from the model's raw total (weather included).
-      var t0 = A.E + H.E; if(SP0){ t0 = t0 * (1 + (SP0.pace - 1) * o.sit) + 2 * SP0.eff * o.sit; }
+      var t0 = A.Etot + H.Etot; if(SP0){ t0 = t0 * (1 + (SP0.pace - 1) * o.sit) + 2 * SP0.eff * o.sit; }
       tS += rw * ((x.g.hs + x.g.as) - t0); tW += rw;
       // Reference only, never used: how wide the closing lines ran against the same predictions.
       var L = x.W.lines[x.g.id]; if(L && isFinite(L.c)){ vx.push(H.E - A.E); vy.push(-L.c - (x.g.n ? 0 : o.hfa)); vw.push(rw); } });
@@ -2550,12 +2744,15 @@ function pxDriveParams(fit, off, def){
   var sideW = function(id, pr){ return (id === "__avg__" || !pr) ? null : (fit.tm[id] ? fit.pw : 1); };
   var wv = [sideW(off, po), sideW(def, pd)].filter(function(v){ return v !== null; });
   var w = wv.length ? wv.reduce(function(a, b){ return a + b; }, 0) / wv.length : 0;
-  var Eb = (1 - w) * E + w * pE;
-  // SP+ blend: that week's pasted sheet, offense against defense, as points.
+  var Eb = (1 - w) * E + w * pE, Etot = Eb;
+  // SP+ blend: that week's pasted sheet, offense against defense, as points. It moves the
+  // margin only: tested on 2026 games, SP+ sharpens spreads but pulls totals the wrong way
+  // (its totals ran behind the drive model's, and an overall-only paste flattens every
+  // total toward league average), so totals stay with the model (Etot).
   var ws = fit.o.sp || 0, SPS = fit.spSheet, spE = null;
   var AVG0 = { off: 0, def: 0 }, so = off === "__avg__" ? AVG0 : SPS && SPS[off], sd = def === "__avg__" ? AVG0 : SPS && SPS[def];
   if(ws && SPS && so && sd && !(so === AVG0 && sd === AVG0)){ spE = fit.mPts + so.off + sd.def; Eb = (1 - ws) * Eb + ws * spE; }
-  return { dr: dr, ppd: ppd, E: Eb, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
+  return { dr: dr, ppd: ppd, E: Eb, Etot: Etot, Eplay: E, spE: spE, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
            succ: succ, hav: hav, eR: eR, eP: eP, epa: rr * eR + (1 - rr) * eP };
 }
 // ── Situational spots: rest, travel, altitude, crowd, weather ──
@@ -2624,7 +2821,7 @@ function pxSitParts(awayId, homeId, neutral, date, gid){
 }
 function pxPredict(fit, awayId, homeId, neutral, ctx){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
-  var st = fit.st || 1, mid = (A.E + H.E) / 2, half = (H.E - A.E) / 2 * st;
+  var st = fit.st || 1, mid = (A.Etot + H.Etot) / 2, half = (H.E - A.E) / 2 * st;       // margin with the SP+ blend, total without it
   var tb = (fit.tb || 0) / 2;                                                      // walk-forward totals correction, half to each side
   var eA = Math.max(3, mid - half + tb), eH = Math.max(3, mid + half + tb);       // points before home field, spread stretched
   // A real game's spot: weather slows both sides, rest / travel / altitude / crowd tilt it.
@@ -2705,7 +2902,7 @@ function pxCVErr(o, weeksUpTo){
 }
 function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v11|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v13|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -2743,7 +2940,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m12|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m14|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2878,7 +3075,7 @@ function pxPowerRatings(fit){
   var ids = fit.teams.filter(function(id){ return id !== "__avg__" && pearIsFbs(id); }), st = fit.st || 1, out = {};
   ids.forEach(function(id){
     var o = pxDriveParams(fit, id, "__avg__"), d = pxDriveParams(fit, "__avg__", id);
-    var off0 = (o.E - fit.mPts) * st, def0 = (d.E - fit.mPts) * st, sum = 0, n = 0;
+    var off0 = (o.Etot - fit.mPts) * st, def0 = (d.Etot - fit.mPts) * st, sum = 0, n = 0;
     ids.forEach(function(j){ if(j === id) return; var p = pxPredict(fit, j, id, true); sum += p.home - p.away; n++; });
     var rr = n ? sum / n : off0 - def0, dl = rr - (off0 - def0);
     out[id] = { off: off0 + dl / 2, def: def0 - dl / 2, rr: rr, o: o, d: d };
@@ -3060,6 +3257,8 @@ function pxSimCardHtml(){
 function pxPanelHtml(){
   var h = '<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>';
   h += pxDataCardHtml();
+  h += pxSnapCardHtml();
+  if(pxKey()) h += pxHistCardHtml();
   if(PX.active){
     h += pemAtsCardHtml();
     h += pxEvalCardHtml();
@@ -3091,6 +3290,10 @@ function pxBind(){
   };
   var fc = document.getElementById("px-fadecmp");
   if(fc) fc.onclick = function(){ this.disabled = true; this.textContent = "Comparing\u2026"; var self = this; setTimeout(function(){ PX._fcShow = true; var c = document.getElementById("px-fadecard"); if(c){ c.outerHTML = pxFadeCardHtml(); pxBind(); } }, 30); };
+  var hg = document.getElementById("px-histgo");
+  if(hg) hg.onclick = function(){ pxHistSync(); };
+  var sg = document.getElementById("px-snapgo");
+  if(sg) sg.onclick = function(){ pxSnapLines(); };
   var tu = document.getElementById("px-tune");
   if(tu) tu.onclick = function(){ pxState().tuneSig = ""; pxAutoTune(); pxStatus(); renderPoolEdge(); };
 }
@@ -3389,7 +3592,8 @@ function pemMeanErr(em){ var s = 0, n = 0; for(var k in em){ s += em[k]; n++; } 
 // Background upkeep whenever a view paints: current week, CFBD data, FBS list.
 function pemAutoMaybe(){
   if(!PE.ready) return;
-  psNow();
+  psNow().then(function(){ try{ pxSnapMaybe(); }catch(e){} });
+  if(!PXS.timer) PXS.timer = setInterval(function(){ try{ pxSnapMaybe(); }catch(e){} }, 3600e3);
   if(pxKey()) pxMaybe();
   pemEnsureFbs();
 }
