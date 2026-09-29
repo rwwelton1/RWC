@@ -3135,9 +3135,11 @@ function pxUTPaired(A, B, tot){
 function pxUTTest(){
   if(PX.ut.busy || !PX.active) return;
   var o = Object.assign({}, pxUTInit()), weeks = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; }), G = {}, i = 0;
-  PX.ut.busy = true; PX.ut.stale = false; PX.ut.res = null;
+  PX.ut.busy = true; PX.ut.stale = !!PX.ut.res;                     // the last result stays up (greyed as stale) until the new one lands
   (function step(){
-    if(i >= weeks.length){ PX.ut.busy = false; PX.ut.msg = ""; PX.ut.res = { o: o, games: G, at: Date.now() }; pxUTStatus(); return; }
+    if(i >= weeks.length){ PX.ut.busy = false; PX.ut.msg = ""; PX.ut.stale = false; PX.ut.res = { o: o, games: G, at: Date.now() };
+      if(PX.ut.again){ PX.ut.again = false; PX.ut.stale = true; pxUTStatus(); setTimeout(pxUTTest, 50); return; }
+      pxUTStatus(); return; }
     var w = weeks[i++]; PX.ut.msg = "Testing week " + w + " (" + i + " of " + weeks.length + ")…"; pxUTStatus();
     setTimeout(function(){
       try{
@@ -3160,60 +3162,96 @@ function pxUTApply(){
   pxUTRefresh("Your tune is in use · every setting locked");
 }
 function pxUTReset(){ var S = pxState(); S.lock = {}; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
+var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "hfa", "stretch"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit"]]];
+var PX_UT_CSS = '<style>' +
+  '#px-ut .ut-g{margin:12px 0 2px;font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;opacity:.6}' +
+  '#px-ut .ut-r{padding:6px 0 4px;border-top:1px dashed var(--border2)}' +
+  '#px-ut .ut-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800;line-height:1.15}' +
+  '#px-ut .ut-v{flex:none;border:1.5px solid var(--border2);background:#fff;border-radius:7px;padding:2px 7px;font:900 12px Nunito,sans-serif;color:inherit;cursor:pointer}' +
+  '#px-ut .ut-v.ch{background:var(--gold-bg);border-color:var(--gold-dark);color:#7a5c00}' +
+  '#px-ut .ut-s{width:100%;height:22px;margin:2px 0 0;accent-color:#1a4fd6}' +
+  '#px-ut .ut-bar{position:sticky;bottom:10px;z-index:5;margin-top:12px;background:#111;color:#fff;border-radius:12px;padding:9px 10px;display:flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);font-size:12px;font-weight:800;line-height:1.3}' +
+  '#px-ut .ut-bar .ut-n{flex:1;min-width:0}' +
+  '#px-ut .ut-bar b.up{color:#7ee2a8}#px-ut .ut-bar b.dn{color:#ff9b9b}' +
+  '#px-ut .ut-bar button{flex:none;border:0;border-radius:8px;padding:7px 10px;font:900 12px Nunito,sans-serif;background:var(--gold);color:#111}' +
+  '#px-ut .ut-bar button:disabled{opacity:.5}' +
+  '</style>';
+function pxUTKnob(key){ var kd = null; PX_KNOBS.forEach(function(k){ if(k.key === key) kd = k; }); return kd; }
+function pxUTChanged(){ var o = pxUTInit(), S = pxState(), n = 0; PX_KNOBS.forEach(function(k){ if(Math.abs(o[k.key] - S.opts[k.key]) > 1e-9) n++; }); return n; }
+// The pinned bar: headline numbers, status, and the button that matters.
+function pxUTBarHtml(){
+  var R = PX.ut.res, n = pxUTChanged(), s;
+  if(PX.ut.busy) s = '⏳ ' + x(PX.ut.msg || 'Testing…');
+  else if(R && !PX.ut.stale){
+    var cur = pxUTCurrent(), A = pxUTSummary(R.games), B = pxUTSummary(cur), c = function(a, b){ return a < b - 0.005 ? 'up' : (a > b + 0.005 ? 'dn' : ''); };
+    var ea = A.e / A.n, eb = B.e / B.n, ta = A.tn ? A.te / A.tn : null, tb = B.tn ? B.te / B.tn : null;
+    s = 'Spread miss <b class="' + c(ea, eb) + '">' + ea.toFixed(2) + '</b> <span style="opacity:.6">now ' + eb.toFixed(2) + '</span>' +
+        (ta !== null ? '<br>Total miss <b class="' + c(ta, tb) + '">' + ta.toFixed(2) + '</b> <span style="opacity:.6">now ' + tb.toFixed(2) + '</span>' : '');
+  } else s = n ? n + ' change' + (n === 1 ? '' : 's') + ' — let go of a slider to test' : 'Move any slider — it tests itself';
+  return '<div class="ut-n">' + s + '</div><button id="px-ut-apply"' + (PX.ut.busy || !n ? ' disabled' : '') + '>Use my tune</button>';
+}
+// Full results under the sliders.
+function pxUTResHtml(){
+  var R = PX.ut.res; if(!R) return '';
+  var cur = pxUTCurrent(), A = pxUTSummary(R.games), B = pxUTSummary(cur);
+  var f2 = function(a, n){ return n ? (a / n).toFixed(2) : '—'; }, rec = function(w, l){ var n = w + l; return w + '-' + l + (n ? ' <small>' + (100 * w / n).toFixed(1) + '%</small>' : ''); };
+  var better = function(a, b){ return a < b - 1e-9 ? 'up' : (a > b + 1e-9 ? 'dn' : ''); };
+  var h = '<div class="pem-bk" style="margin-top:12px"><div class="pem-bkhd"><span>' + (PX.ut.stale ? 'Last test (sliders moved since)' : 'This season, weeks ' + PX_FIRST_GRADED + '+') + '</span><span>Your tune</span><span>Now</span></div>' +
+       '<div class="pem-bkrow"><span>Spread miss <small>(Vegas ' + f2(A.ev, A.n) + ')</small></span><b class="' + better(A.e / A.n, B.e / B.n) + '">' + f2(A.e, A.n) + '</b><span>' + f2(B.e, B.n) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Against the spread</span><b>' + rec(A.w, A.l) + '</b><span>' + rec(B.w, B.l) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Edges of 3+</span><b>' + rec(A.sw, A.sl) + '</b><span>' + rec(B.sw, B.sl) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Total miss <small>(Vegas ' + f2(A.tv, A.tn) + ')</small></span><b class="' + better(A.te / A.tn, B.te / B.tn) + '">' + f2(A.te, A.tn) + '</b><span>' + f2(B.te, B.tn) + '</span></div>' +
+       '<div class="pem-bkrow"><span>Over/under</span><b>' + rec(A.ow, A.ol) + '</b><span>' + rec(B.ow, B.ol) + '</span></div></div>';
+  var wks = Object.keys(A.wk).map(Number).sort(function(a, b){ return a - b; });
+  if(wks.length) h += '<div class="pem-autonote" style="margin-top:4px">Spread miss by week — yours / now: ' + wks.map(function(w){ var a = A.wk[w], b = B.wk[w]; return 'wk ' + w + ' <b>' + (a.e / a.n).toFixed(1) + '</b> / ' + (b ? (b.e / b.n).toFixed(1) : '—'); }).join(' · ') + '</div>';
+  var say = function(p, what){ if(!p) return ''; return '<b>' + what + ':</b> ' + Math.abs(p.d).toFixed(2) + ' pts a game ' + (p.d < 0 ? 'better' : 'worse') + ' (±' + p.se.toFixed(2) + ') — ' + (Math.abs(p.t) >= 2 ? '<b class="' + (p.d < 0 ? 'up' : 'dn') + '">a real difference</b>' : 'within the noise on ' + p.n + ' games'); };
+  h += '<div class="pem-autonote" style="margin-top:4px">' + [say(pxUTPaired(R.games, cur, false), 'Spreads'), say(pxUTPaired(R.games, cur, true), 'Totals')].filter(Boolean).join('<br>') + '</div>';
+  return h;
+}
 function pxUTHtml(){
   if(!PX.active) return "";
   var o = pxUTInit(), S = pxState(), LK = pxLocks(), allLocked = PX_KNOBS.every(function(k){ return LK[k.key] !== undefined; });
-  var h = '<div class="pem-ats" id="px-ut"><div class="pem-autotop"><b>🎛️ Your tune</b><button class="btn btn-sm btn-gold" id="px-ut-test"' + (PX.ut.busy ? ' disabled' : '') + '>' + (PX.ut.busy ? 'Testing…' : 'Test') + '</button></div>';
-  h += '<div class="pem-autosub">' + (allLocked ? 'Your tune is <b>in use</b> (every setting locked).' : 'Sandbox — nothing changes until you tap <b>Use my tune</b>.') + ' Move a slider, then Test to see how this season would have gone with it.</div>';
-  PX_KNOBS.forEach(function(k){
-    var v = o[k.key]; if(typeof v !== "number") v = PX_DEFAULTS[k.key];
-    var changed = Math.abs(v - S.opts[k.key]) > 1e-9;
-    h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span id="ut-v-' + k.key + '"' + (changed ? ' style="color:var(--gold2,#b8860b)"' : '') + '>' + k.fmt(v) + (changed ? ' <small>(now ' + k.fmt(S.opts[k.key]) + ')</small>' : '') + '</span></div>' +
-         '<input type="range" id="ut-' + k.key + '" min="' + k.min + '" max="' + k.max + '" step="' + k.step + '" value="' + v + '" style="width:100%;accent-color:#1a4fd6;margin:4px 0 0">' +
-         '<div style="display:flex;justify-content:space-between;font-size:11px;opacity:.65"><span>' + x(k.lo || '') + '</span><span>' + x(k.hi || '') + '</span></div></div>';
+  var h = '<div class="pem-ats" id="px-ut">' + PX_UT_CSS + '<div class="pem-autotop"><b>🎛️ Your tune</b><span style="font-size:11px;font-weight:800;opacity:.65">' + (allLocked ? 'in use' : 'sandbox') + '</span></div>';
+  h += '<div class="pem-autosub" style="font-size:13px">Let go of a slider and it tests itself; the bar at the bottom follows you. Tap a value to put it back. Nothing changes until <b>Use my tune</b>.</div>';
+  PX_UT_GROUPS.forEach(function(gr){
+    h += '<div class="ut-g">' + x(gr[0]) + '</div>';
+    gr[1].forEach(function(key){
+      var k = pxUTKnob(key); if(!k) return;
+      var v = typeof o[key] === "number" ? o[key] : PX_DEFAULTS[key], ch = Math.abs(v - S.opts[key]) > 1e-9;
+      h += '<div class="ut-r"><div class="ut-top"><span>' + x(k.label) + '</span><button class="ut-v' + (ch ? ' ch' : '') + '" id="ut-v-' + key + '" title="Tap to put back to ' + x(k.fmt(S.opts[key])) + '">' + k.fmt(v) + '</button></div>' +
+           '<input class="ut-s" type="range" id="ut-' + key + '" min="' + k.min + '" max="' + k.max + '" step="' + k.step + '" value="' + v + '" title="' + x((k.lo || '') + ' ← → ' + (k.hi || '')) + '"></div>';
+    });
   });
-  if(PX.ut.busy) h += '<div class="pem-autosub">' + x(PX.ut.msg) + '</div>';
-  else if(PX.ut.msg) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PX.ut.msg) + '</div>';
-  var R = PX.ut.res;
-  if(R){
-    var cur = pxUTCurrent(), A = pxUTSummary(R.games), B = pxUTSummary(cur);
-    var f2 = function(a, n){ return n ? (a / n).toFixed(2) : '—'; }, rec = function(w, l){ var n = w + l; return w + '-' + l + (n ? ' <small>' + (100 * w / n).toFixed(1) + '%</small>' : ''); };
-    var better = function(a, b){ return a < b - 1e-9 ? 'up' : (a > b + 1e-9 ? 'dn' : ''); };
-    h += '<div class="pem-bk" style="margin-top:10px"><div class="pem-bkhd"><span>' + (PX.ut.stale ? 'Last test (sliders moved since)' : 'This season, weeks ' + PX_FIRST_GRADED + '+') + '</span><span>Your tune</span><span>Now</span></div>' +
-         '<div class="pem-bkrow"><span>Spread miss <small>(Vegas ' + f2(A.ev, A.n) + ')</small></span><b class="' + better(A.e / A.n, B.e / B.n) + '">' + f2(A.e, A.n) + '</b><span>' + f2(B.e, B.n) + '</span></div>' +
-         '<div class="pem-bkrow"><span>Against the spread</span><b>' + rec(A.w, A.l) + '</b><span>' + rec(B.w, B.l) + '</span></div>' +
-         '<div class="pem-bkrow"><span>Edges of 3+</span><b>' + rec(A.sw, A.sl) + '</b><span>' + rec(B.sw, B.sl) + '</span></div>' +
-         '<div class="pem-bkrow"><span>Total miss <small>(Vegas ' + f2(A.tv, A.tn) + ')</small></span><b class="' + better(A.te / A.tn, B.te / B.tn) + '">' + f2(A.te, A.tn) + '</b><span>' + f2(B.te, B.tn) + '</span></div>' +
-         '<div class="pem-bkrow"><span>Over/under</span><b>' + rec(A.ow, A.ol) + '</b><span>' + rec(B.ow, B.ol) + '</span></div></div>';
-    var wks = Object.keys(A.wk).map(Number).sort(function(a, b){ return a - b; });
-    if(wks.length) h += '<div class="pem-autonote" style="margin-top:4px">Spread miss by week — yours / now: ' + wks.map(function(w){ var a = A.wk[w], b = B.wk[w]; return 'wk ' + w + ' <b>' + (a.e / a.n).toFixed(1) + '</b> / ' + (b ? (b.e / b.n).toFixed(1) : '—'); }).join(' · ') + '</div>';
-    var say = function(p, what){ if(!p) return ''; var sign = p.d < 0 ? 'better' : 'worse';
-      return '<b>' + what + ':</b> ' + Math.abs(p.d).toFixed(2) + ' pts a game ' + sign + ' (±' + p.se.toFixed(2) + ') — ' + (Math.abs(p.t) >= 2 ? '<b class="' + (p.d < 0 ? 'up' : 'dn') + '">a real difference</b>' : 'within the noise on ' + p.n + ' games'); };
-    var ps = pxUTPaired(R.games, cur, false), pt = pxUTPaired(R.games, cur, true);
-    h += '<div class="pem-autonote" style="margin-top:4px">' + [say(ps, 'Spreads'), say(pt, 'Totals')].filter(Boolean).join('<br>') + '</div>';
-    h += '<div class="pem-autonote">One season is a small sample: most slider moves land "within the noise" here even when they matter over three seasons. The defaults were tuned on 2023–2025 (about 2,000 games), so treat a gain here as a lead, not proof.</div>';
-  }
+  h += '<div id="px-ut-res">' + pxUTResHtml() + '</div>';
   h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">' +
-       '<button class="btn btn-sm btn-gold" id="px-ut-apply"' + (PX.ut.busy ? ' disabled' : '') + '>Use my tune</button>' +
        '<button class="btn btn-sm btn-ghost" id="px-ut-load">Start from current</button>' +
        '<button class="btn btn-sm btn-ghost" id="px-ut-def">Start from defaults</button>' +
        '<button class="btn btn-sm btn-ghost" id="px-ut-reset">Back to auto</button></div>';
+  h += '<div class="pem-autonote">One season is a small sample — most moves read “within the noise” even when they matter over three seasons. The defaults come from about 2,000 games of 2023–25.</div>';
+  h += '<div class="ut-bar" id="px-ut-bar">' + pxUTBarHtml() + '</div>';
   return h + '</div>';
 }
-function pxUTStatus(){ var el = document.getElementById("px-ut"); if(el){ el.outerHTML = pxUTHtml(); pxBind(); } }
+// Refresh only the results and the bar, so a slider you're holding isn't redrawn under your finger.
+function pxUTStatus(full){
+  if(full){ var el = document.getElementById("px-ut"); if(el){ el.outerHTML = pxUTHtml(); pxBind(); } return; }
+  var r = document.getElementById("px-ut-res"), b = document.getElementById("px-ut-bar");
+  if(r) r.innerHTML = pxUTResHtml();
+  if(b){ b.innerHTML = pxUTBarHtml(); var ap = document.getElementById("px-ut-apply"); if(ap) ap.onclick = function(){ pxUTApply(); }; }
+}
+function pxUTSoon(){ clearTimeout(PX.ut.timer); PX.ut.timer = setTimeout(function(){ if(PX.ut.busy){ PX.ut.again = true; return; } pxUTTest(); }, 350); }
 function pxUTBind(){
   PX_KNOBS.forEach(function(k){
-    var el = document.getElementById("ut-" + k.key); if(!el) return;
-    el.oninput = function(){ var v = parseFloat(this.value), o = pxUTInit(), S = pxState(); o[k.key] = v; if(PX.ut.res) PX.ut.stale = true;
-      var lab = document.getElementById("ut-v-" + k.key), changed = Math.abs(v - S.opts[k.key]) > 1e-9;
-      if(lab){ lab.innerHTML = k.fmt(v) + (changed ? ' <small>(now ' + k.fmt(S.opts[k.key]) + ')</small>' : ''); lab.style.color = changed ? 'var(--gold2,#b8860b)' : ''; } };
+    var el = document.getElementById("ut-" + k.key), lab = document.getElementById("ut-v-" + k.key); if(!el) return;
+    var show = function(v){ var S = pxState(), ch = Math.abs(v - S.opts[k.key]) > 1e-9; if(lab){ lab.textContent = k.fmt(v); lab.className = 'ut-v' + (ch ? ' ch' : ''); } };
+    el.oninput = function(){ var v = parseFloat(this.value); pxUTInit()[k.key] = v; show(v); if(PX.ut.res) PX.ut.stale = true; };
+    el.onchange = function(){ pxUTInit()[k.key] = parseFloat(this.value); if(PX.ut.res) PX.ut.stale = true; pxUTStatus(); pxUTSoon(); };
+    if(lab) lab.onclick = function(){ var v = pxState().opts[k.key]; pxUTInit()[k.key] = v; el.value = v; show(v); if(PX.ut.res) PX.ut.stale = true; pxUTStatus(); pxUTSoon(); };
   });
   var b;
-  if((b = document.getElementById("px-ut-test"))) b.onclick = function(){ pxUTTest(); };
   if((b = document.getElementById("px-ut-apply"))) b.onclick = function(){ pxUTApply(); };
   if((b = document.getElementById("px-ut-reset"))) b.onclick = function(){ pxUTReset(); };
-  if((b = document.getElementById("px-ut-load"))) b.onclick = function(){ PX.ut.o = null; PX.ut.res = null; pxUTInit(); pxUTStatus(); };
-  if((b = document.getElementById("px-ut-def"))) b.onclick = function(){ PX.ut.o = Object.assign({}, PX_DEFAULTS); PX.ut.res = null; pxUTStatus(); };
+  if((b = document.getElementById("px-ut-load"))) b.onclick = function(){ PX.ut.o = null; PX.ut.res = null; pxUTInit(); pxUTStatus(true); };
+  if((b = document.getElementById("px-ut-def"))) b.onclick = function(){ PX.ut.o = Object.assign({}, PX_DEFAULTS); PX.ut.res = null; pxUTStatus(true); pxUTSoon(); };
 }
 
 // ── Wiring into the rest of the page ────────────────────────────────────────
