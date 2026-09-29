@@ -1998,9 +1998,6 @@ function pxSeasonInputs(y){
     return T;
   });
 }
-// Fit the composite on past seasons (inputs for year y against how SP+ finished
-// year y), then apply it to this season. Falls back to fixed weights if the
-// history can't be fetched.
 // A team with no SP+ last season (moving up from FCS) is not an average FBS
 // team, which is what a missing rating used to count as. It starts at the 10th
 // percentile of last season's FBS ratings instead, and anchors half as hard
@@ -2021,31 +2018,78 @@ function pxPriorFix(P){
   P.fx = 2;
   return P;
 }
+// Head coaches by team and season, from one CFBD call. Mid-season changes keep
+// whoever coached the most games that year.
+function pxCoachIndex(list){
+  var at = {}, career = {};
+  (list || []).forEach(function(c){
+    var name = String((pxG(c, "firstName", "first_name") || "") + " " + (pxG(c, "lastName", "last_name") || "")).trim();
+    (pxG(c, "seasons") || []).forEach(function(se){
+      var id = pxTeamId(pxG(se, "school")), yr = +pxG(se, "year"), g = +pxG(se, "games") || 0; if(!id || !yr) return;
+      var A = at[id] = at[id] || {}; if(!A[yr] || g > A[yr].g) A[yr] = { n: name, g: g };
+      (career[name] = career[name] || []).push({ id: id, yr: yr, g: g });
+    });
+  });
+  return { at: at, career: career };
+}
+// Reliability of a team's prior: how much its own plays should be trusted over
+// it. New to FBS, a new head coach, or little returning production all mean last
+// season says less about this one.
+function pxPriorRel(t){ if(!t) return 1; return (t.imp ? 0.5 : 1) * (t.nc ? 0.6 : 1) * ((t.ret != null && t.ret < 0.35) ? 0.8 : 1); }
+// Fit the composite on past seasons (inputs for year y against how SP+ finished
+// year y), then apply it to this season. Recent seasons count more in the fit.
+// Coaching: a team with a new head coach gets two extra terms, both fitted:
+//   gap  = how far last season's SP+ sat from what the roster's talent predicts
+//          (new coaches tend to move a team back toward its talent level)
+//   cvd  = the new coach's track record minus the old one's: at each earlier
+//          job, how much better his teams played than their talent predicted,
+//          recent seasons weighted most and shrunk toward zero when short.
+// Falls back to fixed weights if the history can't be fetched.
 function pxLoadPrior(force){
   var S = pxState(), y = pxYear();
-  if(S.prior && S.prior.y === y && !force) return Promise.resolve(pxPriorFix(S.prior));
-  var hist = [y - 3, y - 2, y - 1];
-  return Promise.all([pxSeasonInputs(y)].concat(hist.map(function(h){
+  if(S.prior && S.prior.y === y && S.prior.v === 3 && !force) return Promise.resolve(pxPriorFix(S.prior));
+  var hist = [y - 3, y - 2, y - 1], REC = {}; REC[y - 1] = 1; REC[y - 2] = 0.7; REC[y - 3] = 0.5;
+  return Promise.all([pxSeasonInputs(y), pxCall("/coaches", { minYear: y - 4, maxYear: y }).catch(function(){ return []; })].concat(hist.map(function(h){
     return Promise.all([pxSeasonInputs(h), pxCall("/ratings/sp", { year: h }).catch(function(){ return []; })]);
   }))).then(function(res){
-    var cur = res[0], rows = [];
-    function feats(o){ var sp = isFinite(o.sp) ? o.sp : 0; return [1, sp, sp * ((o.ret || 0.5) - 0.5), isFinite(o.tal) ? o.tal : null, o.port || 0]; }
+    var cur = res[0], CO = pxCoachIndex(res[1]), H = res.slice(2), rows = [];
     // Standardise talent across teams in each season.
     function zTal(T){ var v = Object.keys(T).map(function(k){ return T[k].tal; }).filter(isFinite), m = 0, s = 0; v.forEach(function(x){ m += x; }); m /= (v.length || 1); v.forEach(function(x){ s += (x - m) * (x - m); }); s = Math.sqrt(s / (v.length || 1)) || 1;
       Object.keys(T).forEach(function(k){ T[k].talZ = isFinite(T[k].tal) ? (T[k].tal - m) / s : 0; }); }
     zTal(cur);
-    res.slice(1).forEach(function(pair){
-      var T = pair[0]; zTal(T);
-      var fin = {}; (pair[1] || []).forEach(function(s){ var id = pxTeamId(pxG(s, "team")); if(id) fin[id] = +pxG(s, "rating"); });
+    var FIN = {};
+    H.forEach(function(pair, i){ zTal(pair[0]); var fin = FIN[hist[i]] = {}; (pair[1] || []).forEach(function(s){ var id = pxTeamId(pxG(s, "team")); if(id) fin[id] = +pxG(s, "rating"); }); });
+    // What talent alone predicts (SP+ on talent, pooled), and each team-season's residual from it.
+    var tl = [];
+    H.forEach(function(pair, i){ var T = pair[0], fin = FIN[hist[i]]; Object.keys(T).forEach(function(id){ if(isFinite(fin[id])) tl.push({ x: [1, T[id].talZ], y: fin[id], w: REC[hist[i]] }); }); });
+    var tk = tl.length >= 60 ? pxOls(tl, 0.5) : [0, 8], RES = {};
+    H.forEach(function(pair, i){ var T = pair[0], fin = FIN[hist[i]], h = hist[i]; Object.keys(T).forEach(function(id){ if(isFinite(fin[id])) (RES[id] = RES[id] || {})[h] = fin[id] - (tk[0] + tk[1] * T[id].talZ); }); });
+    function cva(name, before){
+      var sw = 0, sr = 0;
+      (CO.career[name] || []).forEach(function(q){ if(q.yr >= before || q.g < 6) return; var r = RES[q.id] && RES[q.id][q.yr]; if(r === undefined || !isFinite(r)) return;
+        var w = Math.pow(0.6, before - 1 - q.yr); sw += w; sr += w * r; });
+      return sr / (sw + 1);                              // one season of "average" shrinks short records toward zero
+    }
+    function coachFeat(id, h, spPrev, talZ){
+      var c = CO.at[id], now = c && c[h], prev = c && c[h - 1];
+      if(!now || !prev || now.n === prev.n || !isFinite(spPrev)) return { nc: 0, gap: 0, cvd: 0, coach: now ? now.n : null };
+      var a = cva(now.n, h), b = cva(prev.n, h);
+      return { nc: 1, gap: (tk[0] + tk[1] * talZ) - spPrev, cvd: a - b, coach: now.n, prevCoach: prev.n, cvaNew: a, cvaOld: b };
+    }
+    H.forEach(function(pair, i){
+      var T = pair[0], fin = FIN[hist[i]], h = hist[i];
       Object.keys(T).forEach(function(id){ var o = T[id]; if(!isFinite(o.sp) || !isFinite(fin[id])) return;
-        rows.push({ x: [1, o.sp, o.sp * ((o.ret || 0.5) - 0.5), o.talZ, o.port || 0], y: fin[id] }); });
+        var cf = coachFeat(id, h, o.sp, o.talZ);
+        rows.push({ x: [1, o.sp, o.sp * ((o.ret || 0.5) - 0.5), o.talZ, o.port || 0, cf.gap, cf.cvd], y: fin[id], w: REC[h] }); });
     });
-    var coef = rows.length >= 150 ? pxOls(rows, 1.0) : [0, 0.55, 0.6, 3.0, 0.15];   // fixed fallback: regress halfway, reward returning production and talent
-    var out = { y: y, coef: coef, n: rows.length, t: {} };
+    var coef = rows.length >= 150 ? pxOls(rows, 1.0) : [0, 0.55, 0.6, 3.0, 0.15, 0.3, 0.4];   // fixed fallback: regress halfway, reward returning production and talent
+    coef[5] = Math.max(0, Math.min(1, coef[5])); coef[6] = Math.max(0, Math.min(1.2, coef[6]));
+    var out = { y: y, v: 3, coef: coef, n: rows.length, t: {}, tk: tk, newCoaches: rows.filter(function(r){ return r.x[5] || r.x[6]; }).length };
     var mo = 0, md = 0, nm = 0; Object.keys(cur).forEach(function(id){ var o = cur[id]; if(isFinite(o.spo) && isFinite(o.spd)){ mo += o.spo; md += o.spd; nm++; } });
     if(nm){ mo /= nm; md /= nm; }
     Object.keys(cur).forEach(function(id){
-      var o = cur[id], x = [1, isFinite(o.sp) ? o.sp : 0, (isFinite(o.sp) ? o.sp : 0) * ((o.ret || 0.5) - 0.5), o.talZ || 0, o.port || 0];
+      var o = cur[id], sp = isFinite(o.sp) ? o.sp : 0, cf = coachFeat(id, y, o.sp, o.talZ || 0);
+      var x = [1, sp, sp * ((o.ret || 0.5) - 0.5), o.talZ || 0, o.port || 0, cf.gap, cf.cvd];
       var r = 0; x.forEach(function(v, i){ r += v * coef[i]; });
       // Offence/defence split follows last season's SP+ split (offence above average
       // vs defence better than average), applied to the new overall number.
@@ -2055,6 +2099,7 @@ function pxLoadPrior(force){
         if(Math.abs(tot) > 1 && (tot > 0) === (r > 0)) share = Math.max(0.1, Math.min(0.9, oD / tot));
       }
       out.t[id] = { r: r, off: r * share, def: -r * (1 - share), ret: o.ret, tal: o.tal, port: o.port || 0, sp: o.sp };
+      if(cf.nc){ var t = out.t[id]; t.nc = 1; t.coach = cf.coach; t.prevCoach = cf.prevCoach; t.cvaNew = cf.cvaNew; t.cvaOld = cf.cvaOld; t.coachAdj = coef[5] * cf.gap + coef[6] * cf.cvd; }
     });
     S.prior = pxPriorFix(out);
     return out;
@@ -2063,7 +2108,7 @@ function pxLoadPrior(force){
 function pxOls(rows, ridge){
   var k = rows[0].x.length, A = [], b = [];
   for(var i = 0; i < k; i++){ A.push(new Array(k).fill(0)); b.push(0); }
-  rows.forEach(function(r){ for(var i = 0; i < k; i++){ b[i] += r.x[i] * r.y; for(var j = 0; j < k; j++) A[i][j] += r.x[i] * r.x[j]; } });
+  rows.forEach(function(r){ var w = r.w === undefined ? 1 : r.w; for(var i = 0; i < k; i++){ b[i] += w * r.x[i] * r.y; for(var j = 0; j < k; j++) A[i][j] += w * r.x[i] * r.x[j]; } });
   for(var d = 1; d < k; d++) A[d][d] += ridge;
   // Gaussian elimination.
   for(var c = 0; c < k; c++){
@@ -2297,7 +2342,7 @@ function pxFit(upto, o){
       if(f0.O[id] !== undefined && w["o" + id]){ xo += w["o" + id] * f0.O[id] * p.off; xxo += w["o" + id] * p.off * p.off; }
       if(f0.D[id] !== undefined && w["d" + id]){ xd += w["d" + id] * f0.D[id] * p.def; xxd += w["d" + id] * p.def * p.def; } });
     var bO = xxo ? Math.max(0, xo / xxo) : 0, bD = xxd ? Math.max(0, xd / xxd) : 0, C = { O: {}, D: {} };
-    Object.keys(PT).forEach(function(id){ var rel = PT[id].imp ? 0.5 : 1; C.O[id] = rel * tw * bO * PT[id].off; C.D[id] = rel * tw * bD * PT[id].def; });
+    Object.keys(PT).forEach(function(id){ var rel = pxPriorRel(PT[id]); C.O[id] = rel * tw * bO * PT[id].off; C.D[id] = rel * tw * bD * PT[id].def; });
     var f = pxRidge(rows, get, a, C); f.bO = bO; f.bD = bD;
     // A team with no FBS plays yet (an FCS opener, a bye) starts at its tier, not at league average.
     Object.keys(C.O).forEach(function(id){ if(f.O[id] === undefined) f.O[id] = C.O[id]; if(f.D[id] === undefined) f.D[id] = C.D[id]; });
@@ -2384,7 +2429,7 @@ function pxDriveParams(fit, off, def){
   // Roster prior, fading to nothing by week 7 (and standing in alone for a team with no plays yet).
   var P = fit.prior, po = P[off], pd = P[def];
   var pE = fit.mPts + (po ? po.off : 0) + (pd ? pd.def : 0);
-  var w = have ? fit.pw : 1;
+  var w = have ? fit.pw * ((po ? pxPriorRel(po) : 1) + (pd ? pxPriorRel(pd) : 1)) / 2 : 1;   // a less reliable prior gives way to plays sooner
   if(!po && !pd) w = 0;
   var Eb = (1 - w) * E + w * pE;
   return { dr: dr, ppd: ppd, E: Eb, Eplay: E, rr: rr, sR: sR, sP: sP, muR: muR, muP: muP, tov: L.tov * rT, dY: dY, fpE: fpE,
@@ -2453,7 +2498,7 @@ function pxCVErr(o, weeksUpTo){
   return em;
 }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v5|" + n + "|" + (S.prior ? S.prior.n : 0); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v6|" + n + "|" + (S.prior ? S.prior.n : 0); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 function pxTune(weeksUpTo, done){
@@ -2488,7 +2533,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m5"; }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m6"; }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -2662,6 +2707,7 @@ function pxMaybe(){
   var S = pxState();
   if(!PX.synced && !PX.busy){ PX.synced = true; pxRebuild();
     var old = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && W.v !== PX_AGG_V; });
+    if(S.prior && S.prior.v !== 3) old = true;                                       // roster prior predates coaching data
     var stale = !S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3; if(stale || old || !PX.active) pxSync(false); }
   if(PX.active && !PX_T.running && S.tuneSig !== pxTuneSig()) pxAutoTune();
 }
@@ -2690,6 +2736,14 @@ function pxPriorCardHtml(){
   h += '<div class="pem-autosub">Weight this week: <b>' + w + '%</b> (fades to 0% by week 7) · ' + (P.n >= 150 ? 'fitted on ' + P.n + ' team-seasons' : 'fixed weights (not enough history to fit)') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Team</span><span>Prior</span><span>Returning · Portal</span></div>';
   list.slice(0, 10).forEach(function(z){ h += '<div class="pem-bkrow"><span>' + x(pearName(z.id)) + '</span><span>' + pemFmtSigned(z.t.r, 1) + '</span><b>' + (z.t.ret != null ? Math.round(z.t.ret * 100) + '%' : '—') + ' · ' + (z.t.port >= 0 ? '+' : '') + z.t.port.toFixed(1) + '</b></div>'; });
+  var nc = Object.keys(P.t).filter(function(id){ return P.t[id].nc && pearIsFbs(id); }).sort(function(a, b){ return (P.t[b].coachAdj || 0) - (P.t[a].coachAdj || 0); });
+  if(nc.length){
+    h += '</div><div class="pem-hd" style="margin-top:12px">New head coaches</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Team \u00b7 coach</span><span>Track record</span><span>Prior change</span></div>';
+    nc.forEach(function(id){ var t = P.t[id];
+      h += '<div class="pem-bkrow"><span>' + x(pearName(id)) + ' <small>' + x(t.coach || '') + '</small></span><span>' + pemFmtSigned(t.cvaNew || 0, 1) + ' <small>vs ' + pemFmtSigned(t.cvaOld || 0, 1) + '</small></span>' +
+           '<b class="' + ((t.coachAdj || 0) >= 0 ? 'up' : 'dn') + '">' + pemFmtSigned(t.coachAdj || 0, 1) + '</b></div>'; });
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Track record: how many points a game better than their recruiting talent predicted the coach\u2019s teams played at earlier jobs (recent seasons count most; short records are pulled toward zero), against the coach he replaced. Prior change: what the coaching change adds to the prior, from two fitted effects \u2014 new staffs pull a team back toward its talent level (coefficient ' + (P.coef[5] || 0).toFixed(2) + '), plus the track-record gap (' + (P.coef[6] || 0).toFixed(2) + '). These teams\u2019 priors also give way to their own plays faster.';
+  }
   var newbies = Object.keys(P.t).filter(function(id){ return P.t[id].imp && pearIsFbs(id); });
   if(newbies.length) h += '</div><div class="pem-autosub" style="margin-top:6px">No SP+ last season (new to FBS): <b>' + newbies.map(function(id){ return x(pearName(id)); }).join(', ') + '</b> \u2014 started near the bottom of FBS and anchored half as hard.';
   h += '</div><div class="pem-autonote">Prior = last season’s SP+, regressed by how much production returns (QB-weighted), plus recruiting talent and position-weighted net transfer value (QB ×2.5, O-line ×2, pass rush ×1.5), with weights fitted on the previous three seasons. CFBD’s returning production covers offense only, so defensive continuity comes through last season’s rating and the portal.</div>';
@@ -3953,7 +4007,10 @@ function pearTeamHtml(id){
   if(PEAR.backCard) h += '<div class="pc-backrow"><button class="pc-bk" data-pear-backcard>← Back to matchup</button></div>';
   h += '<div class="tm-top">' + pearImg(id, "tm-logo") + '<div><div class="pc-title" style="text-align:left;padding:0">' + x(pearName(id)) + '</div>' +
        '<div class="tm-sub">' + (rk ? '<b>#' + rk + '</b> in Prophescore' : 'Not rated') +
-       (S && S.rec ? ' · ' + x(S.rec) : (r && r.n ? ' · ' + r.w + '-' + r.l + ' vs FBS' : '')) + (S && S.standing ? ' · ' + x(S.standing) : '') + '</div></div></div>';
+       (S && S.rec ? ' · ' + x(S.rec) : (r && r.n ? ' · ' + r.w + '-' + r.l + ' vs FBS' : '')) + (S && S.standing ? ' · ' + x(S.standing) : '') + '</div>' +
+       (function(){ var t = PX.active && pxState().prior && pxState().prior.t[id]; if(!t || !t.nc) return '';
+         return '<div class="tm-sub">New head coach: <b>' + x(t.coach || '') + '</b> · track record ' + pemFmtSigned(t.cvaNew || 0, 1) + ' · prior ' + pemFmtSigned(t.coachAdj || 0, 1) + ' for the change</div>'; })() +
+       '</div></div>';
   if(r){
     h += '<div class="tm-stats">';
     [["Rating", "rating"], ["Offense", "off"], ["Defense", "def"], ["Sched", "sos"]].forEach(function(s){
