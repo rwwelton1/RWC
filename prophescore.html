@@ -764,6 +764,16 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pe-sub button{flex:1 0 auto;position:relative;border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:999px;padding:7px 9px;font:900 12px 'Nunito',sans-serif;cursor:pointer;white-space:nowrap;box-shadow:2px 2px 0 var(--border)}
 .pe-sub button.on{background:#111;color:#fff;box-shadow:none;transform:translate(2px,2px)}
 .pe-sub button .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red2);margin-left:5px;vertical-align:1px}
+.pool-tabs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin:0 0 8px;padding:1px 2px 3px}
+.pool-tabs::-webkit-scrollbar{display:none}
+.pool-tabs button{flex:0 0 auto;border:2px solid var(--border);background:#fff;color:var(--text);border-radius:999px;padding:6px 12px;font:900 12.5px 'Nunito',sans-serif;cursor:pointer;white-space:nowrap;box-shadow:2px 2px 0 var(--border)}
+.pool-tabs button.on{background:var(--gold);box-shadow:none;transform:translate(2px,2px)}
+.pool-tabs button.add{color:var(--muted);border-style:dashed;box-shadow:none}
+.pool-find{font-size:12px;color:var(--muted);font-weight:800;align-self:center}
+.pool-stat{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pool-stat span{color:var(--muted)}
+.pool-ref{margin-left:auto;border:2px solid var(--border);background:#fff;border-radius:50%;width:30px;height:30px;font:900 15px 'Nunito',sans-serif;cursor:pointer;line-height:1}
+.pool-note{margin-top:6px;font-size:12px;color:var(--muted)}
 .pe-subnote{font-size:12px;font-weight:800;color:var(--muted);margin:-6px 0 12px}
 .pear{font-family:'Nunito',sans-serif;color:var(--text)}
 .pr-h1{font-size:22px;font-weight:900;letter-spacing:-.02em;line-height:1.1}
@@ -4716,7 +4726,7 @@ function pxPoolGames(){
 function pxGameEdge(g){
   if(!g || !g.home || !g.away) return null;
   var week = (typeof g.week === "number" && g.week) || PEAR.week || (PE.meta && PE.meta.espnWeek) || 1, pool = null;
-  (PE.games || []).forEach(function(pg){ if(pg && String(pg.homeId) === g.home.id && String(pg.awayId) === g.away.id && typeof pg.pool === "number") pool = (pg.favIsHome ? 1 : -1) * pg.pool; });
+  (PE.games || []).forEach(function(pg){ if(pg && String(pg.homeId) === g.home.id && String(pg.awayId) === g.away.id && typeof pg.pool === "number" && (!pg.w || +pg.w === +week)) pool = (pg.favIsHome ? 1 : -1) * pg.pool; });
   var now = g.state === "pre" ? (g.vegas ? pearVegasHome(g) : null) : (pearSavedLine(g) ? -pearSavedLine(g)[0] : (g.vegas ? pearVegasHome(g) : null));
   var ref = pool !== null ? pool : now;
   var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null, String(g.id), pool === null); if(k) k.pool = pool !== null;
@@ -4799,24 +4809,42 @@ function pePoolWeekId(meta, w){
   if(!hit) ids.forEach(function(id){ var n = /(\d+)/.exec(String(wl[id] || id)); if(n && +n[1] === +w) hit = hit || id; });
   return hit;
 }
+// ESPN week for a pool week: its weekMeta.espnWeek, else the number in its label.
+function pePoolEspnWeek(meta, wid){
+  var m = (meta.weekMeta || {})[wid]; if(m && m.espnWeek && (!m.seasontype || +m.seasontype === 2)) return +m.espnWeek;
+  if(m && m.seasontype && +m.seasontype !== 2) return null;
+  var n = /(\d+)/.exec(String((meta.weekLabels || {})[wid] || wid)); return n ? +n[1] : null;
+}
+function pePoolKeyNow(){ var c = pePoolSrc(); return c.key || (c.group ? "g:" + c.group : "main") + (c.year ? "@" + c.year : ""); }
+PEPOOL.cache = {}; PEPOOL.loadedKey = null; PEPOOL.recCache = {};
+// Put one pool's games (every week) into PE.games, replacing any other pool's.
+function pePoolApply(list){
+  PE.games = (PE.games || []).filter(function(pg){
+    if(!pg) return false;
+    if(pg.src === "pool") return false;
+    return !list.some(function(e){ return e.homeId === String(pg.homeId) && e.awayId === String(pg.awayId); });   // an older hand-entered copy of the same game
+  }).concat(list);
+}
+// Load every week of the chosen pool in two reads (its week list and its games), so moving
+// between weeks needs nothing more. done(ok, games in week w).
 function pePoolLoad(w, done){
   if(PEPOOL.busy || !DB || !ME()){ if(done) done(false); return; }
-  PEPOOL.busy = true; PEPOOL.err = ""; PEPOOL.tried[w] = 1;
-  var base = pePoolBase();
-  DB.ref(base + "/meta").once("value").then(function(sn){
-    var meta = sn.val() || {}, wid = pePoolWeekId(meta, w);
-    if(!(meta.weekIds || []).length) throw new Error("No pool found at " + pePoolSrcLabel().toLowerCase() + " \u2014 paste your pool link below");
-    if(!wid) throw new Error("Your pool has no week " + w + " yet");
-    return DB.ref(base + "/games/" + wid).once("value").then(function(gs){
-      var G = gs.val() || {}, list = [];
-      Object.keys(G).sort().forEach(function(gid){ var e = pePoolGame(wid, gid, G[gid], w); if(e) list.push(e); });
-      // Replace this week's pool games; keep other weeks' (and anything entered another way).
-      PE.games = (PE.games || []).filter(function(pg){ return !(pg && pg.src === "pool" && (pg.wk === wid || +pg.w === +w)) && !(pg && !pg.src && list.some(function(e){ return e.homeId === String(pg.homeId) && e.awayId === String(pg.awayId); })); }).concat(list);
-      PE.meta = PE.meta || {}; PE.meta.poolAt = Date.now(); PE.meta.poolWeek = w; PE.meta.poolLabel = (meta.weekLabels || {})[wid] || wid;
-      peSave();
-      return list.length;
+  PEPOOL.busy = true; PEPOOL.err = "";
+  var base = pePoolBase(), key = pePoolKeyNow();
+  Promise.all([DB.ref(base + "/meta").once("value"), DB.ref(base + "/games").once("value")]).then(function(r){
+    var meta = r[0].val() || {}, G = r[1].val() || {}, list = [], labels = {};
+    if(!(meta.weekIds || []).length) throw new Error("No pool found at " + pePoolSrcLabel().toLowerCase() + " — paste your pool link below");
+    (meta.weekIds || []).forEach(function(wid){
+      var ew = pePoolEspnWeek(meta, wid); if(!ew) return;
+      labels[ew] = labels[ew] || (meta.weekLabels || {})[wid] || wid;
+      var gs = G[wid] || {};
+      Object.keys(gs).sort().forEach(function(gid){ var e = pePoolGame(wid, gid, gs[gid], ew); if(e) list.push(e); });
     });
-  }).then(function(n){ PEPOOL.busy = false; if(done) done(true, n); }, function(e){ PEPOOL.busy = false; PEPOOL.err = (e && e.code === "PERMISSION_DENIED") ? "The pool\u2019s data isn\u2019t readable from here (Firebase rules)." : ((e && e.message) || String(e)); if(done) done(false); });
+    PEPOOL.cache[key] = { list: list, labels: labels, at: Date.now() };
+    if(pePoolKeyNow() === key){ pePoolApply(list); PEPOOL.loadedKey = key; }
+    PE.meta = PE.meta || {}; PE.meta.poolAt = Date.now(); peSave();
+    return list.filter(function(e){ return +e.w === +w; }).length;
+  }).then(function(n){ PEPOOL.busy = false; if(done) done(true, n); }, function(e){ PEPOOL.busy = false; PEPOOL.loadedKey = key; PEPOOL.err = (e && e.code === "PERMISSION_DENIED") ? "The pool’s data isn’t readable from here (Firebase rules)." : ((e && e.message) || String(e)); if(done) done(false); });
 }
 // ── Pools you're in ──
 // Found without pasting anything: group pools list their members' uids in groups/<id>/players.
@@ -4870,40 +4898,40 @@ function pePoolDiscover(done){
 }
 function pePoolUse(o, quiet){
   PE.meta = PE.meta || {}; PE.meta.poolSrc = { key: o.key, group: o.group || null, year: o.year || null, label: o.label, url: o.url || null };
-  PEPOOL.tried = {}; PEPOOL.rec = null; PEPOOL.recErr = ""; peSave();
+  var C = PEPOOL.cache[o.key];
+  if(C){ pePoolApply(C.list); PEPOOL.loadedKey = o.key; } else PEPOOL.loadedKey = null;
+  PEPOOL.err = ""; PEPOOL.rec = PEPOOL.recCache[o.key] || null; PEPOOL.recErr = ""; peSave();
   if(!quiet) toast("Pool: " + o.label);
 }
 function pePoolSrcLabel(){ var c = pePoolSrc(); return c.label || ((c.group ? "Group pool “" + c.group + "”" : "Main pool") + (c.year ? " · " + c.year + " season" : "")); }
-// The pool bar at the top of the Pool tab.
+// The pool bar at the top of the Pool tab: a tab per pool you're in, then this week's status.
 function pePoolBarHtml(n){
-  var M = PE.meta || {}, w = PEAR.week, c = pePoolSrc(), h = '<div class="pr-edgenote pool-src">';
-  h += '<b>' + (n ? n + ' game' + (n === 1 ? '' : 's') + ' from your pool' : (PEPOOL.busy ? 'Loading your pool…' : 'No pool games for week ' + (w || '') + ' yet')) + '</b>' +
-       (M.poolAt && n ? ' <span style="color:var(--muted)">· ' + x(String(M.poolLabel || '')) + ' · loaded ' + new Date(M.poolAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + '</span>' : '');
-  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px">';
-  var L = PEPOOL.list || [];
-  if(PEPOOL.finding && !L.length) h += '<span style="font-size:12px;color:var(--muted)">Finding your pools…</span>';
-  else {
-    var opts = L.slice(); if(c.key && !L.some(function(o){ return o.key === c.key; })) opts.unshift({ key: c.key, label: pePoolSrcLabel() });
-    h += '<select id="pe-poolsel" style="flex:1;min-width:0;padding:7px 8px;border:2px solid var(--border);border-radius:9px;font:800 15px Nunito,sans-serif;background:#fff">' +
-         opts.map(function(o){ return '<option value="' + x(o.key) + '"' + (o.key === c.key ? ' selected' : '') + '>' + x(o.label) + '</option>'; }).join('') +
-         (opts.length ? '' : '<option value="" selected>' + (PEPOOL.list ? 'No pools found' : 'Your pools') + '</option>') +
-         '<option value="__paste">Another pool (paste its link)…</option></select>';
-  }
-  h += '<button class="pr-btn" id="pe-poolload"' + (PEPOOL.busy ? ' disabled' : '') + '>' + (PEPOOL.busy ? 'Loading…' : '↻ Load') + '</button></div>';
+  var w = PEAR.week, c = pePoolSrc(), key = pePoolKeyNow(), C = PEPOOL.cache[key], h = '<div class="pr-edgenote pool-src">';
+  var L = (PEPOOL.list || []).slice(); if(c.key && !L.some(function(o){ return o.key === c.key; })) L.unshift({ key: c.key, label: pePoolSrcLabel() });
+  h += '<div class="pool-tabs" role="tablist">';
+  if(PEPOOL.finding && !L.length) h += '<span class="pool-find">Finding your pools…</span>';
+  L.forEach(function(o){ h += '<button role="tab" class="' + (o.key === key ? 'on' : '') + '" data-pe-pool="' + x(o.key) + '">' + x(o.label) + '</button>'; });
+  h += '<button class="add' + (PEPOOL.editing ? ' on' : '') + '" data-pe-pool="__paste" title="Another pool">+ Other</button></div>';
+  var lab = C && C.labels ? C.labels[w] : null;
+  h += '<div class="pool-stat"><b>' + (PEPOOL.busy && !C ? 'Loading your pool…' : n ? n + ' game' + (n === 1 ? '' : 's') + ' from your pool' : (C && !lab ? 'Your pool hasn’t set up week ' + (w || '') + ' yet' : 'No pool games for week ' + (w || '') + ' yet')) + '</b>' +
+       (lab && n ? ' <span>· ' + x(String(lab)) + '</span>' : '') +
+       '<button class="pool-ref" id="pe-poolload"' + (PEPOOL.busy ? ' disabled' : '') + ' title="Reload from the pool">' + (PEPOOL.busy ? '…' : '↻') + '</button></div>';
   if(PEPOOL.editing || /No pool found/.test(PEPOOL.err)) h += '<div style="display:flex;gap:6px;margin-top:6px"><input id="pe-poolurl" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your pool link" value="' + x(pePoolSrc().url || '') + '" style="flex:1;min-width:0;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:700 16px Nunito,sans-serif"><button class="pr-btn" id="pe-poolsave">Save</button></div>';
   if(PEPOOL.err) h += '<div style="color:var(--red2);margin-top:6px;font-weight:800">' + x(PEPOOL.err) + '</div>';
-  h += '<div style="margin-top:6px">Rated on the chance to cover <b>your pool’s line</b> (line movement since it was set, SP+, the model from week 9, QB-out marks), best first.</div>';
+  h += '<div class="pool-note">Every week of the pool loads at once, so each week you open shows its games. Rated on the chance to cover <b>your pool’s line</b>, best first.</div>';
   return h + '</div>';
 }
 function pePoolBind(){
   var ld = document.getElementById("pe-poolload");
-  if(ld) ld.onclick = function(){ PEPOOL.rec = null; pePoolLoad(PEAR.week, function(ok, n){ if(ok) toast(n ? "Loaded " + n + " pool games" : "Your pool has no games in week " + PEAR.week + " yet", ok && n ? "ok" : undefined); pearRepaint(); }); pearRepaint(); };
-  var sel = document.getElementById("pe-poolsel");
-  if(sel) sel.onchange = function(){
-    if(this.value === "__paste"){ PEPOOL.editing = true; pearRepaint(); return; }
-    var v = this.value, o = (PEPOOL.list || []).filter(function(z){ return z.key === v; })[0]; if(!o) return;
-    PEPOOL.editing = false; pePoolUse(o); pePoolLoad(PEAR.week, function(){ pearRepaint(); }); pearRepaint();
-  };
+  if(ld) ld.onclick = function(){ PEPOOL.rec = null; delete PEPOOL.recCache[pePoolKeyNow()]; pePoolLoad(PEAR.week, function(ok, n){ if(ok) toast(n ? "Loaded " + n + " pool games" : "Your pool has no games in week " + PEAR.week + " yet", ok && n ? "ok" : undefined); pearRepaint(); }); pearRepaint(); };
+  document.querySelectorAll("[data-pe-pool]").forEach(function(b){ b.onclick = function(){
+    var v = this.getAttribute("data-pe-pool");
+    if(v === "__paste"){ PEPOOL.editing = !PEPOOL.editing; pearRepaint(); return; }
+    if(v === pePoolKeyNow() && PEPOOL.loadedKey === v){ return; }
+    var o = (PEPOOL.list || []).filter(function(z){ return z.key === v; })[0]; if(!o) return;
+    PEPOOL.editing = false; pePoolUse(o, true); pearRepaint();
+    if(!PEPOOL.cache[o.key]) pePoolLoad(PEAR.week, function(){ pearRepaint(); });
+  }; });
   var sv = document.getElementById("pe-poolsave");
   if(sv) sv.onclick = function(){ var v = (document.getElementById("pe-poolurl") || {}).value || "", c = pePoolParse(v);
     pePoolUse({ key: c.group ? "g:" + c.group : "main", group: c.group || null, year: c.year || null, label: c.group ? "Group pool “" + c.group + "”" : "Main pool", url: v.trim() || null }); PEPOOL.editing = false;
@@ -4948,7 +4976,7 @@ function pePoolRecLoad(done){
           rows.push({ w: w, label: (meta.weekLabels || {})[w] || w, ew: ew, gid: gid, g: g, res: res, side: p && p.side || null, conf: p ? (+p.conf || 0) : 0 });
         });
       });
-      PEPOOL.rec = { rows: rows, at: Date.now(), base: base };
+      PEPOOL.rec = { rows: rows, at: Date.now(), base: base }; PEPOOL.recCache[pePoolKeyNow()] = PEPOOL.rec;
     });
   }).then(function(){ PEPOOL.recBusy = false; if(done) done(); }, function(e){ PEPOOL.recBusy = false; PEPOOL.recErr = (e && e.code === "PERMISSION_DENIED") ? "Your picks aren’t readable from here (Firebase rules)." : ((e && e.message) || String(e)); if(done) done(); });
 }
@@ -5010,7 +5038,7 @@ function pePoolRecordHtml(){
 var PEAR_SUBS = [["all", "All"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
 function pearPoolIds(){
   var o = { n: 0, k: {} };
-  (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number"){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
+  (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number" && (!pg.w || !PEAR.week || +pg.w === +PEAR.week)){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
   (PEAR.games || []).forEach(function(g){ if(o.k[g.home.id + "|" + g.away.id]) o.n++; });
   return o;
 }
@@ -5038,7 +5066,7 @@ function pearGamesHtml(){
   // First look at the Pool tab each week (and each session): load that week from the pool.
   if(PEAR.filter === "pool" && typeof DB !== "undefined" && DB && ME()){
     if(!PEPOOL.list && !PEPOOL.finding) setTimeout(function(){ pePoolDiscover(function(){ pearRepaint(); }); }, 0);
-    else if(PEAR.week && !PEPOOL.tried[PEAR.week] && !PEPOOL.busy && (pePoolSrc().key || pePoolSrc().group || (PEPOOL.list && !PEPOOL.list.length))) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
+    else if(PEPOOL.loadedKey !== pePoolKeyNow() && !PEPOOL.busy && (pePoolSrc().key || pePoolSrc().group || (PEPOOL.list && !PEPOOL.list.length))) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
   }
   h += '<div class="pe-sub" role="tablist">' + PEAR_SUBS.map(function(t){
          return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + '</button>'; }).join('') + '</div>';
