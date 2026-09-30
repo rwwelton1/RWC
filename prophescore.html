@@ -997,6 +997,12 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pr-res.win{background:var(--green-bg);color:#15803d}.pr-res.loss{background:var(--red-bg);color:var(--red2)}.pr-res.push{background:#fff;color:var(--muted)}
 .pc-edge{font-size:clamp(10px,2.9vw,12.5px);font-weight:900;margin-top:4px;border:1.5px solid var(--border);border-radius:20px;padding:1px 10px;background:#fff}
 .pc-edge.big{background:#111;color:#fff}
+.pick-pill{display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:1px 8px;border:1.5px solid var(--border);border-radius:999px;background:#fff;font-size:11px;font-weight:900;white-space:nowrap;vertical-align:1px}
+.pick-pill i{font-style:normal;color:var(--muted);font-weight:800}
+.pick-pill.win{background:var(--green-bg);border-color:#15803d;color:#15803d}
+.pick-pill.loss{background:var(--red-bg);border-color:var(--red2);color:var(--red2)}
+.pick-pill.push{background:var(--card2)}
+.ph-line + .pick-pill{font-size:clamp(12px,3.6vw,14px);padding:2px 9px;margin-left:0}
 .pr-gfoot b.mvup{color:#15803d;font-weight:900}.pr-gfoot b.mvdn{color:var(--red2);font-weight:900}
 @media(max-width:400px){.pr-seg button{padding:6px 7px;font-size:10.5px}}
 .pr-pastnote{font-size:10.5px;font-weight:800;color:var(--muted);background:#fff;border:1.5px dashed var(--border2);border-radius:10px;padding:7px 10px;margin:6px 0 4px;line-height:1.45}
@@ -2144,6 +2150,49 @@ function pxLoadWeek(w, force){
   if(have && have.done && have.v === PX_AGG_V && !force) return Promise.resolve(have);
   return pxFetchWeek(y, w, pxCall).then(function(W){ S.wk[key] = W; return W; });
 }
+// CFBD /lines -> { lines: {gameId: {c, o, t, to}} (consensus close / open), linesAll: every book }.
+function pxParseLines(list){
+  var out = { lines: {}, linesAll: {} }, num = function(v){ return (v === null || v === undefined || v === "" || !isFinite(+v)) ? null : +v; };
+  (list || []).forEach(function(L){
+    // Every sportsbook's numbers too, for line-movement work: [book, spread, spread open, total, total open].
+    var all = (pxG(L, "lines") || []).map(function(q){ return [String(pxG(q, "provider") || ""), num(pxG(q, "spread")), num(pxG(q, "spreadOpen", "spread_open")), num(pxG(q, "overUnder", "over_under")), num(pxG(q, "overUnderOpen", "over_under_open"))]; })
+      .filter(function(a){ return a[1] !== null || a[3] !== null; });
+    if(all.length) out.linesAll[String(pxG(L, "id"))] = all;
+    var l = pxPick(pxG(L, "lines")); if(!l) return;
+    out.lines[String(pxG(L, "id"))] = { c: +l.spread, o: num(pxG(l, "spreadOpen", "spread_open")), t: num(pxG(l, "overUnder", "over_under")), to: num(pxG(l, "overUnderOpen", "over_under_open")) };
+  });
+  return out;
+}
+// Re-check the record: fetch every graded week's final lines from CFBD again (one call a week),
+// replace any that changed, and re-grade. Reports what moved.
+var PXR = { busy: false, msg: "", res: null };
+function pxRecheckLines(){
+  if(PXR.busy || !pxKey()) return;
+  var S = pxState(), y = pxYear(), ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; });
+  if(!ws.length){ toast("No graded weeks yet"); return; }
+  var before = pxAts(), b0 = before ? { w: before.w, l: before.l, p: before.p } : null, changed = [], added = 0, n = 0;
+  PXR.busy = true; PXR.res = null; PXR.msg = "Checking week " + ws[0] + "\u2026"; pemRepaint();
+  var chain = Promise.resolve();
+  ws.forEach(function(w){ chain = chain.then(function(){
+    var W = null; Object.keys(S.wk).forEach(function(k){ if(S.wk[k].y === y && S.wk[k].w === w) W = S.wk[k]; }); if(!W) return;
+    PXR.msg = "Checking week " + w + "\u2026"; var el = document.getElementById("px-recheck"); if(el) el.textContent = PXR.msg;
+    return pxCall("/lines", { year: y, week: w, seasonType: "regular" }).then(function(list){
+      var PL = pxParseLines(list);
+      W.games.forEach(function(g){ if(!g.c) return; var o = W.lines[g.id], nw = PL.lines[g.id]; if(!nw) return; n++;
+        if(!o || !isFinite(o.c)){ added++; return; }
+        if(o.c !== nw.c || o.t !== nw.t) changed.push({ w: w, a: g.a, h: g.h, from: o.c, to: nw.c, tf: o.t, tt: nw.t }); });
+      Object.keys(PL.lines).forEach(function(id){ W.lines[id] = PL.lines[id]; });
+      Object.keys(PL.linesAll).forEach(function(id){ W.linesAll = W.linesAll || {}; W.linesAll[id] = PL.linesAll[id]; });
+    });
+  }); });
+  chain.then(function(){
+    PX._ats = null; PX._tc = null; PEM._ats = null; pxRebuild(); peSave();
+    var after = pxAts(), a0 = after ? { w: after.w, l: after.l, p: after.p } : null;
+    PXR.busy = false; PXR.msg = ""; PXR.res = { at: Date.now(), n: n, changed: changed, added: added, before: b0, after: a0 };
+    toast(changed.length || added ? (changed.length + " line" + (changed.length === 1 ? "" : "s") + " corrected" + (added ? ", " + added + " added" : "")) : "All " + n + " closing lines match", "ok");
+    pemRepaint();
+  }, function(e){ PXR.busy = false; PXR.msg = ""; toast("Re-check stopped: " + ((e && e.message) || e)); pemRepaint(); });
+}
 // One week of any season (the current one, or a past one for backtesting): FBS-vs-FBS
 // games, lines, and aggregated plays. `call` is pxCall or a memoised wrapper of it.
 function pxFetchWeek(y, w, call){
@@ -2164,15 +2213,7 @@ function pxFetchWeek(y, w, call){
     if(anyDone) jobs.push(call("/plays", { year: y, week: w, seasonType: "regular" }));
     return Promise.all(jobs).then(function(res){
       // Consensus closing spread and total, and their openers.
-      var num = function(v){ return (v === null || v === undefined || v === "" || !isFinite(+v)) ? null : +v; };
-      (res[0] || []).forEach(function(L){
-        // Every sportsbook's numbers too, for line-movement work: [book, spread, spread open, total, total open].
-        var all = (pxG(L, "lines") || []).map(function(q){ return [String(pxG(q, "provider") || ""), num(pxG(q, "spread")), num(pxG(q, "spreadOpen", "spread_open")), num(pxG(q, "overUnder", "over_under")), num(pxG(q, "overUnderOpen", "over_under_open"))]; })
-          .filter(function(a){ return a[1] !== null || a[3] !== null; });
-        if(all.length) W.linesAll[String(pxG(L, "id"))] = all;
-        var l = pxPick(pxG(L, "lines")); if(!l) return;
-        W.lines[String(pxG(L, "id"))] = { c: +l.spread, o: num(pxG(l, "spreadOpen", "spread_open")), t: num(pxG(l, "overUnder", "over_under")), to: num(pxG(l, "overUnderOpen", "over_under_open")) };
-      });
+      var PL = pxParseLines(res[0]); W.lines = PL.lines; W.linesAll = PL.linesAll;
       if(anyDone){
         var ag = pxAggregate(W.games.filter(function(g){ return g.c; }), res[1]);
         Object.keys(ag.agg).forEach(function(id){ W.agg[id] = { h: pxPack(ag.agg[id].h), a: pxPack(ag.agg[id].a) }; });
@@ -3836,6 +3877,8 @@ function pxBind(){
   if(fc) fc.onclick = function(){ this.disabled = true; this.textContent = "Comparing\u2026"; var self = this; setTimeout(function(){ PX._fcShow = true; var c = document.getElementById("px-fadecard"); if(c){ c.outerHTML = pxFadeCardHtml(); pxBind(); } }, 30); };
   var hg = document.getElementById("px-histgo");
   if(hg) hg.onclick = function(){ pxHistSync(); };
+  var rc = document.getElementById("px-recheck");
+  if(rc) rc.onclick = function(){ pxRecheckLines(); };
   var qg = document.getElementById("px-qbgo");
   if(qg) qg.onclick = function(){ pxQbSync(); };
   var sg = document.getElementById("px-snapgo");
@@ -4087,7 +4130,11 @@ function pemProvenHtml(r){
 function pemAtsCardHtml(){
   if(!PX.active) return "";
   var r = pemAts();
-  var h = '<div class="pem-ats rec"><div class="pem-autotop"><b>🎰 Record vs Vegas</b></div>';
+  var h = '<div class="pem-ats rec"><div class="pem-autotop"><b>🎰 Record vs Vegas</b>' + (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-recheck"' + (PXR.busy ? ' disabled' : '') + '>' + (PXR.busy ? x(PXR.msg || 'Checking\u2026') : '\u21bb Re-check lines') + '</button>' : '') + '</div>';
+  if(PXR.res){ var RR = PXR.res, fmtR = function(q){ return q ? q.w + '-' + q.l + (q.p ? '-' + q.p : '') : '\u2014'; };
+    h += '<div class="pem-autosub" style="margin-bottom:8px">' + (RR.changed.length || RR.added ? '<b>' + RR.changed.length + ' closing line' + (RR.changed.length === 1 ? '' : 's') + ' corrected</b>' + (RR.added ? ', ' + RR.added + ' added' : '') + ' \u00b7 record ' + fmtR(RR.before) + ' \u2192 <b>' + fmtR(RR.after) + '</b>' +
+         (RR.changed.length ? '<br>' + RR.changed.slice(0, 6).map(function(c){ var vh0 = -c.from, vh1 = -c.to; return 'Wk ' + c.w + ' ' + x(pearAbbr(c.a)) + ' @ ' + x(pearAbbr(c.h)) + ': ' + x(pearAbbr(vh0 >= 0 ? c.h : c.a)) + ' -' + Math.abs(vh0) + ' \u2192 ' + x(pearAbbr(vh1 >= 0 ? c.h : c.a)) + ' -' + Math.abs(vh1); }).join(' \u00b7 ') + (RR.changed.length > 6 ? ' \u2026' : '') : '')
+         : '\u2713 All ' + RR.n + ' closing lines match CFBD\u2019s final lines \u00b7 record ' + fmtR(RR.after)) + ' <span style="color:var(--muted)">(checked ' + new Date(RR.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + ')</span></div>'; }
   if(!r || !r.lined) return h + '<div class="pem-autosub">No closing lines on graded games yet.</div></div>';
   var cls = function(p){ return p === null ? "" : (p >= 0.524 ? "up" : "dn"); };
   h += '<div class="pem-atsrow"><div><span>Against the spread</span><b class="' + cls(r.pct) + '">' + pemAtsTxt(r) + '</b><i>' + (r.pct !== null ? (r.pct*100).toFixed(1) + '%' : '—') + '</i></div>' +
@@ -4624,6 +4671,22 @@ function pearVegasTxt(g){
   var vh = -L[0];
   if(vh === 0) return "EVEN";
   return pearAbbr(vh > 0 ? g.home.id : g.away.id) + " -" + Math.abs(vh);
+}
+// The model's side against the market: its projected margin vs the current line before
+// kickoff, the saved closing line once the game is final (the same line the record vs Vegas
+// is graded on), with ✓ / ✗ / push when it's over. null when there's no line or no lean.
+function pearModelPick(g, margin){
+  if(!g || margin === null || margin === undefined || !isFinite(margin) || !pearFbsGame(g)) return null;
+  var fin = g.state === "post" && g.home.score !== null && g.away.score !== null;
+  var L = pearSavedLine(g), vh = fin && L ? -L[0] : pearVegasHome(g);
+  if(vh === null || vh === undefined || !isFinite(vh) || Math.abs(margin - vh) < 0.05) return null;
+  var home = margin > vh, team = home ? g.home.id : g.away.id, line = home ? -vh : vh, res = null;
+  if(fin){ var cv = (g.home.score - g.away.score) - vh; res = cv === 0 ? "push" : ((cv > 0) === home ? "win" : "loss"); }
+  return { team: team, line: line, res: res, close: fin, txt: pearAbbr(team) + ' ' + (line === 0 ? 'PK' : (line > 0 ? '+' : '') + (Math.round(line * 10) / 10)) };
+}
+function pearPickPillHtml(k){
+  if(!k) return '';
+  return '<span class="pick-pill' + (k.res ? ' ' + k.res : '') + '" title="' + (k.close ? 'Model’s pick against the closing line' : 'Model’s pick against the current line') + '"><i>Pick</i> ' + x(k.txt) + (k.res === "win" ? ' ✓' : k.res === "loss" ? ' ✗' : k.res === "push" ? ' · push' : '') + '</span>';
 }
 function pearVegasHome(g){
   if(!g.vegas){ var L = pearSavedLine(g); return L ? -L[0] : null; }
@@ -5186,7 +5249,7 @@ function pearGamesHtml(){
            '<span>' + x(t.rec || "") + (t.conf ? ' (' + x(t.conf) + ')' : '') + '</span></div>' +
            '<div class="pr-tproj"><b class="' + (p ? (fav ? "fav" : "dog") : "") + '">' + big + '</b><span>' + small + '</span></div></div>';
     });
-    h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
+    h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) + pearPickPillHtml(pearModelPick(g, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
          '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) + pearOpenTxt(g, p) : '')) + '</span></div>';
     if(PEAR.filter === "pool" && o.pg && (!o.k || o.k.none)){ var pfav = o.pg.favIsHome ? g.home.id : g.away.id;
       h += '<div class="pr-take"><span>Pool line <b>' + x(pearName(pfav) + ' -' + o.pg.pool) + '</b><small> \u00b7 no edge either way</small></span><span></span></div>'; }
@@ -5818,7 +5881,7 @@ function pearCardHtml(){
     var aw = Math.max(3, Math.min(97, p.awayWin * 100));
     h += '<div class="ph-bar"><span style="width:' + aw.toFixed(1) + '%">' + x(pearAbbr(A)) + ' ' + Math.round(p.awayWin * 100) + '%</span><em>' + Math.round(p.homeWin * 100) + '% ' + x(pearAbbr(H)) + '</em></div>';
     var _vt = g ? pearVegasTxt(g) : "", _vou = g ? (g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g)||[])[1] != null ? pearSavedLine(g)[1] : null)) : null;
-    h += '<div class="ph-lines"><span class="ph-line">' + x(pearLineTxt(A, H, p.margin)) + ' · O/U ' + p.total.toFixed(1) + '</span>' +
+    h += '<div class="ph-lines"><span class="ph-line">' + x(pearLineTxt(A, H, p.margin)) + ' · O/U ' + p.total.toFixed(1) + '</span>' + ((g && !c.neutral === !g.neutral && g.away.id === A && g.home.id === H) ? pearPickPillHtml(pearModelPick(g, p.margin)) : '') +
          ((_vt || _vou != null) ? '<span class="ph-veg">Vegas ' + x(_vt || '—') + (_vou != null ? ' · ' + _vou : '') + '</span>' : '') + '</div>';
     var notes = [];
     if(g && !c.neutral === !g.neutral){
