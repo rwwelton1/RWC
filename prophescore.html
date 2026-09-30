@@ -4616,7 +4616,7 @@ var PEAR_EDGE_MIN = 3;
 
 
 // ── Edge rating (1–10) and pool picks ───────────────────────────────────────
-// Chance a pick covers a FIXED line (your pool's line, or the opener), from what has
+// Chance a pick covers a FIXED line (your pool's line; see PX_PICK_CUR for the current line), from what has
 // actually predicted covers: fitted on 2023–25 (2,098 games), checked season by season,
 // with the SP+ term from 2024's weekly SP+ checked on 2026 and vice versa.
 //   z = 0.105 × line move since that line (points toward the side, capped at 4)
@@ -4628,23 +4628,31 @@ var PEAR_EDGE_MIN = 3;
 // starts), on top of the line-move term. 2023–25, fading those teams vs the opener: 56.8% on first
 // starts, 54.4% later (the term fitted on top of line movement: +0.19 and +0.13, shrunk to 0.16 / 0.10).
 var PX_PICK = { mv: 0.105, sp: 0.0085, pbp: 0.038, late: 9, hfa: 2.5, qb1: 0.16, qb2: 0.10 };
+// Against the CURRENT line (every non-pool game), refitted on 2023–26 graded vs the close (2,252
+// games): the line's move since the open is already in the number (following it went 50.0%), and
+// SP+'s disagreement with the close has no value either (+0.011 ± 0.016; its big disagreements
+// covered 47%). What still beats the close: the play-by-play model from week 9 (+0.037 ± 0.014;
+// 3+ point disagreements 54.6%, 5+ 56.6%; by season 54.3%, 60.9%, 48.5%) and QB-out marks (fading
+// a team starting its backup covered the close 54–55%). So before week 9 most games rate no edge.
+var PX_PICK_CUR = { pbp: 0.037, late: 9, qb1: 0.16, qb2: 0.10 };
 function pxEdgeRating(chance){ return Math.max(1, Math.min(10, 1 + Math.floor((chance - 0.5) / 0.011))); }
 // PBP-only fit for this week (no SP+), cached with the live fit.
 function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0, tierAdj: 0 })); return F._pbp; }
 // ref: the line you're picking against (home margin, + = home favoured); now: the market's
 // current line, same units (null if unknown). Returns the pick, its chance and the reasons.
-function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid){
+function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid, cur){
   if(ref === null || ref === undefined || !isFinite(ref)) return null;
   var clip = function(v, a){ return Math.max(-a, Math.min(a, v)); }, parts = { mv: 0, sp: 0, pbp: 0 }, z = 0;
-  if(now !== null && now !== undefined && isFinite(now)){ parts.mvPts = now - ref; parts.mv = PX_PICK.mv * clip(now - ref, 4); z += parts.mv; }
-  var SPS = (typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
+  var K = cur ? PX_PICK_CUR : PX_PICK;
+  if(!cur && now !== null && now !== undefined && isFinite(now)){ parts.mvPts = now - ref; parts.mv = PX_PICK.mv * clip(now - ref, 4); z += parts.mv; }
+  var SPS = (!cur && typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
   if(SPS && SPS[homeId] && SPS[awayId]){ var spm = SPS[homeId].fpi - SPS[awayId].fpi + (neutral ? 0 : PX_PICK.hfa); parts.spPts = spm - ref; parts.sp = PX_PICK.sp * clip(spm - ref, 10); z += parts.sp; }
-  if(week >= PX_PICK.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = PX_PICK.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
+  if(week >= K.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = K.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
   var QM = pxQbMarks(gid);
-  if(QM){ var qv = function(v){ return v === 1 ? PX_PICK.qb1 : v === 2 ? PX_PICK.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; z += parts.qb; }
+  if(QM){ var qv = function(v){ return v === 1 ? K.qb1 : v === 2 ? K.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; z += parts.qb; }
   if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
   var p = 1 / (1 + Math.exp(-Math.abs(z)));
-  return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now };
+  return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: !!cur };
 }
 function pxPickWhy(k, homeAbbr, awayAbbr){
   var s = [], side = function(v){ return v > 0 ? homeAbbr : awayAbbr; };
@@ -4671,14 +4679,15 @@ function pxPoolGames(){
   });
   return out;
 }
-// Edge for any ESPN game: against your pool's line if it's a pool game, else the opener.
+// Edge for any ESPN game: against your pool's line if it's a pool game, else the current line
+// (the latest ESPN line before kickoff, the saved closing line after).
 function pxGameEdge(g){
   if(!g || !g.home || !g.away) return null;
   var week = (typeof g.week === "number" && g.week) || PEAR.week || (PE.meta && PE.meta.espnWeek) || 1, pool = null;
   (PE.games || []).forEach(function(pg){ if(pg && String(pg.homeId) === g.home.id && String(pg.awayId) === g.away.id && typeof pg.pool === "number") pool = (pg.favIsHome ? 1 : -1) * pg.pool; });
-  var op = PE.opens && PE.opens[g.id], ref = pool !== null ? pool : (op ? -op.h : null);
   var now = g.state === "pre" ? (g.vegas ? pearVegasHome(g) : null) : (pearSavedLine(g) ? -pearSavedLine(g)[0] : (g.vegas ? pearVegasHome(g) : null));
-  var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null, String(g.id)); if(k) k.pool = pool !== null;
+  var ref = pool !== null ? pool : now;
+  var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null, String(g.id), pool === null); if(k) k.pool = pool !== null;
   return k;
 }
 function pxPoolCardHtml(){
@@ -4772,7 +4781,7 @@ function pearGamesHtml(){
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
     var wk = { w: 0, l: 0, p: 0 };
     list.forEach(function(o){ if(o.e.res === "win") wk.w++; else if(o.e.res === "loss") wk.l++; else if(o.e.res === "push") wk.p++; });
-    h += '<div class="pr-edgenote">Every game rated 1\u201310 on its chance to cover <b>the opening line</b> (your pool\u2019s line for pool games): the line\u2019s move since then counts most, then SP+, then from week 9 the play-by-play model. 10 is 60%+, not a lock. ' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
+    h += '<div class="pr-edgenote">Every game rated 1\u201310 on its chance to cover <b>the current line</b> (your pool\u2019s line for pool games). At the current number the line\u2019s move and SP+ are already priced in, so what\u2019s left is the play-by-play model from week 9 and any QB-out marks you\u2019ve set; before week 9 most games have no edge. Pool games still count the line\u2019s move since your pool\u2019s line and SP+. 10 is 60%+, not a lock. ' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
          (hr && (hr.sw + hr.sl) ? ' The model\u2019s record on 3+ edges so far: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') +
                                   ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
@@ -4791,7 +4800,7 @@ function pearGamesHtml(){
   if(!list.length) return h + '<div class="pr-empty">' + (PEAR.filter === "edge"
       ? (!PEM.ratings ? 'Add your CFBD key in the Model tab to find edges.'
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
-         : 'No game this week has a 3+ point edge on a posted line.')
+         : 'No game has an edge at the current line' + ((PEAR.week || 0) < PX_PICK_CUR.late ? ' \u2014 before week ' + PX_PICK_CUR.late + ' only QB-out marks (on a game card) or your pool\u2019s lines can create one' : '') + '.')
       : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
   var lastDay = "";
   list.forEach(function(o){
@@ -5451,7 +5460,7 @@ function pearCardHtml(){
       var KR = pxGameEdge(g);
       if(KR && !KR.none){ var kt = KR.pickHome ? g.home.id : g.away.id, kl = KR.pickHome ? -KR.ref : KR.ref;
         h += '<div class="ph-edge' + (KR.rating >= 7 ? ' big' : '') + '">Edge ' + KR.rating + '/10 → ' + x(pearName(kt) + ' ' + pearSpreadTxt(kl)) + ' · ' + Math.round(KR.chance * 100) + '%</div>';
-        notes.push(x(pxPickWhy(KR, pearAbbr(g.home.id), pearAbbr(g.away.id))) + ' (vs ' + (KR.pool ? 'your pool’s line' : 'the opener') + ')'); }
+        notes.push(x(pxPickWhy(KR, pearAbbr(g.home.id), pearAbbr(g.away.id))) + ' (vs ' + (KR.pool ? 'your pool’s line' : 'the current line') + ')'); }
       if(_vou != null && isFinite(_vou) && Math.abs(p.total - _vou) >= 0.5) notes.push('Total: ' + (p.total > _vou ? 'Over ' : 'Under ') + _vou + ' (' + Math.abs(p.total - _vou).toFixed(1) + ' pts)');
     }
     notes.push('GQI ' + p.gqi.toFixed(1) + (cFit ? ' · pre-game projection' : ''));
