@@ -25,7 +25,7 @@
   --cream:#fdf8ee;--shadow:#111111
 }
 
-html{background:var(--bg)}
+html{background:var(--bg);-webkit-text-size-adjust:100%;text-size-adjust:100%}
 
 body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font-size:14px;min-height:100vh;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 
@@ -1003,6 +1003,11 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .gf-lab{flex:none;width:44px;font-size:9.5px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .gf-val{flex:1;min-width:0;font-size:12px;font-weight:900;overflow-wrap:anywhere}
 .gf-val.mut{font-weight:800;color:#555}
+.gf-val b.gf-strong{color:var(--text);font-weight:900}
+.gf-edge{white-space:nowrap;color:var(--text);font-weight:900}
+.pe-kind{display:flex;gap:6px;margin:0 0 10px}
+.pe-kind button{flex:1;border:2px solid var(--border);background:#fff;border-radius:10px;padding:7px 8px;font:900 12.5px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
+.pe-kind button.on{background:var(--gold);color:var(--text)}
 .gf-row .pick-pill{margin-left:auto}
 .gf-val b.mvup{color:#15803d;font-weight:900;white-space:nowrap}.gf-val b.mvdn{color:var(--red2);font-weight:900;white-space:nowrap}
 .tk-lab{font-style:normal;font-size:9.5px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:2px}
@@ -4681,7 +4686,7 @@ function pearOpenTxt(g, p){
   var t = vo === 0 ? "PK" : (pearAbbr(vo > 0 ? g.home.id : g.away.id) + " -" + Math.abs(vo));
   var arrow = "";
   if(p){ var dir = p.margin > vo ? 1 : p.margin < vo ? -1 : 0, mv = (vc - vo) * dir;
-    if(dir) arrow = ' <b class="' + (mv > 0 ? 'mvup' : 'mvdn') + '">' + (mv > 0 ? '\u2197 moved toward model' : '\u2198 moved away from model') + '</b>'; }
+    if(dir) arrow = ' <b class="' + (mv > 0 ? 'mvup' : 'mvdn') + '">' + (mv > 0 ? '\u2197\ufe0e moved toward model' : '\u2198\ufe0e moved away from model') + '</b>'; }
   return ' \u00b7 opened ' + x(t) + arrow;
 }
 function pearSavedLine(g){ var L = PE.lines && PE.lines[g.id]; return (L && typeof L[0] === "number") ? L : null; }
@@ -4703,6 +4708,21 @@ function pearModelPick(g, margin){
   var home = margin > vh, team = home ? g.home.id : g.away.id, line = home ? -vh : vh, res = null;
   if(fin){ var cv = (g.home.score - g.away.score) - vh; res = cv === 0 ? "push" : ((cv > 0) === home ? "win" : "loss"); }
   return { team: team, line: line, res: res, close: fin, txt: pearAbbr(team) + ' ' + (line === 0 ? 'PK' : (line > 0 ? '+' : '') + (Math.round(line * 10) / 10)) };
+}
+// The model's over/under: its projected total vs the current total before kickoff, the saved
+// closing total once final (the same number the O/U record is graded on), ✓ / ✗ when over.
+function pearModelTotal(g, total){
+  if(!g || total === null || total === undefined || !isFinite(total) || !pearFbsGame(g)) return null;
+  var fin = g.state === "post" && g.home.score !== null && g.away.score !== null, L = pearSavedLine(g);
+  var vt = fin && L && L[1] != null ? +L[1] : (g.vegasOU != null ? +g.vegasOU : (L && L[1] != null ? +L[1] : null));
+  if(vt === null || !isFinite(vt) || Math.abs(total - vt) < 0.05) return null;
+  var over = total > vt, res = null;
+  if(fin){ var at = g.home.score + g.away.score; res = at === vt ? "push" : ((at > vt) === over ? "win" : "loss"); }
+  return { over: over, line: vt, gap: Math.abs(total - vt), res: res, close: fin, total: total, txt: (over ? 'Over ' : 'Under ') + vt };
+}
+function pearOuPillHtml(k){
+  if(!k) return '';
+  return '<span class="pick-pill' + (k.res ? ' ' + k.res : '') + '" title="' + (k.close ? 'Model’s over/under against the closing total' : 'Model’s over/under against the current total') + '"><i>O/U</i> ' + x(k.txt) + (k.res === "win" ? ' ✓' : k.res === "loss" ? ' ✗' : k.res === "push" ? ' · push' : '') + '</span>';
 }
 function pearPickPillHtml(k){
   if(!k) return '';
@@ -5211,6 +5231,25 @@ function pearGamesHtml(){
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
+    if(!PEAR.edgeKind){ try{ PEAR.edgeKind = localStorage.getItem("ps_ekind") || "spread"; }catch(_){ PEAR.edgeKind = "spread"; } }
+    h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind !== "total" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
+  }
+  if(PEAR.filter === "edge" && PEAR.edgeKind === "total"){
+    // Over/under edges: the 25 games where the model's total sits furthest from the current total
+    // (the closing total once played).
+    list.forEach(function(o){ o.ou = o.p ? pearModelTotal(o.g, o.p.total) : null; });
+    list = list.filter(function(o){ return o.ou && pearFbsGame(o.g); });
+    list.sort(function(a, b){ return b.ou.gap - a.ou.gap; });
+    list = list.slice(0, 25);
+    var hrT = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null, wkT = { w: 0, l: 0, p: 0 };
+    list.forEach(function(o){ if(o.ou.res === "win") wkT.w++; else if(o.ou.res === "loss") wkT.l++; else if(o.ou.res === "push") wkT.p++; });
+    var OU = hrT && hrT.ou;
+    h += '<div class="pr-edgenote">The 25 games with the biggest <b>over/under edge</b> \u2014 points between the model\u2019s total and <b>the current total</b> (the closing total once played). ' +
+         'Totals have been the model\u2019s steadier edge: over 2023\u20132025 its side of the closing total hit about 54.7% in weeks 2\u20138 (fading to about 50% late in the season), where its spreads alone ran about 51%.' +
+         (OU && (OU.w + OU.l) ? ' This season vs the close: <b class="' + (OU.w / (OU.w + OU.l) >= 0.524 ? "up" : "dn") + '">' + OU.w + '-' + OU.l + (OU.p ? '-' + OU.p : '') + ' (' + (100 * OU.w / (OU.w + OU.l)).toFixed(1) + '%)</b>' + ((OU.sw + OU.sl) ? ', <b>' + OU.sw + '-' + OU.sl + '</b> when 3+ points off' : '') + '.' : '') +
+         ((wkT.w + wkT.l + wkT.p) ? ' These 25 this week: <b class="' + (wkT.w / (wkT.w + wkT.l || 1) >= 0.524 ? "up" : "dn") + '">' + wkT.w + '-' + wkT.l + (wkT.p ? '-' + wkT.p : '') + '</b>.' : '') + '</div>';
+  }
+  else if(PEAR.filter === "edge"){
     // Edges: the 25 games where the model sits furthest from the current line (the closing line
     // once played), pool games included. Games with a proven edge rating (week 9+ model, QB-out
     // marks) come first; the rest are ranked by points of disagreement.
@@ -5222,15 +5261,15 @@ function pearGamesHtml(){
     list = list.slice(0, 25);
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null, wk = { w: 0, l: 0, p: 0 }, nr = 0;
     list.forEach(function(o){ if(o.mp.res === "win") wk.w++; else if(o.mp.res === "loss") wk.l++; else if(o.mp.res === "push") wk.p++; if(rated(o)) nr++; });
-    h += '<div class="pr-edgenote">The 25 games where the model is furthest from <b>the current line</b> (the closing line once played), pool games included, biggest gap first' + (nr ? '; the ' + nr + ' with a proven edge rating lead' : '') + '. ' +
-         'Before week 9 a gap alone hasn’t beaten the closing line in past seasons (about 50% at 3+ points); from week 9 the model’s gaps have covered 54.6% at 3+ and 56.6% at 5+, and those games carry an EDGE rating. QB-out marks you set also rate. The Pool tab grades your pool’s games against your pool’s lines.' +
+    h += '<div class="pr-edgenote">The 25 games with the biggest <b>edge</b> \u2014 points between the model and <b>the current line</b> (the closing line once played) \u2014 pool games included' + (nr ? '; the ' + nr + ' that also carry a 1\u201310 rating lead' : '') + '. ' +
+         'Before week 9 a gap alone hasn’t beaten the closing line in past seasons (about 50% at 3+ points); from week 9 the model’s gaps have covered 54.6% at 3+ and 56.6% at 5+, and those games also show a 1\u201310 rating (EDGE 8.6 \u00b7 6/10). QB-out marks you set also rate. The Pool tab grades your pool’s games against your pool’s lines.' +
          (hr && (hr.sw + hr.sl) ? ' The model’s season record when it’s 3+ points off the close: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') + ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' These 25 this week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
   }
   if(PEAR.filter === "pool"){
     var PI = pearPoolIds().k;
     list = list.filter(function(o){ return PI[o.g.home.id + "|" + o.g.away.id]; });
-    list.forEach(function(o){ o.pg = PI[o.g.home.id + "|" + o.g.away.id]; o.k = pxGameEdge(o.g); });
+    list.forEach(function(o){ o.pg = PI[o.g.home.id + "|" + o.g.away.id]; o.k = pxGameEdge(o.g); o.mp = null; });
     list.sort(function(a, b){ return ((b.k && !b.k.none) ? b.k.chance : 0) - ((a.k && !a.k.none) ? a.k.chance : 0); });
     h += pePoolBarHtml(list.length) + pePoolRecordHtml();
     list.forEach(function(o){ pePoolLogPick(o.pg, o.k, o.g); });
@@ -5261,8 +5300,12 @@ function pearGamesHtml(){
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
-         ((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none ? '<span class="pr-edgepill">EDGE ' + o.k.rating + '/10 \u00b7 ' + Math.round(o.k.chance * 100) + '%</span>'
-          : (PEAR.filter === "edge" && o.mp) ? '<span class="pr-edgepill gap">' + o.gap.toFixed(1) + ' pts off line</span>'
+         // Edge = points between the model and the line (the same "edge" as the record's Edge 3+);
+         // a game with a proven rating adds it, e.g. EDGE 8.6 · 6/10.
+         (PEAR.filter === "edge" && o.ou ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
+         (PEAR.filter === "edge" || PEAR.filter === "pool") && (o.mp || (o.k && !o.k.none)) ? (function(){
+            var rt = o.k && !o.k.none, ln = rt ? o.k.ref : null, gp = (PEAR.filter === "pool" && rt && p) ? Math.abs(p.margin - ln) : o.gap;
+            return '<span class="pr-edgepill' + (rt ? '' : ' gap') + '">EDGE ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' \u00b7 ' + o.k.rating + '/10' : '') + '</span>'; })()
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -5278,7 +5321,9 @@ function pearGamesHtml(){
     var _fin = g.state === "post", _vt = pearVegasTxt(g);
     h += '<div class="pr-gfoot2">' +
          '<div class="gf-row"><span class="gf-lab">Model</span><span class="gf-val">' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "\u2014")) + '</span>' + (p ? pearPickPillHtml(pearModelPick(g, p.margin)) : '') + '</div>' +
-         '<div class="gf-row"><span class="gf-lab">Vegas</span><span class="gf-val mut">' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (_vt ? (_fin && !g.vegas ? 'closed ' : '') + x(_vt) + pearOpenTxt(g, p) : 'no line yet')) + '</span></div></div>';
+         '<div class="gf-row"><span class="gf-lab">Vegas</span><span class="gf-val mut">' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (_vt ? (_fin && !g.vegas ? 'closed ' : '') + x(_vt) + pearOpenTxt(g, p) : 'no line yet')) + '</span></div>' +
+         (function(){ if(!p || !pearFbsGame(g)) return ''; var T = pearModelTotal(g, p.total);
+           return '<div class="gf-row"><span class="gf-lab">Total</span><span class="gf-val mut"><b class="gf-strong">' + p.total.toFixed(1) + '</b>' + (T ? ' vs ' + T.line + ' <span class="gf-edge">edge ' + T.gap.toFixed(1) + '</span>' : '') + '</span>' + pearOuPillHtml(T) + '</div>'; })() + '</div>';
     if(PEAR.filter === "pool" && o.pg && (!o.k || o.k.none)){ var pfav = o.pg.favIsHome ? g.home.id : g.away.id;
       h += '<div class="pr-take"><span><i class="tk-lab">Pool</i> <b>' + x(pearName(pfav) + ' -' + o.pg.pool) + '</b><small> \u00b7 no edge either way at your pool\u2019s line</small></span><span></span></div>'; }
     if((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none){
@@ -5909,7 +5954,7 @@ function pearCardHtml(){
     var aw = Math.max(3, Math.min(97, p.awayWin * 100));
     h += '<div class="ph-bar"><span style="width:' + aw.toFixed(1) + '%">' + x(pearAbbr(A)) + ' ' + Math.round(p.awayWin * 100) + '%</span><em>' + Math.round(p.homeWin * 100) + '% ' + x(pearAbbr(H)) + '</em></div>';
     var _vt = g ? pearVegasTxt(g) : "", _vou = g ? (g.vegasOU != null ? g.vegasOU : ((pearSavedLine(g)||[])[1] != null ? pearSavedLine(g)[1] : null)) : null;
-    h += '<div class="ph-lines"><span class="ph-line">' + x(pearLineTxt(A, H, p.margin)) + ' · O/U ' + p.total.toFixed(1) + '</span>' + ((g && !c.neutral === !g.neutral && g.away.id === A && g.home.id === H) ? pearPickPillHtml(pearModelPick(g, p.margin)) : '') +
+    h += '<div class="ph-lines"><span class="ph-line">' + x(pearLineTxt(A, H, p.margin)) + ' · O/U ' + p.total.toFixed(1) + '</span>' + ((g && !c.neutral === !g.neutral && g.away.id === A && g.home.id === H) ? pearPickPillHtml(pearModelPick(g, p.margin)) + pearOuPillHtml(pearModelTotal(g, p.total)) : '') +
          ((_vt || _vou != null) ? '<span class="ph-veg">Vegas ' + x(_vt || '—') + (_vou != null ? ' · ' + _vou : '') + '</span>' : '') + '</div>';
     var notes = [];
     if(g && !c.neutral === !g.neutral){
@@ -5917,7 +5962,7 @@ function pearCardHtml(){
       if(KR && !KR.none){ var kt = KR.pickHome ? g.home.id : g.away.id, kl = KR.pickHome ? -KR.ref : KR.ref;
         h += '<div class="ph-edge' + (KR.rating >= 7 ? ' big' : '') + '">Edge ' + KR.rating + '/10 → ' + x(pearName(kt) + ' ' + pearSpreadTxt(kl)) + ' · ' + Math.round(KR.chance * 100) + '%</div>';
         notes.push(x(pxPickWhy(KR, pearAbbr(g.home.id), pearAbbr(g.away.id))) + ' (vs ' + (KR.pool ? 'your pool’s line' : 'the current line') + ')'); }
-      if(_vou != null && isFinite(_vou) && Math.abs(p.total - _vou) >= 0.5) notes.push('Total: ' + (p.total > _vou ? 'Over ' : 'Under ') + _vou + ' (' + Math.abs(p.total - _vou).toFixed(1) + ' pts)');
+      var _T = pearModelTotal(g, p.total); if(_T && _T.gap >= 0.5) notes.push('O/U edge ' + _T.gap.toFixed(1) + ': model ' + p.total.toFixed(1) + ' vs ' + (_T.close ? 'closing ' : '') + _T.line);
     }
     notes.push('GQI ' + p.gqi.toFixed(1) + (cFit ? ' · pre-game projection' : ''));
     if(p.sit && p.sitW){ var _sp = p.sit.parts.map(function(q){ var v = q[1] * p.sitW; return x(pearAbbr(v > 0 ? H : A)) + ' +' + Math.abs(v).toFixed(1) + ' ' + x(q[0]); });
@@ -6211,7 +6256,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -6235,6 +6280,7 @@ document.addEventListener("click", function(e){
     renderPoolEdge(); window.scrollTo(0, 0); return;
   }
   if(t.hasAttribute("data-pear-week")){ var w = parseInt(t.getAttribute("data-pear-week"), 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w); return; }
+  if(t.hasAttribute("data-pear-ekind")){ PEAR.edgeKind = t.getAttribute("data-pear-ekind"); try{ localStorage.setItem("ps_ekind", PEAR.edgeKind); }catch(_){} pearRepaint(); return; }
   if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
     var sb0 = document.querySelector(".pe-sub"), y0 = sb0 ? sb0.getBoundingClientRect().top + window.scrollY : 0, past = sb0 && window.scrollY > y0 - 80;
     pearRepaint();
