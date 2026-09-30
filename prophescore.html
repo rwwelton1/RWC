@@ -990,6 +990,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pr-edgenote{background:var(--gold-bg);border:2px solid var(--border);border-radius:12px;padding:10px 12px;font-size:11.5px;font-weight:700;line-height:1.5;margin:8px 0 12px;box-shadow:2px 2px 0 var(--border)}
 .pr-edgenote b.up{color:#15803d}.pr-edgenote b.dn{color:var(--red2)}
 .pr-gtop span.pr-edgepill{background:#111;color:#fff}
+.pr-gtop span.pr-edgepill.gap{background:#fff;color:var(--text);border:1.5px solid var(--border)}
 .pr-take{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 11px;font-size:12px;font-weight:800;background:var(--gold-bg);border-top:2px solid var(--border)}
 .pr-take b{font-weight:900}
 .pr-take span:last-child{font-size:11px;color:var(--muted);white-space:nowrap}
@@ -5191,17 +5192,21 @@ function pearGamesHtml(){
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
-    list.forEach(function(o){ o.k = pxGameEdge(o.g, "market"); });                // Edges: every game at the current line (the Pool tab uses your pool's lines)
-    list = list.filter(function(o){ return o.k && !o.k.none && pearFbsGame(o.g); });
-    list.sort(function(a, b){ return b.k.chance - a.k.chance; });
-    var byCal = false;
-    var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
-    var wk = { w: 0, l: 0, p: 0 };
-    list.forEach(function(o){ if(o.e.res === "win") wk.w++; else if(o.e.res === "loss") wk.l++; else if(o.e.res === "push") wk.p++; });
-    h += '<div class="pr-edgenote">Every game rated 1\u201310 on its chance to cover <b>the current line</b> (the closing line once it\u2019s played), pool games included \u2014 the Pool tab rates your pool\u2019s games against your pool\u2019s lines. At the current number the line\u2019s move and SP+ are already priced in, so what\u2019s left is the play-by-play model from week 9 and any QB-out marks you\u2019ve set; before week 9 most games have no edge. The model\u2019s own record against the closing line (every game, its projected side) is on the Model tab under Record. 10 is 60%+, not a lock. ' + (byCal ? 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, ranked by how often that <b>kind of pick</b> has covered (graded games before this week, pulled toward 50% until the evidence is solid), then by edge.' : 'Games where the model and Vegas disagree by <b>' + PEAR_EDGE_MIN + '+ points</b>, biggest edge first.') +
-         (hr && (hr.sw + hr.sl) ? ' The model\u2019s record on 3+ edges so far: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') +
-                                  ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
-         ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
+    // Edges: the 25 games where the model sits furthest from the current line (the closing line
+    // once played), pool games included. Games with a proven edge rating (week 9+ model, QB-out
+    // marks) come first; the rest are ranked by points of disagreement.
+    list.forEach(function(o){ o.k = pxGameEdge(o.g, "market"); o.mp = o.p ? pearModelPick(o.g, o.p.margin) : null;
+      o.gap = o.mp ? Math.abs(o.p.margin - (o.mp.team === o.g.home.id ? -o.mp.line : o.mp.line)) : 0; });
+    list = list.filter(function(o){ return o.mp && pearFbsGame(o.g); });
+    var rated = function(o){ return o.k && !o.k.none ? o.k.chance : 0; };
+    list.sort(function(a, b){ return (rated(b) - rated(a)) || (b.gap - a.gap); });
+    list = list.slice(0, 25);
+    var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null, wk = { w: 0, l: 0, p: 0 }, nr = 0;
+    list.forEach(function(o){ if(o.mp.res === "win") wk.w++; else if(o.mp.res === "loss") wk.l++; else if(o.mp.res === "push") wk.p++; if(rated(o)) nr++; });
+    h += '<div class="pr-edgenote">The 25 games where the model is furthest from <b>the current line</b> (the closing line once played), pool games included, biggest gap first' + (nr ? '; the ' + nr + ' with a proven edge rating lead' : '') + '. ' +
+         'Before week 9 a gap alone hasn’t beaten the closing line in past seasons (about 50% at 3+ points); from week 9 the model’s gaps have covered 54.6% at 3+ and 56.6% at 5+, and those games carry an EDGE rating. QB-out marks you set also rate. The Pool tab grades your pool’s games against your pool’s lines.' +
+         (hr && (hr.sw + hr.sl) ? ' The model’s season record when it’s 3+ points off the close: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') + ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
+         ((wk.w + wk.l + wk.p) ? ' These 25 this week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
   }
   if(PEAR.filter === "pool"){
     var PI = pearPoolIds().k;
@@ -5226,7 +5231,7 @@ function pearGamesHtml(){
   if(!list.length) return h + '<div class="pr-empty">' + (PEAR.filter === "edge"
       ? (!PEM.ratings ? 'Add your CFBD key in the Model tab to find edges.'
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
-         : 'No game has an edge at the current line' + ((PEAR.week || 0) < PX_PICK_CUR.late ? ' \u2014 before week ' + PX_PICK_CUR.late + ' only QB-out marks (on a game card) or your pool\u2019s lines can create one' : '') + '.')
+         : 'No posted lines to compare with yet this week.')
       : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
   var lastDay = "";
   list.forEach(function(o){
@@ -5238,6 +5243,7 @@ function pearGamesHtml(){
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
          ((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none ? '<span class="pr-edgepill">EDGE ' + o.k.rating + '/10 \u00b7 ' + Math.round(o.k.chance * 100) + '%</span>'
+          : (PEAR.filter === "edge" && o.mp) ? '<span class="pr-edgepill gap">' + o.gap.toFixed(1) + ' PTS OFF</span>'
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -5253,6 +5259,10 @@ function pearGamesHtml(){
          '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) + pearOpenTxt(g, p) : '')) + '</span></div>';
     if(PEAR.filter === "pool" && o.pg && (!o.k || o.k.none)){ var pfav = o.pg.favIsHome ? g.home.id : g.away.id;
       h += '<div class="pr-take"><span>Pool line <b>' + x(pearName(pfav) + ' -' + o.pg.pool) + '</b><small> \u00b7 no edge either way</small></span><span></span></div>'; }
+    if(PEAR.filter === "edge" && o.mp && !(o.k && !o.k.none)){
+      h += '<div class="pr-take"><span>Takes <b>' + x(pearName(o.mp.team) + ' ' + pearSpreadTxt(o.mp.line)) + '</b><small> \u00b7 model ' + o.gap.toFixed(1) + ' pts off the line \u00b7 no proven edge yet</small></span>' +
+           (o.mp.res ? '<span class="pr-res ' + o.mp.res + '">' + (o.mp.res === "win" ? "\u2713 Covered" : o.mp.res === "loss" ? "\u2717 Missed" : "Push") + '</span>' : '<span></span>') + '</div>';
+    }
     if((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none){
       var K = o.k, pt = K.pickHome ? g.home.id : g.away.id, pl = K.pickHome ? -K.ref : K.ref, rs = null;
       if(g.state === "post" && g.home.score !== null && g.away.score !== null){ var cv = (g.home.score - g.away.score) - K.ref; rs = cv === 0 ? "push" : ((cv > 0) === K.pickHome ? "win" : "loss"); }
