@@ -3411,7 +3411,7 @@ function pxAts(){
       var C = r.clv;
       if(L.o !== null && L.o !== undefined && isFinite(L.o)){
         var vo = -L.o, dir = pred > vo ? 1 : pred < vo ? -1 : 0; G.vo = vo;
-        if(dir){ var mv = (vHome - vo) * dir; C.n++; C.gap += Math.abs(pred - vo); C.move += Math.abs(vHome - vo); C.toward += mv; if(mv > 0.01) C.tw++; else if(mv < -0.01) C.ta++; }
+        if(dir){ var mv = (vHome - vo) * dir; G.mvS = mv > 0.01 ? 1 : mv < -0.01 ? -1 : 0; C.n++; C.gap += Math.abs(pred - vo); C.move += Math.abs(vHome - vo); C.toward += mv; if(mv > 0.01) C.tw++; else if(mv < -0.01) C.ta++; }
         // Record against the opener: the model's side of the opening spread.
         if(Math.abs(pred - vo) >= 0.05){ var OPc = act - vo, OP = r.op, opStrong = Math.abs(pred - vo) >= 3;
           if(OPc === 0){ OP.p++; G.ores = "P"; } else if((OPc > 0) === (pred > vo)){ OP.w++; G.ores = "W"; if(opStrong) OP.sw++; } else { OP.l++; G.ores = "L"; if(opStrong) OP.sl++; } }
@@ -3425,7 +3425,7 @@ function pxAts(){
         E.tN++; E.tM += Math.abs(pt - at); E.tM2 += (pt - at) * (pt - at); E.tV += Math.abs(G.vt - at); E.tV2 += (G.vt - at) * (G.vt - at);
         if(L.to !== null && L.to !== undefined && isFinite(L.to)){
           var td = pt > L.to ? 1 : pt < L.to ? -1 : 0;
-          if(td){ var tmv = (G.vt - L.to) * td; C.tn++; C.tgap += Math.abs(pt - L.to); C.tmove += Math.abs(G.vt - L.to); C.ttoward += tmv; if(tmv > 0.01) C.ttw++; else if(tmv < -0.01) C.tta++; }
+          if(td){ var tmv = (G.vt - L.to) * td; G.mvT = tmv > 0.01 ? 1 : tmv < -0.01 ? -1 : 0; C.tn++; C.tgap += Math.abs(pt - L.to); C.tmove += Math.abs(G.vt - L.to); C.ttoward += tmv; if(tmv > 0.01) C.ttw++; else if(tmv < -0.01) C.tta++; }
         }
         if(Math.abs(pt - G.vt) >= 0.05){
           var over = pt > G.vt, tc = at - G.vt, O = r.ou; O.n++;
@@ -4248,9 +4248,23 @@ function pemHotCold(r, nHot, nCold){
   return { hot: hot, cold: cold };
 }
 // The four numbers people ask about, plus the market-moved-toward-us rate.
+function pemRecByMove(r){
+  // Record of the model's picks split by whether the line then moved toward (+1) or away from (-1) the model.
+  var mk = function(){ return { w: 0, l: 0, p: 0 }; }, M = {};
+  [1, -1].forEach(function(d){ M[d] = { so: mk(), sc: mk(), to: mk(), tc: mk() }; });
+  var put = function(o, res){ if(res === "W") o.w++; else if(res === "L") o.l++; else if(res === "P") o.p++; };
+  r.games.forEach(function(q){
+    if(q.mvS === 1 || q.mvS === -1){ put(M[q.mvS].so, q.ores); put(M[q.mvS].sc, q.res); }
+    if(q.mvT === 1 || q.mvT === -1){ put(M[q.mvT].to, q.otres); put(M[q.mvT].tc, q.tres); }
+  });
+  var t = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
+  var out = {};
+  [[1, "tw"], [-1, "aw"]].forEach(function(k){ var m = M[k[0]]; out[k[1]] = { so: t(m.so), sc: t(m.sc), to: t(m.to), tc: t(m.tc) }; });
+  return out;
+}
 function pemRecCore(r){
   var C = r.clv, t = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
-  return { so: t(r.op), sc: t(r), to: t(r.ot), tc: t(r.ou),
+  return { so: t(r.op), sc: t(r), to: t(r.ot), tc: t(r.ou), mv: pemRecByMove(r),
            mvS: { w: C.tw, n: C.tw + C.ta }, mvT: { w: C.ttw, n: C.ttw + C.tta } };
 }
 function pemRecWeeks(r){
@@ -4356,6 +4370,16 @@ function pemAtsCardHtml(){
   h += '<div class="rb-mini"><div><b>' + (r.suN ? Math.round(100 * r.su / r.suN) + '%' : '—') + '</b><span>Picked the winner</span><i>' + r.su + ' of ' + r.suN + '</i></div>' +
        '<div><b class="' + (K.mvS.n && K.mvS.w / K.mvS.n > 0.5 ? 'up' : '') + '">' + mv(K.mvS) + '</b><span>Spread moved toward model</span><i>' + K.mvS.w + ' of ' + K.mvS.n + '</i></div>' +
        '<div><b class="' + (K.mvT.n && K.mvT.w / K.mvT.n > 0.5 ? 'up' : '') + '">' + mv(K.mvT) + '</b><span>Total moved toward model</span><i>' + K.mvT.w + ' of ' + K.mvT.n + '</i></div></div>';
+  var MV = K.mv, mvN = MV.tw.so.n + MV.tw.to.n;
+  if(mvN){
+    var awTxt = function(a, b){ return a.n ? pemRecTxt(a) + ' (' + pemPctTxt(a.pct, 0) + ')' : '—'; };
+    h += '<div class="rb-tphd" style="margin-top:12px">When Vegas moves toward the model</div>' +
+         '<div class="rb-sub">Picks graded only on games where the line moved the model’s way: ' + MV.tw.so.n + ' spreads · ' + MV.tw.to.n + ' totals</div>' +
+         '<div class="rb-grid"><span></span><span class="rb-colhd">Opening line</span><span class="rb-colhd">Closing line</span>' +
+         '<span class="rb-rowhd">Spread</span>' + pemRecCell(MV.tw.so) + pemRecCell(MV.tw.sc) +
+         '<span class="rb-rowhd">Over/<br>under</span>' + pemRecCell(MV.tw.to) + pemRecCell(MV.tw.tc) + '</div>' +
+         '<div class="pem-autonote" style="margin-top:6px">When the line moved <b>away</b> from the model: spreads ' + awTxt(MV.aw.so) + ' vs the opener, ' + awTxt(MV.aw.sc) + ' vs the close · totals ' + awTxt(MV.aw.to) + ' vs the opener, ' + awTxt(MV.aw.tc) + ' vs the close.</div>';
+  }
   h += '<div class="pem-autonote">The <b>opening line</b> is Vegas’s first number of the week; the <b>closing line</b> is the last one before kickoff, after a week of bets have moved it. Beating the close is the tougher, gold-standard test. “Moved toward model” counts games where the line moved at all: if the model said a team was better than the opener and the line then moved that way, it counts.</div>';
   var tp = pemRecPoints(r, K, HC);
   if(tp.length) h += '<div class="rb-tphd">Talking points</div><ul class="rb-tp">' + tp.map(function(t){ return '<li><span>' + t[0] + '</span><p>' + t[1] + '</p></li>'; }).join('') + '</ul>';
