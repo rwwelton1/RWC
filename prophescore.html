@@ -758,6 +758,13 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pe-nav button{padding:10px 8px;border:none;background:#fff;color:var(--muted);font:900 13px 'Nunito',sans-serif;cursor:pointer}
 .pe-nav button+button{border-left:2px solid var(--border)}
 .pe-nav button.on{background:var(--gold);color:var(--text)}
+/* Sub-tabs: one row under the main tabs that stays on screen while you scroll */
+.pe-sub{position:sticky;top:var(--pe-tb,64px);z-index:40;display:flex;gap:4px;margin:-6px -14px 14px;padding:8px 14px;background:var(--bg);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.pe-sub::-webkit-scrollbar{display:none}
+.pe-sub button{flex:1 0 auto;position:relative;border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:999px;padding:7px 9px;font:900 12px 'Nunito',sans-serif;cursor:pointer;white-space:nowrap;box-shadow:2px 2px 0 var(--border)}
+.pe-sub button.on{background:#111;color:#fff;box-shadow:none;transform:translate(2px,2px)}
+.pe-sub button .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red2);margin-left:5px;vertical-align:1px}
+.pe-subnote{font-size:12px;font-weight:800;color:var(--muted);margin:-6px 0 12px}
 .pear{font-family:'Nunito',sans-serif;color:var(--text)}
 .pr-h1{font-size:22px;font-weight:900;letter-spacing:-.02em;line-height:1.1}
 .pr-h2{font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:4px 0 12px}
@@ -3710,20 +3717,45 @@ function pxSimCardHtml(){
   h += '<div class="pem-autonote">Each simulated drive starts from the league’s drive-start distribution, shifted by both teams’ field-position ratings (drive-start EP for and against, which carries kickoffs, punts, returns and the short fields a defense creates). Every snap is a run or pass by the offense’s mix; it succeeds at the matchup’s success rate for that play type, and a success gains the success line plus log-normal extra yards stretched by the matchup’s IsoEPA. Turnovers follow the matchup’s havoc; fourth downs kick, go or punt by field position. The simulator is calibrated so an average matchup scores what the league does per drive.</div>';
   return h + '</div>';
 }
+// Model tab sub-tabs: Record (how it's doing), Tune (settings and your tune), Priors (roster
+// prior and SP+ sheets), Data (CFBD, line tracking, past seasons, quarterbacks).
+var PX_MSUBS = [["record", "Record"], ["tune", "Tune"], ["priors", "Priors & SP+"], ["data", "Data"]];
+function pxMsub(){
+  PE.ui = PE.ui || {};
+  if(!PE.ui.msub){ try{ PE.ui.msub = localStorage.getItem("ps_msub") || ""; }catch(_){ PE.ui.msub = ""; } }
+  if(!PX_MSUBS.some(function(t){ return t[0] === PE.ui.msub; })) PE.ui.msub = "record";
+  if(!pxKey() || !PX.active){ if(PE.ui.msub === "record" || PE.ui.msub === "tune") return "data"; }   // nothing to show there yet
+  return PE.ui.msub;
+}
+// Downloads still to finish (or an error) put a dot on the Data tab.
+function pxDataDot(){
+  try{ return !!(PX.err || PXH.err || PXQ.err || (PXH.idx && pxHistCallsLeft()) || (PXQ.idx && pxQbTodo().length)); }catch(e){ return false; }
+}
+function pxSubNavHtml(cur){
+  return '<div class="pe-sub" role="tablist">' + PX_MSUBS.map(function(t){
+    var off = (!pxKey() || !PX.active) && (t[0] === "record" || t[0] === "tune");
+    return '<button role="tab" class="' + (t[0] === cur ? "on" : "") + '" data-pe-msub="' + t[0] + '"' + (off ? ' disabled style="opacity:.45"' : '') + '>' + t[1] + (t[0] === "data" && pxDataDot() ? '<span class="dot"></span>' : '') + '</button>';
+  }).join('') + '</div>';
+}
 function pxPanelHtml(){
-  var h = '<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>';
-  h += pxDataCardHtml();
-  h += pxSnapCardHtml();
-  if(pxKey()) h += pxHistCardHtml() + pxQbCardHtml();
-  if(PX.active){
+  var cur = pxMsub(), h = pxSubNavHtml(cur);
+  if(cur === "record"){
     h += pemAtsCardHtml();
     h += pxEvalCardHtml();
     h += pemAnglesCardHtml();
-    h += pxFadeCardHtml();
-    h += pxKnobsHtml();
+  } else if(cur === "tune"){
     h += pxUTHtml();
+    h += pxKnobsHtml();
+    h += pxFadeCardHtml();
     h += pxSimCardHtml();
-    h += pxPriorCardHtml();
+  } else if(cur === "priors"){
+    if(PX.active) h += pxPriorCardHtml();
+    h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
+         '<div class="admin-panel">' + pemSheetsHtml() + '</div>';
+  } else {
+    h += pxDataCardHtml();
+    h += pxSnapCardHtml();
+    if(pxKey()) h += pxHistCardHtml() + pxQbCardHtml();
   }
   return h;
 }
@@ -4235,17 +4267,17 @@ function renderPoolEdge(){
       }
     }
     if(PEM.restoreErr) h += '<div class="pem-stale">The saved data would not load: <b>' + x(PEM.restoreErr) + '</b>.</div>';
-    h += pxKey() ? pxPanelHtml() : ('<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>' + pxDataCardHtml());
-    h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
-         '<div class="admin-panel">' + pemSheetsHtml() + '</div>';
+    h += pxPanelHtml();
   }
   h += '</div>';
   render(h);
 
+  try{ var tbEl = document.querySelector(".topbar"); if(tbEl) document.documentElement.style.setProperty("--pe-tb", (tbEl.offsetHeight + 3) + "px"); }catch(_){}
   var bk = document.getElementById("pe-back");
   if(bk) bk.addEventListener("click", function(){ SC.screen = "profile"; draw(); });
   if(PE.ui.view === "rank") pearBindRank();
   else if(PE.ui.view !== "games"){ pxBind(); pemBindSheets(); }
+  else pePoolBind();
   setTimeout(pemAutoMaybe, 400);
 }
 
@@ -4257,7 +4289,7 @@ function renderPoolEdge(){
 // opens a matchup card; tapping either logo swaps that team for any other, so a
 // card can show a game that is not on anyone's schedule.
 var PEAR = { year:null, week:null, curWeek:null, curYear:null, weeks:null, games:null,
-             loading:false, err:"", cache:{}, info:{}, card:null, pick:null, filter:"all" };
+             loading:false, err:"", cache:{}, info:{}, card:null, pick:null, filter:(function(){ try{ var f = localStorage.getItem("ps_gsub"); return /^(all|top|close|edge|pool)$/.test(f || "") ? f : "all"; }catch(_){ return "all"; } })() };
 var PEAR_SCORE = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard";
 
 function pearLogo(id){
@@ -4736,6 +4768,87 @@ document.addEventListener("input", function(e){
 });
 
 // ── Games list ───────────────────────────────────────────────────────────────
+// ── Your pool's games, read straight from the pool (cfbpool) ─────────────────
+// Same Firebase project and sign-in as the pool page. The pool lives at pools/cfb, or
+// groups/<id>/data/cfbpool for a group pool, with /seasons/<year> when the link carries
+// ?year=. Paste your pool link once to point at a group; the main pool is the default.
+// Each pool week's games become PE.games entries (the shape the edge rating reads).
+var PEPOOL = { busy: false, err: "", tried: {}, editing: false };
+function pePoolSrc(){ return (PE.meta && PE.meta.poolSrc) || {}; }
+function pePoolBase(){ var c = pePoolSrc(), root = c.group ? "groups/" + c.group + "/data/cfbpool" : "pools/cfb"; return c.year ? root + "/seasons/" + c.year : root; }
+function pePoolSrcLabel(){ var c = pePoolSrc(); return (c.group ? "Group pool \u201c" + c.group + "\u201d" : "Main pool") + (c.year ? " \u00b7 " + c.year + " season" : ""); }
+// Pool link (or just a group id) -> { group, year }.
+function pePoolParse(txt){
+  txt = String(txt || "").trim(); if(!txt) return {};
+  var g = /[?&]group=([^&#]+)/.exec(txt), y = /[?&]year=(\d{4})/.exec(txt);
+  if(!g && !/[\/?=&.]/.test(txt)) return { group: txt };
+  return { group: g ? decodeURIComponent(g[1]) : null, year: y ? y[1] : null };
+}
+// Pool game -> PE.games entry. Ids come from the pool's ESPN import; hand-typed games fall back to names.
+function pePoolGame(weekId, gid, g, espnWeek){
+  if(!g || !g.home || !g.away) return null;
+  var hid = String(g.homeId || pxTeamId(g.home) || ""), aid = String(g.awayId || pxTeamId(g.away) || ""); if(!hid || !aid) return null;
+  var sp = Math.abs(+g.spread); if(!isFinite(sp)) return null;
+  var favHome = g.favSide !== "away";
+  return { id: "pool_" + weekId + "_" + gid, homeId: hid, awayId: aid, favIsHome: favHome, pool: sp, fav: favHome ? g.home : g.away, dog: favHome ? g.away : g.home, w: espnWeek || null, wk: weekId, src: "pool" };
+}
+// Which pool week is ESPN week w: its weekMeta.espnWeek, else a number in its label.
+function pePoolWeekId(meta, w){
+  var ids = meta.weekIds || [], wm = meta.weekMeta || {}, wl = meta.weekLabels || {}, hit = null;
+  ids.forEach(function(id){ var m = wm[id]; if(m && +m.espnWeek === +w && (!m.seasontype || +m.seasontype === 2)) hit = hit || id; });
+  if(!hit) ids.forEach(function(id){ var n = /(\d+)/.exec(String(wl[id] || id)); if(n && +n[1] === +w) hit = hit || id; });
+  return hit;
+}
+function pePoolLoad(w, done){
+  if(PEPOOL.busy || !DB || !ME()){ if(done) done(false); return; }
+  PEPOOL.busy = true; PEPOOL.err = ""; PEPOOL.tried[w] = 1;
+  var base = pePoolBase();
+  DB.ref(base + "/meta").once("value").then(function(sn){
+    var meta = sn.val() || {}, wid = pePoolWeekId(meta, w);
+    if(!(meta.weekIds || []).length) throw new Error("No pool found at " + pePoolSrcLabel().toLowerCase() + " \u2014 paste your pool link below");
+    if(!wid) throw new Error("Your pool has no week " + w + " yet");
+    return DB.ref(base + "/games/" + wid).once("value").then(function(gs){
+      var G = gs.val() || {}, list = [];
+      Object.keys(G).sort().forEach(function(gid){ var e = pePoolGame(wid, gid, G[gid], w); if(e) list.push(e); });
+      // Replace this week's pool games; keep other weeks' (and anything entered another way).
+      PE.games = (PE.games || []).filter(function(pg){ return !(pg && pg.src === "pool" && (pg.wk === wid || +pg.w === +w)) && !(pg && !pg.src && list.some(function(e){ return e.homeId === String(pg.homeId) && e.awayId === String(pg.awayId); })); }).concat(list);
+      PE.meta = PE.meta || {}; PE.meta.poolAt = Date.now(); PE.meta.poolWeek = w; PE.meta.poolLabel = (meta.weekLabels || {})[wid] || wid;
+      peSave();
+      return list.length;
+    });
+  }).then(function(n){ PEPOOL.busy = false; if(done) done(true, n); }, function(e){ PEPOOL.busy = false; PEPOOL.err = (e && e.code === "PERMISSION_DENIED") ? "The pool\u2019s data isn\u2019t readable from here (Firebase rules)." : ((e && e.message) || String(e)); if(done) done(false); });
+}
+// The pool bar at the top of the Pool tab.
+function pePoolBarHtml(n){
+  var M = PE.meta || {}, w = PEAR.week, h = '<div class="pr-edgenote pool-src">';
+  h += '<b>' + (n ? n + ' game' + (n === 1 ? '' : 's') + ' from your pool' : (PEPOOL.busy ? 'Loading your pool\u2026' : 'No pool games for week ' + (w || '') + ' yet')) + '</b>' +
+       (M.poolAt && n ? ' <span style="color:var(--muted)">\u00b7 ' + x(String(M.poolLabel || '')) + ' \u00b7 loaded ' + new Date(M.poolAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + '</span>' : '') +
+       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px">' +
+       '<button class="pr-btn" id="pe-poolload"' + (PEPOOL.busy ? ' disabled' : '') + '>' + (PEPOOL.busy ? 'Loading\u2026' : '\u21bb Load from pool') + '</button>' +
+       '<span style="font-size:12px;color:var(--muted)">' + x(pePoolSrcLabel()) + ' \u00b7 <button class="pr-link" id="pe-poolsrc">change</button></span></div>';
+  if(PEPOOL.editing || /No pool found/.test(PEPOOL.err)) h += '<div style="display:flex;gap:6px;margin-top:6px"><input id="pe-poolurl" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your pool link" value="' + x(pePoolSrc().url || '') + '" style="flex:1;min-width:0;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:700 16px Nunito,sans-serif"><button class="pr-btn" id="pe-poolsave">Save</button></div>';
+  if(PEPOOL.err) h += '<div style="color:var(--red2);margin-top:6px;font-weight:800">' + x(PEPOOL.err) + '</div>';
+  h += '<div style="margin-top:6px">Rated on the chance to cover <b>your pool\u2019s line</b> (line movement since it was set, SP+, the model from week 9, QB-out marks), best first.</div>';
+  return h + '</div>';
+}
+function pePoolBind(){
+  var ld = document.getElementById("pe-poolload");
+  if(ld) ld.onclick = function(){ pePoolLoad(PEAR.week, function(ok, n){ if(ok) toast(n ? "Loaded " + n + " pool games" : "Your pool has no games in week " + PEAR.week + " yet", ok && n ? "ok" : undefined); pearRepaint(); }); pearRepaint(); };
+  var sc = document.getElementById("pe-poolsrc");
+  if(sc) sc.onclick = function(){ PEPOOL.editing = !PEPOOL.editing; pearRepaint(); };
+  var sv = document.getElementById("pe-poolsave");
+  if(sv) sv.onclick = function(){ var v = (document.getElementById("pe-poolurl") || {}).value || "", c = pePoolParse(v);
+    PE.meta = PE.meta || {}; PE.meta.poolSrc = { group: c.group || null, year: c.year || null, url: v.trim() || null }; PEPOOL.editing = false; PEPOOL.tried = {}; peSave();
+    pePoolLoad(PEAR.week, function(){ pearRepaint(); }); pearRepaint(); };
+}
+// Games tab sub-tabs. "Pool" lists your pool's games; it loads them from the pool on first open each week.
+var PEAR_SUBS = [["all", "All"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
+function pearPoolIds(){
+  var o = { n: 0, k: {} };
+  (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number"){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
+  (PEAR.games || []).forEach(function(g){ if(o.k[g.home.id + "|" + g.away.id]) o.n++; });
+  return o;
+}
 function pearGamesHtml(){
   if(!PEAR.games && !PEAR.loading && !PEAR.err){
     PEAR.loading = true;
@@ -4756,12 +4869,12 @@ function pearGamesHtml(){
     h += '<div class="pr-note"><b>No model yet.</b> Add your CFBD key in the Model tab (or paste an SP+ sheet) to get projections, win chances and GQI for every game.' +
          '<button class="pr-btn" id="pear-build">Open Model tab</button></div>';
   }
-  h += '<div class="pr-tools"><div class="pr-seg">' +
-       '<button class="' + (PEAR.filter === "all" ? "on" : "") + '" data-pear-filter="all">All FBS</button>' +
-       '<button class="' + (PEAR.filter === "top" ? "on" : "") + '" data-pear-filter="top">Top 25</button>' +
-       '<button class="' + (PEAR.filter === "close" ? "on" : "") + '" data-pear-filter="close">Best games</button>' +
-       '<button class="' + (PEAR.filter === "edge" ? "on" : "") + '" data-pear-filter="edge">Best edge</button></div>' +
-       '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
+  var poolN = pearPoolIds().n;
+  // First look at the Pool tab each week (and each session): load that week from the pool.
+  if(PEAR.filter === "pool" && PEAR.week && !PEPOOL.tried[PEAR.week] && !PEPOOL.busy && typeof DB !== "undefined" && DB && ME()) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
+  h += '<div class="pe-sub" role="tablist">' + PEAR_SUBS.map(function(t){
+         return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + '</button>'; }).join('') + '</div>';
+  h += '<div class="pr-tools"><button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
        '<div style="position:relative;margin:0 0 10px"><input id="pear-q" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="\ud83d\udd0d Search teams" value="' + x(PEAR.q || '') + '" ' +
        'style="width:100%;box-sizing:border-box;padding:10px 12px;border:2px solid var(--border);border-radius:10px;font:800 16px Nunito,sans-serif;background:#fff;color:inherit"></div>';
   if(PEAR.loading) return h + '<div class="pr-empty">Loading week ' + (PEAR.week||"") + '…</div></div>';
@@ -4786,6 +4899,13 @@ function pearGamesHtml(){
                                   ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' This week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
   }
+  if(PEAR.filter === "pool"){
+    var PI = pearPoolIds().k;
+    list = list.filter(function(o){ return PI[o.g.home.id + "|" + o.g.away.id]; });
+    list.forEach(function(o){ o.pg = PI[o.g.home.id + "|" + o.g.away.id]; o.k = pxGameEdge(o.g); });
+    list.sort(function(a, b){ return ((b.k && !b.k.none) ? b.k.chance : 0) - ((a.k && !a.k.none) ? a.k.chance : 0); });
+    h += pePoolBarHtml(list.length);
+  }
   if(PEAR.filter === "top") list = list.filter(function(o){ return o.g.away.rank || o.g.home.rank; });
   if(PEAR.filter === "close"){
     list = list.filter(function(o){ return o.p && pearFbsGame(o.g); });
@@ -4797,6 +4917,7 @@ function pearGamesHtml(){
     list = list.filter(function(o){ return pearTeamMatches(o.g.away.id, qn) || pearTeamMatches(o.g.home.id, qn); });
     if(!list.length) return h + '<div class="pr-empty">No week ' + (PEAR.week || '') + ' game matches \u201c' + x(PEAR.q.trim()) + '\u201d' + (PEAR.filter !== "all" ? ' in this filter \u2014 try All FBS' : ' \u2014 try another week') + '.</div></div>';
   }
+  if(!list.length && PEAR.filter === "pool") return h + '</div>';
   if(!list.length) return h + '<div class="pr-empty">' + (PEAR.filter === "edge"
       ? (!PEM.ratings ? 'Add your CFBD key in the Model tab to find edges.'
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
@@ -4806,12 +4927,12 @@ function pearGamesHtml(){
   list.forEach(function(o){
     var g = o.g, p = o.p, d = new Date(g.date);
     var day = d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
-    if(PEAR.filter !== "close" && PEAR.filter !== "edge" && day !== lastDay){ h += '<div class="pr-day">' + x(day) + '</div>'; lastDay = day; }
+    if(PEAR.filter !== "close" && PEAR.filter !== "edge" && PEAR.filter !== "pool" && day !== lastDay){ h += '<div class="pr-day">' + x(day) + '</div>'; lastDay = day; }
     var when = g.state === "post" ? "Final" : g.state === "in" ? ('<span class="pr-live">● LIVE</span> ' + x(g.detail))
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
-         (PEAR.filter === "edge" && o.k ? '<span class="pr-edgepill">EDGE ' + o.k.rating + '/10 \u00b7 ' + Math.round(o.k.chance * 100) + '%</span>'
+         ((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none ? '<span class="pr-edgepill">EDGE ' + o.k.rating + '/10 \u00b7 ' + Math.round(o.k.chance * 100) + '%</span>'
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -4825,7 +4946,9 @@ function pearGamesHtml(){
     });
     h += '<div class="pr-gfoot"><span>' + (p ? x(pearLineTxt(g.away.id, g.home.id, p.margin)) : (PEM.ratings ? "Not rated" : "")) + '</span>' +
          '<span>' + (!pearFbsGame(g) ? 'FCS opponent \u00b7 not graded' : (pearVegasTxt(g) ? 'Vegas: ' + x(pearVegasTxt(g)) + pearOpenTxt(g, p) : '')) + '</span></div>';
-    if(PEAR.filter === "edge" && o.k){
+    if(PEAR.filter === "pool" && o.pg && (!o.k || o.k.none)){ var pfav = o.pg.favIsHome ? g.home.id : g.away.id;
+      h += '<div class="pr-take"><span>Pool line <b>' + x(pearName(pfav) + ' -' + o.pg.pool) + '</b><small> \u00b7 no edge either way</small></span><span></span></div>'; }
+    if((PEAR.filter === "edge" || PEAR.filter === "pool") && o.k && !o.k.none){
       var K = o.k, pt = K.pickHome ? g.home.id : g.away.id, pl = K.pickHome ? -K.ref : K.ref, rs = null;
       if(g.state === "post" && g.home.score !== null && g.away.score !== null){ var cv = (g.home.score - g.away.score) - K.ref; rs = cv === 0 ? "push" : ((cv > 0) === K.pickHome ? "win" : "loss"); }
       h += '<div class="pr-take"><span>Takes <b>' + x(pearName(pt) + ' ' + pearSpreadTxt(pl)) + '</b><small> \u00b7 ' + x(pxPickWhy(K, pearAbbr(g.home.id), pearAbbr(g.away.id))) + '</small></span>' +
@@ -5755,7 +5878,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -5779,7 +5902,14 @@ document.addEventListener("click", function(e){
     renderPoolEdge(); window.scrollTo(0, 0); return;
   }
   if(t.hasAttribute("data-pear-week")){ var w = parseInt(t.getAttribute("data-pear-week"), 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w); return; }
-  if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); pearRepaint(); return; }
+  if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
+    var sb0 = document.querySelector(".pe-sub"), y0 = sb0 ? sb0.getBoundingClientRect().top + window.scrollY : 0, past = sb0 && window.scrollY > y0 - 80;
+    pearRepaint();
+    if(past){ var sb1 = document.querySelector(".pe-sub"); if(sb1){ var tb = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--pe-tb")) || 64; window.scrollTo(0, Math.max(0, sb1.getBoundingClientRect().top + window.scrollY - tb - 2)); } }
+    return; }
+  if(t.hasAttribute("data-pe-msub")){ if(t.disabled) return; PE.ui.msub = t.getAttribute("data-pe-msub"); try{ localStorage.setItem("ps_msub", PE.ui.msub); }catch(_){}
+    renderPoolEdge(); var sb2 = document.querySelector(".pe-sub"); if(sb2){ var tb2 = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--pe-tb")) || 64; var top2 = sb2.getBoundingClientRect().top + window.scrollY - tb2 - 2; if(window.scrollY > top2) window.scrollTo(0, Math.max(0, top2)); }
+    return; }
   if(t.hasAttribute("data-pear-game")){
     var gid = t.getAttribute("data-pear-game");
     if(!(PEAR.games || []).some(function(z){ return z.id === gid; })) return;
