@@ -1808,7 +1808,9 @@ var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, liv
 // 2025, which they never saw: spread error 12.99 -> 12.75 a game there, totals 12.91 -> 12.74.
 // alphaT / levT: the totals fit's own shrink and leverage (totals want more shrink, every play equal).
 // sp / spLate: SP+ weight in weeks 1–3 and from week 6 (linear in between), from 2024's weekly SP+.
-var PX_DEFAULTS = { alpha: 25, half: 10, prior: 1, hfa: 3, lev: 1, tier: 1, stretch: 0, fade: 10, sp: 1, spLate: 0.5, sit: 1, alphaT: 75, levT: 0 };
+// tierAdj: points added to the Power-4 side when a P4 team plays a Group-of-5 team (0 = the
+// model as it was). Set from 2023–25 only, then checked on 2024–26 held out: see pxTierPts.
+var PX_DEFAULTS = { alpha: 25, half: 10, prior: 1, hfa: 3, lev: 1, tier: 1, stretch: 0, fade: 10, sp: 1, spLate: 0.5, sit: 1, alphaT: 75, levT: 0, tierAdj: 3.5 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1834,6 +1836,8 @@ var PX_KNOBS = [
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
   { key: "tier", label: "Tier anchoring", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
     help: "Small samples get shrunk. 0% shrinks every team toward the league average (which flattens elite teams); 100% shrinks each team toward what its roster prior says it should be, so an elite team stays elite until its plays say otherwise. Capped at 100%: the centre is already the best guess the prior supports (a regression of each facet on it), so going past it only exaggerates the gap between tiers." },
+  { key: "tierAdj", label: "P4 vs G6 adjustment", min: 0, max: 8, step: 0.5, fmt: function(v){ return v ? "+" + v.toFixed(1) + " pts" : "off (old model)"; }, lo: "off", hi: "8 pts",
+    help: "Points added to the Power-4 team (SEC, Big Ten, Big 12, ACC, Notre Dame; the Pac-12 through 2023) when it plays a Group-of-5 team. Same-tier games are untouched. Why: P4 and G6 teams rarely meet, so the ratings learn the gap between the tiers from only about one game in ten, and the shrinkage that steadies small samples squeezes that gap. Across 2023\u20132026 the P4 side beat the model\u2019s number by 3\u20135 points in those games every season, while same-tier spreads were the right size (so the global stretch can\u2019t fix it). 3.5 is the size 2023\u201325 gave, shrunk; on 2024\u201326 held out it cut the miss in those games by about a third of a point. 0 = the model exactly as it was. Set by hand; the tuner leaves it alone." },
   { key: "stretch", label: "Spread stretch", min: 0, max: 2, step: 0.05, fmt: function(v){ return v ? "×" + v.toFixed(2) : "auto"; }, lo: "auto", hi: "wider spreads",
     help: "Auto: before each week, every earlier prediction is lined up against how the game actually ended; if the model has been too tight (or too wide), this week's spreads are scaled by exactly that much, trusted more as games pile up. A number fixes the scale by hand instead." }
 ];
@@ -2424,6 +2428,113 @@ function pxHistCardHtml(){
 }
 function pxHistStatus(){ var el = document.getElementById("px-hist"); if(el){ el.outerHTML = pxHistCardHtml(); pxBind(); } }
 
+// ── Quarterbacks (for the QB-change backtest) ───────────────────────────────
+// Per game, every player who threw a pass (completions, attempts, yards, TD, INT, QBR) from
+// /games/players, and every QB's EPA per play (all / pass / rush) from /ppa/players/games:
+// two calls a week. Past seasons (2023–2025) plus this season's finished weeks, saved to
+// prophescore/<uid>/qb/y<year>/w<week> with an index at qbIdx. Resumable like the history
+// download, never loaded when the page opens, and not used by the model yet: it is for
+// measuring how much the model misses when a team's usual starter doesn't play.
+var PXQ = { busy: false, msg: "", err: "", idx: null, loading: false };
+function pxQbYears(){ var ys = PX_HIST_YEARS.slice(), y = pxYear(); if(ys.indexOf(y) < 0) ys.push(y); return ys; }
+function pxQbLoadIdx(){
+  if(!DB || !ME()) return Promise.resolve({});
+  PXQ.loading = true;
+  return pxHistGet("qbIdx").then(function(v){ PXQ.idx = v || {}; PXQ.loading = false; return PXQ.idx; }, function(e){ PXQ.loading = false; PXQ.idx = {}; throw e; });
+}
+// Weeks each season should have: a past season's regular-season calendar (from the history
+// index when it's there, else 1–15); this season, the weeks already loaded with finished games.
+function pxQbWeeks(y){
+  if(y === pxYear()){
+    var S = pxState(), out = {};
+    Object.keys(S.wk).forEach(function(k){ var W = S.wk[k]; if(W && W.y === y && W.games.some(function(g){ return g.c; })) out[W.w] = W.done ? 1 : 0; });
+    return out;                                                     // week -> 1 if every game in it is final
+  }
+  var e = (PXH.idx || {})["y" + y], ws = (e && e.weeks) || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], o = {};
+  ws.forEach(function(w){ o[w] = 1; }); return o;
+}
+// A week needs (re)fetching if it isn't saved, or was saved before all its games were final.
+function pxQbTodo(){
+  var I = PXQ.idx || {}, list = [];
+  pxQbYears().forEach(function(y){ var e = (I["y" + y] || {}).wk || {}, want = pxQbWeeks(y);
+    Object.keys(want).forEach(function(w){ var have = e["w" + w]; if(!have || (have.d === 0 && want[w] === 1)) list.push([y, +w, want[w]]); }); });
+  return list;
+}
+// Parse one week. Game ids are CFBD's (the same ids as the saved games); team ids as saved.
+function pxQbParse(box, ppa){
+  var G = {}, P = [];
+  (box || []).forEach(function(gm){
+    var gid = String(pxG(gm, "id") || ""); if(!gid) return;
+    (pxG(gm, "teams") || []).forEach(function(t){
+      var tid = String(pxG(t, "teamId", "team_id", "schoolId", "id") || pxTeamId(pxG(t, "team", "school")) || ""); if(!tid) return;
+      var cat = (pxG(t, "categories") || []).filter(function(c){ return /pass/i.test(String(pxG(c, "name") || "")); })[0]; if(!cat) return;
+      var who = {};
+      (pxG(cat, "types") || []).forEach(function(ty){ var nm = String(pxG(ty, "name") || "").toUpperCase();
+        (pxG(ty, "athletes") || []).forEach(function(a){ var id = String(pxG(a, "id") || ""), name = String(pxG(a, "name") || "");
+          if(!name || /^team$/i.test(name) || (+id < 0)) return;
+          var r = who[id || name] = who[id || name] || { id: id, n: name }; r[nm] = pxG(a, "stat"); }); });
+      var num = function(v){ v = parseFloat(v); return isFinite(v) ? v : null; }, rows = [];
+      Object.keys(who).forEach(function(k){ var r = who[k], ca = String(r["C/ATT"] || "").split("/");
+        rows.push([r.n, r.id, num(ca[0]), num(ca[1]), num(r.YDS), num(r.TD), num(r.INT), num(r.QBR)]); });
+      rows.sort(function(a, b){ return (b[3] || 0) - (a[3] || 0); });          // most attempts first: the de facto starter
+      if(rows.length) (G[gid] = G[gid] || {})[tid] = rows;
+    });
+  });
+  (ppa || []).forEach(function(q){
+    var A = pxG(q, "averagePPA", "average_ppa") || {}, num = function(v){ v = +v; return isFinite(v) ? Math.round(v * 1000) / 1000 : null; };
+    var tn = pxG(q, "team"), tid = String(pxTeamId(tn) || "");
+    P.push([tid, String(tn || ""), String(pxG(q, "name") || ""), String(pxG(q, "id") || ""), String(pxG(q, "opponent") || ""), num(pxG(A, "all")), num(pxG(A, "pass")), num(pxG(A, "rush"))]);
+  });
+  return { g: G, p: P };
+}
+function pxQbSync(){
+  if(PXQ.busy) return;
+  if(!pxKey()){ PXQ.err = "Save your CFBD key first."; pxQbStatus(); return; }
+  if(!DB || !ME()){ PXQ.err = "Needs the Firebase connection (sign in on the hub)."; pxQbStatus(); return; }
+  if(PX.busy || PXH.busy){ PXQ.err = "Wait for the other download to finish, then try again."; pxQbStatus(); return; }
+  PXQ.busy = true; PXQ.err = ""; PXQ.msg = "Checking what’s already saved…"; pxQbStatus();
+  var step = "";
+  Promise.all([pxQbLoadIdx(), PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx().catch(function(){ return {}; })]).then(function(){
+    var todo = pxQbTodo(), chain = Promise.resolve(), n = 0;
+    todo.forEach(function(t){ chain = chain.then(function(){
+      var y = t[0], w = t[1]; step = y + " week " + w; n++;
+      PXQ.msg = y + " week " + w + " (" + n + " of " + todo.length + "): passers and QB EPA…"; pxQbStatus();
+      return Promise.all([pxCall("/games/players", { year: y, week: w, seasonType: "regular", classification: "fbs", category: "passing" }),
+                          pxCall("/ppa/players/games", { year: y, week: w, seasonType: "regular", position: "QB" })]).then(function(r){
+        var Q = pxQbParse(r[0], r[1]), ng = Object.keys(Q.g).length;
+        Q.at = Date.now(); Q.d = t[2];
+        return pxHistPut("qb/y" + y + "/w" + w, Q).then(function(){
+          var I = PXQ.idx["y" + y] = PXQ.idx["y" + y] || { wk: {} }; I.wk = I.wk || {}; I.wk["w" + w] = { g: ng, p: Q.p.length, d: t[2] }; I.at = Date.now();
+          return pxHistPut("qbIdx/y" + y, I);
+        });
+      });
+    }); });
+    return chain;
+  }).then(function(){
+    PXQ.busy = false; PXQ.msg = ""; peSave(); pxQbStatus(); toast("Quarterback data saved", "ok");
+  }).catch(function(e){
+    PXQ.busy = false; PXQ.msg = ""; PXQ.err = (step ? step + ": " : "") + ((e && (e.message || e.code)) || String(e)); peSave(); pxQbStatus();
+  });
+}
+function pxQbCardHtml(){
+  if(!PXQ.idx && !PXQ.loading && DB && ME()){ pxQbLoadIdx().then(pxQbStatus, pxQbStatus); }
+  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(pxQbStatus, pxQbStatus); }
+  var I = PXQ.idx || {}, S = pxState(), todo = PXQ.idx ? pxQbTodo() : [], any = pxQbYears().some(function(y){ return I["y" + y]; });
+  var h = '<div class="pem-ats" id="px-qb"><div class="pem-autotop"><b>🏈 Quarterbacks</b>' +
+          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-qbgo"' + (PXQ.busy ? ' disabled' : '') + '>' + (PXQ.busy ? 'Saving…' : (any ? (todo.length ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
+  h += '<div class="pem-bk"><div class="pem-bkhd"><span>Season</span><span>Weeks saved</span><span>QB games</span></div>';
+  pxQbYears().forEach(function(y){ var e = (I["y" + y] || {}).wk || {}, want = Object.keys(pxQbWeeks(y)).length, have = Object.keys(e).length, g = 0;
+    Object.keys(e).forEach(function(k){ g += e[k].g || 0; });
+    h += '<div class="pem-bkrow"><span>' + y + (y === pxYear() ? ' <small>so far</small>' : '') + '</span><span>' + (want && have >= want ? '<b class="up">all ' + have + '</b>' : have + (want ? ' of ' + want : '')) + '</span><b>' + (g ? g + ' games' : '—') + '</b></div>'; });
+  h += '</div>';
+  if(PXQ.busy) h += '<div class="pem-autosub">' + x(PXQ.msg) + '</div>';
+  if(PXQ.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXQ.err) + ' Everything saved so far is kept — Resume continues from there.</div>';
+  h += '<div class="pem-autonote">' + (PXQ.idx ? (todo.length ? 'About <b>' + (2 * todo.length) + '</b> CFBD calls still to go (2 a week)' : 'Up to date') : 'Checking what’s saved…') + (S.calls ? ' · ' + S.calls.n + ' used this month' : '') +
+       '. For every game: each player who threw a pass (completions, attempts, yards, TD, INT, QBR) and each QB’s EPA per play. Saved to Firebase under <b>prophescore/→qb</b>, so it comes along when you export prophescore. The model doesn’t use it yet: it’s for testing how much the model misses when a team’s usual starter is out. Press Re-check after each weekend to add the new week.</div>';
+  return h + '</div>';
+}
+function pxQbStatus(){ var el = document.getElementById("px-qb"); if(el){ el.outerHTML = pxQbCardHtml(); pxBind(); } }
+
 // ── Daily line snapshots (ESPN) ─────────────────────────────────────────────
 // Once per day (Eastern) while this page is open, every upcoming FBS game's spread and
 // total from ESPN go to prophescore/<uid>/snaps/<game id>:
@@ -2756,7 +2867,7 @@ function pxAutoStretch(upto, o){
     pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return;
       var A = pxDriveParams(f, x.g.a, x.g.h), H = pxDriveParams(f, x.g.h, x.g.a);
       var cx = o.sit ? pxCtx(x.g) : null, SP0 = cx ? pxSitParts(x.g.a, x.g.h, x.g.n, cx.d, cx.id) : null, sp = SP0 ? SP0.pts * o.sit : 0;
-      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa) - sp); ws.push(rw);
+      xs.push(H.E - A.E); ys.push((x.g.hs - x.g.as) - (x.g.n ? 0 : o.hfa) - sp - pxTierPts(o, x.g.a, x.g.h)); ws.push(rw);
       // Totals: how far real scoring has run from the model's raw total (weather included).
       var t0 = A.Etot + H.Etot; if(SP0){ t0 = t0 * (1 + (SP0.pace - 1) * o.sit) + 2 * SP0.eff * o.sit; }
       tS += rw * ((x.g.hs + x.g.as) - t0); tW += rw;
@@ -2898,6 +3009,21 @@ function pxSitParts(awayId, homeId, neutral, date, gid){
   I.cache[ck] = out;
   return out;
 }
+// ── P4 vs G6 adjustment ──
+// Power-conference team this season: SEC, Big Ten, Big 12, ACC (the Pac-12 through 2023) or Notre Dame.
+function pxIsP4(id){
+  var t = (pxState().teams || {})[id], c = String((t && t.c) || "").toLowerCase();
+  return id === "87" || /\bsec\b|southeastern|big ten|big 12|atlantic coast|\bacc\b/.test(c) || (pxYear() <= 2023 && /pac-1[02]|pac-12|pacific/.test(c));
+}
+// Points to the home side from the P4-vs-G6 adjustment: +tierAdj when a P4 team hosts a G6
+// team, -tierAdj the other way round, 0 in same-tier games or with the setting off. Added after
+// the spread stretch (so it isn't stretched) and taken out of the stretch's own fit (so the two
+// don't both correct the same misses).
+function pxTierPts(o, awayId, homeId){
+  var k = (o && o.tierAdj) || 0; if(!k) return 0;
+  var d = (pxIsP4(homeId) ? 1 : 0) - (pxIsP4(awayId) ? 1 : 0);
+  return d * k;
+}
 function pxPredict(fit, awayId, homeId, neutral, ctx){
   var A = pxDriveParams(fit, awayId, homeId), H = pxDriveParams(fit, homeId, awayId), hf = neutral ? 0 : fit.o.hfa / 2;
   var ft = fit.tf || fit, At = ft === fit ? A : pxDriveParams(ft, awayId, homeId), Ht = ft === fit ? H : pxDriveParams(ft, homeId, awayId);
@@ -2911,7 +3037,9 @@ function pxPredict(fit, awayId, homeId, neutral, ctx){
     var pace = 1 + (sit.pace - 1) * sw, eff = sit.eff * sw;
     eA = Math.max(0, eA * pace + eff - sit.pts * sw / 2); eH = Math.max(0, eH * pace + eff + sit.pts * sw / 2);
   }
-  return { away: eA - hf, home: eH + hf, A: A, H: H, eA: eA, eH: eH, sit: sit, sitW: sw };
+  var tier = pxTierPts(fit.o, awayId, homeId);                                     // P4 vs G6, half to each side
+  if(tier){ eA = Math.max(0, eA - tier / 2); eH = Math.max(0, eH + tier / 2); }
+  return { away: eA - hf, home: eH + hf, A: A, H: H, eA: eA, eH: eH, sit: sit, sitW: sw, tier: tier };
 }
 // Game simulation. Each side's drive outcomes (touchdown, field goal, nothing)
 // come from simulating thousands of drives play by play with that side's
@@ -2982,7 +3110,7 @@ function pxCVErr(o, weeksUpTo){
 }
 function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v14|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v15|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
 // Tune from the defaults; a knob only moves when the gain is at least 2
 // standard errors game by game (the same guard as before).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -3020,7 +3148,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m15|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m16|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -3050,7 +3178,8 @@ function pxAts(){
       var vHome = -L.c; r.lined++; any = true; r.cal.push([pred, act, vHome]);
       var E = r.err; E.sN++; E.sM += Math.abs(pred - act); E.sM2 += (pred - act) * (pred - act); E.sV += Math.abs(vHome - act); E.sV2 += (vHome - act) * (vHome - act);
       var G = { id: g.id, g: { eventId: g.id, awayId: g.a, homeId: g.h, week: w, neutral: g.n, as: g.as, hs: g.hs, date: g.d || null }, w: w, pred: pred, vh: vHome, act: act, res: null,
-                pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null, sit: p.sit };
+                pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null, sit: p.sit, tier: p.tier || 0 };
+
       if(p.sit){ var p0 = pxPredict(fit, g.a, g.h, g.n); G.pns = p0.home - p0.away; G.tns = p0.home + p0.away; }     // the same pick without the spot
       r.games.push(G);
       // Closing line value: did the line move from the opener toward the model?
@@ -3091,6 +3220,30 @@ function pxAts(){
   if(sdL.length >= 40){ var m = 0; sdL.forEach(function(z){ m += z[0]; }); m /= sdL.length; var ss = 0; sdL.forEach(function(z){ ss += (z[0] - m) * (z[0] - m); }); r.sdObs = Math.sqrt(ss / (sdL.length - 1)); }
   PX._ats = { key: key, v: r };
   return r;
+}
+// P4 vs G6 adjustment, graded: every graded P4-vs-G6 game this season predicted honestly twice,
+// by the model as it runs now and by the same model with the adjustment off (tierAdj 0, which
+// also refits the spread stretch the old way). So "without" is exactly the old model's number.
+function pxTierCmp(){
+  var S = pxState(), key = pxDataSig() + "|" + JSON.stringify(S.opts) + "|" + JSON.stringify(S.wf || {});
+  if(PX._tc && PX._tc.key === key) return PX._tc.v;
+  var T = { n: 0, e: 0, e0: 0, b: 0, b0: 0, bv: 0, w: 0, l: 0, w0: 0, l0: 0, games: [] };
+  pxWeeks().forEach(function(w){
+    if(w < PX_FIRST_GRADED) return;
+    var ow = pxOptsForWeek(w) || S.opts, f1 = null, f0 = null;
+    pxGames().forEach(function(x){
+      var g = x.g; if(x.W.w !== w || !g.c) return;
+      var xT = (pxIsP4(g.h) ? 1 : 0) - (pxIsP4(g.a) ? 1 : 0), L = x.W.lines[g.id]; if(!xT || !L || !isFinite(L.c)) return;
+      f1 = f1 || pxFit(w, ow); f0 = f0 || pxFit(w, Object.assign({}, ow, { tierAdj: 0 }));
+      var p1 = pxPredict(f1, g.a, g.h, g.n, pxCtx(g)), p0 = pxPredict(f0, g.a, g.h, g.n, pxCtx(g)), m1 = p1.home - p1.away, m0 = p0.home - p0.away, act = g.hs - g.as, vh = -L.c;
+      var ats = function(v){ if(Math.abs(v - vh) < 0.05) return 0; var c = act - vh; return !c ? 0 : ((c > 0) === (v > vh) ? 1 : -1); }, a1 = ats(m1), a0 = ats(m0);
+      T.n++; T.e += Math.abs(m1 - act); T.e0 += Math.abs(m0 - act); T.b += (act - m1) * xT; T.b0 += (act - m0) * xT; T.bv += (act - vh) * xT;
+      if(a1 > 0) T.w++; else if(a1 < 0) T.l++; if(a0 > 0) T.w0++; else if(a0 < 0) T.l0++;
+      T.games.push({ id: g.id, w: w, m: m1, m0: m0, act: act, vh: vh });
+    });
+  });
+  PX._tc = { key: key, v: T };
+  return T;
 }
 // Model vs market: errors, records and closing line value in one card.
 function pxEvalCardHtml(){
@@ -3137,6 +3290,17 @@ function pxEvalCardHtml(){
            '<b class="' + (n && b.w / n >= 0.524 ? 'up' : 'dn') + '">' + b.w + '-' + b.l + '</b></div>'; });
     h += '</div><div class="pem-autonote" style="margin-top:4px">Average margin for the Vegas favorite in each band: what Vegas said, what the model said, what happened. A model column well below the other two is the model underrating big favorites \u2014 the \u201ctier anchoring\u201d and \u201cspread stretch\u201d settings exist to fix exactly that, and the auto-tuner moves them when the honest numbers support it.</div>';
   }
+  // P4 vs G6 adjustment: the season's cross-tier games graded with it and without it.
+  var TC = pxTierCmp(), kT = pxOpts().tierAdj || 0;
+  h += '<div class="pem-hd" style="margin-top:12px">P4 vs G6 adjustment' + (kT ? ' (+' + kT.toFixed(1) + ' to the P4 side)' : ' (off)') + '</div>';
+  if(TC && TC.n){
+    var sgn = function(v){ return (v >= 0 ? '+' : '') + v.toFixed(1); };
+    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>' + TC.n + ' P4-vs-G6 games</span><span>Miss · P4 beat it by</span><span>ATS</span></div>' +
+         '<div class="pem-bkrow"><span>With it</span><span><b class="' + (TC.e <= TC.e0 ? 'up' : 'dn') + '">' + (TC.e / TC.n).toFixed(2) + '</b> · ' + sgn(TC.b / TC.n) + '</span><b class="' + cls(TC.w, TC.l) + '">' + TC.w + '-' + TC.l + pc(TC.w, TC.l) + '</b></div>' +
+         '<div class="pem-bkrow"><span>Old model (off)</span><span>' + (TC.e0 / TC.n).toFixed(2) + ' · ' + sgn(TC.b0 / TC.n) + '</span><b class="' + cls(TC.w0, TC.l0) + '">' + TC.w0 + '-' + TC.l0 + pc(TC.w0, TC.l0) + '</b></div>' +
+         '<div class="pem-bkrow"><span>Vegas close</span><span>' + sgn(TC.bv / TC.n) + ' <small>P4 beat it by</small></span><span></span></div></div>';
+    h += '<div class="pem-autonote" style="margin-top:4px">Every graded game this season between a Power-4 team and a Group-of-5 team, picked honestly by the model as it runs now and by the old model (adjustment off, which also puts the spread stretch back the old way). “P4 beat it by” is how far the P4 team beat that number on average: near 0 is right, positive means the P4 side was still underrated. A season has only 40–80 of these games, so a gap under about half a point is noise. Same-tier games aren’t affected.</div>';
+  } else h += '<div class="pem-autosub">No graded P4-vs-G6 games yet.</div>';
   h += '<div class="pem-atsacct"><b>' + E.sN + '</b> games with a closing spread · <b>' + E.tN + '</b> with a closing total · ' + C.n + ' with a spread opener</div>';
   h += '<div class="pem-autonote">Green error = the model beat the closing line on that measure. The closing line is the sharpest public number, so matching it is already good; beating it on MAE over a season would be a real edge. Closing line value: when the model disagrees with the opener, how far the market then moved its way (positive = toward the model). Share of gap closed is that move as a percent of the model’s disagreement. All picks are honest, pre-game projections.</div>';
   return h + '</div>';
@@ -3206,7 +3370,7 @@ function pxUTApply(){
   pxUTRefresh("Your tune is in use · every setting locked");
 }
 function pxUTReset(){ var S = pxState(); S.lock = {}; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
-var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "hfa", "stretch"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit"]]];
+var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "hfa", "tierAdj", "stretch"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit"]]];
 var PX_UT_CSS = '<style>' +
   '#px-ut .ut-g{margin:12px 0 2px;font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;opacity:.6}' +
   '#px-ut .ut-r{padding:6px 0 4px;border-top:1px dashed var(--border2)}' +
@@ -3495,7 +3659,7 @@ function pxPanelHtml(){
   var h = '<div class="section-label">Prophescore <span style="font-weight:800;color:var(--dim)">&middot; play-by-play efficiency</span></div>';
   h += pxDataCardHtml();
   h += pxSnapCardHtml();
-  if(pxKey()) h += pxHistCardHtml();
+  if(pxKey()) h += pxHistCardHtml() + pxQbCardHtml();
   if(PX.active){
     h += pemAtsCardHtml();
     h += pxEvalCardHtml();
@@ -3530,6 +3694,8 @@ function pxBind(){
   if(fc) fc.onclick = function(){ this.disabled = true; this.textContent = "Comparing\u2026"; var self = this; setTimeout(function(){ PX._fcShow = true; var c = document.getElementById("px-fadecard"); if(c){ c.outerHTML = pxFadeCardHtml(); pxBind(); } }, 30); };
   var hg = document.getElementById("px-histgo");
   if(hg) hg.onclick = function(){ pxHistSync(); };
+  var qg = document.getElementById("px-qbgo");
+  if(qg) qg.onclick = function(){ pxQbSync(); };
   var sg = document.getElementById("px-snapgo");
   if(sg) sg.onclick = function(){ pxSnapLines(); };
   pxUTBind();
@@ -4247,9 +4413,11 @@ function pearProject(awayId, homeId, neutral, fit, game){
     if(!f.sdExtra) f.sdExtra = PX.live.sdExtra;
     if(!f.sdTarget) f.sdTarget = PX.live.sdTarget;
     var q = pxPredict(f, awayId, homeId, !!neutral, cx), sim = pxSimulate(f, awayId, homeId, !!neutral, 0, cx);
+    // P4 vs G6 diagnostic: the old model's spread for this game (adjustment off, stretch refit the old way).
+    var q0 = q.tier ? pxPredict(pxFit(f.upto, Object.assign({}, f.o, { tierAdj: 0 })), awayId, homeId, !!neutral, cx) : null;
     var hw = sim.homeWin;
     return { away: Math.round(q.away*10)/10, home: Math.round(q.home*10)/10, total: Math.round((q.home + q.away)*10)/10, margin: Math.round((q.home - q.away)*10)/10,
-             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim, sit: q.sit, sitW: q.sitW };
+             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim, sit: q.sit, sitW: q.sitW, tier: q.tier || 0, margin0: q0 ? Math.round((q0.home - q0.away) * 10) / 10 : null };
   }
   var p = pemPredict(awayId, homeId, !!neutral);
   if(!p) return null;
@@ -4402,7 +4570,7 @@ var PEAR_EDGE_MIN = 3;
 var PX_PICK = { mv: 0.105, sp: 0.0085, pbp: 0.038, late: 9, hfa: 2.5 };
 function pxEdgeRating(chance){ return Math.max(1, Math.min(10, 1 + Math.floor((chance - 0.5) / 0.011))); }
 // PBP-only fit for this week (no SP+), cached with the live fit.
-function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0 })); return F._pbp; }
+function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0, tierAdj: 0 })); return F._pbp; }
 // ref: the line you're picking against (home margin, + = home favoured); now: the market's
 // current line, same units (null if unknown). Returns the pick, its chance and the reasons.
 function pxPickSide(awayId, homeId, neutral, ref, now, week, fit){
@@ -5225,6 +5393,7 @@ function pearCardHtml(){
     if(p.sit && p.sitW){ var _sp = p.sit.parts.map(function(q){ var v = q[1] * p.sitW; return x(pearAbbr(v > 0 ? H : A)) + ' +' + Math.abs(v).toFixed(1) + ' ' + x(q[0]); });
       if(p.sit.tags.wx) _sp.push((p.sit.ws > 15 ? 'wind ' + p.sit.ws + ' mph' : '') + (p.sit.ws > 15 && p.sit.pr ? ' + ' : '') + (p.sit.pr ? 'rain' : '') + ' slows it');
       if(_sp.length) notes.push('Spot: ' + _sp.join(' · ')); }
+    if(p.tier){ var _tt = p.tier > 0 ? H : A; notes.push('P4 vs G6: ' + x(pearAbbr(_tt)) + ' +' + Math.abs(p.tier).toFixed(1) + (p.margin0 !== null && p.margin0 !== undefined ? ' · old model ' + x(pearLineTxt(A, H, p.margin0)) : '')); }
     if(PEAR.cardMore && p.sim && p.sim.drA){ var _dp = function(o){ return 'TD ' + Math.round(o.td * 100) + '% · FG ' + Math.round(o.fg * 100) + '%'; };
       notes.push('Per drive: ' + x(pearAbbr(A)) + ' ' + _dp(p.sim.drA) + ' · ' + x(pearAbbr(H)) + ' ' + _dp(p.sim.drH)); }
     h += '<div class="ph-notes">' + notes.join('<br>') + '</div>';
