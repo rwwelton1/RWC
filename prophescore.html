@@ -1006,6 +1006,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .gf-val b.gf-strong{color:var(--text);font-weight:900}
 .gf-edge{white-space:nowrap;color:var(--text);font-weight:900}
 .pe-kind{display:flex;gap:6px;margin:0 0 10px}
+.p10-btn{display:block;width:100%;margin:0 0 10px;padding:11px 12px;border:2px solid var(--border);border-radius:12px;background:#111;color:#fff;font:900 15px 'Nunito',sans-serif;cursor:pointer;box-shadow:3px 3px 0 var(--gold)}
 .pe-kind button{flex:1;border:2px solid var(--border);background:#fff;border-radius:10px;padding:7px 8px;font:900 12.5px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
 .pe-kind button.on{background:var(--gold);color:var(--text)}
 .gf-row .pick-pill{margin-left:auto}
@@ -5232,6 +5233,7 @@ function pearGamesHtml(){
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
     if(!PEAR.edgeKind){ try{ PEAR.edgeKind = localStorage.getItem("ps_ekind") || "spread"; }catch(_){ PEAR.edgeKind = "spread"; } }
+    h += '<button class="p10-btn" data-pear-p10>\ud83d\udce4 Week ' + (PEAR.week || '') + ' Prophescore 10</button>';
     h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind !== "total" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
   }
   if(PEAR.filter === "edge" && PEAR.edgeKind === "total"){
@@ -6111,6 +6113,126 @@ function pearShareCard(){
       '<div class="simg" data-pear-shareclose><img alt="Game card" src="' + PEAR_SHARE.url + '"></div>';
   });
 }
+
+// ── The Prophescore 10 ──────────────────────────────────────────────────────
+// The week's ten best plays (spreads and over/unders) against the current Vegas line, ranked
+// by estimated hit rate, drawn as a shareable image. The estimate is a logistic on the model's
+// points of edge (capped at 10), fitted on 2023–26 graded against the closing line:
+//   totals, weeks 2–8: 0.0376 per point (5+ point edges hit 56.8%, 54–61% each season)
+//   totals, week 9 on: 0.005   (the totals edge fades late in the season)
+//   spreads, weeks 2–8: 0.004  (early spread gaps haven't beaten the close)
+//   spreads, week 9 on: 0.032  (5+ point gaps hit 57.1%)
+// plus the QB-out term for a spread whose team you've marked out.
+var PX10 = { tot: [0.0376, 0.005], spr: [0.004, 0.032], late: 9 };
+function px10Plays(week){
+  var games = (PEAR.games || []).filter(function(g){ return pearFbsGame(g) && (!g.week || +g.week === +week); });
+  var fit = pearFitFor(week) || null, out = [], late = week >= PX10.late;
+  var logit = function(z){ return 1 / (1 + Math.exp(-z)); };
+  games.forEach(function(g){
+    var pj = pearProject(g.away.id, g.home.id, !!g.neutral, fit, g); if(!pj) return;
+    var sp = pearModelPick(g, pj.margin), tt = pearModelTotal(g, pj.total);
+    if(sp){ var gap = Math.abs(pj.margin - (sp.team === g.home.id ? -sp.line : sp.line)), z = PX10.spr[late ? 1 : 0] * Math.min(10, gap);
+      var QM = pxQbMarks(String(g.id)); if(QM){ var qv = function(v){ return v === 1 ? PX_PICK_CUR.qb1 : v === 2 ? PX_PICK_CUR.qb2 : 0; }, qz = qv(QM[g.away.id]) - qv(QM[g.home.id]); z += (sp.team === g.home.id ? 1 : -1) * qz; }
+      out.push({ kind: "spread", g: g, p: pj, pick: sp, gap: gap, chance: logit(z), qb: QM }); }
+    if(tt) out.push({ kind: "total", g: g, p: pj, pick: tt, gap: tt.gap, chance: logit(PX10.tot[late ? 1 : 0] * Math.min(10, tt.gap)) });
+  });
+  out.sort(function(a, b){ return (b.chance - a.chance) || (b.gap - a.gap); });
+  return out.slice(0, 10);
+}
+// One or two short sentences on why: the numbers behind the play, in plain words.
+function px10Why(pl){
+  var g = pl.g, p = pl.p, A = g.away.id, H = g.home.id, aa = pearAbbr(A), ha = pearAbbr(H), R = PEM.ratings ? pemRanks() : { rank: {} };
+  var rk = function(id, k){ var r = R.rank[id] && R.rank[id][k]; return r ? "#" + r : "—"; };
+  var s1, s2 = "";
+  if(pl.kind === "total"){
+    var T = pl.pick;
+    s1 = "Model projects " + aa + " " + p.away.toFixed(1) + ", " + ha + " " + p.home.toFixed(1) + " — " + p.total.toFixed(1) + " total, " + T.gap.toFixed(1) + (T.over ? " over" : " under") + " the number.";
+    s2 = T.over ? "Offenses rank " + rk(A, "off") + " and " + rk(H, "off") + "; defenses " + rk(A, "def") + " and " + rk(H, "def") + "."
+                : "Defenses rank " + rk(A, "def") + " and " + rk(H, "def") + "; offenses " + rk(A, "off") + " and " + rk(H, "off") + ".";
+    if(p.sit && p.sit.tags && p.sit.tags.wx) s2 += " Weather slows it.";
+  } else {
+    var P = pl.pick, t = P.team, o = t === H ? A : H, fav = p.margin >= 0 ? H : A;
+    s1 = "Model has " + pearAbbr(fav) + " by " + Math.abs(p.margin).toFixed(1) + "; Vegas says " + pearVegasTxt(g) + " — " + pl.gap.toFixed(1) + " points of value on " + pearAbbr(t) + ".";
+    s2 = pearAbbr(t) + " offense " + rk(t, "off") + " vs " + pearAbbr(o) + " defense " + rk(o, "def") + ".";
+    var op = PE.opens && PE.opens[g.id], vc = pearVegasHome(g);
+    if(op && vc !== null){ var mv = (vc - (-op.h)) * (t === H ? 1 : -1); if(Math.abs(mv) >= 0.5) s2 += " Line has moved " + Math.abs(mv) + (mv > 0 ? " toward " : " against ") + pearAbbr(t) + " since it opened."; }
+    if(pl.qb){ [A, H].forEach(function(id){ if(pl.qb[id]) s2 += " " + pearAbbr(id) + " starting a backup QB."; }); }
+  }
+  return (s1 + " " + s2).trim();
+}
+function px10Draw(week, plays, logos, rec){
+  var W = 1080, P = 56, cv = document.createElement("canvas"); cv.width = W; cv.height = 4200;
+  var X = cv.getContext("2d"), y = 0, F = "Nunito, 'Helvetica Neue', Arial, sans-serif", ink = "#111111", muted = "#6b6459", gold = "#e8c840", green = "#15803d", red = "#c62828";
+  var font = function(sz, w){ X.font = (w || 900) + " " + sz + "px " + F; };
+  var fit = function(t, max, sz, w){ font(sz, w); while(sz > 14 && X.measureText(t).width > max){ sz -= 2; font(sz, w); } return sz; };
+  var txt = function(t, x0, y0, al, col){ X.textAlign = al || "left"; X.fillStyle = col || ink; X.fillText(t, x0, y0); };
+  var rr = function(x0, y0, w, h, r, fill, stroke, lw){ X.beginPath(); X.moveTo(x0 + r, y0); X.arcTo(x0 + w, y0, x0 + w, y0 + h, r); X.arcTo(x0 + w, y0 + h, x0, y0 + h, r); X.arcTo(x0, y0 + h, x0, y0, r); X.arcTo(x0, y0, x0 + w, y0, r); X.closePath(); if(fill){ X.fillStyle = fill; X.fill(); } if(stroke){ X.lineWidth = lw || 4; X.strokeStyle = stroke; X.stroke(); } };
+  var wrap = function(t, max, sz, w){ font(sz, w); var words = String(t).split(/\s+/), lines = [], cur = ""; words.forEach(function(wd){ var tryL = cur ? cur + " " + wd : wd; if(X.measureText(tryL).width > max && cur){ lines.push(cur); cur = wd; } else cur = tryL; }); if(cur) lines.push(cur); return lines; };
+  // Header
+  y = 78; font(26, 900); X.letterSpacing = "6px"; txt("WEEK " + week, W / 2, y, "center", muted); X.letterSpacing = "0px";
+  y += 86; font(84, 900); txt("PROPHESCORE 10", W / 2, y, "center");
+  X.fillStyle = gold; X.fillRect(W / 2 - 150, y + 18, 300, 10);
+  y += 72; font(28, 800); txt("The model’s 10 best plays vs the current Vegas line", W / 2, y, "center", muted);
+  y += 38; font(24, 800); txt("Ranked by confidence, most to least", W / 2, y, "center", muted);
+  y += 36;
+  plays.forEach(function(pl, i){
+    var g = pl.g, fin = pl.pick.res, isT = pl.kind === "total", why = wrap(px10Why(pl), W - 2 * P - 170, 25, 700), rowH = 150 + why.length * 33;
+    rr(P + 8, y + 8, W - 2 * P, rowH, 24, ink);
+    rr(P, y, W - 2 * P, rowH, 24, i < 3 ? "#fffbe8" : "#ffffff", ink, 4);
+    // rank
+    rr(P + 22, y + 26, 84, 84, 42, i < 3 ? gold : "#f1ece2", ink, 4); font(46); txt(String(i + 1), P + 64, y + 84, "center");
+    var cx = P + 132, right = W - P - 26;
+    // pick line
+    var pickTxt = isT ? pl.pick.txt : pearName(pl.pick.team) + " " + (pl.pick.line === 0 ? "PK" : (pl.pick.line > 0 ? "+" : "") + (Math.round(pl.pick.line * 10) / 10));
+    var lg = logos[i] || [];
+    var lx = cx; if(lg.length){ lg.forEach(function(im){ if(!im) return; try{ X.drawImage(im, lx, y + 30, 56, 56); lx += 62; }catch(e){} }); if(lx > cx) lx += 8; }
+    var tag = isT ? "TOTAL" : "SPREAD"; font(20, 900); var tw = X.measureText(tag).width + 26;
+    var rtxt = fin ? (fin === "win" ? "\u2713 HIT" : fin === "loss" ? "\u2717 MISS" : "PUSH") : "", rcol = fin === "win" ? green : fin === "loss" ? red : muted, rw = 0;
+    if(rtxt){ font(20, 900); rw = X.measureText(rtxt).width + 26; rr(right - tw - 10 - rw, y + 30, rw, 36, 18, rcol, ink, 2.5); txt(rtxt, right - tw - 10 - rw / 2, y + 55, "center", "#ffffff"); }
+    fit(pickTxt, right - lx - tw - (rw ? rw + 10 : 0) - 24, 46); txt(pickTxt, lx, y + 74, "left");
+    rr(right - tw, y + 30, tw, 36, 18, isT ? "#e8f0ff" : "#edfae8", ink, 2.5); font(20, 900); txt(tag, right - tw / 2, y + 55, "center");
+    font(30, 900); txt(Math.round(pl.chance * 100) + "%", right, y + 104, "right", ink); font(17, 800); txt("EST. HIT", right, y + 126, "right", muted);
+    // matchup + result
+    var when = g.date ? new Date(g.date).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+    var mu = pearName(g.away.id) + (g.neutral ? " vs " : " at ") + pearName(g.home.id) + (when ? " · " + when : "") + " · edge " + pl.gap.toFixed(1);
+    fit(mu, right - cx - 150, 24, 800); txt(mu, cx, y + 114, "left", muted);
+    // why
+    font(25, 700); why.forEach(function(ln, k){ txt(ln, cx, y + 150 + k * 33, "left", "#333333"); });
+    y += rowH + 24;
+  });
+  if(!plays.length){ font(32, 800); txt("No posted lines to compare with yet this week.", W / 2, y + 60, "center", muted); y += 120; }
+  // Footer
+  y += 8;
+  if(rec){ var l1 = "Model this season vs the closing line:  ATS " + rec.ats + "  ·  O/U " + rec.ou; fit(l1, W - 2 * P, 26, 900); txt(l1, W / 2, y + 10, "center"); y += 46; }
+  font(21, 800); txt("Estimated hit rates from 2023–2026 results. For fun — not betting advice.", W / 2, y, "center", muted); y += 46;
+  font(26, 900); X.letterSpacing = "3px"; txt("SCORECERY · PROPHESCORE", W / 2, y, "center", ink); X.letterSpacing = "0px"; y += 30;
+  var Hh = y + 40, out = document.createElement("canvas"); out.width = W + 60; out.height = Hh + 80;
+  var O = out.getContext("2d"); O.fillStyle = "#f5f0e8"; O.fillRect(0, 0, out.width, out.height);
+  var rr2 = function(x0, y0, w, h, r){ O.beginPath(); O.moveTo(x0 + r, y0); O.arcTo(x0 + w, y0, x0 + w, y0 + h, r); O.arcTo(x0 + w, y0 + h, x0, y0 + h, r); O.arcTo(x0, y0 + h, x0, y0, r); O.arcTo(x0, y0, x0 + w, y0, r); O.closePath(); };
+  rr2(40, 40, W - 10, Hh, 36); O.fillStyle = ink; O.fill();
+  rr2(28, 28, W - 10, Hh, 36); O.fillStyle = "#ffffff"; O.fill(); O.lineWidth = 6; O.strokeStyle = ink; O.stroke();
+  O.drawImage(cv, 0, 0, W, Hh, 23, 28, W, Hh);
+  return out;
+}
+function px10Share(){
+  var week = PEAR.week, plays = px10Plays(week);
+  if(!plays.length){ toast("No lines to compare with yet this week"); return; }
+  var ov = document.getElementById("pear-shareov"); if(ov) ov.remove();
+  ov = document.createElement("div"); ov.id = "pear-shareov"; ov.innerHTML = '<div class="sbar"><button class="sx" data-pear-shareclose aria-label="Close">✕</button><span class="sp">Building the Prophescore 10…</span></div>'; document.body.appendChild(ov);
+  var r = (typeof pemAts === "function") ? pemAts() : null, rec = r ? { ats: r.w + "-" + r.l, ou: r.ou.w + "-" + r.ou.l } : null;
+  var fontReady = (document.fonts && document.fonts.load) ? Promise.race([document.fonts.load("900 40px Nunito"), new Promise(function(res){ setTimeout(res, 1500); })]) : Promise.resolve();
+  var lg = function(id){ var i = PEAR.info[id]; return i && i.logo ? i.logo : ""; };
+  var jobs = plays.map(function(pl){ var ids = pl.kind === "total" ? [pl.g.away.id, pl.g.home.id] : [pl.pick.team]; return Promise.all(ids.map(function(id){ return pearLoadImg(lg(id)); })); });
+  Promise.all([fontReady, Promise.all(jobs)]).then(function(res){
+    var cv; try{ cv = px10Draw(week, plays, res[1], rec); cv.toDataURL(); }catch(e){ cv = px10Draw(week, plays, [], rec); }
+    PEAR_SHARE.name = "prophescore-10-week-" + week + ".png"; PEAR_SHARE.url = cv.toDataURL("image/png"); PEAR_SHARE.blob = null;
+    cv.toBlob(function(b){ PEAR_SHARE.blob = b; });
+    var canShare = !!(navigator.share && navigator.canShare);
+    ov.innerHTML = '<div class="sbar"><button class="sx" data-pear-shareclose aria-label="Close">✕</button><span class="sp">Week ' + week + ' Prophescore 10</span>' +
+      (canShare ? '<button class="go" data-pear-sharego>Send</button>' : '') + '<a href="' + PEAR_SHARE.url + '" download="' + PEAR_SHARE.name + '">Save</a></div>' +
+      '<div class="simg" data-pear-shareclose><img alt="Week ' + week + ' Prophescore 10" src="' + PEAR_SHARE.url + '"></div>';
+  });
+}
 function pearShareSend(){
   var b = PEAR_SHARE.blob; if(!b){ toast("Still building — tap again"); return; }
   var f = new File([b], PEAR_SHARE.name, { type: "image/png" });
@@ -6256,7 +6378,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-p10]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -6280,6 +6402,7 @@ document.addEventListener("click", function(e){
     renderPoolEdge(); window.scrollTo(0, 0); return;
   }
   if(t.hasAttribute("data-pear-week")){ var w = parseInt(t.getAttribute("data-pear-week"), 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w); return; }
+  if(t.hasAttribute("data-pear-p10")){ px10Share(); return; }
   if(t.hasAttribute("data-pear-ekind")){ PEAR.edgeKind = t.getAttribute("data-pear-ekind"); try{ localStorage.setItem("ps_ekind", PEAR.edgeKind); }catch(_){} pearRepaint(); return; }
   if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
     var sb0 = document.querySelector(".pe-sub"), y0 = sb0 ? sb0.getBoundingClientRect().top + window.scrollY : 0, past = sb0 && window.scrollY > y0 - 80;
