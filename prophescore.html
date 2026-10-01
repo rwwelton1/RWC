@@ -5565,7 +5565,7 @@ function pearGamesHtml(){
   if(PEAR.filter === "edge"){
     if(!PEAR.edgeKind){ try{ PEAR.edgeKind = localStorage.getItem("ps_ekind") || "spread"; }catch(_){ PEAR.edgeKind = "spread"; } }
     h += '<button class="p10-btn" data-pear-p10>\ud83d\udce4 Week ' + (PEAR.week || '') + ' Prophescore 10</button>';
-    h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind !== "total" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
+    h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind === "spread" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
     var emin = pearEdgeRange().min, emax = pearEdgeRange().max;
     var erl = function(a, b){ return a <= 0 && b >= 15 ? 'Any' : a <= 0 ? '0\u2013' + b.toFixed(1) : b >= 15 ? a.toFixed(1) + '+' : a.toFixed(1) + '\u2013' + b.toFixed(1); };
     h += '<div class="pr-range"><div class="rh"><small>Edge size (points)</small><b id="pear-erl">' + erl(emin, emax) + '</b></div>' +
@@ -5575,7 +5575,16 @@ function pearGamesHtml(){
   }
   var ER = pearEdgeRange(), erOn = PEAR.filter === "edge" && (ER.min > 0 || ER.max < 15);
   var inER = function(g){ return g >= ER.min - 1e-9 && (ER.max >= 15 || g <= ER.max + 1e-9); };
-  if(PEAR.filter === "edge" && PEAR.edgeKind === "total"){
+  if(PEAR.filter === "edge" && PEAR.edgeKind === "all"){
+    // Neither tab selected: every game this week, biggest edge (spread or over/under) first.
+    list.forEach(function(o){ o.k = pxGameEdge(o.g, "market"); o.mp = o.p ? pearModelPick(o.g, o.p.margin) : null;
+      o.gap = o.mp ? Math.abs(o.p.margin - (o.mp.team === o.g.home.id ? -o.mp.line : o.mp.line)) : 0;
+      o.ou = o.p ? pearModelTotal(o.g, o.p.total) : null; o.big = Math.max(o.mp ? o.gap : 0, o.ou ? o.ou.gap : 0); });
+    list = list.filter(function(o){ return (o.mp || o.ou) && pearFbsGame(o.g) && (!erOn || (o.mp && inER(o.gap)) || (o.ou && inER(o.ou.gap))); });
+    list.sort(function(a, b){ return b.big - a.big; });
+    h += '<div class="pr-edgenote">Every game this week, biggest edge first \u2014 spread or over/under, whichever is larger. Tap <b>Spread edges</b> or <b>Over/under edges</b> to focus on one; tap it again to come back here.</div>';
+  }
+  else if(PEAR.filter === "edge" && PEAR.edgeKind === "total"){
     // Over/under edges: the 25 games where the model's total sits furthest from the current total
     // (the closing total once played).
     list.forEach(function(o){ o.ou = o.p ? pearModelTotal(o.g, o.p.total) : null; });
@@ -5607,24 +5616,32 @@ function pearGamesHtml(){
          (hr && (hr.sw + hr.sl) ? ' The model’s season record when it’s 3+ points off the close: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') + ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' These 25 this week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
   }
-  if(erOn){
-    // With a range set, the note becomes the season record for picks in that range, graded against the close.
-    var isT = PEAR.edgeKind === "total", hrR = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
+  if(PEAR.filter === "edge"){
+    // Season record for picks whose edge falls in the chosen range, graded against the close.
+    var isT = PEAR.edgeKind === "total", isAll = PEAR.edgeKind === "all", hrR = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
     var rec = function(total){ var o = { w: 0, l: 0, p: 0, wks: [] };
       if(hrR && hrR.games) hrR.games.forEach(function(G){
         var res = total ? G.tres : G.res, gp = total ? (G.vt === null || G.vt === undefined ? null : Math.abs(G.pt - G.vt)) : Math.abs(G.pred - G.vh);
         if(!res || gp === null || !inER(gp)) return;
         if(res === "W") o.w++; else if(res === "L") o.l++; else if(res === "P") o.p++; else return; o.wks.push(G.w); });
       return o; };
-    var rtxt = function(o){ var n = o.w + o.l, pc = n ? o.w / n : 0; return n ? '<b class="' + (pc >= 0.524 ? "up" : "dn") + '">' + o.w + '-' + o.l + (o.p ? '-' + o.p : '') + ' (' + (pc * 100).toFixed(1) + '%)</b>' : '<b>no graded picks</b>'; };
-    var rg = (ER.min > 0 ? ER.min.toFixed(1) : "0") + (ER.max < 15 ? "\u2013" + ER.max.toFixed(1) : "+");
-    var R1 = rec(isT), R2 = rec(!isT), wkR = isT ? wkT : wk;
-    var wkSpan = R1.wks.length ? Math.min.apply(null, R1.wks) + "\u2013" + Math.max.apply(null, R1.wks) : "";
-    var note = '<div class="pr-edgenote"><b>' + list.length + '</b> game' + (list.length === 1 ? '' : 's') + ' with a <b>' + (isT ? 'over/under' : 'spread') + ' edge</b> of ' + rg + ' points. ' +
-      (R1.w + R1.l ? 'Picks in that range this season: ' + rtxt(R1) + ' vs the closing line' + (wkSpan ? ' (weeks ' + wkSpan + ', ' + (R1.w + R1.l + R1.p) + ' graded)' : '') + ' \u2014 break-even is 52.4%.' : 'No graded picks in that range yet this season.') +
-      ((R2.w + R2.l) ? ' The same range on ' + (isT ? 'spreads' : 'over/unders') + ': ' + rtxt(R2) + '.' : '') +
-      ((wkR.w + wkR.l + wkR.p) ? ' This week\u2019s games here: ' + wkR.w + '-' + wkR.l + (wkR.p ? '-' + wkR.p : '') + '.' : '') + '</div>';
-    var ni = h.lastIndexOf('<div class="pr-edgenote">'); if(ni >= 0) h = h.slice(0, ni) + note;
+    var cellOf = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
+    var RS = rec(false), RT = rec(true), allW = RS.wks.concat(RT.wks);
+    var rg = !erOn ? "All edge sizes" : (ER.min > 0 ? ER.min.toFixed(1) : "0") + (ER.max < 15 ? "\u2013" + ER.max.toFixed(1) : "+") + " points";
+    var wkSpan = allW.length ? "weeks " + Math.min.apply(null, allW) + "\u2013" + Math.max.apply(null, allW) : "";
+    var card = '<div class="pr-range"><div class="rh"><small>Season record in this range</small><b>' + rg + '</b></div>' +
+      '<div class="rb-sub" style="margin:2px 0 8px">Picks graded vs the closing line' + (wkSpan ? ' \u00b7 ' + wkSpan : '') + '</div>' +
+      '<div class="rb-grid"><span></span><span class="rb-colhd">Spread</span><span class="rb-colhd">Over/under</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(cellOf(RS)) + pemRecCell(cellOf(RT)) + '</div></div>';
+    var ni = h.lastIndexOf('<div class="pr-edgenote">');
+    if(ni >= 0){
+      var tail = h.slice(ni);
+      if(erOn && !isAll){
+        var wkR = isT ? wkT : wk;
+        tail = '<div class="pr-edgenote"><b>' + list.length + '</b> game' + (list.length === 1 ? '' : 's') + ' with a <b>' + (isT ? 'over/under' : 'spread') + ' edge</b> of ' + rg + '.' +
+          ((wkR.w + wkR.l + wkR.p) ? ' This week\u2019s games here: ' + wkR.w + '-' + wkR.l + (wkR.p ? '-' + wkR.p : '') + '.' : '') + ' Break-even is 52.4%.</div>';
+      }
+      h = h.slice(0, ni) + card + tail;
+    } else h += card;
   }
   if(PEAR.filter === "pool"){
     var PI = pearPoolIds().k;
@@ -5662,10 +5679,11 @@ function pearGamesHtml(){
     h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
          // Edge = points between the model and the line (the same "edge" as the record's Edge 3+);
          // a game with a proven rating adds it, e.g. EDGE 8.6 · 6/10.
-         (PEAR.filter === "edge" && o.ou ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
+         (PEAR.filter === "edge" && o.ou && PEAR.edgeKind !== "all" ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
          (PEAR.filter === "edge" || PEAR.filter === "pool") && (o.mp || (o.k && !o.k.none)) ? (function(){
             var rt = o.k && !o.k.none, ln = rt ? o.k.ref : null, gp = (PEAR.filter === "pool" && rt && p) ? Math.abs(p.margin - ln) : o.gap;
-            return '<span class="pr-edgepill' + (rt ? '' : ' gap') + '">EDGE ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' \u00b7 ' + o.k.rating + '/10' : '') + '</span>'; })()
+            var pill = '<span class="pr-edgepill' + (rt ? '' : ' gap') + '">EDGE ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' \u00b7 ' + o.k.rating + '/10' : '') + '</span>';
+            return PEAR.filter === "edge" && PEAR.edgeKind === "all" ? '<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">' + (o.mp ? pill.replace("EDGE ", "SPREAD ") : '') + (o.ou ? '<span class="pr-edgepill gap">O/U ' + o.ou.gap.toFixed(1) + '</span>' : '') + '</span>' : pill; })()
                                          : (p ? '<span>GQI ' + p.gqi.toFixed(1) + '</span>' : '')) + '</div>';
     [["away", g.away, p && p.away, p && p.awayWin], ["home", g.home, p && p.home, p && p.homeWin]].forEach(function(s){
       var t = s[1], proj = s[2], win = s[3];
@@ -6786,7 +6804,7 @@ document.addEventListener("click", function(e){
   if(t.hasAttribute("data-pear-week")){ var w = parseInt(t.getAttribute("data-pear-week"), 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w); return; }
   if(t.hasAttribute("data-pear-p10")){ px10Share(); return; }
   if(t.hasAttribute("data-pem-recshare")){ pemRecShare(); return; }
-  if(t.hasAttribute("data-pear-ekind")){ PEAR.edgeKind = t.getAttribute("data-pear-ekind"); try{ localStorage.setItem("ps_ekind", PEAR.edgeKind); }catch(_){} pearRepaint(); return; }
+  if(t.hasAttribute("data-pear-ekind")){ var ek = t.getAttribute("data-pear-ekind"); PEAR.edgeKind = PEAR.edgeKind === ek ? "all" : ek; try{ localStorage.setItem("ps_ekind", PEAR.edgeKind); }catch(_){} pearRepaint(); return; }
   if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
     var sb0 = document.querySelector(".pe-sub"), y0 = sb0 ? sb0.getBoundingClientRect().top + window.scrollY : 0, past = sb0 && window.scrollY > y0 - 80;
     pearRepaint();
