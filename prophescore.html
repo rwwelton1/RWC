@@ -6466,17 +6466,41 @@ function pearShareCard(){
 //   spreads, week 9 on: 0.032  (5+ point gaps hit 57.1%)
 // plus the QB-out term for a spread whose team you've marked out.
 var PX10 = { tot: [0.0376, 0.005], spr: [0.004, 0.032], late: 9 };
+// Calibration from this season's graded games. The logistic above is the prior; for each kind of
+// play we compare what it predicted with what actually hit (graded vs the close), shrink that
+// toward the prior (K games' worth), and carry the difference as a shift on the play's logit:
+//   spreads: by whether the line moved toward / away from the model / stayed put since the open
+//   totals:  by edge size (under 3, 3-6, 6+ points)
+function px10Calib(){
+  var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null;
+  if(!hr || !hr.games) return null;
+  if(PX10._cal && PX10._cal.src === hr) return PX10._cal.v;
+  var K = 40, acc = {}, inv = function(z){ return 1 / (1 + Math.exp(-z)); }, lg = function(q){ q = Math.min(0.97, Math.max(0.03, q)); return Math.log(q / (1 - q)); };
+  var add = function(key, z, res){ if(res !== "W" && res !== "L") return; var a = acc[key] = acc[key] || { n: 0, w: 0, ps: 0 }; a.n++; if(res === "W") a.w++; a.ps += inv(z); };
+  hr.games.forEach(function(G){
+    var late = G.w >= PX10.late;
+    if(G.res && (G.mvS === 1 || G.mvS === -1 || G.mvS === 0)) add("s" + G.mvS, PX10.spr[late ? 1 : 0] * Math.min(10, Math.abs(G.pred - G.vh)), G.res);
+    if(G.tres && G.vt !== null && G.vt !== undefined){ var tg = Math.abs(G.pt - G.vt); add("t" + (tg < 3 ? 0 : tg < 6 ? 1 : 2), PX10.tot[late ? 1 : 0] * Math.min(10, tg), G.tres); }
+  });
+  var v = {};
+  Object.keys(acc).forEach(function(k){ var a = acc[k], pb = a.ps / a.n, bl = (a.w + K * pb) / (a.n + K); v[k] = { shift: lg(bl) - lg(pb), n: a.n, rate: a.w / a.n }; });
+  PX10._cal = { src: hr, v: v };
+  return v;
+}
 function px10Plays(week){
   var games = (PEAR.games || []).filter(function(g){ return pearFbsGame(g) && (!g.week || +g.week === +week); });
-  var fit = pearFitFor(week) || null, out = [], late = week >= PX10.late;
+  var fit = pearFitFor(week) || null, out = [], late = week >= PX10.late, CAL = px10Calib() || {};
   var logit = function(z){ return 1 / (1 + Math.exp(-z)); };
   games.forEach(function(g){
     var pj = pearProject(g.away.id, g.home.id, !!g.neutral, fit, g); if(!pj) return;
     var sp = pearModelPick(g, pj.margin), tt = pearModelTotal(g, pj.total);
     if(sp){ var gap = Math.abs(pj.margin - (sp.team === g.home.id ? -sp.line : sp.line)), z = PX10.spr[late ? 1 : 0] * Math.min(10, gap);
       var QM = pxQbMarks(String(g.id)); if(QM){ var qv = function(v){ return v === 1 ? PX_PICK_CUR.qb1 : v === 2 ? PX_PICK_CUR.qb2 : 0; }, qz = qv(QM[g.away.id]) - qv(QM[g.home.id]); z += (sp.team === g.home.id ? 1 : -1) * qz; }
+      var op0 = PE.opens && PE.opens[g.id], vc0 = pearVegasHome(g);
+      if(op0 && vc0 !== null){ var vo0 = -op0.h, mv0 = (vc0 - vo0) * (pj.margin > vo0 ? 1 : pj.margin < vo0 ? -1 : 0), ms = mv0 > 0.01 ? 1 : mv0 < -0.01 ? -1 : 0; if(CAL["s" + ms]) z += CAL["s" + ms].shift; }
       out.push({ kind: "spread", g: g, p: pj, pick: sp, gap: gap, chance: logit(z), qb: QM }); }
-    if(tt) out.push({ kind: "total", g: g, p: pj, pick: tt, gap: tt.gap, chance: logit(PX10.tot[late ? 1 : 0] * Math.min(10, tt.gap)) });
+    if(tt){ var tz = PX10.tot[late ? 1 : 0] * Math.min(10, tt.gap), tb = "t" + (tt.gap < 3 ? 0 : tt.gap < 6 ? 1 : 2); if(CAL[tb]) tz += CAL[tb].shift;
+      out.push({ kind: "total", g: g, p: pj, pick: tt, gap: tt.gap, chance: logit(tz) }); }
   });
   out.sort(function(a, b){ return (b.chance - a.chance) || (b.gap - a.gap); });
   return out.slice(0, 10);
@@ -6515,7 +6539,7 @@ function px10Draw(week, plays, logos, rec){
   y += 86; font(84, 900); txt("PROPHESCORE 10", W / 2, y, "center");
   X.fillStyle = gold; X.fillRect(W / 2 - 150, y + 18, 300, 10);
   y += 72; font(28, 800); txt("The model’s 10 best plays vs the current Vegas line", W / 2, y, "center", muted);
-  y += 38; font(24, 800); txt("Ranked by confidence, most to least", W / 2, y, "center", muted);
+  y += 38; font(24, 800); txt("Ranked by estimated hit rate, highest first", W / 2, y, "center", muted);
   y += 36;
   plays.forEach(function(pl, i){
     var g = pl.g, fin = pl.pick.res, isT = pl.kind === "total", why = wrap(px10Why(pl), W - 2 * P - 170, 25, 700), rowH = 150 + why.length * 33;
