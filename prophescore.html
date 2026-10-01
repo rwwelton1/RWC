@@ -4268,35 +4268,61 @@ function pemHotCold(r, nHot, nCold){
 function pemMoverTest(){
   var A = pemAts(); if(!A || !A.games || !A.games.length) return null;
   var cache = {}, netAt = function(u){ if(!cache[u]){ var pf = pxFit(u, u < 2 ? pxWeek1Opts() : pxOpts()), PR = pxPowerRatings(pf), n = {}; Object.keys(PR).forEach(function(id){ n[id] = PR[id].off - PR[id].def; }); cache[u] = n; } return cache[u]; };
+  // For each game: swing = change over the 3 weeks before; latest = change from the most recent week alone;
+  // pace = average weekly change over the weeks before that (so latest vs pace is the speed-up or slow-down).
   var rows = [];
   A.games.forEach(function(G){
-    var a = netAt(G.w), b = netAt(Math.max(1, G.w - 3)), h = G.g.homeId, aw = G.g.awayId;
-    if(a[h] === undefined || b[h] === undefined || a[aw] === undefined || b[aw] === undefined) return;
-    rows.push({ d: (a[h] - b[h]) - (a[aw] - b[aw]), e: G.act - G.pred, res: G.res, ph: G.pred > G.vh });
+    var w = G.w, u3 = Math.max(1, w - 3), u1 = Math.max(1, w - 1), a = netAt(w), b = netAt(u1), c = netAt(u3), h = G.g.homeId, aw = G.g.awayId;
+    if([a, b, c].some(function(m){ return m[h] === undefined || m[aw] === undefined; })) return;
+    var span = u1 - u3, gap = function(x, y){ return (x[h] - y[h]) - (x[aw] - y[aw]); };
+    rows.push({ d: gap(a, c), r1: gap(a, b), r2: span > 0 ? gap(b, c) / span : 0, e: G.act - G.pred, res: G.res, ph: G.pred > G.vh });
   });
-  var n = rows.length; if(n < 10) return null;
-  var md = 0, me = 0; rows.forEach(function(r){ md += r.d; me += r.e; }); md /= n; me /= n;
+  var n = rows.length; if(n < 12) return null;
+  var mean = function(k){ var m = 0; rows.forEach(function(r){ m += r[k]; }); return m / n; };
+  var md = mean("d"), m1 = mean("r1"), m2 = mean("r2"), me = mean("e");
+  // One-variable fit on the 3-week swing.
   var sxx = 0, sxy = 0; rows.forEach(function(r){ sxx += (r.d - md) * (r.d - md); sxy += (r.d - md) * (r.e - me); });
   var beta = sxx ? sxy / sxx : 0, ss = 0; rows.forEach(function(r){ var rs = (r.e - me) - beta * (r.d - md); ss += rs * rs; });
   var se = sxx && n > 2 ? Math.sqrt(ss / (n - 2) / sxx) : null;
-  var mk = function(){ return { w: 0, l: 0, p: 0 }; }, B = { up: mk(), mid: mk(), dn: mk() };
-  rows.forEach(function(r){ if(r.res !== "W" && r.res !== "L") return; var pd = r.ph ? r.d : -r.d, k = pd >= 5 ? "up" : pd <= -5 ? "dn" : "mid"; if(r.res === "W") B[k].w++; else B[k].l++; });
+  // Two-variable fit: latest week and earlier pace together.
+  var S11 = 0, S12 = 0, S22 = 0, S1y = 0, S2y = 0;
+  rows.forEach(function(r){ var x1 = r.r1 - m1, x2 = r.r2 - m2, y = r.e - me; S11 += x1 * x1; S12 += x1 * x2; S22 += x2 * x2; S1y += x1 * y; S2y += x2 * y; });
+  var det = S11 * S22 - S12 * S12, pace = null;
+  if(Math.abs(det) > 1e-9 && n > 4){
+    var b1 = (S22 * S1y - S12 * S2y) / det, b2 = (S11 * S2y - S12 * S1y) / det, rss = 0;
+    rows.forEach(function(r){ var rs = (r.e - me) - b1 * (r.r1 - m1) - b2 * (r.r2 - m2); rss += rs * rs; });
+    var s2 = rss / (n - 3);
+    pace = { b1: b1, b2: b2, se1: Math.sqrt(s2 * S22 / det), se2: Math.sqrt(s2 * S11 / det) };
+  }
+  var mk = function(){ return { w: 0, l: 0, p: 0 }; }, B = { up: mk(), mid: mk(), dn: mk() }, V = { up: mk(), dn: mk(), mid: mk() };
+  rows.forEach(function(r){ if(r.res !== "W" && r.res !== "L") return;
+    var pd = r.ph ? r.d : -r.d, k = pd >= 5 ? "up" : pd <= -5 ? "dn" : "mid"; if(r.res === "W") B[k].w++; else B[k].l++;
+    var pv = r.ph ? r.r1 : -r.r1, kv = pv >= 3 ? "up" : pv <= -3 ? "dn" : "mid"; if(r.res === "W") V[kv].w++; else V[kv].l++; });
   var t = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
-  return { n: n, beta: beta, se: se, up: t(B.up), mid: t(B.mid), dn: t(B.dn) };
+  return { n: n, beta: beta, se: se, pace: pace, up: t(B.up), mid: t(B.mid), dn: t(B.dn), vUp: t(V.up), vDn: t(V.dn), vMid: t(V.mid) };
 }
 function pemMoverCardHtml(){
   var M = PX._mover, h = '<div class="rb-tphd" style="margin-top:12px">Does the model overreact to rating moves?</div>';
   if(!M){
-    return h + '<div class="rb-sub">Checks every graded game: did teams that had surged or slumped over the prior 3 weeks get priced too aggressively? Takes a few seconds.</div><button class="btn btn-sm btn-ghost" id="px-moverrun"' + (PX._moverBusy ? ' disabled' : '') + '>' + (PX._moverBusy ? 'Running\u2026' : 'Run the test') + '</button>';
+    return h + '<div class="rb-sub">Checks every graded game: did teams that had surged or slumped over the prior 3 weeks get priced too aggressively \u2014 and does it matter whether the move is speeding up or slowing down? Takes a few seconds.</div><button class="btn btn-sm btn-ghost" id="px-moverrun"' + (PX._moverBusy ? ' disabled' : '') + '>' + (PX._moverBusy ? 'Running\u2026' : 'Run the test') + '</button>';
   }
   if(M === "none") return h + '<div class="rb-sub">Not enough graded games yet.</div>';
-  var z = M.se ? M.beta / M.se : 0, sig = Math.abs(z) >= 2, dir = M.beta < 0 ? "over" : "under";
-  h += '<div class="rb-sub">' + M.n + ' games \u00b7 result vs model, against the gap in each side\u2019s 3-week rating change</div>' +
-       '<div class="pem-autonote" style="margin:0 0 8px"><b>' + (M.beta >= 0 ? '+' : '') + M.beta.toFixed(2) + ' pts</b> of miss per point of rating change' + (M.se ? ' (\u00b1' + M.se.toFixed(2) + ')' : '') + '. ' +
-       (sig ? 'The model <b>' + dir + 'reacts</b> to recent moves \u2014 ' + (M.beta < 0 ? 'a slower-moving rating (more SP+ / prior weight, longer half-life) should help.' : 'recent form is under-weighted; a faster decay should help.')
-            : 'Not distinguishable from zero yet \u2014 no clear sign it over- or under-reacts, so the current decay looks about right.') + '</div>' +
-       '<div class="rb-grid"><span></span><span class="rb-colhd">Pick side rose 5+</span><span class="rb-colhd">Pick side fell 5+</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(M.up) + pemRecCell(M.dn) + '</div>' +
-       '<div class="pem-autonote" style="margin-top:6px">Steady picks (moved under 5): ' + pemRecTxt(M.mid) + ' (' + pemPctTxt(M.mid.pct, 0) + '). If the \u201crose 5+\u201d cell sits below break-even while \u201cfell 5+\u201d is above, fade the hot teams.</div>';
+  var sg = function(v){ return (v >= 0 ? '+' : '') + v.toFixed(2); }, zf = function(b, e){ return e ? b / e : 0; };
+  var z = zf(M.beta, M.se), sig = Math.abs(z) >= 2;
+  h += '<div class="rb-sub">' + M.n + ' games \u00b7 how far results missed the model, against the gap in each side\u2019s rating change</div>' +
+       '<div class="rb-sub" style="color:var(--text);margin-top:-4px"><b>3-week swing:</b> ' + sg(M.beta) + ' pts of miss per rating point' + (M.se ? ' (\u00b1' + M.se.toFixed(2) + ')' : '') + ' \u2014 ' +
+       (sig ? (M.beta < 0 ? 'the model <b>overreacts</b> to big swings.' : 'the model <b>underreacts</b> to big swings.') : 'not distinguishable from zero yet.') + '</div>' +
+       '<div class="rb-grid"><span></span><span class="rb-colhd">Pick side rose 5+</span><span class="rb-colhd">Pick side fell 5+</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(M.up) + pemRecCell(M.dn) + '</div>';
+  if(M.pace){
+    var P = M.pace, z1 = zf(P.b1, P.se1), z2 = zf(P.b2, P.se2), v;
+    if(Math.abs(z1) < 2 && Math.abs(z2) < 2) v = 'Neither the latest week nor the earlier pace is distinguishable from zero yet.';
+    else if(Math.abs(z1) >= 2 && Math.abs(z2) < 2) v = (P.b1 < 0 ? 'The overreaction is in the <b>latest week\u2019s jump</b> \u2014 one big game moves the rating too far. A longer half-life should help.' : 'The latest week is <b>under</b>-weighted \u2014 a shorter half-life should help.');
+    else if(Math.abs(z2) >= 2 && Math.abs(z1) < 2) v = (P.b2 < 0 ? 'The overreaction is in the <b>sustained trend</b>, not one game \u2014 lean more on the prior / SP+.' : 'Sustained trends are <b>under</b>-weighted.');
+    else v = 'Both the latest week (' + sg(P.b1) + ') and the earlier pace (' + sg(P.b2) + ') matter.';
+    h += '<div class="rb-sub" style="color:var(--text);margin-top:12px"><b>Rate of change:</b> latest week ' + sg(P.b1) + ' (\u00b1' + P.se1.toFixed(2) + '), earlier weekly pace ' + sg(P.b2) + ' (\u00b1' + P.se2.toFixed(2) + ') pts of miss per rating point per week. ' + v + '</div>' +
+         '<div class="rb-grid"><span></span><span class="rb-colhd">Pick side jumped 3+ last wk</span><span class="rb-colhd">Pick side dropped 3+ last wk</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(M.vUp) + pemRecCell(M.vDn) + '</div>';
+  }
+  h += '<div class="rb-sub" style="margin-top:8px">Steady picks (no big move): ' + pemRecTxt(M.mid) + ' (' + pemPctTxt(M.mid.pct, 0) + '). Negative numbers mean teams that were moving up came in below the model\u2019s number.</div>';
   return h;
 }
 function pemRecByMove(r){
