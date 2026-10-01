@@ -4289,7 +4289,8 @@ function pemMoverTest(){
     var w = G.w, u3 = Math.max(1, w - 3), u1 = Math.max(1, w - 1), a = netAt(w), b = netAt(u1), c = netAt(u3), h = G.g.homeId, aw = G.g.awayId;
     if([a, b, c].some(function(m){ return m[h] === undefined || m[aw] === undefined; })) return;
     var span = u1 - u3, gap = function(x, y){ return (x[h] - y[h]) - (x[aw] - y[aw]); };
-    rows.push({ d: gap(a, c), r1: gap(a, b), r2: span > 0 ? gap(b, c) / span : 0, e: G.act - G.pred, res: G.res, ph: G.pred > G.vh });
+    rows.push({ d: gap(a, c), r1: gap(a, b), r2: span > 0 ? gap(b, c) / span : 0, e: G.act - G.pred, res: G.res, ores: G.ores, tres: G.tres, otres: G.otres, ph: G.pred > G.vh,
+                big: Math.max(Math.abs(a[h] - c[h]), Math.abs(a[aw] - c[aw])) });
   });
   var n = rows.length; if(n < 12) return null;
   var mean = function(k){ var m = 0; rows.forEach(function(r){ m += r[k]; }); return m / n; };
@@ -4308,25 +4309,34 @@ function pemMoverTest(){
     var s2 = rss / (n - 3);
     pace = { b1: b1, b2: b2, se1: Math.sqrt(s2 * S22 / det), se2: Math.sqrt(s2 * S11 / det) };
   }
-  var mk = function(){ return { w: 0, l: 0, p: 0 }; }, B = { up: mk(), mid: mk(), dn: mk() }, V = { up: mk(), dn: mk(), mid: mk() };
-  rows.forEach(function(r){ if(r.res !== "W" && r.res !== "L") return;
-    var pd = r.ph ? r.d : -r.d, k = pd >= 5 ? "up" : pd <= -5 ? "dn" : "mid"; if(r.res === "W") B[k].w++; else B[k].l++;
-    var pv = r.ph ? r.r1 : -r.r1, kv = pv >= 3 ? "up" : pv <= -3 ? "dn" : "mid"; if(r.res === "W") V[kv].w++; else V[kv].l++; });
-  var t = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
-  return { n: n, beta: beta, se: se, pace: pace, up: t(B.up), mid: t(B.mid), dn: t(B.dn), vUp: t(V.up), vDn: t(V.dn), vMid: t(V.mid) };
+  // Records for a slice of games, in the same shape as the main record: spread and over/under, against the open and the close.
+  var tally = function(fn){
+    var o = { so: { w: 0, l: 0, p: 0 }, sc: { w: 0, l: 0, p: 0 }, to: { w: 0, l: 0, p: 0 }, tc: { w: 0, l: 0, p: 0 } };
+    var add = function(c, r){ if(r === "W") c.w++; else if(r === "L") c.l++; else if(r === "P") c.p++; };
+    rows.forEach(function(r){ if(!fn(r)) return; add(o.so, r.ores); add(o.sc, r.res); add(o.to, r.otres); add(o.tc, r.tres); });
+    Object.keys(o).forEach(function(k){ var c = o[k]; o[k] = { w: c.w, l: c.l, p: c.p, n: c.w + c.l, pct: pemPct(c.w, c.l) }; });
+    return o;
+  };
+  var pd = function(r){ return r.ph ? r.d : -r.d; }, pv = function(r){ return r.ph ? r.r1 : -r.r1; };
+  return { n: n, beta: beta, se: se, pace: pace,
+           rose: tally(function(r){ return pd(r) >= 5; }), fell: tally(function(r){ return pd(r) <= -5; }), steady3: tally(function(r){ return Math.abs(pd(r)) < 5; }),
+           jump: tally(function(r){ return pv(r) >= 3; }), drop: tally(function(r){ return pv(r) <= -3; }),
+           flux: tally(function(r){ return r.big >= 5; }), calm: tally(function(r){ return r.big < 5; }) };
 }
 function pemMoverCardHtml(){
-  var M = PX._mover, h = '<div class="rb-tphd" style="margin-top:12px">Does the model overreact to rating moves?</div>';
+  var M = PX._mover; if(M && M !== "none" && !M.rose) M = null; var h = '<div class="rb-tphd" style="margin-top:12px">Does the model overreact to rating moves?</div>';
   if(!M){
     return h + '<div class="rb-sub">Checks every graded game: did teams that had surged or slumped over the prior 3 weeks get priced too aggressively \u2014 and does it matter whether the move is speeding up or slowing down? Takes a few seconds.</div><button class="btn btn-sm btn-ghost" id="px-moverrun"' + (PX._moverBusy ? ' disabled' : '') + '>' + (PX._moverBusy ? 'Running\u2026' : 'Run the test') + '</button>';
   }
   if(M === "none") return h + '<div class="rb-sub">Not enough graded games yet.</div>';
   var sg = function(v){ return (v >= 0 ? '+' : '') + v.toFixed(2); }, zf = function(b, e){ return e ? b / e : 0; };
+  var sec = function(title, sub, rws){ return '<div class="rb-tphd" style="margin-top:12px">' + title + '</div><div class="rb-sub">' + sub + '</div><div class="rb-grid"><span></span><span class="rb-colhd">Opening line</span><span class="rb-colhd">Closing line</span>' +
+    rws.map(function(r){ return '<span class="rb-rowhd">' + r[0] + '</span>' + pemRecCell(r[1]) + pemRecCell(r[2]); }).join('') + '</div>'; };
   var z = zf(M.beta, M.se), sig = Math.abs(z) >= 2;
   h += '<div class="rb-sub">' + M.n + ' games \u00b7 how far results missed the model, against the gap in each side\u2019s rating change</div>' +
        '<div class="rb-sub" style="color:var(--text);margin-top:-4px"><b>3-week swing:</b> ' + sg(M.beta) + ' pts of miss per rating point' + (M.se ? ' (\u00b1' + M.se.toFixed(2) + ')' : '') + ' \u2014 ' +
        (sig ? (M.beta < 0 ? 'the model <b>overreacts</b> to big swings.' : 'the model <b>underreacts</b> to big swings.') : 'not distinguishable from zero yet.') + '</div>' +
-       '<div class="rb-grid"><span></span><span class="rb-colhd">Pick side rose 5+</span><span class="rb-colhd">Pick side fell 5+</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(M.up) + pemRecCell(M.dn) + '</div>';
+       sec('Your pick\u2019s side, 3-week move', 'Spread record by how far the team you picked had risen or fallen in the 3 weeks before kickoff', [['Rose<br>5+', M.rose.so, M.rose.sc], ['Fell<br>5+', M.fell.so, M.fell.sc]]);
   if(M.pace){
     var P = M.pace, z1 = zf(P.b1, P.se1), z2 = zf(P.b2, P.se2), v;
     if(Math.abs(z1) < 2 && Math.abs(z2) < 2) v = 'Neither the latest week nor the earlier pace is distinguishable from zero yet.';
@@ -4334,9 +4344,10 @@ function pemMoverCardHtml(){
     else if(Math.abs(z2) >= 2 && Math.abs(z1) < 2) v = (P.b2 < 0 ? 'The overreaction is in the <b>sustained trend</b>, not one game \u2014 lean more on the prior / SP+.' : 'Sustained trends are <b>under</b>-weighted.');
     else v = 'Both the latest week (' + sg(P.b1) + ') and the earlier pace (' + sg(P.b2) + ') matter.';
     h += '<div class="rb-sub" style="color:var(--text);margin-top:12px"><b>Rate of change:</b> latest week ' + sg(P.b1) + ' (\u00b1' + P.se1.toFixed(2) + '), earlier weekly pace ' + sg(P.b2) + ' (\u00b1' + P.se2.toFixed(2) + ') pts of miss per rating point per week. ' + v + '</div>' +
-         '<div class="rb-grid"><span></span><span class="rb-colhd">Pick side jumped 3+ last wk</span><span class="rb-colhd">Pick side dropped 3+ last wk</span><span class="rb-rowhd">Vs the<br>close</span>' + pemRecCell(M.vUp) + pemRecCell(M.vDn) + '</div>';
+         sec('Your pick\u2019s side, last week', 'Spread record by the team you picked\u2019s move in the most recent week alone', [['Jumped<br>3+', M.jump.so, M.jump.sc], ['Dropped<br>3+', M.drop.so, M.drop.sc]]);
   }
-  h += '<div class="rb-sub" style="margin-top:8px">Steady picks (no big move): ' + pemRecTxt(M.mid) + ' (' + pemPctTxt(M.mid.pct, 0) + '). Negative numbers mean teams that were moving up came in below the model\u2019s number.</div>';
+  h += sec('Games with a big mover', 'Either team had moved 5+ rating points in the 3 weeks before kickoff', [['Spread', M.flux.so, M.flux.sc], ['Over/<br>under', M.flux.to, M.flux.tc]]) +
+       sec('Steady games', 'Neither team had moved more than 5 points', [['Spread', M.calm.so, M.calm.sc], ['Over/<br>under', M.calm.to, M.calm.tc]]);
   return h;
 }
 function pemRecByMove(r){
