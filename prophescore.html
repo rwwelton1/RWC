@@ -5761,7 +5761,9 @@ function pearGamesHtml(){
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
          : 'No posted lines to compare with yet this week.')
       : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
-  var lastDay = "";
+  var lastDay = "", VM = pearVolMap(PEAR.week);
+  var isRad = function(g){ return !!VM && VM[g.away.id] !== undefined && VM[g.home.id] !== undefined && (Math.abs(VM[g.away.id]) >= PEAR_VOL_AT || Math.abs(VM[g.home.id]) >= PEAR_VOL_AT); };
+  if(VM && list.some(function(o){ return isRad(o.g); })) h += '<div style="font:800 11px Nunito,sans-serif;color:var(--muted);margin:2px 2px 8px">\u2622\ufe0f = a team in the game has moved ' + PEAR_VOL_AT + '+ rating points in the last 3 weeks \u2014 harder to price.</div>';
   list.forEach(function(o){
     var g = o.g, p = o.p, d = new Date(g.date);
     var day = d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
@@ -5769,7 +5771,7 @@ function pearGamesHtml(){
     var when = g.state === "post" ? "Final" : g.state === "in" ? ('<span class="pr-live">● LIVE</span> ' + x(g.detail))
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
-    h += '<div class="pr-gtop"><span>' + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
+    h += '<div class="pr-gtop"><span>' + (isRad(g) ? '<span title="A team here has moved ' + PEAR_VOL_AT + '+ rating points in 3 weeks">\u2622\ufe0f</span> ' : '') + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
          // Edge = points between the model and the line (the same "edge" as the record's Edge 3+);
          // a game with a proven rating adds it, e.g. EDGE 8.6 · 6/10.
          (PEAR.filter === "edge" && o.ou && PEAR.edgeKind !== "all" ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
@@ -5834,6 +5836,22 @@ function pearPrevRanks(){
 }
 // Team rating as it stood at an earlier point, re-fitted with today's settings so the change is apples to apples.
 // upto = the model fitted on games before that week (1 = preseason, before any games).
+// How far each team's rating has moved over the 3 weeks before a week's games (same measure as the overreact test).
+// A game is flagged \u2622\ufe0f when either side has moved 5+ points \u2014 harder to price than two steady teams.
+var _volC = {}, PEAR_VOL_AT = 5;
+function pearVolMap(week){
+  if(!PX.active || !PEM.ratings || !week || week < 2) return null;
+  var key = week + "|" + (PEM._games ? PEM._games.length : 0) + "|" + JSON.stringify(pxOpts());
+  if(_volC.key === key) return _volC.v;
+  var v = null;
+  try{
+    var net = function(u){ var PR = pxPowerRatings(pxFit(u, u < 2 ? pxWeek1Opts() : pxOpts())), n = {}; Object.keys(PR).forEach(function(id){ n[id] = PR[id].off - PR[id].def; }); return n; };
+    var a = net(week), c = net(Math.max(1, week - 3)); v = {};
+    Object.keys(a).forEach(function(id){ if(c[id] !== undefined) v[id] = a[id] - c[id]; });
+  }catch(e){ v = null; }
+  _volC = { key: key, v: v };
+  return v;
+}
 var _rkBase = {};
 function pearBaseNet(upto){
   var key = (PEM._games ? PEM._games.length : 0) + "|" + upto + "|" + JSON.stringify(pxOpts());
