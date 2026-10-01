@@ -3340,6 +3340,60 @@ function pxSimulate(fit, awayId, homeId, neutral, n, ctx){
   var ks = Object.keys(PX.sims); if(ks.length > 400) PX.sims = {};
   return out;
 }
+// ── Simulated box score ─────────────────────────────────────────────────────
+// The same play-by-play drive model as pxDrive, with a tally kept: runs, passes, yards, first downs, turnovers.
+// Run on demand when the Box score button is tapped, never during tuning.
+function pxDriveBox(P, L, R, T){
+  var ytg = pxDraw(L.stCum, R.u()) + P.dY; ytg = Math.max(1, Math.min(99, Math.round(ytg)));
+  var down = 1, dist = Math.min(10, ytg), k = 0; T.dr++;
+  while(k++ < 40){
+    if(down === 4){
+      if(ytg <= 38){ if(!(dist <= 1 && ytg <= 3)){ if(R.u() < P.fg(ytg + 17)) T.pts += 3; return; } }
+      else if(!(dist <= 2 && ytg <= 55)) return;
+    }
+    var run = R.u() < P.rr;
+    if(R.u() < P.tov){ T.to++; if(run) T.rA++; else T.pA++; return; }
+    var thr = down === 1 ? Math.ceil(dist * 0.5) : down === 2 ? Math.ceil(dist * 0.7) : dist; if(thr < 1) thr = 1;
+    var yd;
+    if(R.u() < (run ? P.sR : P.sP)) yd = thr + Math.floor(Math.exp((run ? P.muR : P.muP) + (run ? L.sdR : L.sdP) * R.n()) - 1 + 1e-9);
+    else yd = pxDraw(L.fail[run ? 0 : 1][Math.min(31, thr)], R.u()) - 15;
+    var gain = Math.min(yd, ytg);
+    if(run){ T.rA++; T.rY += gain; if(gain >= 12) T.rEx++; } else { T.pA++; T.pY += gain; if(gain >= 20) T.pEx++; }
+    if(yd >= ytg){ T.pts += 7; return; }
+    ytg -= yd; if(ytg >= 100) return;
+    if(yd >= dist){ T.fd++; down = 1; dist = Math.min(10, ytg); } else { down++; dist -= yd; if(down > 4) return; }
+  }
+}
+function pxBoxScore(fit, awayId, homeId, neutral, ctx){
+  var sk = "box|" + fit.upto + "|" + awayId + "|" + homeId + "|" + (neutral ? 1 : 0) + "|" + JSON.stringify(fit.o) + "|" + pxDataSig() + (ctx ? "|" + ctx.d + ctx.id : "");
+  PX.boxes = PX.boxes || {}; if(PX.boxes[sk]) return PX.boxes[sk];
+  var P = pxPredict(fit, awayId, homeId, neutral, ctx), L = fit.L, dr = (P.A.dr + P.H.dr) / 2, N = 8000;
+  var seed = 11; String(awayId + "|" + homeId).split("").forEach(function(ch){ seed = (seed * 31 + ch.charCodeAt(0)) >>> 0; });
+  function side(D, sd, pts){
+    var Q = pxDriveParamsSim(D, L), R = pxRng(sd), T = { dr: 0, rA: 0, rY: 0, pA: 0, pY: 0, fd: 0, to: 0, rEx: 0, pEx: 0, pts: 0 };
+    for(var i = 0; i < N; i++) pxDriveBox(Q, L, R, T);
+    // Yards come from the raw matchup; nudge them toward the projection's scoring (square root, capped) so the box agrees with the score.
+    var simPpd = T.pts / N, tgt = pts / dr, sc = simPpd > 0 ? Math.max(0.8, Math.min(1.25, Math.sqrt(tgt / simPpd))) : 1, g = dr / N;
+    var o = { rA: T.rA * g, rY: T.rY * g * sc, pA: T.pA * g, pY: T.pY * g * sc, fd: T.fd * g, to: T.to * g, rEx: T.rEx * g, pEx: T.pEx * g };
+    o.plays = o.rA + o.pA; o.yds = o.rY + o.pY; return o;
+  }
+  var out = { A: side(P.A, seed, P.away), H: side(P.H, seed + 1, P.home), dr: dr, pts: { A: P.away, H: P.home } };
+  PX.boxes[sk] = out; var ks = Object.keys(PX.boxes); if(ks.length > 60) PX.boxes = {};
+  return out;
+}
+function pearBoxHtml(box, A, H){
+  var row = function(l, a, b){ return '<div class="pc-crow"><span class="pc-val">' + a + '</span><span></span><span class="pc-clab">' + l + '</span><span></span><span class="pc-val">' + b + '</span></div>'; };
+  var i0 = function(v){ return Math.round(v); }, d1 = function(v){ return v.toFixed(1); };
+  var a = box.A, h = box.H, ypp = function(t){ return t.plays ? t.yds / t.plays : 0; }, ypc = function(y, n){ return n ? y / n : 0; };
+  var s = '<div class="pc-chd">Simulated box score</div>';
+  s += '<div class="pc-crow pc-thd"><span class="pc-val">' + x(pearAbbr(A)) + '</span><span></span><span class="pc-clab"></span><span></span><span class="pc-val">' + x(pearAbbr(H)) + '</span></div>';
+  s += row('POINTS', d1(box.pts.A), d1(box.pts.H)) + row('TOTAL YARDS', i0(a.yds), i0(h.yds)) + row('PLAYS', i0(a.plays), i0(h.plays)) + row('YDS/PLAY', d1(ypp(a)), d1(ypp(h))) +
+       row('1ST DOWNS', i0(a.fd), i0(h.fd)) + row('TURNOVERS', d1(a.to), d1(h.to)) + row('DRIVES', d1(box.dr), d1(box.dr));
+  s += '<div class="pc-chd">Rushing</div>' + row('ATTEMPTS', i0(a.rA), i0(h.rA)) + row('YARDS', i0(a.rY), i0(h.rY)) + row('YDS/CARRY', d1(ypc(a.rY, a.rA)), d1(ypc(h.rY, h.rA))) + row('RUNS 12+', d1(a.rEx), d1(h.rEx));
+  s += '<div class="pc-chd">Passing</div>' + row('PASS PLAYS', i0(a.pA), i0(h.pA)) + row('YARDS', i0(a.pY), i0(h.pY)) + row('YDS/PLAY', d1(ypc(a.pY, a.pA)), d1(ypc(h.pY, h.pA))) + row('PASSES 20+', d1(a.pEx), d1(h.pEx));
+  s += '<div style="font:800 10px Nunito,sans-serif;color:var(--muted);margin:8px 2px 2px;line-height:1.35">Averages from the drive-by-drive simulation behind the projection, not a single game. Pass plays include sacks and incompletions. Turnovers are each team\u2019s giveaways.</div>';
+  return s;
+}
 function pxDataSig(){ var S = pxState(); return (Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0)) + "|sp:" + pxSheetSig(); }
 // Changes whenever a sheet is pasted, replaced or deleted, so fits and tuning refresh.
 function pxSheetSig(){ var P = PE.priors || {}; return Object.keys(P).sort().map(function(k){ return k + (P[k] && P[k].at); }).join(","); }
@@ -5060,7 +5114,7 @@ function pearProject(awayId, homeId, neutral, fit, game){
     var q0 = q.tier ? pxPredict(pxFit(f.upto, Object.assign({}, f.o, { tierAdj: 0 })), awayId, homeId, !!neutral, cx) : null;
     var hw = sim.homeWin;
     return { away: Math.round(q.away*10)/10, home: Math.round(q.home*10)/10, total: Math.round((q.home + q.away)*10)/10, margin: Math.round((q.home - q.away)*10)/10,
-             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim, sit: q.sit, sitW: q.sitW, tier: q.tier || 0, margin0: q0 ? Math.round((q0.home - q0.away) * 10) / 10 : null, qb: q.qb || 0, margin0q: q0q ? Math.round((q0q.home - q0q.away) * 10) / 10 : null };
+             awayWin: 1 - hw, homeWin: hw, gqi: pearGqi(awayId, homeId, hw), sim: sim, box: function(){ return pxBoxScore(f, awayId, homeId, !!neutral, cx); }, sit: q.sit, sitW: q.sitW, tier: q.tier || 0, margin0: q0 ? Math.round((q0.home - q0.away) * 10) / 10 : null, qb: q.qb || 0, margin0q: q0q ? Math.round((q0q.home - q0q.away) * 10) / 10 : null };
   }
   var p = pemPredict(awayId, homeId, !!neutral);
   if(!p) return null;
@@ -6523,14 +6577,18 @@ function pearCardHtml(){
     h += '<div class="pc-none">' + (!PEM.ratings ? 'Add your CFBD key (or an SP+ sheet) in the Model tab to project this game.' : (!pearIsFbs(A) || !pearIsFbs(H)) ? 'FCS teams aren’t rated, so there’s no projection for this one.' : 'One of these teams has no rating yet.') + '</div>';
   }
   h += '</div>';
-  h += '<div class="pc-ctrls"><button data-pear-flip>⇆ Flip</button>' +
+  h += '<div class="pc-ctrls">' + (p && p.box ? '<button class="' + (PEAR.boxMode ? 'on' : '') + '" data-pear-box>\u25a6 Box score</button>' : '') + '<button data-pear-flip>⇆ Flip</button>' +
        '<button class="' + (c.neutral ? "on" : "") + '" data-pear-neutral>Neutral: ' + (c.neutral ? "on" : "off") + '</button>' +
        (p ? '<button class="pc-share" data-pear-share>\ud83d\udce4 Share image</button>' : '') + '</div>';
 
   if(PEM.ratings && (ra || rh)){
     h += '<div class="pc-grid pc-one">';
-    h += pearTapeHtml(ra, rh, A, H, ranks) + pearCenter(ra, rh, A, H, ranks, !!PEAR.cardMore);
-    h += '<button class="pc-more" data-pear-more>' + (PEAR.cardMore ? 'Fewer stats \u25b4' : 'More stats \u25be') + '</button>';
+    if(PEAR.boxMode && p && p.box){ var _bx = null; try{ _bx = p.box(); }catch(e){ _bx = null; }
+      h += _bx ? pearBoxHtml(_bx, A, H) : '<div class="pc-none">The box score needs the play-by-play model for this game.</div>';
+    } else {
+      h += pearTapeHtml(ra, rh, A, H, ranks) + pearCenter(ra, rh, A, H, ranks, !!PEAR.cardMore);
+      h += '<button class="pc-more" data-pear-more>' + (PEAR.cardMore ? 'Fewer stats \u25b4' : 'More stats \u25be') + '</button>';
+    }
     h += '</div>';
   }
   h += '<div class="pc-foot">@Scorecery · Prophescore</div>';
@@ -6936,7 +6994,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-rkchg],[data-pear-novol],[data-pear-p10],[data-pem-recshare]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-box],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-rkchg],[data-pear-novol],[data-pear-p10],[data-pem-recshare]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -7007,6 +7065,7 @@ document.addEventListener("click", function(e){
   if(t.hasAttribute("data-pear-share")){ pearShareCard(); return; }
   if(t.hasAttribute("data-pear-shareclose")){ var ov = document.getElementById("pear-shareov"); if(ov) ov.remove(); return; }
   if(t.hasAttribute("data-pear-sharego")){ pearShareSend(); return; }
+  if(t.hasAttribute("data-pear-box")){ PEAR.boxMode = !PEAR.boxMode; pearRenderCard(); return; }
   if(t.hasAttribute("data-pear-flip")){ var cc = PEAR.card, tmp = cc.a; cc.a = cc.h; cc.h = tmp; pearRenderCard(); return; }
   if(t.hasAttribute("data-pear-neutral")){ PEAR.card.neutral = !PEAR.card.neutral; pearRenderCard(); return; }
 });
