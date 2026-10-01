@@ -5827,10 +5827,11 @@ var _rkBase = {};
 function pearBaseNet(upto){
   var key = (PEM._games ? PEM._games.length : 0) + "|" + upto + "|" + JSON.stringify(pxOpts());
   if(_rkBase.key === key) return _rkBase.v;
-  var pf = pxFit(upto, upto < 2 ? pxWeek1Opts() : pxOpts()), PR = pxPowerRatings(pf), net = {};
-  Object.keys(PR).forEach(function(id){ net[id] = PR[id].off - PR[id].def; });
-  _rkBase = { key: key, v: net };
-  return net;
+  var pf = pxFit(upto, upto < 2 ? pxWeek1Opts() : pxOpts()), PR = pxPowerRatings(pf), net = {}, pr2 = {};
+  Object.keys(PR).forEach(function(id){ net[id] = PR[id].off - PR[id].def; pr2[id] = { off: PR[id].off, def: PR[id].def }; });
+  var v = { net: net, rank: pearRankOrder(pr2).rank };
+  _rkBase = { key: key, v: v };
+  return v;
 }
 function pearRankHtml(){
   pearLoadFbs(); pearLoadInfo();
@@ -5851,18 +5852,20 @@ function pearRankHtml(){
        '<input class="rk-search" id="rk-search" placeholder="Find a team…" autocomplete="off" autocorrect="off"></div>';
   var chg = PX.active && prev ? PEAR.rkChg : "", delta = null, chgLbl = "";
   var lastWk = prev ? prev.week : 0;
-  h += '<div class="pr-tools" style="margin-top:6px"><span class="pm-lab" style="font:900 10px Nunito,sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;align-self:center">Rating change</span><div class="pr-seg">' +
+  h += '<div class="pr-tools" style="margin-top:6px"><span class="pm-lab" style="font:900 10px Nunito,sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;align-self:center">Rank change</span><div class="pr-seg">' +
        [["", "Off"], ["pre", "Preseason"], ["3", "3 wks"], ["1", "Last wk"]].map(function(o){ return '<button class="' + ((chg || "") === o[0] ? "on" : "") + '" data-pear-rkchg="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>';
   if(chg){
     var upto = chg === "pre" ? 1 : Math.max(1, lastWk + 1 - (chg === "3" ? 3 : 1));
     // Last wk = the model through the week before the latest games, same as the \u25B2\u25BC arrows.
     if(chg === "1") upto = lastWk;
     chgLbl = chg === "pre" ? "since the preseason" : chg === "3" ? "over the last 3 weeks" : "since last week";
-    var base = pearBaseNet(upto); delta = {};
-    cur.order.forEach(function(id){ var n = PEM.ratings[id].off - PEM.ratings[id].def; delta[id] = base[id] === undefined ? null : n - base[id]; });
-    var ds = cur.order.filter(function(id){ return delta[id] !== null; }).sort(function(a, b){ return delta[b] - delta[a]; });
-    var mvRow = function(id){ var d = delta[id]; return '<button class="rk-mrow" data-pear-team="' + x(id) + '">' + pearImg(id, "rk-logo") + '<b>' + x(pearName(id)) + '</b><i class="rk-mv ' + (d >= 0 ? "up" : "dn") + '">' + (d >= 0 ? "+" : "") + d.toFixed(1) + '</i></button>'; };
-    h += '<div class="pr-range" style="margin-top:8px"><div class="rh"><small>Biggest rating moves</small><b>' + chgLbl + '</b></div><div class="rk-movs">' +
+    var base = pearBaseNet(upto); delta = {}; var pts = {};
+    // Rank change out of the field: places gained (+) or lost (\u2212) in the ordering, base rank minus rank now.
+    cur.order.forEach(function(id, i){ var br = base.rank[id], n = PEM.ratings[id].off - PEM.ratings[id].def;
+      delta[id] = br === undefined ? null : br - (i + 1); pts[id] = base.net[id] === undefined ? 0 : n - base.net[id]; });
+    var ds = cur.order.filter(function(id){ return delta[id] !== null; }).sort(function(a, b){ return (delta[b] - delta[a]) || (pts[b] - pts[a]); });
+    var mvRow = function(id){ var d = delta[id]; return '<button class="rk-mrow" data-pear-team="' + x(id) + '">' + pearImg(id, "rk-logo") + '<b>' + x(pearName(id)) + '</b><i class="rk-mv ' + (d > 0 ? "up" : d < 0 ? "dn" : "eq") + '">' + (d > 0 ? "\u25B2" + d : d < 0 ? "\u25BC" + (-d) : "\u2013") + '</i></button>'; };
+    h += '<div class="pr-range" style="margin-top:8px"><div class="rh"><small>Biggest rank moves (of ' + cur.order.length + ')</small><b>' + chgLbl + '</b></div><div class="rk-movs">' +
          '<div><div class="rk-mh up">\u25B2 Risers</div>' + ds.slice(0, 5).map(mvRow).join('') + '</div>' +
          '<div><div class="rk-mh dn">\u25BC Fallers</div>' + ds.slice(-5).reverse().map(mvRow).join('') + '</div></div></div>';
   }
@@ -5870,7 +5873,7 @@ function pearRankHtml(){
   h += '<div class="rk-list" id="rk-list">';
   cur.order.forEach(function(id, i){
     var rk = i + 1, r = byId[id] || {}, pr = prev && prev.ranks ? prev.ranks[id] : null;
-    var mv = delta ? (delta[id] === null ? '<i class="rk-mv new">NEW</i>' : '<i class="rk-mv ' + (delta[id] > 0.05 ? 'up' : delta[id] < -0.05 ? 'dn' : 'eq') + '">' + (delta[id] > 0.05 ? '+' : '') + (Math.abs(delta[id]) >= 10 ? Math.round(delta[id]) : delta[id].toFixed(1)) + '</i>')
+    var mv = delta ? (delta[id] === null ? '<i class="rk-mv new">NEW</i>' : '<i class="rk-mv ' + (delta[id] > 0 ? 'up' : delta[id] < 0 ? 'dn' : 'eq') + '">' + (delta[id] > 0 ? '\u25B2' + delta[id] : delta[id] < 0 ? '\u25BC' + (-delta[id]) : '\u2013') + '</i>')
              : !prev || !prev.ranks ? "" : (!pr ? '<i class="rk-mv new">NEW</i>'
              : pr > rk ? '<i class="rk-mv up">▲' + (pr - rk) + '</i>' : pr < rk ? '<i class="rk-mv dn">▼' + (rk - pr) + '</i>' : '<i class="rk-mv eq">–</i>');
     var hide = (!PEAR.rankAll && rk > 25) ? ' style="display:none"' : '';
@@ -5882,7 +5885,7 @@ function pearRankHtml(){
   });
   h += '<div class="pr-empty" id="rk-none" style="display:none">No team by that name</div>';
   h += '</div>';
-  h += '<div class="pr-foot">Rating = average projected margin against every other FBS team on a neutral field, from the same projection as the matchup cards \u2014 so a higher-rated team is favored over the field as a whole. Off/Def/SOS show each team’s rank; ' + (prev ? (chg ? 'the rating change column is the move in rating points ' + chgLbl + ', re-fitted with today\u2019s settings.' : 'movement is since the model fitted through week ' + (prev.week - 1) + '.') : '') + '</div>';
+  h += '<div class="pr-foot">Rating = average projected margin against every other FBS team on a neutral field, from the same projection as the matchup cards \u2014 so a higher-rated team is favored over the field as a whole. Off/Def/SOS show each team’s rank; ' + (prev ? (chg ? 'the arrows show places gained or lost in the ranking ' + chgLbl + ', out of ' + cur.order.length + ', re-fitted with today\u2019s settings.' : 'movement is since the model fitted through week ' + (prev.week - 1) + '.') : '') + '</div>';
   return h + '</div>';
 }
 function pearBindRank(){
