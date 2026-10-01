@@ -1094,6 +1094,9 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .rk-n{font-size:16px;font-weight:900;text-align:center}
 .rk-row.t25 .rk-n{color:var(--text)}
 .rk-mvc{text-align:center}
+.rk-movs{display:grid;grid-template-columns:1fr 1fr;gap:10px}.rk-mh{font:900 10px 'Nunito',sans-serif;text-transform:uppercase;letter-spacing:.06em;margin:4px 0}.rk-mh.up{color:#15803d}.rk-mh.dn{color:var(--red2)}
+.rk-mrow{display:flex;align-items:center;gap:6px;width:100%;background:none;border:none;padding:4px 0;font:800 12px 'Nunito',sans-serif;color:var(--text);text-align:left;cursor:pointer;border-top:1px dashed var(--border2)}
+.rk-mrow b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:900}.rk-mrow .rk-logo{width:20px;height:20px}
 .rk-mv{font-style:normal;font-size:9.5px;font-weight:900;border-radius:20px;padding:1px 4px;white-space:nowrap}
 .rk-mv.up{color:#15803d;background:var(--green-bg)}.rk-mv.dn{color:var(--red2);background:var(--red-bg)}
 .rk-mv.eq{color:var(--dim)}.rk-mv.new{color:var(--gold-dark);background:var(--gold-bg)}
@@ -5739,6 +5742,17 @@ function pearPrevRanks(){
   _pearPrev = { key: key, ranks: pearRankOrder(pr2).rank, week: last };
   return _pearPrev;
 }
+// Team rating as it stood at an earlier point, re-fitted with today's settings so the change is apples to apples.
+// upto = the model fitted on games before that week (1 = preseason, before any games).
+var _rkBase = {};
+function pearBaseNet(upto){
+  var key = (PEM._games ? PEM._games.length : 0) + "|" + upto + "|" + JSON.stringify(pxOpts());
+  if(_rkBase.key === key) return _rkBase.v;
+  var pf = pxFit(upto, upto < 2 ? pxWeek1Opts() : pxOpts()), PR = pxPowerRatings(pf), net = {};
+  Object.keys(PR).forEach(function(id){ net[id] = PR[id].off - PR[id].def; });
+  _rkBase = { key: key, v: net };
+  return net;
+}
 function pearRankHtml(){
   pearLoadFbs(); pearLoadInfo();
   var h = '<div class="pear">';
@@ -5756,11 +5770,29 @@ function pearRankHtml(){
        '<button class="' + (!PEAR.rankAll ? "on" : "") + '" data-pear-rankall="0">Top 25</button>' +
        '<button class="' + (PEAR.rankAll ? "on" : "") + '" data-pear-rankall="1">All ' + cur.order.length + '</button></div>' +
        '<input class="rk-search" id="rk-search" placeholder="Find a team…" autocomplete="off" autocorrect="off"></div>';
+  var chg = PX.active && prev ? PEAR.rkChg : "", delta = null, chgLbl = "";
+  var lastWk = prev ? prev.week : 0;
+  h += '<div class="pr-tools" style="margin-top:6px"><span class="pm-lab" style="font:900 10px Nunito,sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;align-self:center">Rating change</span><div class="pr-seg">' +
+       [["", "Off"], ["pre", "Preseason"], ["3", "3 wks"], ["1", "Last wk"]].map(function(o){ return '<button class="' + ((chg || "") === o[0] ? "on" : "") + '" data-pear-rkchg="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>';
+  if(chg){
+    var upto = chg === "pre" ? 1 : Math.max(1, lastWk + 1 - (chg === "3" ? 3 : 1));
+    // Last wk = the model through the week before the latest games, same as the \u25B2\u25BC arrows.
+    if(chg === "1") upto = lastWk;
+    chgLbl = chg === "pre" ? "since the preseason" : chg === "3" ? "over the last 3 weeks" : "since last week";
+    var base = pearBaseNet(upto); delta = {};
+    cur.order.forEach(function(id){ var n = PEM.ratings[id].off - PEM.ratings[id].def; delta[id] = base[id] === undefined ? null : n - base[id]; });
+    var ds = cur.order.filter(function(id){ return delta[id] !== null; }).sort(function(a, b){ return delta[b] - delta[a]; });
+    var mvRow = function(id){ var d = delta[id]; return '<button class="rk-mrow" data-pear-team="' + x(id) + '">' + pearImg(id, "rk-logo") + '<b>' + x(pearName(id)) + '</b><i class="rk-mv ' + (d >= 0 ? "up" : "dn") + '">' + (d >= 0 ? "+" : "") + d.toFixed(1) + '</i></button>'; };
+    h += '<div class="pr-range" style="margin-top:8px"><div class="rh"><small>Biggest rating moves</small><b>' + chgLbl + '</b></div><div class="rk-movs">' +
+         '<div><div class="rk-mh up">\u25B2 Risers</div>' + ds.slice(0, 5).map(mvRow).join('') + '</div>' +
+         '<div><div class="rk-mh dn">\u25BC Fallers</div>' + ds.slice(-5).reverse().map(mvRow).join('') + '</div></div></div>';
+  }
   h += '<div class="rk-head"><span>#</span><span></span><span>Team</span><span>Rating</span><span>Off</span><span>Def</span><span>SOS</span></div>';
   h += '<div class="rk-list" id="rk-list">';
   cur.order.forEach(function(id, i){
     var rk = i + 1, r = byId[id] || {}, pr = prev && prev.ranks ? prev.ranks[id] : null;
-    var mv = !prev || !prev.ranks ? "" : (!pr ? '<i class="rk-mv new">NEW</i>'
+    var mv = delta ? (delta[id] === null ? '<i class="rk-mv new">NEW</i>' : '<i class="rk-mv ' + (delta[id] > 0.05 ? 'up' : delta[id] < -0.05 ? 'dn' : 'eq') + '">' + (delta[id] > 0.05 ? '+' : '') + (Math.abs(delta[id]) >= 10 ? Math.round(delta[id]) : delta[id].toFixed(1)) + '</i>')
+             : !prev || !prev.ranks ? "" : (!pr ? '<i class="rk-mv new">NEW</i>'
              : pr > rk ? '<i class="rk-mv up">▲' + (pr - rk) + '</i>' : pr < rk ? '<i class="rk-mv dn">▼' + (rk - pr) + '</i>' : '<i class="rk-mv eq">–</i>');
     var hide = (!PEAR.rankAll && rk > 25) ? ' style="display:none"' : '';
     h += '<button class="rk-row' + (rk <= 25 ? " t25" : "") + '" data-pear-team="' + x(id) + '" data-rk="' + rk + '" data-q="' + x((pearName(id) + " " + pearAbbr(id)).toLowerCase()) + '"' + hide + '>' +
@@ -5771,7 +5803,7 @@ function pearRankHtml(){
   });
   h += '<div class="pr-empty" id="rk-none" style="display:none">No team by that name</div>';
   h += '</div>';
-  h += '<div class="pr-foot">Rating = average projected margin against every other FBS team on a neutral field, from the same projection as the matchup cards \u2014 so a higher-rated team is favored over the field as a whole. Off/Def/SOS show each team’s rank; ' + (prev ? 'movement is since the model fitted through week ' + (prev.week - 1) + '.' : '') + '</div>';
+  h += '<div class="pr-foot">Rating = average projected margin against every other FBS team on a neutral field, from the same projection as the matchup cards \u2014 so a higher-rated team is favored over the field as a whole. Off/Def/SOS show each team’s rank; ' + (prev ? (chg ? 'the rating change column is the move in rating points ' + chgLbl + ', re-fitted with today\u2019s settings.' : 'movement is since the model fitted through week ' + (prev.week - 1) + '.') : '') + '</div>';
   return h + '</div>';
 }
 function pearBindRank(){
@@ -6778,7 +6810,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-p10],[data-pem-recshare]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-rkchg],[data-pear-p10],[data-pem-recshare]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -6789,6 +6821,7 @@ document.addEventListener("click", function(e){
   if(t.hasAttribute("data-pear-backteam")){ var bt = PEAR.backTeam; PEAR.backTeam = null; if(bt){ var keep = PEAR.backCard; pearOpenTeam(bt); PEAR.backCard = keep; pearRedrawTeam(); } return; }
   if(t.hasAttribute("data-pear-team")){ PEAR.backCard = null; pearOpenTeam(t.getAttribute("data-pear-team")); return; }
   if(t.hasAttribute("data-pear-sgame")){ var sp = t.getAttribute("data-pear-sgame").split("|"); pearOpenSchedGame(sp[0], sp[1]); return; }
+  if(t.hasAttribute("data-pear-rkchg")){ PEAR.rkChg = t.getAttribute("data-pear-rkchg"); renderPoolEdge(); return; }
   if(t.hasAttribute("data-pear-rankall")){ PEAR.rankAll = t.getAttribute("data-pear-rankall") === "1"; renderPoolEdge(); return; }
   if(t.hasAttribute("data-pear-teamvs")){
     var tid = t.getAttribute("data-pear-teamvs"), order = pearRankOrder(PEM.ratings).order;
