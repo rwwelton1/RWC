@@ -1059,6 +1059,9 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .p10-btn{display:block;width:100%;margin:0 0 10px;padding:11px 12px;border:2px solid var(--border);border-radius:12px;background:#111;color:#fff;font:900 15px 'Nunito',sans-serif;cursor:pointer;box-shadow:3px 3px 0 var(--gold)}
 .pe-kind button{flex:1;border:2px solid var(--border);background:#fff;border-radius:10px;padding:7px 8px;font:900 12.5px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
 .pe-kind button.on{background:var(--gold);color:var(--text)}
+.pr-sort{display:flex;gap:6px;align-items:center}.pr-sort small{font:900 10px 'Nunito',sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.pr-sort button{border:2px solid var(--border);background:#fff;border-radius:9px;padding:7px 10px;font:900 11px 'Nunito',sans-serif;color:var(--muted);box-shadow:2px 2px 0 var(--border);cursor:pointer}
+.pr-sort button.on{background:var(--gold);color:var(--text)}.pr-sort button:active{transform:translate(2px,2px);box-shadow:none}
 .gf-row .pick-pill{margin-left:auto}
 .gf-val b.mvup{color:#15803d;font-weight:900;white-space:nowrap}.gf-val b.mvdn{color:var(--red2);font-weight:900;white-space:nowrap}
 .tk-lab{font-style:normal;font-size:9.5px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:2px}
@@ -5498,7 +5501,9 @@ function pearGamesHtml(){
   }
   h += '<div class="pe-sub" role="tablist">' + PEAR_SUBS.map(function(t){
          return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + '</button>'; }).join('') + '</div>';
-  h += '<div class="pr-tools"><button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
+  if(PEAR.filter === "edge" && !PEAR.esort){ try{ PEAR.esort = localStorage.getItem("ps_esort") || "default"; }catch(_){ PEAR.esort = "default"; } }
+  h += '<div class="pr-tools">' + (PEAR.filter === "edge" ? '<div class="pr-sort"><small>Sort</small><button class="' + (PEAR.esort === "spread" ? 'on' : '') + '" data-pear-esort="spread">Spread</button><button class="' + (PEAR.esort === "total" ? 'on' : '') + '" data-pear-esort="total">O/U</button></div>' : '') +
+       '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
        '<div style="position:relative;margin:0 0 10px"><input id="pear-q" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="\ud83d\udd0d Search teams" value="' + x(PEAR.q || '') + '" ' +
        'style="width:100%;box-sizing:border-box;padding:10px 12px;border:2px solid var(--border);border-radius:10px;font:800 16px Nunito,sans-serif;background:#fff;color:inherit"></div>';
   if(PEAR.loading) return h + '<div class="pr-empty">Loading week ' + (PEAR.week||"") + '…</div></div>';
@@ -5546,6 +5551,13 @@ function pearGamesHtml(){
          'Before week 9 a gap alone hasn’t beaten the closing line in past seasons (about 50% at 3+ points); from week 9 the model’s gaps have covered 54.6% at 3+ and 56.6% at 5+, and those games also show a 1\u201310 rating (EDGE 8.6 \u00b7 6/10). QB-out marks you set also rate. The Pool tab grades your pool’s games against your pool’s lines.' +
          (hr && (hr.sw + hr.sl) ? ' The model’s season record when it’s 3+ points off the close: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') + ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' These 25 this week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
+  }
+  if(PEAR.filter === "edge" && (PEAR.esort === "spread" || PEAR.esort === "total")){
+    // Re-order the games shown by the size of the model's gap to the spread, or to the total.
+    var sGap = function(o){ if(o.gap !== undefined) return o.gap; var mp = o.p ? pearModelPick(o.g, o.p.margin) : null; return mp ? Math.abs(o.p.margin - (mp.team === o.g.home.id ? -mp.line : mp.line)) : -1; };
+    var oGap = function(o){ var T = o.ou || (o.p ? pearModelTotal(o.g, o.p.total) : null); return T ? T.gap : -1; };
+    var gf = PEAR.esort === "spread" ? sGap : oGap;
+    list.sort(function(a, b){ return gf(b) - gf(a); });
   }
   if(PEAR.filter === "pool"){
     var PI = pearPoolIds().k;
@@ -6657,7 +6669,7 @@ function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "pro
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
-  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-p10],[data-pem-recshare]");
+  var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-esort],[data-pear-p10],[data-pem-recshare]");
   if(!t) return;
   if(t.id === "pear-fbsretry"){
     PEAR.fbs = null; PEM._fbsChecked = null; t.textContent = "Checking\u2026";
@@ -6683,6 +6695,7 @@ document.addEventListener("click", function(e){
   if(t.hasAttribute("data-pear-week")){ var w = parseInt(t.getAttribute("data-pear-week"), 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w); return; }
   if(t.hasAttribute("data-pear-p10")){ px10Share(); return; }
   if(t.hasAttribute("data-pem-recshare")){ pemRecShare(); return; }
+  if(t.hasAttribute("data-pear-esort")){ var es = t.getAttribute("data-pear-esort"); PEAR.esort = PEAR.esort === es ? "default" : es; try{ localStorage.setItem("ps_esort", PEAR.esort); }catch(_){} pearRepaint(); return; }
   if(t.hasAttribute("data-pear-ekind")){ PEAR.edgeKind = t.getAttribute("data-pear-ekind"); try{ localStorage.setItem("ps_ekind", PEAR.edgeKind); }catch(_){} pearRepaint(); return; }
   if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
     var sb0 = document.querySelector(".pe-sub"), y0 = sb0 ? sb0.getBoundingClientRect().top + window.scrollY : 0, past = sb0 && window.scrollY > y0 - 80;
