@@ -3838,6 +3838,185 @@ function pxUTBind(){
   if((b = document.getElementById("px-ut-def"))) b.onclick = function(){ PX.ut.o = Object.assign({}, PX_DEFAULTS); PX.ut.res = null; pxUTStatus(true); pxUTSoon(); };
 }
 
+// ── Backtest on past seasons ────────────────────────────────────────────────
+// Grades several settings side by side on the 2023–25 seasons saved under Data → Past seasons,
+// walk-forward (each week predicted only from the weeks before it), settings held fixed all season.
+// It runs in a background worker holding its own copy of this page's model code, so the page
+// stays responsive and the live season, its settings and its saved record are never touched.
+var PXB = { busy: false, msg: "", pct: 0, err: "", res: null, worker: null, sel: null, t0: 0 };
+// This script's own text, kept from load time for the worker (null inside the worker itself).
+var PXB_SRC = (typeof document !== "undefined" && document.currentScript && document.currentScript.textContent) || null;
+function pxBtConfigs(){
+  var S = pxState(), now = Object.assign({}, S.opts), D = Object.assign({}, PX_DEFAULTS), ut = PX.ut && PX.ut.o, out = [];
+  out.push({ k: "now", name: "Settings now", o: now, fixed: true });
+  out.push({ k: "def", name: "Defaults", o: D });
+  out.push({ k: "noadj", name: "P4/G6 adjustment off", o: Object.assign({}, now, { tierAdj: 0 }) });
+  out.push({ k: "c100", name: "Conference anchoring 100, P4/G6 off", o: Object.assign({}, now, { conf: 100, tierAdj: 0 }) });
+  out.push({ k: "c300", name: "Conference anchoring 300, P4/G6 off", o: Object.assign({}, now, { conf: 300, tierAdj: 0 }) });
+  if(ut && pxUTChanged()) out.push({ k: "ut", name: "Your tune (sliders above)", o: Object.assign({}, now, ut) });
+  return out;
+}
+function pxBtSel(){
+  if(!PXB.sel) PXB.sel = { now: 1, noadj: 1, c100: 1, ut: 1 };
+  return PXB.sel;
+}
+// The worker: stand-ins for the browser bits the page touches at load, then this page's own
+// script, then a small runner. Nothing in the worker can reach Firebase or the live page.
+function pxBtWorker(){
+  var src = PXB_SRC;
+  if(!src) Array.prototype.forEach.call(document.scripts, function(s){ if(!s.src && /function pxFit\(/.test(s.textContent || "")) src = s.textContent; });
+  if(!src) throw new Error("couldn’t find the model code on this page");
+  var stub = [
+    "var __el = function(){ return new Proxy({ style: { setProperty: function(){} }, classList: { add: function(){}, remove: function(){}, toggle: function(){} } }, { get: function(t, k){ return k in t ? t[k] : (typeof k === 'string' ? function(){} : undefined); }, set: function(t, k, v){ t[k] = v; return true; } }); };",
+    "var window = self, document = { getElementById: __el, querySelector: function(){ return null; }, querySelectorAll: function(){ return []; }, createElement: __el, addEventListener: function(){}, body: __el(), documentElement: __el(), visibilityState: 'visible', scripts: [] };",
+    "var localStorage = { getItem: function(){ return null; }, setItem: function(){}, removeItem: function(){} };",
+    "var setTimeout = function(){ return 0; }, setInterval = function(){ return 0; }, clearTimeout = function(){}, clearInterval = function(){};",
+    "var fetch = function(){ return Promise.reject(new Error('offline')); }, firebase = undefined, innerHeight = 800, innerWidth = 400, scrollY = 0, scrollTo = function(){};"
+  ].join("\n");
+  var runner = "\n;(" + function(){
+    self.onmessage = function(e){
+      var M = e.data, FIRST = PX_FIRST_GRADED, total = 0, done = 0;
+      try{
+        M.seasons.forEach(function(s){ Object.keys(s.wk || {}).forEach(function(k){ if(s.wk[k] && (s.wk[k].w || +k.replace(/\D/g, "")) >= FIRST) total++; }); });
+        M.seasons.forEach(function(sd){
+          var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y };
+          var maxW = 0;
+          Object.keys(sd.wk || {}).forEach(function(k){ var W = sd.wk[k]; if(!W) return; W.y = W.y || y; W.w = W.w || +k.replace(/\D/g, ""); S.wk[y + "-" + W.w] = W; if(W.w > maxW) maxW = W.w; });
+          PE.meta = { espnYear: y, espnWeek: maxW }; PE.priors = M.priors || {}; PE.px = S;
+          PEM._ppCache = null; PX.fits = {}; PX.sims = {}; PX._sch = null; PX_LG = {};
+          var weeks = {}, preds = [];
+          Object.keys(S.wk).forEach(function(k){ var W = S.wk[k]; (W.games || []).forEach(function(g){ if(g && g.c && W.w >= FIRST && g.hs !== null && g.hs !== undefined && g.as !== null && g.as !== undefined) (weeks[W.w] = weeks[W.w] || []).push({ W: W, g: g }); }); });
+          Object.keys(S.wk).map(function(k){ return S.wk[k].w; }).filter(function(w){ return w >= FIRST; }).sort(function(a, b){ return a - b; }).forEach(function(w){
+            self.postMessage({ t: "prog", y: y, w: w, done: done, total: total });
+            M.configs.forEach(function(c){
+              var o = Object.assign({}, PX_DEFAULTS, c.o), fit = pxFit(w, o);
+              (weeks[w] || []).forEach(function(x){ var g = x.g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), L = (x.W.lines || {})[g.id] || null;
+                preds.push({ c: c.k, y: y, w: w, id: g.id, pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as,
+                  vh: L && isFinite(L.c) ? -L.c : null, vt: L && L.t !== null && L.t !== undefined && isFinite(L.t) ? +L.t : null, xT: (pxIsP4(g.h) ? 1 : 0) - (pxIsP4(g.a) ? 1 : 0) }); });
+            });
+            done++;
+          });
+          self.postMessage({ t: "season", y: y, preds: preds });
+        });
+        self.postMessage({ t: "done" });
+      }catch(err){ self.postMessage({ t: "err", msg: (err && err.message) || String(err) }); }
+    };
+  } + ")();";
+  var url = URL.createObjectURL(new Blob([stub + "\n" + src + runner], { type: "text/javascript" }));
+  var w = new Worker(url); setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+  return w;
+}
+function pxBtRun(){
+  if(PXB.busy) return;
+  if(!DB || !ME()){ PXB.err = "Needs the Firebase connection (sign in on the hub)."; pxBtStatus(); return; }
+  var cfg = pxBtConfigs(), sel = pxBtSel(), run = cfg.filter(function(c){ return c.fixed || sel[c.k]; });
+  if(run.length < 2){ PXB.err = "Tick at least one setting to compare against Settings now."; pxBtStatus(); return; }
+  PXB.busy = true; PXB.err = ""; PXB.pct = 0; PXB.msg = "Loading saved seasons…"; PXB.t0 = Date.now(); pxBtStatus();
+  var acc = { configs: run.map(function(c){ return { k: c.k, name: c.name }; }), preds: [], seasons: [] };
+  (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(idx){
+    var ys = PX_HIST_YEARS.filter(function(y){ var e = idx["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
+    if(!ys.length) throw new Error("No past seasons saved yet. Download them under Data → Past seasons for backtesting first.");
+    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, wk: v.wk } : null; }); }));
+  }).then(function(seasons){
+    seasons = seasons.filter(Boolean);
+    PXB.msg = "Starting…"; pxBtStatus();
+    var w = PXB.worker = pxBtWorker();
+    w.onmessage = function(e){
+      var d = e.data;
+      if(d.t === "prog"){ PXB.pct = d.total ? d.done / d.total : 0; PXB.msg = d.y + " week " + d.w; pxBtStatus(true); }
+      else if(d.t === "season"){ acc.preds = acc.preds.concat(d.preds); acc.seasons.push(d.y); PXB.res = { configs: acc.configs, preds: acc.preds, seasons: acc.seasons.slice(), partial: true, at: Date.now() }; pxBtStatus(); }
+      else if(d.t === "done"){ pxBtEnd(acc, null); }
+      else if(d.t === "err"){ pxBtEnd(acc, "The backtest stopped: " + d.msg); }
+    };
+    w.onerror = function(ev){ pxBtEnd(acc, "The backtest stopped: " + ((ev && ev.message) || "worker error")); };
+    w.postMessage({ seasons: seasons, priors: PE.priors || {}, configs: run.map(function(c){ return { k: c.k, o: c.o }; }) });
+  }).catch(function(e){ PXB.busy = false; PXB.msg = ""; PXB.err = (e && e.message) || String(e); pxBtStatus(); });
+}
+function pxBtEnd(acc, err){
+  if(PXB.worker){ try{ PXB.worker.terminate(); }catch(e){} PXB.worker = null; }
+  PXB.busy = false; PXB.msg = ""; PXB.err = err || "";
+  if(acc && acc.preds.length) PXB.res = { configs: acc.configs, preds: acc.preds, seasons: acc.seasons, partial: !!err, at: Date.now(), secs: Math.round((Date.now() - PXB.t0) / 1000) };
+  pxBtStatus();
+}
+function pxBtStop(){ if(!PXB.busy) return; var R = PXB.res; pxBtEnd(R ? { configs: R.configs, preds: R.preds, seasons: R.seasons } : null, "Stopped — showing the seasons that finished."); }
+function pxBtGrade(P){
+  var s = { n: 0, e: 0, ev: 0, w: 0, l: 0, sw: 0, sl: 0, tn: 0, te: 0, tv: 0, ow: 0, ol: 0, xn: 0, xb: 0, xbv: 0 };
+  P.forEach(function(q){
+    if(q.vh !== null){
+      s.n++; s.e += Math.abs(q.pred - q.act); s.ev += Math.abs(q.vh - q.act);
+      if(Math.abs(q.pred - q.vh) >= 0.05 && q.act !== q.vh){ var won = (q.act > q.vh) === (q.pred > q.vh); if(won) s.w++; else s.l++; if(Math.abs(q.pred - q.vh) >= 3){ if(won) s.sw++; else s.sl++; } }
+      if(q.xT){ s.xn++; s.xb += (q.act - q.pred) * q.xT; s.xbv += (q.act - q.vh) * q.xT; }
+    }
+    if(q.vt !== null){ s.tn++; s.te += Math.abs(q.pt - q.at); s.tv += Math.abs(q.vt - q.at); if(Math.abs(q.pt - q.vt) >= 0.05 && q.at !== q.vt){ if((q.at > q.vt) === (q.pt > q.vt)) s.ow++; else s.ol++; } }
+  });
+  return s;
+}
+function pxBtPaired(A, B, tot){
+  var bi = {}; B.forEach(function(q){ bi[q.y + "|" + q.id] = q; });
+  var d = [];
+  A.forEach(function(a){ var b = bi[a.y + "|" + a.id]; if(!b || a.vh === null) return;
+    if(tot){ if(a.vt === null) return; d.push(Math.abs(a.pt - a.at) - Math.abs(b.pt - b.at)); } else d.push(Math.abs(a.pred - a.act) - Math.abs(b.pred - b.act)); });
+  if(d.length < 10) return null;
+  var mu = 0; d.forEach(function(v){ mu += v; }); mu /= d.length; var ss = 0; d.forEach(function(v){ ss += (v - mu) * (v - mu); });
+  var se = Math.sqrt(ss / (d.length - 1) / d.length); return { d: mu, se: se, t: se ? mu / se : 0 };
+}
+function pxBtResHtml(){
+  var R = PXB.res; if(!R || !R.preds.length) return "";
+  var by = {}; R.preds.forEach(function(q){ (by[q.c] = by[q.c] || []).push(q); });
+  var base = by[R.configs[0].k] || [], G = {}; R.configs.forEach(function(c){ G[c.k] = pxBtGrade(by[c.k] || []); });
+  var f2 = function(a, n){ return n ? (a / n).toFixed(2) : "—"; }, sg = function(v){ return (v >= 0 ? "+" : "") + v.toFixed(2); };
+  var rec = function(w, l){ var n = w + l; return w + "-" + l + (n ? " <small>" + (100 * w / n).toFixed(1) + "%</small>" : ""); };
+  var cls = function(w, l){ var n = w + l; return !n ? "" : (w / n >= 0.524 ? "up" : "dn"); };
+  var nm = function(c, i){ return x(c.name) + (i ? "" : " <small>(baseline)</small>"); };
+  var vs = function(p){ if(!p) return "—"; var real = Math.abs(p.t) >= 2; return '<b class="' + (real ? (p.d < 0 ? "up" : "dn") : "") + '">' + sg(p.d) + '</b> <small>±' + p.se.toFixed(2) + (real ? "" : " noise") + '</small>'; };
+  var b0 = G[R.configs[0].k];
+  var h = '<div class="pem-autosub" style="margin-top:10px"><b>' + b0.n + '</b> graded games with a closing line · seasons ' + R.seasons.join(", ") + (R.partial ? ' <small>(partial)</small>' : '') + (R.secs ? ' · took ' + (R.secs < 90 ? R.secs + ' s' : Math.round(R.secs / 60) + ' min') : '') + '</div>';
+  h += '<div class="pem-bk" style="margin-top:6px"><div class="pem-bkhd"><span>Spreads</span><span>Miss</span><span>vs baseline</span></div>';
+  R.configs.forEach(function(c, i){ var s = G[c.k]; h += '<div class="pem-bkrow"><span>' + nm(c, i) + '</span><b>' + f2(s.e, s.n) + '</b><span>' + (i ? vs(pxBtPaired(by[c.k], base, false)) : "") + '</span></div>'; });
+  h += '<div class="pem-bkrow"><span>Vegas close</span><span>' + f2(b0.ev, b0.n) + '</span><span></span></div></div>';
+  h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Against the spread</span><span>All picks</span><span>Edge 3+</span></div>';
+  R.configs.forEach(function(c, i){ var s = G[c.k]; h += '<div class="pem-bkrow"><span>' + nm(c, i) + '</span><b class="' + cls(s.w, s.l) + '">' + rec(s.w, s.l) + '</b><b class="' + cls(s.sw, s.sl) + '">' + rec(s.sw, s.sl) + '</b></div>'; });
+  h += '</div><div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Totals · P4 vs G6</span><span>Total miss</span><span>P4 beat it by</span></div>';
+  R.configs.forEach(function(c, i){ var s = G[c.k]; h += '<div class="pem-bkrow"><span>' + nm(c, i) + '</span><span>' + f2(s.te, s.tn) + '</span><span>' + (s.xn ? sg(s.xb / s.xn) + ' <small>(' + s.xn + ')</small>' : '—') + '</span></div>'; });
+  h += '<div class="pem-bkrow"><span>Vegas close</span><span>' + f2(b0.tv, b0.tn) + '</span><span>' + (b0.xn ? sg(b0.xbv / b0.xn) : '—') + '</span></div></div>';
+  var yl = R.seasons.map(function(y){ return y + ': ' + R.configs.map(function(c){ var s = pxBtGrade((by[c.k] || []).filter(function(q){ return q.y === y; })); return s.n ? (s.e / s.n).toFixed(2) : '—'; }).join(' / '); });
+  h += '<div class="pem-autonote" style="margin-top:4px">Spread miss by season, in the order above — ' + yl.join(' · ') + '</div>';
+  var load = R.configs.slice(1).filter(function(c){ return c.k !== "ut"; });
+  if(load.length) h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' + load.map(function(c){ return '<button class="btn btn-sm btn-ghost" data-bt-load="' + c.k + '">Load “' + x(c.name) + '” into Your tune</button>'; }).join('') + '</div>';
+  return h;
+}
+function pxBtCardHtml(){
+  if(!PX.active || !pxKey()) return "";
+  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(function(){ pxBtStatus(); }, function(){ pxBtStatus(); }); }
+  var I = PXH.idx || {}, ys = PX_HIST_YEARS.filter(function(y){ var e = I["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
+  var h = '<div class="pem-ats" id="px-bt"><div class="pem-autotop"><b>🧪 Backtest on past seasons</b>' +
+          (PXB.busy ? '<button class="btn btn-sm btn-ghost" id="px-btstop">Stop</button>' : '<button class="btn btn-sm btn-gold" id="px-btgo"' + (ys.length ? '' : ' disabled') + '>' + (PXB.res ? 'Run again' : 'Run') + '</button>') + '</div>';
+  h += '<div class="pem-autosub">' + (ys.length ? 'Grades each setting on <b>' + ys.join(', ') + '</b>, every week predicted only from the weeks before it.' : (PXH.idx ? 'Download past seasons under <b>Data → Past seasons for backtesting</b> first.' : 'Checking saved seasons…')) + '</div>';
+  var sel = pxBtSel();
+  h += '<div style="margin-top:6px">' + pxBtConfigs().map(function(c){
+    return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '> ' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + '</label>'; }).join('') + '</div>';
+  if(PXB.busy) h += '<div class="pem-autosub" id="px-btprog" style="margin-top:8px">⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div></div>';
+  if(PXB.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXB.err) + '</div>';
+  h += pxBtResHtml();
+  h += '<div class="pem-autonote">Runs in the background on this device, with its own copy of the model, so your live season, settings and record are never touched. Most of the time goes to calibrating the play simulator for each week (shared by every setting), so adding settings costs little; three seasons take a minute or two on a computer and a few minutes on a phone. Keep this tab in front — a phone pauses background tabs. Settings are held fixed for the whole season (no in-season re-tuning). “vs baseline” is the game-by-game difference in miss: negative is better; under 2 standard errors it’s marked noise. “P4 beat it by”: how far the Power-4 side beat that number in P4-vs-G6 games, so near 0 is right.</div>';
+  return h + '</div>';
+}
+function pxBtStatus(progOnly){
+  if(progOnly){ var p = document.getElementById("px-btprog"); if(p){ p.innerHTML = '⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div>'; return; } }
+  var el = document.getElementById("px-bt"); if(el){ el.outerHTML = pxBtCardHtml(); pxBtBind(); }
+}
+function pxBtBind(){
+  var b = document.getElementById("px-btgo"); if(b) b.onclick = function(){ pxBtRun(); };
+  var s = document.getElementById("px-btstop"); if(s) s.onclick = function(){ pxBtStop(); };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-bt-sel]"), function(cb){ cb.onchange = function(){ pxBtSel()[this.getAttribute("data-bt-sel")] = this.checked ? 1 : 0; }; });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-bt-load]"), function(btn){ btn.onclick = function(){
+    var k = this.getAttribute("data-bt-load"), c = null; pxBtConfigs().forEach(function(z){ if(z.k === k) c = z; }); if(!c) return;
+    PX.ut.o = {}; for(var key in PX_DEFAULTS) PX.ut.o[key] = typeof c.o[key] === "number" ? c.o[key] : PX_DEFAULTS[key];
+    PX.ut.res = null; pxUTStatus(true); pxUTSoon();
+    var u = document.getElementById("px-ut"); if(u && u.scrollIntoView) u.scrollIntoView({ behavior: "smooth" });
+    toast("Loaded into Your tune · testing on this season", "ok"); }; });
+}
+
 // ── Wiring into the rest of the page ────────────────────────────────────────
 // Once PX has data it becomes the model: the Games list, cards, rankings, team
 // sheets, playoff odds and the Vegas record all read from it.
@@ -4057,6 +4236,7 @@ function pxPanelHtml(){
     h += pemAtsCardHtml();
   } else if(cur === "tune"){
     h += pxUTHtml();
+    h += pxBtCardHtml();
     h += pxKnobsHtml();
     h += pxFadeCardHtml();
     h += pxSimCardHtml();
@@ -4102,6 +4282,7 @@ function pxBind(){
   var sg = document.getElementById("px-snapgo");
   if(sg) sg.onclick = function(){ pxSnapLines(); };
   pxUTBind();
+  pxBtBind();
   var tu = document.getElementById("px-tune");
   if(tu) tu.onclick = function(){ pxState().tuneSig = ""; pxAutoTune(); pxStatus(); renderPoolEdge(); };
 }
