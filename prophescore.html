@@ -2528,14 +2528,18 @@ function pxSync(force){
 // at a time, with a small index at histIdx. Resumable: a stopped download continues from
 // the last saved week. Never loaded when the page opens; it is there for the export.
 var PX_HIST_YEARS = [2023, 2024, 2025];
-var PXH = { busy: false, msg: "", err: "", step: "", idx: null, loading: false };
+var PXH = { busy: false, msg: "", err: "", step: "", idx: null, loading: false, idxErr: "" };
 function pxHistRef(sub){ return DB.ref("prophescore/" + ME() + "/" + sub); }
 function pxHistPut(sub, val){ return new Promise(function(res, rej){ pxHistRef(sub).set(peClean(val), function(err){ if(err) rej(err); else res(); }); }); }
 function pxHistGet(sub){ return pxHistRef(sub).once("value").then(function(sn){ return sn.val(); }); }
 function pxHistLoadIdx(){
   if(!DB || !ME()) return Promise.resolve({});
-  PXH.loading = true;
-  return pxHistGet("histIdx").then(function(v){ PXH.idx = v || {}; PXH.loading = false; return PXH.idx; }, function(e){ PXH.loading = false; PXH.idx = {}; throw e; });
+  PXH.loading = true; PXH.idxErr = "";
+  var done = false;
+  var rd = pxHistGet("histIdx").then(function(v){ PXH.idx = v || {}; PXH.idxErr = ""; PXH.loading = false; done = true; return PXH.idx; },
+                                     function(e){ PXH.loading = false; PXH.idxErr = (e && e.message) || "read failed"; done = true; throw e; });
+  var to = new Promise(function(res, rej){ setTimeout(function(){ if(!done){ PXH.loading = false; PXH.idxErr = "timed out"; rej(new Error("timed out")); } }, 15000); });
+  return Promise.race([rd, to]);
 }
 // Calls still needed: 3 per missing week, ~2 for teams + calendar, ~12 for a prior.
 function pxHistCallsLeft(){
@@ -2615,7 +2619,7 @@ function pxHistSeason(y, idx, call){
   }).then(function(){ I.done = 1; return saveIdx(); });
 }
 function pxHistCardHtml(){
-  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(pxHistStatus, pxHistStatus); }
+  if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(pxHistStatus, pxHistStatus); }
   var S = pxState(), I = PXH.idx || {};
   var h = '<div class="pem-ats" id="px-hist"><div class="pem-autotop"><b>📚 Past seasons for backtesting</b>' +
           (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? (pxHistCallsLeft() ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
@@ -2757,7 +2761,7 @@ function pxQbWatch(id){
 }
 function pxQbCardHtml(){
   if(!PXQ.idx && !PXQ.loading && DB && ME()){ pxQbLoadIdx().then(pxQbStatus, pxQbStatus); }
-  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(pxQbStatus, pxQbStatus); }
+  if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(pxQbStatus, pxQbStatus); }
   var I = PXQ.idx || {}, S = pxState(), todo = PXQ.idx ? pxQbTodo() : [], any = pxQbYears().some(function(y){ return I["y" + y]; });
   var h = '<div class="pem-ats" id="px-qb"><div class="pem-autotop"><b>🏈 Quarterbacks</b>' +
           (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-qbgo"' + (PXQ.busy ? ' disabled' : '') + '>' + (PXQ.busy ? 'Saving…' : (any ? (todo.length ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
@@ -4165,11 +4169,11 @@ function pxBtResHtml(){
 }
 function pxBtCardHtml(){
   if(!PX.active || !pxKey()) return "";
-  if(!PXH.idx && !PXH.loading && DB && ME()){ pxHistLoadIdx().then(function(){ pxBtStatus(); }, function(){ pxBtStatus(); }); }
+  if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(function(){ pxBtStatus(); }, function(){ pxBtStatus(); }); }
   var I = PXH.idx || {}, ys = PX_HIST_YEARS.filter(function(y){ var e = I["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
   var h = '<div class="pem-ats" id="px-bt"><div class="pem-autotop"><b>🧪 Backtest on past seasons</b>' +
           (PXB.busy ? '<button class="btn btn-sm btn-ghost" id="px-btstop">Stop</button>' : '<button class="btn btn-sm btn-gold" id="px-btgo"' + (ys.length ? '' : ' disabled') + '>' + (PXB.res ? 'Run again' : 'Run') + '</button>') + '</div>';
-  h += '<div class="pem-autosub">' + (ys.length ? 'Grades each setting on <b>' + ys.join(', ') + '</b>, every week predicted only from the weeks before it.' : (PXH.idx ? 'Download past seasons under <b>Data → Past seasons for backtesting</b> first.' : 'Checking saved seasons…')) + '</div>';
+  h += '<div class="pem-autosub">' + (ys.length ? 'Grades each setting on <b>' + ys.join(', ') + '</b>, every week predicted only from the weeks before it.' : (PXH.idx ? 'Download past seasons under <b>Data → Past seasons for backtesting</b> first.' : PXH.idxErr ? 'Couldn\u2019t read your saved seasons (' + x(PXH.idxErr) + '). <button class="btn btn-sm btn-ghost" id="px-btretry">Try again</button>' : (DB && ME() ? 'Checking saved seasons\u2026' : 'Sign in to check your saved seasons.'))) + '</div>';
   var sel = pxBtSel();
   h += '<div style="margin-top:6px">' + pxBtConfigs().map(function(c){
     return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '><span>' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + (c.sub ? '<br><small style="font-weight:700;color:var(--muted)">' + x(c.sub) + '</small>' : '') + '</span></label>'; }).join('') + '</div>';
@@ -4189,6 +4193,7 @@ function pxBtStatus(progOnly){
 function pxBtBind(){
   var b = document.getElementById("px-btgo"); if(b) b.onclick = function(){ pxBtRun(); };
   var s = document.getElementById("px-btstop"); if(s) s.onclick = function(){ pxBtStop(); };
+  var rt = document.getElementById("px-btretry"); if(rt) rt.onclick = function(){ PXH.idxErr = ""; pxBtStatus(); };
   var tn = document.getElementById("px-bttune"); if(tn) tn.onclick = function(){ pxBtTune(); };
   Array.prototype.forEach.call(document.querySelectorAll("[data-bttune-load]"), function(btn){ btn.onclick = function(){
     pxTuneLoad(this.getAttribute("data-bttune-load")); var u = document.getElementById("px-ut"); if(u && u.scrollIntoView) u.scrollIntoView({ behavior: "smooth" }); }; });
