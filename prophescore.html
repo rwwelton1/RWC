@@ -1944,13 +1944,19 @@ function pemRanks(){
 //    (already in the prior's regression, it was being applied two more times)
 //  - turnovers follow havoc by a fitted slope, not in full proportion (sacks were counted twice)
 //  - totals get a walk-forward bias correction; win odds get per-game noise
-//  - priors fade by week 6 by default (tuner tries 4–8)
+//  - priors fade by week 10 by default (tuner tries 4–10); note the fade curve itself (pxPriorFade,
+//    k = 0.5 a week) already has the prior near a third of its week-1 weight by week 3
 //  - week 1 is data only: its games feed every later fit, but its prior-only
 //    projections are never graded, tuned on, or used to calibrate stretch, totals or odds
-//  - SP+ sheet moves the spread only (totals stay with the drive model); default weight 75%
+//  - SP+ sheet moves the spread only (totals stay with the drive model); default weight 100% in
+//    weeks 1–3, easing to 50% from week 6 (sp / spLate)
 //  - defaults tuned on 2023–25 history; totals use their own fit (alphaT/levT); SP+ weight by week
 //  - roster priors that failed to fit (CFBD history calls rate-limited) are detected and retried
 //  - tried and dropped: a home-field term inside the opponent adjustment (see pxRidge)
+//  - optional conference anchoring (o.conf, off by default): each team shrinks toward its
+//    conference's fitted level instead of the league average, so the tier gap survives shrinkage
+//  - the tuner moves a knob only on a 2.8-standard-error gain (PX_TUNE_T): it picks the best of
+//    several grid values first, and at 2.0 that let roughly 1 in 10 knobs move on noise alone
 
 // First week whose projections count for grading, tuning and calibration. Week 1 has no
 // in-season data behind it (the roster prior alone, and a guessed league scoring level), so
@@ -1964,7 +1970,7 @@ var PX = { active: false, busy: false, msg: "", err: "", fits: {}, sims: {}, liv
 // sp / spLate: SP+ weight in weeks 1–3 and from week 6 (linear in between), from 2024's weekly SP+.
 // tierAdj: points added to the Power-4 side when a P4 team plays a Group-of-5 team (0 = the
 // model as it was). Set from 2023–25 only, then checked on 2024–26 held out: see pxTierPts.
-var PX_DEFAULTS = { alpha: 25, half: 10, prior: 1, hfa: 3, lev: 1, tier: 1, stretch: 0, fade: 10, sp: 1, spLate: 0.5, sit: 1, alphaT: 75, levT: 0, tierAdj: 3.5, qbOut1: 3, qbOut2: 1.5, vol: 0 };
+var PX_DEFAULTS = { alpha: 25, half: 10, prior: 1, hfa: 3, lev: 1, tier: 1, stretch: 0, fade: 10, sp: 1, spLate: 0.5, sit: 1, alphaT: 75, levT: 0, tierAdj: 3.5, qbOut1: 3, qbOut2: 1.5, vol: 0, conf: 0 };
 var PX_KNOBS = [
   { key: "alpha", label: "Opponent-adjustment shrink", min: 10, max: 400, step: 5, fmt: function(v){ return Math.round(v) + " plays"; }, lo: "trust small samples", hi: "heavy shrink",
     help: "Ridge penalty: how many plays of league-average performance each team starts with before its own plays count. Found by cross-validation." },
@@ -1992,6 +1998,8 @@ var PX_KNOBS = [
     help: "Blend between counting every play equally and weighting plays by how much the game was still in doubt. 100% lets blowout plays fade toward zero on their own." },
   { key: "tier", label: "Tier anchoring", min: 0, max: 1, step: 0.25, fmt: function(v){ return Math.round(v * 100) + "%"; }, lo: "shrink to league average", hi: "shrink to roster tier",
     help: "Small samples get shrunk. 0% shrinks every team toward the league average (which flattens elite teams); 100% shrinks each team toward what its roster prior says it should be, so an elite team stays elite until its plays say otherwise. Capped at 100%: the centre is already the best guess the prior supports (a regression of each facet on it), so going past it only exaggerates the gap between tiers." },
+  { key: "conf", label: "Conference anchoring", min: 0, max: 600, step: 25, fmt: function(v){ return v ? Math.round(v) + " plays" : "off"; }, lo: "off (shrink to league average)", hi: "conference levels shrunk hard",
+    help: "Off = the model as it was. On: each team is shrunk toward its own conference’s fitted level instead of the league average, and the conference level is itself shrunk toward average by this many plays. Conference levels are learned from the cross-conference games, so the P4–G6 gap no longer has to survive every team’s shrinkage. On simulated seasons it kept about 93% of the true tier gap (vs 53–81% for shrinking to average, depending on the shrink above) and cut team-rating error. If you turn this on, test it with the P4 vs G6 adjustment at 0 too: the two fix the same miss. Set by hand; the tuner leaves it alone." },
   { key: "tierAdj", label: "P4 vs G6 adjustment", min: 0, max: 8, step: 0.5, fmt: function(v){ return v ? "+" + v.toFixed(1) + " pts" : "off (old model)"; }, lo: "off", hi: "8 pts",
     help: "Points added to the Power-4 team (SEC, Big Ten, Big 12, ACC, Notre Dame; the Pac-12 through 2023) when it plays a Group-of-5 team. Same-tier games are untouched. Why: P4 and G6 teams rarely meet, so the ratings learn the gap between the tiers from only about one game in ten, and the shrinkage that steadies small samples squeezes that gap. Across 2023\u20132026 the P4 side beat the model\u2019s number by 3\u20135 points in those games every season, while same-tier spreads were the right size (so the global stretch can\u2019t fix it). 3.5 is the size 2023\u201325 gave, shrunk; on 2024\u201326 held out it cut the miss in those games by about a third of a point. 0 = the model exactly as it was. Set by hand; the tuner leaves it alone." },
   { key: "qbOut1", label: "QB out: backup\u2019s first start", min: 0, max: 6, step: 0.5, fmt: function(v){ return v ? "\u2212" + v.toFixed(1) + " pts" : "off"; }, lo: "off", hi: "6 pts",
@@ -2858,22 +2866,56 @@ function pxSpW(o, w){ var a = typeof o.sp === "number" ? o.sp : 0, b = typeof o.
 function pxPriorW(o, w){ return o.prior * pxPriorFade(o, w); }
 // Ridge regression by alternating updates: y = mu + O[off] + D[def], each team
 // starting from `alpha` units of its centre C (league average when no centre).
-function pxRidge(rows, get, alpha, C){
-  var sN = 0, sS = 0; rows.forEach(function(r){ var v = get(r); if(v){ sN += v[0] * r.dec; sS += v[1] * r.dec; } });
-  var mu = sN ? sS / sN : 0, O = {}, D = {};
-  rows.forEach(function(r){ O[r.o] = 0; D[r.d] = 0; });
+// H (optional): conference anchoring, { a: plays of shrink on each conference level, of: id -> group }.
+// Each team is then shrunk toward its conference's fitted level (plus its centre C) instead of
+// toward the league average, and the conference level itself is shrunk toward average by H.a.
+function pxRidge(rows, get, alpha, C, H){
+  // Each row's values are read once (get() used to run twice per row per pass). Same arithmetic
+  // in the same order, so the result is identical to the old loop, just quicker for the tuner.
+  var V = [], sN = 0, sS = 0, O = {}, D = {};
+  rows.forEach(function(r){ var v = get(r); O[r.o] = 0; D[r.d] = 0; if(!v) return; sN += v[0] * r.dec; sS += v[1] * r.dec; if(v[0]) V.push([r.o, r.d, v[0] * r.dec, v[1] * r.dec]); });
+  var mu = sN ? sS / sN : 0, nV = V.length;
+  var cO = function(id){ return (C && C.O[id]) || 0; }, cD = function(id){ return (C && C.D[id]) || 0; };
   // No home term here on purpose. Tried and measured on real 2026 games: early in the season
   // the stronger team usually hosts (home sides averaged a 10-point prior edge in week 1), so
   // an unshrunk home term soaked up team strength (3–4 points of success rate, several times
   // a realistic home edge) and compressed every spread. Home field is added at prediction.
-  for(var it = 0; it < 20; it++){
-    var so = {}, no = {}, sd = {}, nd = {};
-    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; so[r.o] = (so[r.o] || 0) + (v[1] * r.dec - n * (mu + D[r.d])); no[r.o] = (no[r.o] || 0) + n; });
-    for(var a in O) O[a] = ((so[a] || 0) + alpha * ((C && C.O[a]) || 0)) / ((no[a] || 0) + alpha);
-    rows.forEach(function(r){ var v = get(r); if(!v || !v[0]) return; var n = v[0] * r.dec; sd[r.d] = (sd[r.d] || 0) + (v[1] * r.dec - n * (mu + O[r.o])); nd[r.d] = (nd[r.d] || 0) + n; });
-    for(var b in D) D[b] = ((sd[b] || 0) + alpha * ((C && C.D[b]) || 0)) / ((nd[b] || 0) + alpha);
+  if(!H || !(H.a > 0)){
+    for(var it = 0; it < 20; it++){
+      var so = {}, no = {}, sd = {}, nd = {}, i, q;
+      for(i = 0; i < nV; i++){ q = V[i]; so[q[0]] = (so[q[0]] || 0) + (q[3] - q[2] * (mu + D[q[1]])); no[q[0]] = (no[q[0]] || 0) + q[2]; }
+      for(var a in O) O[a] = ((so[a] || 0) + alpha * cO(a)) / ((no[a] || 0) + alpha);
+      for(i = 0; i < nV; i++){ q = V[i]; sd[q[1]] = (sd[q[1]] || 0) + (q[3] - q[2] * (mu + O[q[0]])); nd[q[1]] = (nd[q[1]] || 0) + q[2]; }
+      for(var b in D) D[b] = ((sd[b] || 0) + alpha * cD(b)) / ((nd[b] || 0) + alpha);
+    }
+    return { mu: mu, O: O, D: D, n: sN };
   }
-  return { mu: mu, O: O, D: D, n: sN };
+  // Conference anchoring. Same alternating updates, written in team totals: a team's rating is
+  // pulled (alpha) toward its conference level mO / mD (+ its centre), and each level is the
+  // shrunk average of its teams. 40 passes: within a few thousandths of converged on simulated
+  // seasons, far inside a team's sampling noise.
+  var gO = {}, gD = {}, mO = {}, mD = {}, kO = {}, kD = {};
+  for(var a0 in O){ gO[a0] = H.of(a0); mO[gO[a0]] = 0; kO[gO[a0]] = (kO[gO[a0]] || 0) + 1; }
+  for(var b0 in D){ gD[b0] = H.of(b0); mD[gD[b0]] = 0; kD[gD[b0]] = (kD[gD[b0]] || 0) + 1; }
+  for(var it2 = 0; it2 < 40; it2++){
+    var so2 = {}, no2 = {}, sd2 = {}, nd2 = {}, t = {}, j, w;
+    for(j = 0; j < nV; j++){ w = V[j]; so2[w[0]] = (so2[w[0]] || 0) + (w[3] - w[2] * (mu + D[w[1]])); no2[w[0]] = (no2[w[0]] || 0) + w[2]; }
+    for(var a2 in O){ O[a2] = ((so2[a2] || 0) + alpha * (mO[gO[a2]] + cO(a2))) / ((no2[a2] || 0) + alpha); t[gO[a2]] = (t[gO[a2]] || 0) + O[a2] - cO(a2); }
+    for(var g1 in mO) mO[g1] = alpha * (t[g1] || 0) / (alpha * kO[g1] + H.a);
+    t = {};
+    for(j = 0; j < nV; j++){ w = V[j]; sd2[w[1]] = (sd2[w[1]] || 0) + (w[3] - w[2] * (mu + O[w[0]])); nd2[w[1]] = (nd2[w[1]] || 0) + w[2]; }
+    for(var b2 in D){ D[b2] = ((sd2[b2] || 0) + alpha * (mD[gD[b2]] + cD(b2))) / ((nd2[b2] || 0) + alpha); t[gD[b2]] = (t[gD[b2]] || 0) + D[b2] - cD(b2); }
+    for(var g2 in mD) mD[g2] = alpha * (t[g2] || 0) / (alpha * kD[g2] + H.a);
+  }
+  return { mu: mu, O: O, D: D, n: sN, cO: mO, cD: mD };
+}
+// Conference group for anchoring (CFBD's conference that season). Independents are split by
+// tier, so Notre Dame isn't pooled with UMass; a team with no conference on record stands alone.
+function pxConfGroup(id){
+  var t = (pxState().teams || {})[id], c = String((t && t.c) || "").toLowerCase();
+  if(!c) return "_" + id;
+  if(/independ/.test(c)) return pxIsP4(id) ? "ind-p4" : "ind-g6";
+  return c;
 }
 // ── League play model ───────────────────────────────────────────────────────
 // Everything the drive simulator needs that isn't a team rating, from the
@@ -3028,8 +3070,19 @@ function pxFit(upto, o){
   // every spread. Instead each team is shrunk toward what its roster prior says
   // about that facet: a light fit first, the facet's slope on the prior's
   // offense / defense ratings across teams, then the real fit centred there.
+  // Conference anchoring (off unless o.conf > 0): the final fits shrink each team toward its
+  // conference's level; the near-unshrunk slope fit below doesn't need it.
+  var HC = o.conf > 0 ? { a: o.conf, of: pxConfGroup } : null;
+  function confFill(f){
+    // A team with no FBS plays yet starts at its conference's level (plus its tier centre, if any).
+    if(!f.cO) return f;
+    Object.keys(PT).forEach(function(id){ var gr = pxConfGroup(id);
+      if(f.O[id] === undefined && f.cO[gr] !== undefined) f.O[id] = f.cO[gr] + ((f.C && f.C.O[id]) || 0);
+      if(f.D[id] === undefined && f.cD[gr] !== undefined) f.D[id] = f.cD[gr] + ((f.C && f.C.D[id]) || 0); });
+    return f;
+  }
   function tiered(get, a){
-    if(!tw) return pxRidge(rows, get, a);
+    if(!tw) return confFill(pxRidge(rows, get, a, null, HC));
     // Slope from nearly unshrunk estimates: noise in them doesn't bias it, shrinkage would.
     var f0 = pxRidge(rows, get, Math.min(2, a)), w = {};
     rows.forEach(function(r){ var v = get(r); if(v && v[0]){ var n = v[0] * r.dec; w["o" + r.o] = (w["o" + r.o] || 0) + n; w["d" + r.d] = (w["d" + r.d] || 0) + n; } });
@@ -3045,7 +3098,7 @@ function pxFit(upto, o){
     // coach and low returning production, and scaling the centre down treated "less certain"
     // as "worse" (it pulled those teams toward average rather than letting their plays speak).
     Object.keys(PT).forEach(function(id){ C.O[id] = tw * bO * PT[id].off; C.D[id] = tw * bD * PT[id].def; });
-    var f = pxRidge(rows, get, a, C); f.bO = bO; f.bD = bD;
+    var f = pxRidge(rows, get, a, C, HC); f.bO = bO; f.bD = bD; f.C = C; confFill(f);
     // A team with no FBS plays yet (an FCS opener, a bye) starts at its tier, not at league average.
     Object.keys(C.O).forEach(function(id){ if(f.O[id] === undefined) f.O[id] = C.O[id]; if(f.D[id] === undefined) f.D[id] = C.D[id]; });
     return f;
@@ -3418,11 +3471,16 @@ function pxCVErr(o, weeksUpTo){
 }
 function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v16|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
-// Tune from the defaults; a knob only moves when the gain is at least 2
-// standard errors game by game (the same guard as before).
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v17|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+// Tune from the defaults; a knob only moves when the gain is at least PX_TUNE_T
+// standard errors game by game (see below).
 // Settings you've set by hand. The tuner starts from them and never moves them.
 function pxLocks(){ return pxState().lock || {}; }
+// How clear a gain has to be before the tuner moves a knob, in paired standard errors. The tuner
+// tries up to 7 values and keeps the best before testing it, and picking the best of several makes
+// t >= 2 easy to reach by luck: in simulation, with no value truly better, 2.0 moved a knob about
+// 10% of the time (most full tunes moved at least one of the 12 on noise); 2.8 about 1.5%.
+var PX_TUNE_T = 2.8;
 function pxTune(weeksUpTo, done){
   var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k];
   var cur = pxCVErr(o, weeksUpTo), keys = Object.keys(PX_GRID).filter(function(k0){ return LK[k0] === undefined; }), pass = 0, acc = 0, ki = 0;
@@ -3436,7 +3494,7 @@ function pxTune(weeksUpTo, done){
       var em = pxCVErr(oo, weeksUpTo), m = pemMeanErr(em);
       if(m !== null && (!best || m < best.m)) best = { v: v, m: m, em: em };
     });
-    if(best){ var pd = pemPairedDiff(best.em, cur); if(pd && pd.se > 0 && -pd.d / pd.se >= 2){ o[key] = best.v; cur = best.em; acc++; } }
+    if(best){ var pd = pemPairedDiff(best.em, cur); if(pd && pd.se > 0 && -pd.d / pd.se >= PX_TUNE_T){ o[key] = best.v; cur = best.em; acc++; } }
     setTimeout(step, 0);
   })();
 }
@@ -3456,7 +3514,7 @@ function pxAutoTune(){
     })();
   });
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m17|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m18|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -3688,7 +3746,7 @@ function pxUTApply(){
   pxUTRefresh("Your tune is in use · every setting locked");
 }
 function pxUTReset(){ var S = pxState(); S.lock = {}; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
-var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "hfa", "tierAdj", "stretch", "vol"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit", "qbOut1", "qbOut2"]]];
+var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "conf", "hfa", "tierAdj", "stretch", "vol"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit", "qbOut1", "qbOut2"]]];
 var PX_UT_CSS = '<style>' +
   '#px-ut .ut-g{margin:12px 0 2px;font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;opacity:.6}' +
   '#px-ut .ut-r{padding:6px 0 4px;border-top:1px dashed var(--border2)}' +
@@ -3952,7 +4010,7 @@ function pxKnobsHtml(){
     h += '<div class="pem-autosub" style="margin-top:6px">Spread scale this week: <b>×' + LV.st.toFixed(2) + '</b>' +
          (LV.stB ? ' \u2014 results say <b>×' + LV.stB.toFixed(2) + (LV.stSE ? ' \u00b1 ' + LV.stSE.toFixed(2) : '') + '</b> from ' + LV.stN + ' earlier games (recent weeks count most)' : ' \u2014 not enough games yet') +
          (LV.stV ? '. Closing lines imply \u00d7' + LV.stV.toFixed(2) + ' <small>(reference only, not used)</small>' : '') + '.</div>'; }
-  h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (two standard errors, game by game). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
+  h += '<div class="pem-autonote">Each setting starts at its default and only moves when predicting each week from the weeks before it gets clearly better (2.8 standard errors, game by game — higher than 2 because the tuner picks the best of several values before testing it). Every past week in the record is graded with settings tuned only on the weeks before it.</div>';
   return h + '</div>';
 }
 // What the play simulator learned from the league, and how well it matches.
