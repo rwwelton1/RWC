@@ -3811,12 +3811,14 @@ function pxUTHtml(){
        '<button class="btn btn-sm btn-ghost" id="px-ut-load">Start from current</button>' +
        '<button class="btn btn-sm btn-ghost" id="px-ut-def">Start from defaults</button>' +
        '<button class="btn btn-sm btn-ghost" id="px-ut-reset">Back to auto</button></div>';
+  h += pxTunesHtml();
   h += '<div class="pem-autonote">One season is a small sample — most moves read “within the noise” even when they matter over three seasons. The defaults come from about 2,000 games of 2023–25.</div>';
   h += '<div class="ut-bar" id="px-ut-bar">' + pxUTBarHtml() + '</div>';
   return h + '</div>';
 }
 // Refresh only the results and the bar, so a slider you're holding isn't redrawn under your finger.
 function pxUTStatus(full){
+  if(!PXB.busy && document.getElementById("px-bt")) pxBtStatus();      // the backtest's list follows saved tunes and the sliders
   if(full){ var el = document.getElementById("px-ut"); if(el){ el.outerHTML = pxUTHtml(); pxBind(); } return; }
   var r = document.getElementById("px-ut-res"), b = document.getElementById("px-ut-bar");
   if(r) r.innerHTML = pxUTResHtml();
@@ -3836,6 +3838,66 @@ function pxUTBind(){
   if((b = document.getElementById("px-ut-reset"))) b.onclick = function(){ pxUTReset(); };
   if((b = document.getElementById("px-ut-load"))) b.onclick = function(){ PX.ut.o = null; PX.ut.res = null; pxUTInit(); pxUTStatus(true); };
   if((b = document.getElementById("px-ut-def"))) b.onclick = function(){ PX.ut.o = Object.assign({}, PX_DEFAULTS); PX.ut.res = null; pxUTStatus(true); pxUTSoon(); };
+  var nm = document.getElementById("px-ut-name");
+  if((b = document.getElementById("px-ut-save"))) b.onclick = function(){ pxTuneSave(nm ? nm.value : ""); };
+  if(nm) nm.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); pxTuneSave(this.value); } };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-tune-load]"), function(el){ el.onclick = function(){ pxTuneLoad(this.getAttribute("data-tune-load")); }; });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-tune-del]"), function(el){ el.onclick = function(){ pxTuneDelete(this.getAttribute("data-tune-del")); }; });
+}
+
+// ── Saved tunes ─────────────────────────────────────────────────────────────
+// Named sets of sandbox settings, saved with the rest of the model (Firebase, prophescore/<uid>/px/tunes),
+// so they come back on any device. Load one into the sliders to test it on this season, or tick it in
+// the backtest to grade it on 2023–25. Saving never changes the model you're running: "Use my tune" does.
+function pxTunes(){ var S = pxState(); if(!S.tunes || typeof S.tunes !== "object") S.tunes = {}; return S.tunes; }
+function pxTuneList(){
+  var T = pxTunes();
+  return Object.keys(T).filter(function(id){ return T[id] && T[id].o; }).map(function(id){
+    var o = {}; for(var k in PX_DEFAULTS) o[k] = typeof T[id].o[k] === "number" ? T[id].o[k] : PX_DEFAULTS[k];   // tunes saved before a setting existed get its default
+    return { id: id, n: String(T[id].n || "Tune"), o: o, at: T[id].at || 0 };
+  }).sort(function(a, b){ return a.at - b.at; });
+}
+// What a set of settings changes from the defaults, in a few words.
+function pxTuneDiff(o){
+  var out = [];
+  PX_KNOBS.forEach(function(k){ var v = o[k.key]; if(typeof v === "number" && Math.abs(v - PX_DEFAULTS[k.key]) > 1e-9) out.push(k.label.replace(/^Totals: /, "Totals ") + " " + k.fmt(v)); });
+  return out.length ? out.join(" \u00b7 ") : "same as defaults";
+}
+function pxTuneSame(a, b){ for(var k in PX_DEFAULTS) if(Math.abs((a[k] || 0) - (b[k] || 0)) > 1e-9) return false; return true; }
+function pxTuneSave(name){
+  var T = pxTunes(), list = pxTuneList(), o = pxUTInit(), keep = {};
+  for(var k in PX_DEFAULTS) keep[k] = typeof o[k] === "number" ? o[k] : PX_DEFAULTS[k];
+  name = String(name || "").replace(/\s+/g, " ").trim().slice(0, 40) || ("Tune " + (list.length + 1));
+  var id = null; list.forEach(function(t){ if(t.n.toLowerCase() === name.toLowerCase()) id = t.id; });
+  var upd = !!id; if(!id) id = "t" + Date.now().toString(36);
+  T[id] = { n: name, o: keep, at: upd ? (T[id].at || Date.now()) : Date.now() };
+  pxBtSel()["s:" + id] = 1;                                           // ticked for the next backtest
+  peSave(); pxUTStatus(true);
+  toast((upd ? "Updated \u201c" : "Saved \u201c") + name + "\u201d \u00b7 ticked in the backtest", "ok");
+}
+function pxTuneLoad(id){
+  var t = null; pxTuneList().forEach(function(z){ if(z.id === id) t = z; }); if(!t) return;
+  PX.ut.o = Object.assign({}, t.o); PX.ut.res = null; pxUTStatus(true); pxUTSoon();
+  toast("Loaded \u201c" + t.n + "\u201d \u00b7 testing on this season", "ok");
+}
+function pxTuneDelete(id){
+  var T = pxTunes(); if(!T[id]) return;
+  if(!confirm("Delete the saved tune \u201c" + (T[id].n || "Tune") + "\u201d?")) return;
+  delete T[id]; if(PXB.sel) delete PXB.sel["s:" + id];
+  peSave(); pxUTStatus(true); toast("Tune deleted");
+}
+function pxTunesHtml(){
+  var list = pxTuneList(), ut = pxUTInit(), S = pxState();
+  var h = '<div class="ut-g">Saved tunes</div>' +
+    '<div style="display:flex;gap:6px;margin-top:4px"><input id="px-ut-name" type="text" maxlength="40" autocomplete="off" placeholder="Name the sliders above" style="flex:1;min-width:0;padding:7px 9px;border:2px solid var(--border);border-radius:9px;font:800 13px \'Nunito\',sans-serif;background:var(--cream);color:var(--text)">' +
+    '<button class="btn btn-sm btn-gold" id="px-ut-save">Save tune</button></div>';
+  if(!list.length) return h + '<div class="pem-autonote" style="margin-top:6px">Save the sliders under a name to keep them, load them back later, and grade them in the backtest below. Same name again updates it.</div>';
+  list.forEach(function(t){
+    var tag = pxTuneSame(t.o, S.opts) ? ' <small style="color:#15803d;font-weight:900">in use</small>' : (pxTuneSame(t.o, ut) ? ' <small style="color:var(--gold-dark);font-weight:900">in sliders</small>' : '');
+    h += '<div class="ut-r"><div class="ut-top"><span style="min-width:0">' + x(t.n) + tag + '<br><small style="font-weight:700;color:var(--muted)">' + x(pxTuneDiff(t.o)) + '</small></span>' +
+         '<span style="display:flex;gap:5px;flex:none"><button class="btn btn-sm btn-ghost" data-tune-load="' + t.id + '">Load</button><button class="btn btn-sm btn-ghost" data-tune-del="' + t.id + '" title="Delete">\u2715</button></span></div></div>';
+  });
+  return h;
 }
 
 // ── Backtest on past seasons ────────────────────────────────────────────────
@@ -3853,7 +3915,8 @@ function pxBtConfigs(){
   out.push({ k: "noadj", name: "P4/G6 adjustment off", o: Object.assign({}, now, { tierAdj: 0 }) });
   out.push({ k: "c100", name: "Conference anchoring 100, P4/G6 off", o: Object.assign({}, now, { conf: 100, tierAdj: 0 }) });
   out.push({ k: "c300", name: "Conference anchoring 300, P4/G6 off", o: Object.assign({}, now, { conf: 300, tierAdj: 0 }) });
-  if(ut && pxUTChanged()) out.push({ k: "ut", name: "Your tune (sliders above)", o: Object.assign({}, now, ut) });
+  pxTuneList().forEach(function(t){ out.push({ k: "s:" + t.id, name: "\ud83d\udcbe " + t.n, o: t.o, sub: pxTuneDiff(t.o) }); });
+  if(ut && pxUTChanged()) out.push({ k: "ut", name: "Your tune (sliders, unsaved)", o: Object.assign({}, now, ut), sub: pxTuneDiff(Object.assign({}, now, ut)) });
   return out;
 }
 function pxBtSel(){
@@ -3994,7 +4057,7 @@ function pxBtCardHtml(){
   h += '<div class="pem-autosub">' + (ys.length ? 'Grades each setting on <b>' + ys.join(', ') + '</b>, every week predicted only from the weeks before it.' : (PXH.idx ? 'Download past seasons under <b>Data → Past seasons for backtesting</b> first.' : 'Checking saved seasons…')) + '</div>';
   var sel = pxBtSel();
   h += '<div style="margin-top:6px">' + pxBtConfigs().map(function(c){
-    return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '> ' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + '</label>'; }).join('') + '</div>';
+    return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '><span>' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + (c.sub ? '<br><small style="font-weight:700;color:var(--muted)">' + x(c.sub) + '</small>' : '') + '</span></label>'; }).join('') + '</div>';
   if(PXB.busy) h += '<div class="pem-autosub" id="px-btprog" style="margin-top:8px">⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div></div>';
   if(PXB.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXB.err) + '</div>';
   h += pxBtResHtml();
