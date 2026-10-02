@@ -3937,8 +3937,59 @@ function pxBtWorker(){
     "var fetch = function(){ return Promise.reject(new Error('offline')); }, firebase = undefined, innerHeight = 800, innerWidth = 400, scrollY = 0, scrollTo = function(){};"
   ].join("\n");
   var runner = "\n;(" + function(){
+    // Tune on past seasons: the live tuner's one-knob-at-a-time search, scored on every graded game of
+    // every saved season at once. A knob moves only on a PX_TUNE_T-standard-error gain that also shows
+    // up in at least two of three seasons (so one odd season can't carry it).
+    function runTune(M){
+      var FIRST = PX_FIRST_GRADED, SE = {}, order = [];
+      M.seasons.forEach(function(sd){
+        var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y }, maxW = 0, weeks = {};
+        Object.keys(sd.wk || {}).forEach(function(k){ var W = sd.wk[k]; if(!W) return; W.y = W.y || y; W.w = W.w || +k.replace(/\D/g, ""); S.wk[y + "-" + W.w] = W; if(W.w > maxW) maxW = W.w;
+          (W.games || []).forEach(function(g){ if(g && g.c && W.w >= FIRST && g.hs !== null && g.hs !== undefined && g.as !== null && g.as !== undefined) (weeks[W.w] = weeks[W.w] || []).push(g); }); });
+        SE[y] = { S: S, maxW: maxW, weeks: weeks, ws: Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; }), lg: {}, sch: null, pp: null };
+        order.push(y);
+      });
+      // Each season keeps its own simulator calibration (the slow part, the same for every setting); fits are dropped after each pass over a season.
+      function use(y){ var E = SE[y]; PE.meta = { espnYear: y, espnWeek: E.maxW }; PE.priors = M.priors || {}; PE.px = E.S; PX_LG = E.lg; PX._sch = E.sch; PEM._ppCache = E.pp; PX.fits = {}; PX.sims = {}; }
+      function park(y){ var E = SE[y]; E.lg = PX_LG; E.sch = PX._sch; E.pp = PEM._ppCache; PX.fits = {}; }
+      function evalO(o){
+        var em = {}, per = {};
+        order.forEach(function(y){ use(y); var E = SE[y], sm = 0, n = 0;
+          E.ws.forEach(function(w){ var fit = pxFit(w, o); E.weeks[w].forEach(function(g){ var p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), e = Math.abs((p.home - p.away) - (g.hs - g.as)); em[y + "|" + g.id] = e; sm += e; n++; }); });
+          per[y] = n ? sm / n : null; park(y); });
+        return { em: em, per: per, m: pemMeanErr(em) };
+      }
+      var o = Object.assign({}, PX_DEFAULTS, M.start), G = M.grid, keys = Object.keys(G), need = Math.ceil(order.length * 2 / 3), moves = [];
+      var perPass = 0; keys.forEach(function(k){ perPass += G[k].length; });
+      self.postMessage({ t: "prog", msg: "Grading the starting settings\u2026", pct: 0 });
+      var cur = evalO(o), start = cur, done = 0;
+      for(var pass = 0; pass < 3; pass++){
+        var acc = 0;
+        keys.forEach(function(key){
+          var best = null;
+          G[key].forEach(function(v){
+            done++;
+            if(v === o[key]) return;
+            self.postMessage({ t: "prog", msg: "Pass " + (pass + 1) + " \u00b7 " + key + " = " + v, pct: Math.min(0.99, done / (perPass * (pass + 1))), pass: pass + 1 });
+            var oo = Object.assign({}, o); oo[key] = v;
+            var r = evalO(oo); if(r.m !== null && (!best || r.m < best.r.m)) best = { v: v, r: r };
+          });
+          if(!best) return;
+          var pd = pemPairedDiff(best.r.em, cur.em), wins = 0;
+          order.forEach(function(y){ if(best.r.per[y] !== null && cur.per[y] !== null && best.r.per[y] < cur.per[y]) wins++; });
+          if(pd && pd.se > 0 && -pd.d / pd.se >= M.T && wins >= need){
+            var mv = { k: key, from: o[key], to: best.v, d: pd.d, se: pd.se, wins: wins, per: best.r.per };
+            moves.push(mv); o[key] = best.v; cur = best.r; acc++;
+            self.postMessage({ t: "move", mv: mv });
+          }
+        });
+        if(!acc) break;
+      }
+      self.postMessage({ t: "tuned", o: o, moves: moves, startPer: start.per, endPer: cur.per, startM: start.m, endM: cur.m, n: Object.keys(cur.em).length, seasons: order });
+    }
     self.onmessage = function(e){
       var M = e.data, FIRST = PX_FIRST_GRADED, total = 0, done = 0;
+      if(M.mode === "tune"){ try{ runTune(M); }catch(err){ self.postMessage({ t: "err", msg: (err && err.message) || String(err) }); } return; }
       try{
         M.seasons.forEach(function(s){ Object.keys(s.wk || {}).forEach(function(k){ if(s.wk[k] && (s.wk[k].w || +k.replace(/\D/g, "")) >= FIRST) total++; }); });
         M.seasons.forEach(function(sd){
@@ -3974,7 +4025,7 @@ function pxBtRun(){
   if(!DB || !ME()){ PXB.err = "Needs the Firebase connection (sign in on the hub)."; pxBtStatus(); return; }
   var cfg = pxBtConfigs(), sel = pxBtSel(), run = cfg.filter(function(c){ return c.fixed || sel[c.k]; });
   if(run.length < 2){ PXB.err = "Tick at least one setting to compare against Settings now."; pxBtStatus(); return; }
-  PXB.busy = true; PXB.err = ""; PXB.pct = 0; PXB.msg = "Loading saved seasons…"; PXB.t0 = Date.now(); pxBtStatus();
+  PXB.busy = true; PXB.mode = "run"; PXB.err = ""; PXB.pct = 0; PXB.msg = "Loading saved seasons…"; PXB.t0 = Date.now(); pxBtStatus();
   var acc = { configs: run.map(function(c){ return { k: c.k, name: c.name }; }), preds: [], seasons: [] };
   (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(idx){
     var ys = PX_HIST_YEARS.filter(function(y){ var e = idx["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
@@ -3995,13 +4046,77 @@ function pxBtRun(){
     w.postMessage({ seasons: seasons, priors: PE.priors || {}, configs: run.map(function(c){ return { k: c.k, o: c.o }; }) });
   }).catch(function(e){ PXB.busy = false; PXB.msg = ""; PXB.err = (e && e.message) || String(e); pxBtStatus(); });
 }
+// The saved seasons, from Firebase (each downloaded once per run).
+function pxBtLoadSeasons(){
+  return (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(idx){
+    var ys = PX_HIST_YEARS.filter(function(y){ var e = idx["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
+    if(!ys.length) throw new Error("No past seasons saved yet. Download them under Data \u2192 Past seasons for backtesting first.");
+    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, wk: v.wk } : null; }); }));
+  }).then(function(seasons){ return seasons.filter(Boolean); });
+}
+// Grid for tuning on history: the live tuner's, plus the two settings it leaves to you (P4 vs G6
+// and conference anchoring), since three seasons are enough to say something about them.
+var PX_HIST_GRID_EXTRA = { tierAdj: [0, 2, 3.5, 5, 6.5, 8], conf: [0, 100, 300] };
+function pxBtTune(){
+  if(PXB.busy) return;
+  if(!DB || !ME()){ PXB.err = "Needs the Firebase connection (sign in on the hub)."; pxBtStatus(); return; }
+  PXB.busy = true; PXB.mode = "tune"; PXB.err = ""; PXB.pct = 0; PXB.msg = "Loading saved seasons\u2026"; PXB.t0 = Date.now();
+  PXB.tune = { moves: [], running: true }; pxBtStatus();
+  pxBtLoadSeasons().then(function(seasons){
+    PXB.msg = "Starting\u2026"; pxBtStatus();
+    var w = PXB.worker = pxBtWorker(), start = Object.assign({}, pxState().opts);
+    w.onmessage = function(e){
+      var d = e.data;
+      if(d.t === "prog"){ PXB.pct = d.pct || 0; PXB.msg = d.msg; pxBtStatus(true); }
+      else if(d.t === "move"){ PXB.tune.moves.push(d.mv); pxBtStatus(); }
+      else if(d.t === "tuned"){
+        var ys = d.seasons, name = "Tuned on " + (ys.length > 1 ? ys[0] + "\u2013" + String(ys[ys.length - 1]).slice(2) : ys[0]);
+        var T = pxTunes(), id = null; pxTuneList().forEach(function(t){ if(t.n === name) id = t.id; }); if(!id) id = "t" + Date.now().toString(36);
+        var keep = {}; for(var k in PX_DEFAULTS) keep[k] = typeof d.o[k] === "number" ? d.o[k] : PX_DEFAULTS[k];
+        T[id] = { n: name, o: keep, at: (T[id] && T[id].at) || Date.now() };
+        pxBtSel()["s:" + id] = 1; peSave();
+        PXB.tune = { moves: d.moves, startPer: d.startPer, endPer: d.endPer, startM: d.startM, endM: d.endM, n: d.n, seasons: ys, id: id, name: name, done: true, secs: Math.round((Date.now() - PXB.t0) / 1000) };
+        pxBtTuneEnd(null);
+        if(document.getElementById("px-ut")) pxUTStatus(true);          // the new tune shows in Saved tunes
+        toast(d.moves.length ? "Saved \u201c" + name + "\u201d \u00b7 " + d.moves.length + " setting" + (d.moves.length === 1 ? "" : "s") + " moved" : "Nothing beat your settings clearly \u00b7 saved as \u201c" + name + "\u201d", "ok");
+      }
+      else if(d.t === "err"){ pxBtTuneEnd("Tuning stopped: " + d.msg); }
+    };
+    w.onerror = function(ev){ pxBtTuneEnd("Tuning stopped: " + ((ev && ev.message) || "worker error")); };
+    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T });
+  }).catch(function(e){ PXB.busy = false; PXB.mode = ""; PXB.msg = ""; PXB.err = (e && e.message) || String(e); PXB.tune = null; pxBtStatus(); });
+}
+function pxBtTuneEnd(err){
+  if(PXB.worker){ try{ PXB.worker.terminate(); }catch(e){} PXB.worker = null; }
+  PXB.busy = false; PXB.mode = ""; PXB.msg = ""; PXB.err = err || "";
+  if(PXB.tune) PXB.tune.running = false;
+  pxBtStatus();
+}
+function pxBtTuneHtml(){
+  var R = PXB.tune; if(!R || (!R.done && !R.moves.length)) return "";
+  var kl = function(key){ var kd = pxUTKnob(key); return kd ? kd : { label: key, fmt: function(v){ return String(v); } }; };
+  var h = '<div class="pem-hd" style="margin-top:12px">' + (R.done ? 'Tuned on ' + R.seasons.join(', ') : (R.running ? 'Tuning\u2026 moves so far' : 'Stopped \u2014 moves before it stopped (not saved)')) + '</div>';
+  if(R.moves.length){
+    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Setting</span><span>Now \u2192 tuned</span><span>Gain a game</span></div>';
+    R.moves.forEach(function(m){ var k = kl(m.k);
+      h += '<div class="pem-bkrow"><span>' + x(k.label) + '</span><span>' + x(k.fmt(m.from)) + ' \u2192 <b>' + x(k.fmt(m.to)) + '</b></span><span><b class="up">' + (-m.d).toFixed(2) + '</b> <small>\u00b1' + m.se.toFixed(2) + ' \u00b7 ' + m.wins + ' of ' + Object.keys(m.per).length + ' seasons</small></span></div>'; });
+    h += '</div>';
+  } else if(R.done) h += '<div class="pem-autosub">No setting beat your current ones clearly enough to move (a ' + PX_TUNE_T + '-standard-error gain that also holds in most seasons). Your settings are already about as good as this search can find.</div>';
+  if(R.done){
+    h += '<div class="pem-autosub" style="margin-top:6px">Spread miss over <b>' + R.n + '</b> games: <b>' + R.startM.toFixed(2) + '</b> \u2192 <b>' + R.endM.toFixed(2) + '</b> \u00b7 by season ' +
+         R.seasons.map(function(y){ var a = R.startPer[y], b = R.endPer[y]; return y + ' ' + (a !== null ? a.toFixed(2) : '\u2014') + '\u2192' + (b !== null ? b.toFixed(2) : '\u2014'); }).join(' \u00b7 ') + (R.secs ? ' \u00b7 took ' + (R.secs < 90 ? R.secs + ' s' : Math.round(R.secs / 60) + ' min') : '') + '</div>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-sm btn-ghost" data-bttune-load="' + R.id + '">Load \u201c' + x(R.name) + '\u201d into Your tune</button></div>';
+    h += '<div class="pem-autonote" style="margin-top:4px">Saved as \u201c' + x(R.name) + '\u201d under Saved tunes and ticked above \u2014 press Run for its full record (ATS, totals, P4 vs G6). It was tuned on these same seasons, so its backtest numbers flatter it a little; the honest check is this season\u2019s record after you use it. The search starts from Settings now, tries each setting\u2019s values one at a time (including the P4 vs G6 adjustment and conference anchoring, which the in-season tuner leaves alone), and repeats up to three passes.</div>';
+  }
+  return h;
+}
 function pxBtEnd(acc, err){
   if(PXB.worker){ try{ PXB.worker.terminate(); }catch(e){} PXB.worker = null; }
   PXB.busy = false; PXB.msg = ""; PXB.err = err || "";
   if(acc && acc.preds.length) PXB.res = { configs: acc.configs, preds: acc.preds, seasons: acc.seasons, partial: !!err, at: Date.now(), secs: Math.round((Date.now() - PXB.t0) / 1000) };
   pxBtStatus();
 }
-function pxBtStop(){ if(!PXB.busy) return; var R = PXB.res; pxBtEnd(R ? { configs: R.configs, preds: R.preds, seasons: R.seasons } : null, "Stopped — showing the seasons that finished."); }
+function pxBtStop(){ if(!PXB.busy) return; if(PXB.mode === "tune"){ pxBtTuneEnd("Stopped \u2014 nothing was saved."); return; } var R = PXB.res; pxBtEnd(R ? { configs: R.configs, preds: R.preds, seasons: R.seasons } : null, "Stopped — showing the seasons that finished."); }
 function pxBtGrade(P){
   var s = { n: 0, e: 0, ev: 0, w: 0, l: 0, sw: 0, sl: 0, tn: 0, te: 0, tv: 0, ow: 0, ol: 0, xn: 0, xb: 0, xbv: 0 };
   P.forEach(function(q){
@@ -4059,7 +4174,10 @@ function pxBtCardHtml(){
   h += '<div style="margin-top:6px">' + pxBtConfigs().map(function(c){
     return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '><span>' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + (c.sub ? '<br><small style="font-weight:700;color:var(--muted)">' + x(c.sub) + '</small>' : '') + '</span></label>'; }).join('') + '</div>';
   if(PXB.busy) h += '<div class="pem-autosub" id="px-btprog" style="margin-top:8px">⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div></div>';
+  if(!PXB.busy && ys.length) h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-sm btn-ghost" id="px-bttune">\ud83c\udf9b\ufe0f Tune on ' + (ys.length > 1 ? ys[0] + '\u2013' + String(ys[ys.length - 1]).slice(2) : ys[0]) + '</button>' +
+       '<small style="font-weight:700;color:var(--muted);flex:1;min-width:140px">Searches every setting on all ' + ys.length + ' seasons and saves the best as a tune. Takes a while \u2014 keep this tab open.</small></div>';
   if(PXB.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXB.err) + '</div>';
+  h += pxBtTuneHtml();
   h += pxBtResHtml();
   h += '<div class="pem-autonote">Runs in the background on this device, with its own copy of the model, so your live season, settings and record are never touched. Most of the time goes to calibrating the play simulator for each week (shared by every setting), so adding settings costs little; three seasons take a minute or two on a computer and a few minutes on a phone. Keep this tab in front — a phone pauses background tabs. Settings are held fixed for the whole season (no in-season re-tuning). “vs baseline” is the game-by-game difference in miss: negative is better; under 2 standard errors it’s marked noise. “P4 beat it by”: how far the Power-4 side beat that number in P4-vs-G6 games, so near 0 is right.</div>';
   return h + '</div>';
@@ -4071,6 +4189,9 @@ function pxBtStatus(progOnly){
 function pxBtBind(){
   var b = document.getElementById("px-btgo"); if(b) b.onclick = function(){ pxBtRun(); };
   var s = document.getElementById("px-btstop"); if(s) s.onclick = function(){ pxBtStop(); };
+  var tn = document.getElementById("px-bttune"); if(tn) tn.onclick = function(){ pxBtTune(); };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-bttune-load]"), function(btn){ btn.onclick = function(){
+    pxTuneLoad(this.getAttribute("data-bttune-load")); var u = document.getElementById("px-ut"); if(u && u.scrollIntoView) u.scrollIntoView({ behavior: "smooth" }); }; });
   Array.prototype.forEach.call(document.querySelectorAll("[data-bt-sel]"), function(cb){ cb.onchange = function(){ pxBtSel()[this.getAttribute("data-bt-sel")] = this.checked ? 1 : 0; }; });
   Array.prototype.forEach.call(document.querySelectorAll("[data-bt-load]"), function(btn){ btn.onclick = function(){
     var k = this.getAttribute("data-bt-load"), c = null; pxBtConfigs().forEach(function(z){ if(z.k === k) c = z; }); if(!c) return;
