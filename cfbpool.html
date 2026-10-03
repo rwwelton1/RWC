@@ -199,6 +199,16 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 
 .adm-sec-label{font-size:9px;font-weight:900;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin:14px 12px 8px;padding-bottom:5px;border-bottom:2px solid var(--border2)}
 .adm-sec-label:first-of-type{margin-top:0}
+.pickas-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--cream);border-bottom:2px solid var(--border2)}
+.pickas-bar.on{background:var(--purple-bg);border-bottom-color:var(--purple)}
+.pickas-lbl{font-size:9px;font-weight:900;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;flex-shrink:0}
+.pickas-bar.on .pickas-lbl{color:var(--purple)}
+.pickas-sel{flex:1;min-width:0;border:2px solid var(--border);border-radius:6px;padding:5px 6px;font-size:11px;font-weight:800;font-family:'Nunito',sans-serif;background:#ffffff;color:var(--text)}
+.pickas-note{padding:6px 12px;background:var(--purple-bg);border-bottom:2px solid var(--border2);font-size:9px;font-weight:700;color:var(--purple);line-height:1.5}
+.pfp-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2)}
+.pfp-row:last-child{border-bottom:none}
+.pfp-name{flex:1;min-width:0;font-size:11px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pfp-count{font-size:9px;font-weight:800;white-space:nowrap}
 
 .stand-table{border-collapse:collapse;font-size:10px;width:100%;background:#ffffff}
 .stand-table th,.stand-table td{border:1px solid var(--border2);padding:6px 9px;text-align:center;white-space:nowrap}
@@ -651,6 +661,29 @@ function isGroupAdminByUid(){
   if(GROUP_OWNER_UID && MY_UID===GROUP_OWNER_UID) return true;
   if(GROUP_ADMIN_UIDS[MY_UID]) return true;
   return false;
+}
+
+// ── PICK ON BEHALF (master admin) ─────────────────────────
+// A master admin can enter picks for a member who can't get to the app. The
+// picks are written under that member's uid exactly as if they'd made them;
+// nothing else about the session (chat, profile, "you" in standings) changes.
+// ST.pickAs holds the member being picked for, or null for normal mode.
+function canPickForOthers(){ return !PUBLIC_VIEW && !!(MY_UID && MASTER_UIDS[MY_UID]); }
+function proxyActive(){ return !!(ST.pickAs && canPickForOthers() && (PARTS||[]).indexOf(ST.pickAs)>=0); }
+// Whose picks the Picks tab is showing and editing.
+function pickUid(){ return proxyActive() ? ST.pickAs : ST.user; }
+// While picking for someone, games that have kicked off stay open so a pick
+// they sent in before kickoff can still be entered. A locked (closed) week
+// stays closed — unlock it in Week Setup first if it really needs changing.
+function pickGameLocked(weekId,gid){ return proxyActive() ? !!ST.locked[weekId] : isGameLocked(weekId,gid); }
+function setPickAs(uid){
+  // Commit anything still in its undo window under the member it belongs to
+  // before switching, so no pick lands on the wrong entry.
+  if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
+  _undoPick=null;
+  _flushAllPicks();
+  var t=document.getElementById("toast"); if(t) t.classList.remove("show");
+  ST.pickAs=(uid && uid!==ST.user) ? uid : null;   // picking for yourself is just normal mode
 }
 
 function x(s){var t=String(s||"");t=t.replace(/&/g,"&amp;");t=t.replace(/</g,"&lt;");t=t.replace(/>/g,"&gt;");t=t.replace(/'/g,"&#39;");return t;}
@@ -3474,15 +3507,16 @@ function saveTrouble(){ return (!_saveOnline) || _saveFailed>0; }
 // Re-write every local pick for the week in one go and report honestly.
 function resyncPicks(weekId){
   if(!DB){ toast("No database connection"); return; }
-  if(!ST.user){ toast("Select your name first"); return; }
-  var mine=((ST.picks[weekId]||{})[ST.user])||{};
+  var uk=pickUid();
+  if(!uk){ toast("Select your name first"); return; }
+  var mine=((ST.picks[weekId]||{})[uk])||{};
   if(!Object.keys(mine).length){ toast("Nothing to send"); return; }
   toast("Sending picks\u2026");
-  DB.ref(BASE+"/picks/"+weekId+"/"+ST.user).set(mine)
+  DB.ref(BASE+"/picks/"+weekId+"/"+uk).set(mine)
     .then(function(){
       _saveFailed=0; _lastSaveErr="";
       // Read it straight back: the point of this button is proof, not optimism.
-      return DB.ref(BASE+"/picks/"+weekId+"/"+ST.user).once("value");
+      return DB.ref(BASE+"/picks/"+weekId+"/"+uk).once("value");
     })
     .then(function(sn){
       var n=Object.keys(sn.val()||{}).filter(function(k){ return k!=="tb"; }).length;
@@ -3528,9 +3562,9 @@ try{
 }catch(e){}
 function setPickSide(weekId,gid,side){
   if(PUBLIC_VIEW) return;   // read-only spectator
-  if(!ST.user){toast("Select your name first");return;}
-  if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
-  var uk=ST.user;
+  var uk=pickUid();
+  if(!uk){toast("Select your name first");return;}
+  if(pickGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var cur=ST.picks[weekId][uk][gid]||{};
@@ -3729,9 +3763,9 @@ function setTiebreakerField(weekId,field,value){
   if(DB) DB.ref(BASE+"/tiebreaker/"+weekId+"/"+field).set(value);
 }
 function setTiebreakerGuess(weekId,value){
-  if(!ST.user){toast("Select your name first");return;}
+  var uk=pickUid();
+  if(!uk){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
-  var uk=ST.user;
   if(!ST.picks[weekId]) ST.picks[weekId]={};
   if(!ST.picks[weekId][uk]) ST.picks[weekId][uk]={};
   ST.picks[weekId][uk].tb=value?Number(value):null;
@@ -3744,19 +3778,20 @@ function setTiebreakerGuess(weekId,value){
 // already kicked off keep theirs — those are final and can't be re-picked.
 function resetAllPicks(weekId){
   if(PUBLIC_VIEW) return;   // read-only spectator
-  if(!ST.user){toast("Select your name first");return;}
+  var uk=pickUid();
+  if(!uk){toast("Select your name first");return;}
   if(ST.locked[weekId]){toast("&#128274; Week is locked");return;}
-  var uk=ST.user;
   if(!ST.picks[weekId]||!ST.picks[weekId][uk]) return;
   var active=activeGames(weekId);
   var clearable=active.filter(function(gid){
-    if(isGameLocked(weekId,gid)) return false;
+    if(pickGameLocked(weekId,gid)) return false;
     var p=ST.picks[weekId][uk][gid];
     return !!(p&&(p.side||p.conf));
   });
   if(!clearable.length){ toast("Nothing to clear"); return; }
-  var anyLocked=active.some(function(gid){ return isGameLocked(weekId,gid); });
-  if(!confirm("Clear all "+clearable.length+" of your picks and confidence for this week?"+
+  var anyLocked=active.some(function(gid){ return pickGameLocked(weekId,gid); });
+  var _whose=proxyActive() ? (nameOf(uk)+"'s") : "your";
+  if(!confirm("Clear all "+clearable.length+" of "+_whose+" picks and confidence for this week?"+
               (anyLocked?"\n\nGames that have already kicked off will keep their picks.":""))) return;
   // Any pick still inside its undo window would otherwise commit over the wipe.
   if(_undoTimer){ clearTimeout(_undoTimer); _undoTimer=null; }
@@ -3771,9 +3806,9 @@ function resetAllPicks(weekId){
   draw();
 }
 function setConf(weekId,gid,confRaw){
-  if(!ST.user){toast("Select your name first");return;}
-  if(isGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
-  var uk=ST.user;
+  var uk=pickUid();
+  if(!uk){toast("Select your name first");return;}
+  if(pickGameLocked(weekId,gid)){toast("&#128274; Game is locked");return;}
   if(!ST.picks[weekId])ST.picks[weekId]={};
   if(!ST.picks[weekId][uk])ST.picks[weekId][uk]={};
   var picks=ST.picks[weekId][uk];
@@ -3788,7 +3823,7 @@ function setConf(weekId,gid,confRaw){
   }
   if(!picks[gid])picks[gid]={};
   if(conf)picks[gid].conf=conf; else delete picks[gid].conf;
-  _savePickCache(weekId, ST.user, picks);
+  _savePickCache(weekId, uk, picks);
   // Update chips in-place — no full redraw, no flash
   _updateConfChipsDom(weekId, picks);
   // Update progress bar pick/conf counts
@@ -4767,7 +4802,7 @@ function _updateConfChipsDom(weekId, picks){
 
 // Update the progress bar pick/conf counts without full redraw
 function _updateProgressBar(weekId){
-  var picks=((ST.picks[weekId]||{})[ST.user])||{};
+  var picks=((ST.picks[weekId]||{})[pickUid()])||{};
   var active=activeGames(weekId);
   var N=active.length;
   var made=0,confsMade=0,confs={},dupes=false;
@@ -5366,7 +5401,7 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   var pick=viewerPicks[gid]||{};
   var gameLocked=isGameLocked(weekId,gid); // per-game kickoff lock
   var effectiveLocked=locked||gameLocked;
-  var effectiveCanPick=canPick&&!gameLocked;
+  var effectiveCanPick=canPick&&!pickGameLocked(weekId,gid);
   function logoImg(url, teamName){
     return eraImg(teamName, url,
       'style="width:22px;height:22px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:6px"');
@@ -5441,6 +5476,42 @@ function renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedCon
   return h;
 }
 
+// Members sorted for the "pick for" lists: anyone still short of a full slate
+// this week first, then alphabetical.
+function _pickForMembers(weekId){
+  var active=weekId?activeGames(weekId):[];
+  return (PARTS||[]).map(function(uid){
+    var pk=((ST.picks[weekId]||{})[uid])||{};
+    var made=active.filter(function(gid){ return pickComplete(pk[gid]); }).length;
+    return {uid:uid, name:nameOf(uid)||"(unknown)", made:made, n:active.length};
+  }).sort(function(a,b){
+    var ad=a.n>0&&a.made===a.n, bd=b.n>0&&b.made===b.n;
+    if(ad!==bd) return ad?1:-1;
+    return a.name.localeCompare(b.name);
+  });
+}
+// Master-only strip at the top of the Picks tab: choose whose picks to enter.
+function renderPickAsBar(){
+  var on=proxyActive();
+  var wk=ST.curWeek||displayWeekId();
+  var h='<div class="pickas-bar'+(on?' on':'')+'">';
+  h+='<span class="pickas-lbl">&#128737;&#65039; '+(on?'Picking for':'Pick as')+'</span>';
+  h+='<select id="pickas-select" class="pickas-sel">';
+  h+='<option value="">'+(ST.user?('Myself'+(nameOf(ST.user)?(' ('+x(nameOf(ST.user))+')'):'')):'\u2014 Choose a player \u2014')+'</option>';
+  _pickForMembers(wk).forEach(function(m){
+    if(m.uid===ST.user) return;
+    h+='<option value="'+x(m.uid)+'"'+(ST.pickAs===m.uid?' selected':'')+'>'+x((emojiOf(m.uid)?emojiOf(m.uid)+' ':'')+m.name)+(m.n?(' \u2014 '+m.made+'/'+m.n):'')+'</option>';
+  });
+  h+='</select>';
+  if(on) h+='<button class="btn btn-ghost" id="b-pickas-done" style="font-size:10px;padding:4px 10px;flex-shrink:0">Done</button>';
+  h+='</div>';
+  if(on){
+    h+='<div class="pickas-note">Every tap saves straight to <strong>'+x(nameOf(ST.pickAs))+'</strong>&#39;s entry. '+
+       'Games that have already kicked off stay open to you here.</div>';
+  }
+  return h;
+}
+
 function renderPicks(){
   var h='';
   if(!ST._weekInit){
@@ -5468,12 +5539,14 @@ function renderPicks(){
     h+='<div class="lb-note">&#128274; All weeks are locked. Check back when the next week\'s games are posted.</div>';
     return h;
   }
+  if(canPickForOthers()) h+=renderPickAsBar();
   h+=weekDropdown(weekId);
 
   var locked=!!ST.locked[weekId];
-  var viewer=ST.user;
+  var viewer=pickUid();          // you, or the member a master is picking for
+  var proxy=proxyActive();
   var viewerPicks=((ST.picks[weekId]||{})[viewer])||{};
-  var canPick=!!(ST.user&&!locked);
+  var canPick=!!(viewer&&!locked);
   var active=activeGames(weekId);
   var N=active.length;
 
@@ -5487,10 +5560,10 @@ function renderPicks(){
       var p=viewerPicks[gid];
       if(pickComplete(p)) made++;   // side + confidence
       if(p&&p.conf){ confs[p.conf]=(confs[p.conf]||0)+1; confsMade++; }
-      if(isGameLocked(weekId,gid)) gamesLocked++;
+      if(pickGameLocked(weekId,gid)) gamesLocked++;
     });
     var dupes=Object.keys(confs).filter(function(k){return confs[k]>1;}).length;
-    var allDone=ST.user&&made===N&&confsMade===N&&!dupes&&N>0;
+    var allDone=viewer&&made===N&&confsMade===N&&!dupes&&N>0;
 
     // Progress bar
     var pickPct=N>0?Math.round(made/N*100):0;
@@ -5533,10 +5606,10 @@ function renderPicks(){
         h+='<span style="font-size:9px;font-weight:800;color:var(--red2);flex-shrink:0;text-align:right;white-space:nowrap;padding-left:8px">&#128274; Live</span>';
       }
     }
-    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:11px;padding:3px 9px;flex-shrink:0" title="Clear all picks and confidence">&#129529;</button>';
-    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-resend-picks" title="Re-send picks to the server" aria-label="Re-send picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#128190;</button>';
-    if(ST.user&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" title="Share your picks" aria-label="Share your picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#11014;&#65039;</button>';
-    if(!ST.user) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
+    if(viewer&&made>0) h+='<button class="btn btn-ghost" id="b-reset-picks" style="font-size:11px;padding:3px 9px;flex-shrink:0" title="Clear all picks and confidence">&#129529;</button>';
+    if(viewer&&made>0) h+='<button class="btn btn-ghost" id="b-resend-picks" title="Re-send picks to the server" aria-label="Re-send picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#128190;</button>';
+    if(viewer&&!proxy&&made>0) h+='<button class="btn btn-ghost" id="b-share-picks" title="Share your picks" aria-label="Share your picks" style="font-size:11px;padding:3px 9px;flex-shrink:0">&#11014;&#65039;</button>';
+    if(!viewer) h+='<div class="lock-chips"><button class="btn btn-ghost" id="b-switch2">Pick your name</button></div>';
   }
   h+='</div>';
 
@@ -5546,7 +5619,7 @@ function renderPicks(){
   }
 
   // Onboarding tip — shown once, dismissed to localStorage
-  if(ST.user&&!locked){
+  if(viewer&&!proxy&&!locked){
     var _tipKey="cfb_tip_seen_"+(GROUP_ID||"g");
     var _tipSeen=false;
     try{ _tipSeen=!!localStorage.getItem(_tipKey); }catch(e){}
@@ -5576,7 +5649,7 @@ function renderPicks(){
     for(var k in allUsedConfs){ if(Number(k)!==thisConf) usedConfs[k]=true; }
     var cardHtml=renderGameCard(weekId,gid,g,canPick,viewerPicks,locked,result,N,usedConfs);
     // Wrap unpicked games with a subtle left accent
-    if(!locked&&!isPicked&&ST.user&&!isGameLocked(weekId,gid)){
+    if(!locked&&!isPicked&&viewer&&!pickGameLocked(weekId,gid)){
       h+='<div style="border-left:3px solid var(--border2);margin-bottom:10px;border-radius:12px" class="unpicked-wrap" data-gid="'+gid+'">';
       h+=cardHtml.replace('class="game-card"','class="game-card" style="margin-bottom:0"');
       h+='</div>';
@@ -5590,7 +5663,7 @@ function renderPicks(){
   var tb=ST.tiebreaker[weekId]||{};
   if(tbReady(weekId)){
     var _tbProp=tbMode(weekId)==="prop";
-    var tbPick=((ST.picks[weekId]||{})[ST.user]||{}).tb||"";
+    var tbPick=((ST.picks[weekId]||{})[viewer]||{}).tb||"";
     var tbLocked=!!ST.locked[weekId];
     h+='<div class="games-wrap" style="padding-top:0">';
     h+='<div class="game-card" style="border-color:var(--purple);box-shadow:4px 4px 0 var(--purple)">';
@@ -5614,23 +5687,23 @@ function renderPicks(){
     if(tbLocked){
       h+='<span style="font-size:14px;font-weight:900;color:var(--purple)">'+(tbPick||'–')+'</span>';
     } else {
-      h+='<input id="tb-guess-input" type="number" min="0" placeholder="'+(_tbProp?'e.g. 275':'e.g. 47')+'" value="'+x(tbPick)+'" '+(ST.user?'':'disabled')+' style="width:80px;border:2px solid var(--border);border-radius:6px;padding:5px 8px;font-size:13px;font-weight:800;font-family:\'Nunito\',sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
+      h+='<input id="tb-guess-input" type="number" min="0" placeholder="'+(_tbProp?'e.g. 275':'e.g. 47')+'" value="'+x(tbPick)+'" '+(viewer?'':'disabled')+' style="width:80px;border:2px solid var(--border);border-radius:6px;padding:5px 8px;font-size:13px;font-weight:800;font-family:\'Nunito\',sans-serif;background:#ffffff;box-shadow:2px 2px 0 var(--border)">';
     }
     h+='</div>';
     h+='</div></div>';
   }
 
   // All-picked celebration
-  if(ST.user&&!locked&&N>0&&made===N&&confsMade===N&&!dupes){
-    var _celebKey="cfb_celeb_"+weekId+"_"+ST.user;
+  if(viewer&&!locked&&N>0&&made===N&&confsMade===N&&!dupes){
+    var _celebKey="cfb_celeb_"+weekId+"_"+viewer;
     var _celebSeen=false;
     try{ _celebSeen=!!sessionStorage.getItem(_celebKey); }catch(e){}
     if(!_celebSeen){
       try{ sessionStorage.setItem(_celebKey,"1"); }catch(e){}
       h+='<div style="background:var(--green-bg);border-top:2px solid var(--border2);padding:12px 16px;text-align:center">';
       h+='<div style="font-size:20px;margin-bottom:4px">&#127881;</div>';
-      h+='<div style="font-size:12px;font-weight:900;color:var(--green);margin-bottom:2px">All picks submitted!</div>';
-      h+='<div style="font-size:10px;font-weight:700;color:var(--muted)">'+N+' picks &middot; confidence 1–'+N+' assigned &middot; you\'re locked in</div>';
+      h+='<div style="font-size:12px;font-weight:900;color:var(--green);margin-bottom:2px">'+(proxy?(x(nameOf(viewer))+"&#39;s picks are all in!"):"All picks submitted!")+'</div>';
+      h+='<div style="font-size:10px;font-weight:700;color:var(--muted)">'+N+' picks &middot; confidence 1–'+N+' assigned &middot; '+(proxy?'entered by admin':'you\'re locked in')+'</div>';
       h+='</div>';
     }
   }
@@ -6041,6 +6114,29 @@ function renderImportResults(weekId){
 
 function renderAdmin(){
   var h='<div class="adm-wrap">';
+  if(canPickForOthers() && (PARTS||[]).length){
+    var _pfWk=ST.curWeek||displayWeekId();
+    h+='<div class="adm-sec-label">Submit Picks for a Player</div>';
+    h+='<div class="adm-game">';
+    h+='<div class="adm-game-title">Enter picks on someone&#39;s behalf if they can&#39;t get to the app'+
+       (_pfWk?(' &mdash; '+x(ST.weekLabels[_pfWk]||_pfWk)):'')+'</div>';
+    var _pfMembers=_pickForMembers(_pfWk);
+    var _pfMissing=_pfMembers.filter(function(m){ return !(m.n>0&&m.made===m.n); }).length;
+    if(_pfWk && _pfMembers.length && _pfMembers[0].n){
+      h+='<div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:4px">'+
+         (_pfMissing?(_pfMissing+' of '+_pfMembers.length+' still need picks this week'):'Everyone has a full slate this week &#127881;')+'</div>';
+    }
+    h+='<div style="max-height:260px;overflow-y:auto">';
+    _pfMembers.forEach(function(m){
+      var done=m.n>0&&m.made===m.n;
+      h+='<div class="pfp-row">';
+      h+='<div class="pfp-name">'+pem(m.uid)+x(m.name)+(m.uid===ST.user?' <span style="color:var(--muted);font-weight:700">(you)</span>':'')+'</div>';
+      if(m.n) h+='<span class="pfp-count" style="color:'+(done?'var(--green)':m.made?'var(--gold-dark)':'var(--red2)')+'">'+(done?'&#10003; ':'')+m.made+'/'+m.n+'</span>';
+      h+='<button class="adm-btn'+(done?'':' sel')+'" data-pick-for="'+x(m.uid)+'">'+(m.uid===ST.user?'My picks':'Enter picks')+'</button>';
+      h+='</div>';
+    });
+    h+='</div></div>';
+  }
   if(GROUP_ID){
     h+='<div class="adm-sec-label">Group Settings</div>';
     h+='<div class="adm-game"><div class="adm-game-title">Public Leaderboard — anyone (even guests) can view a read-only leaderboard for this group</div><div class="adm-btns">';
@@ -7051,7 +7147,7 @@ function draw(){
   tabs.forEach(function(t){h+='<button class="ptab'+(ST.page===t.id?" active":"")+'" data-page="'+t.id+'">'+t.lbl+'</button>';});
   h+='</div>';
 
-  if(!ST.user&&!ST.admin&&!PUBLIC_VIEW&&ST.page!=="scores"&&ST.page!=="group"){
+  if(!ST.user&&!ST.admin&&!proxyActive()&&!PUBLIC_VIEW&&ST.page!=="scores"&&ST.page!=="group"){
     h+=userSelectScreen();
     document.getElementById("root").innerHTML=h;
     stopScoreRefresh();
@@ -7192,6 +7288,24 @@ function bind(){
   el=document.getElementById("b-resend-picks"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-resend-banner"); if(el) el.addEventListener("click",function(){ resyncPicks(ST.curWeek||displayWeekId()); });
   el=document.getElementById("b-reset-picks"); if(el) el.addEventListener("click",function(){ resetAllPicks(ST.curWeek); });
+
+  // Pick on behalf (master admin)
+  el=document.getElementById("pickas-select"); if(el) el.addEventListener("change",function(){
+    setPickAs(this.value||null);
+    if(proxyActive()) toast("&#128737;&#65039; Picking for "+x(nameOf(ST.pickAs)));
+    draw();
+  });
+  el=document.getElementById("b-pickas-done"); if(el) el.addEventListener("click",function(){
+    setPickAs(null); toast("Back to your own picks"); draw();
+  });
+  els=document.querySelectorAll("[data-pick-for]");
+  for(i=0;i<els.length;i++) els[i].addEventListener("click",function(){
+    setPickAs(this.getAttribute("data-pick-for"));
+    ST.page="picks";
+    if(ST.curWeek&&ST._subscribePicksForWeek&&!ST.picks[ST.curWeek]) ST._subscribePicksForWeek(ST.curWeek);
+    draw();
+    try{ window.scrollTo(0,0); }catch(e){}
+  });
 
   // Tiebreaker guess input (picks tab)
   el=document.getElementById("tb-guess-input"); if(el){
@@ -7567,7 +7681,7 @@ function bind(){
     var wk=this.getAttribute("data-conf-week");
     var gi=this.getAttribute("data-conf-gid");
     var val=this.getAttribute("data-conf-val");
-    var cur=(((ST.picks[wk]||{})[ST.user]||{})[gi]||{}).conf;
+    var cur=(((ST.picks[wk]||{})[pickUid()]||{})[gi]||{}).conf;
     setConf(wk,gi,Number(cur)===Number(val)?null:val);
   });
 

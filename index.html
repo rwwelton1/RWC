@@ -6288,7 +6288,7 @@ function renderAdmin() {
 
   h += '<div class="section-label">Manage Groups</div>';
   h += '<div class="admin-panel" style="margin-bottom:16px">';
-  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Delete a group permanently. This cannot be undone.</div>';
+  h += '<div style="font-size:10px;color:#475569;margin-bottom:12px">Tap Members to see who&#39;s in a group and remove someone. Delete removes the whole group permanently and cannot be undone.</div>';
   h += '<div id="admin-all-groups"><div style="color:#334155;font-size:11px;text-align:center;padding:8px">Loading groups...</div></div>';
   h += '</div>';
 
@@ -6722,11 +6722,41 @@ function renderAdmin() {
       var playerCount = (g.players||[]).length;
       html += '<div class="pool-control-row">';
       html += '<div class="pcr-name">'+x(g.name||g.id)+' <span style="color:#94a3b8;font-weight:700">('+playerCount+' player'+(playerCount===1?'':'s')+')</span></div>';
-      html += '<div class="pcr-btns"><button class="pcr-btn sel-locked" data-admin-del-group="'+x(g.id)+'" data-admin-del-name="'+x(g.name||g.id)+'">Delete</button></div>';
+      html += '<div class="pcr-btns">';
+      html += '<button class="pcr-btn" data-admin-members="'+x(g.id)+'"'+(playerCount?'':' disabled style="opacity:.4;cursor:default"')+'>&#128101; Members</button>';
+      html += '<button class="pcr-btn sel-locked" data-admin-del-group="'+x(g.id)+'" data-admin-del-name="'+x(g.name||g.id)+'">Delete</button>';
+      html += '</div>';
+      // Member list opens inside the row (full width) so Delete still clears it in one go.
+      html += '<div id="agm-'+x(g.id)+'" style="display:none;flex-basis:100%;width:100%"></div>';
       html += '</div>';
     });
     html += '</div>';
     container.innerHTML = html;
+    container.querySelectorAll("[data-admin-members]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var gid = this.getAttribute("data-admin-members");
+        var panel = document.getElementById("agm-"+gid);
+        if(!panel) return;
+        if(panel.style.display !== "none"){ panel.style.display = "none"; this.classList.remove("sel-soon"); delete _agmOpen[gid]; return; }
+        _agmOpen[gid] = true;   // survives the admin screen redrawing underneath it
+        this.classList.add("sel-soon");
+        panel.style.display = "";
+        panel.innerHTML = '<div style="color:#94a3b8;font-size:11px;padding:6px 0">Loading members…</div>';
+        // Read the group fresh — the cached list may be up to 30s old.
+        if(!DB) return;
+        DB.ref("groups/"+gid).once("value", function(sn){
+          var g = sn.val();
+          if(!g){ panel.innerHTML = '<div style="color:#94a3b8;font-size:11px;padding:6px 0">Group not found</div>'; return; }
+          g.id = gid;
+          renderMasterGroupMembers(g, panel);
+        });
+      });
+    });
+    // Re-open any member lists that were open before a redraw.
+    Object.keys(_agmOpen).forEach(function(gid){
+      var mb = container.querySelector('[data-admin-members="'+gid+'"]');
+      if(mb) mb.click(); else delete _agmOpen[gid];
+    });
     var delBtns = container.querySelectorAll("[data-admin-del-group]");
     for(var di=0; di<delBtns.length; di++){
       delBtns[di].addEventListener("click", async function(){
@@ -6872,6 +6902,96 @@ function renderAdmin() {
 }
 
 // ── USER MANAGEMENT ───────────────────────────────────────────────────────────
+var _agmOpen = {};   // Manage Groups: which groups' member lists are expanded
+
+// Master admin: take one member out of a group.
+// Removes them from the group's players and adminUids AND from their own
+// users/{uid}/groups index (otherwise the group lingers on their Hub), in one
+// atomic multi-path update. Their past picks are left in the pool's data so
+// history isn't rewritten, but they drop off the member list, standings and pot.
+function masterRemoveFromGroup(gid, uid, cb){
+  if(!DB){ cb && cb("Firebase unavailable"); return; }
+  DB.ref("groups/"+gid).once("value", function(sn){
+    var g = sn.val();
+    if(!g){ cb && cb("Group not found"); return; }
+    if(uid===g.ownerUid || uid===g.createdByUid){ cb && cb("Can't remove the group creator"); return; }
+    var players = (g.players||[]).filter(function(p){ return p!==uid; });
+    var _v = g.adminUids||[]; var _arr = Array.isArray(_v)?_v:Object.keys(_v);
+    var adminUids = _arr.filter(function(p){ return p!==uid; });
+    DB.ref("users/"+uid+"/groups").once("value", function(usn){
+      var updates = {};
+      updates["groups/"+gid+"/players"] = players;
+      updates["groups/"+gid+"/adminUids"] = adminUids;
+      var ug = usn.val();
+      // Only touch the index if the account has one — legacy name-only players don't.
+      if(Array.isArray(ug)) updates["users/"+uid+"/groups"] = ug.filter(function(x2){ return x2!==gid; });
+      DB.ref().update(updates, function(err){
+        if(err){ cb && cb(err.message||"Error"); return; }
+        _groupsCache = null;
+        cb && cb(null, {players:players, adminUids:adminUids});
+      }).catch(function(){});
+    }, function(){
+      // Can't read their index — still remove them from the group itself.
+      var updates = {};
+      updates["groups/"+gid+"/players"] = players;
+      updates["groups/"+gid+"/adminUids"] = adminUids;
+      DB.ref().update(updates, function(err){
+        if(err){ cb && cb(err.message||"Error"); return; }
+        _groupsCache = null;
+        cb && cb(null, {players:players, adminUids:adminUids});
+      }).catch(function(){});
+    });
+  }, function(err){ cb && cb((err&&err.message)||"Couldn't read group"); });
+}
+
+// Member list shown under a group in Manage Groups, each with a Remove button.
+function renderMasterGroupMembers(group, panel){
+  var players = (group.players||[]).slice();
+  var gname = group.name||group.id;
+  // Keep the "(N players)" count on the row in step with the list.
+  var row = panel.closest(".pool-control-row");
+  var countEl = row ? row.querySelector(".pcr-name span") : null;
+  if(countEl) countEl.textContent = "("+players.length+" player"+(players.length===1?"":"s")+")";
+  if(!players.length){
+    panel.innerHTML = '<div style="color:#94a3b8;font-size:11px;padding:6px 0">No members in this group</div>';
+    return;
+  }
+  players.sort(function(a,b){ return (nameOf(a)||"").localeCompare(nameOf(b)||""); });
+  var _au = group.adminUids||[]; var adminArr = Array.isArray(_au)?_au:Object.keys(_au);
+  var h = '<div style="margin-top:4px;padding:8px 10px;background:var(--cream,#fdf8ee);border:2px solid var(--border2);border-radius:10px;max-height:320px;overflow-y:auto">';
+  players.forEach(function(uid){
+    var isCreator = uid===group.ownerUid || uid===group.createdByUid;
+    var isAdm = adminArr.indexOf(uid)>=0;
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2)">';
+    h += '<div style="flex:1;min-width:0;font-size:11px;font-weight:800;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+emojiOf(uid)+' '+x(nameOf(uid)||uid)+
+         (isCreator?' <span style="font-size:9px;color:var(--gold-dark,#b89a00)">creator</span>':(isAdm?' <span style="font-size:9px;color:var(--gold-dark,#b89a00)">⚡ admin</span>':''))+'</div>';
+    if(isCreator){
+      h += '<span style="font-size:9px;color:#94a3b8;font-weight:700">can&#39;t remove</span>';
+    } else {
+      h += '<button class="pcr-btn sel-locked" data-agm-remove="'+x(uid)+'">&#10005; Remove</button>';
+    }
+    h += '</div>';
+  });
+  h += '</div>';
+  panel.innerHTML = h;
+  panel.querySelectorAll("[data-agm-remove]").forEach(function(btn){
+    btn.addEventListener("click", async function(){
+      var uid = this.getAttribute("data-agm-remove");
+      var who = nameOf(uid)||uid;
+      if(!await scConfirm('Remove '+who+' from "'+gname+'"? They\'ll lose access to the group and drop off its standings.', {title:"Remove Member", okLabel:"Remove", danger:true})) return;
+      var b = this;
+      b.textContent = "Removing…"; b.style.pointerEvents = "none";
+      masterRemoveFromGroup(group.id, uid, function(err, res){
+        if(err){ toast(String(err),"err"); b.innerHTML = "&#10005; Remove"; b.style.pointerEvents = ""; return; }
+        group.players = res.players;
+        group.adminUids = res.adminUids;
+        toast(who+" removed from "+gname);
+        renderMasterGroupMembers(group, panel);
+      });
+    });
+  });
+}
+
 function renderGroupAdminMembers(group, container) {
   var players = group.players || [];
   if(!players.length){ container.innerHTML='<div style="color:#334155;font-size:11px;text-align:center;padding:8px">No members in this group</div>'; return; }
@@ -6940,23 +7060,12 @@ function renderGroupAdminMembers(group, container) {
       var gid = this.getAttribute("data-ga-gid");
       if(player===group.ownerUid || player===group.createdByUid){ toast("Can't remove the group creator"); return; }
       if(!await scConfirm("Remove "+nameOf(player)+" from "+group.name+"?", {title:"Remove Player", okLabel:"Remove", danger:true})) return;
-      if(!DB) return;
-      DB.ref("groups/"+gid).once("value", function(sn){
-        var g = sn.val()||{};
-        var players = (g.players||[]).filter(function(p){ return p!==player; });
-        var _v=g.adminUids||[]; var _arr=Array.isArray(_v)?_v:Object.keys(_v);
-        var adminUids = _arr.filter(function(p){ return p!==player; });
-        var updates = {};
-        updates["groups/"+gid+"/players"] = players;
-        updates["groups/"+gid+"/adminUids"] = adminUids;
-        DB.ref().update(updates, function(err){
-          if(err){ toast("Error"); return; }
-          group.players = players;
-          group.adminUids = adminUids;
-          _groupsCache = null;
-          toast(nameOf(player)+" removed from "+group.name);
-          renderGroupAdminMembers(group, container);
-        });
+      masterRemoveFromGroup(gid, player, function(err, res){
+        if(err){ toast(String(err),"err"); return; }
+        group.players = res.players;
+        group.adminUids = res.adminUids;
+        toast(nameOf(player)+" removed from "+group.name);
+        renderGroupAdminMembers(group, container);
       });
     });
   });
