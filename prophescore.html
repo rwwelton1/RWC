@@ -3623,6 +3623,29 @@ function pxTierCmp(){
   PX._tc = { key: key, v: T };
   return T;
 }
+// Trust in the model this season, next to the trust measured on past seasons (saved by the backtest).
+// Trusted picks are graded with the past seasons' trust when there is one, so they're honest; with
+// only this season's, the record has seen its own games and is marked so.
+function pxTrustCardHtml(r){
+  var S = pxState(), M = S.mk || null, G = (r.games || []).filter(function(q){ return q.vh !== null && q.vh !== undefined; });
+  var T = pxTrustFit(G.map(function(q){ return [q.pred - q.vh, q.act - q.vh]; })), use = M || T;
+  var h = '<div class="pem-hd" style="margin-top:12px">Trust in the model vs the close</div>';
+  if(!T && !M) return h + '<div class="pem-autosub">Needs about 30 graded games with closing lines, or a backtest run on past seasons (Tune tab).</div>';
+  var kc = function(Z){ return '<b class="' + (Z.k - 2 * Z.se > 0 ? 'up' : Z.k + 2 * Z.se < 0 ? 'dn' : '') + '">' + Z.k.toFixed(2) + '</b> <small>±' + Z.se.toFixed(2) + ' · ' + Z.n + ' games</small>'; };
+  h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span></span><span>Trust</span><span></span></div>';
+  if(T) h += '<div class="pem-bkrow"><span>This season</span><span>' + kc(T) + '</span><span></span></div>';
+  if(M) h += '<div class="pem-bkrow"><span>Past seasons <small>(' + x((M.seasons || []).join(', ')) + (M.sig !== JSON.stringify(S.opts) ? ', other settings' : '') + ')</small></span><span>' + kc(M) + '</span><span></span></div>';
+  h += '</div>';
+  var k = Math.max(0, use.k), gap = use.k > 0.005 ? PX_BE_Z * use.s / use.k : null, w = 0, l = 0;
+  if(gap !== null) G.forEach(function(q){ var d = q.pred - q.vh, c = q.act - q.vh; if(Math.abs(d) < gap || !c) return; if((c > 0) === (d > 0)) w++; else l++; });
+  h += '<div class="pem-autosub" style="margin-top:6px">' + (gap === null
+      ? 'At this trust the model’s disagreement with the close hasn’t paid: no gap is big enough to clear break-even.'
+      : 'Using trust <b>' + k.toFixed(2) + '</b>' + (M ? ' (past seasons)' : ' (this season — it has seen these games, so the record flatters)') + ': a pick clears 52.4% only when the model is <b>' + gap.toFixed(1) + '+</b> points off the close. ' +
+        'Those picks this season: <b class="' + ((w + l) && w / (w + l) >= 0.524 ? 'up' : 'dn') + '">' + w + '-' + l + ((w + l) ? ' (' + (100 * w / (w + l)).toFixed(1) + '%)' : '') + '</b>. ' +
+        'A 7-point disagreement is worth about ' + (7 * k).toFixed(1) + ' points, a ' + (100 * pearNormCdf(7 * k / use.s)).toFixed(1) + '% cover chance.') + '</div>';
+  h += '<div class="pem-autonote" style="margin-top:4px">Trust is how much of the model’s disagreement with the closing line has shown up in results: 0 means the line already had it, 1 means take the model’s number outright. The honest projection is close + trust × (model − close). Run the backtest (Tune tab) to measure it on past seasons; it saves the baseline’s trust here.</div>';
+  return h;
+}
 // Model vs market: errors, records and closing line value in one card.
 function pxEvalCardHtml(){
   var r = pxAts(); if(!r) return "";
@@ -3653,6 +3676,7 @@ function pxEvalCardHtml(){
     h += '<div class="pem-bkrow"><span>Moved toward–away</span><span>' + C.tw + '-' + C.ta + '</span><span>' + C.ttw + '-' + C.tta + '</span></div>';
     h += '<div class="pem-bkrow"><span>Share of gap closed</span><b class="' + (C.toward > 0 ? "up" : "dn") + '">' + (C.gap ? (100 * C.toward / C.gap).toFixed(0) + '%' : '—') + '</b><b class="' + (C.ttoward > 0 ? "up" : "dn") + '">' + (C.tgap ? (100 * C.ttoward / C.tgap).toFixed(0) + '%' : '—') + '</b></div></div>';
   }
+  h += pxTrustCardHtml(r);
   // Spread calibration: are the model's spreads as wide as real results (and the market)?
   if(r.cal.length >= 30){
     var slope = function(xi, yi){ var n = r.cal.length, mx = 0, my = 0; r.cal.forEach(function(q){ mx += q[xi]; my += q[yi]; }); mx /= n; my /= n; var sxy = 0, sxx = 0; r.cal.forEach(function(q){ sxy += (q[xi] - mx) * (q[yi] - my); sxx += (q[xi] - mx) * (q[xi] - mx); }); return sxx ? sxy / sxx : null; };
@@ -3904,6 +3928,30 @@ function pxTunesHtml(){
   return h;
 }
 
+// ── Trust in the model vs the line ──────────────────────────────────────────
+// The closing line already prices most of what the model knows, so the useful question is how much
+// of the model's disagreement with the line shows up in results. Fit, through the origin,
+//   (result − line) = k · (model − line)
+// k = 0: the line already had it all; k = 1: take the model's number outright. The blend
+// line + k·(model − line) is the honest projection, and a pick is worth making only when the blend
+// sits far enough from the line to clear −110 (a 52.4% cover chance).
+var PX_BE_Z = 0.0597;                                   // the z-score of a 52.4% cover chance
+// P: [[model − line, result − line], …]. Returns k, its standard error, the spread s of what's left,
+// and the gap (model vs line, in points) a pick needs before the blend clears break-even.
+function pxTrustFit(P){
+  var sxx = 0, sxy = 0, n = 0;
+  P.forEach(function(q){ sxx += q[0] * q[0]; sxy += q[0] * q[1]; n++; });
+  if(n < 30 || !(sxx > 0)) return null;
+  var k = sxy / sxx, ss = 0; P.forEach(function(q){ var e = q[1] - k * q[0]; ss += e * e; });
+  var s = Math.sqrt(ss / (n - 1));
+  return { k: k, se: s / Math.sqrt(sxx), s: s, n: n, gap: k > 0.005 ? PX_BE_Z * s / k : null };
+}
+function pxMeanSe(a){
+  if(a.length < 2) return null;
+  var m = 0; a.forEach(function(v){ m += v; }); m /= a.length; var ss = 0; a.forEach(function(v){ ss += (v - m) * (v - m); });
+  return { m: m, se: Math.sqrt(ss / (a.length - 1) / a.length), n: a.length };
+}
+
 // ── Backtest on past seasons ────────────────────────────────────────────────
 // Grades several settings side by side on the 2023–25 seasons saved under Data → Past seasons,
 // walk-forward (each week predicted only from the weeks before it), settings held fixed all season.
@@ -3944,52 +3992,95 @@ function pxBtWorker(){
     // Tune on past seasons: the live tuner's one-knob-at-a-time search, scored on every graded game of
     // every saved season at once. A knob moves only on a PX_TUNE_T-standard-error gain that also shows
     // up in at least two of three seasons (so one odd season can't carry it).
+    // Aim "res": closest to the result (spread miss). Aim "line": the best correction to the closing
+    // line, i.e. the miss of line + k·(model − line) with k (the trust) fitted for each setting.
+    // With M.cv it then checks itself: the same search with each season left out, graded on that season.
     function runTune(M){
-      var FIRST = PX_FIRST_GRADED, SE = {}, order = [];
+      var FIRST = PX_FIRST_GRADED, SE = {}, order = [], obj = M.obj === "line" ? "line" : "res";
       M.seasons.forEach(function(sd){
-        var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y }, maxW = 0, weeks = {};
+        var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y }, maxW = 0, weeks = {}, list = [];
         Object.keys(sd.wk || {}).forEach(function(k){ var W = sd.wk[k]; if(!W) return; W.y = W.y || y; W.w = W.w || +k.replace(/\D/g, ""); S.wk[y + "-" + W.w] = W; if(W.w > maxW) maxW = W.w;
-          (W.games || []).forEach(function(g){ if(g && g.c && W.w >= FIRST && g.hs !== null && g.hs !== undefined && g.as !== null && g.as !== undefined) (weeks[W.w] = weeks[W.w] || []).push(g); }); });
-        SE[y] = { S: S, maxW: maxW, weeks: weeks, ws: Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; }), lg: {}, sch: null, pp: null };
+          (W.games || []).forEach(function(g){ if(g && g.c && W.w >= FIRST && g.hs !== null && g.hs !== undefined && g.as !== null && g.as !== undefined){
+            var L = (W.lines || {})[g.id]; (weeks[W.w] = weeks[W.w] || []).push(list.length);
+            list.push({ g: g, id: g.id, act: g.hs - g.as, vh: L && isFinite(L.c) ? -L.c : null }); } }); });
+        SE[y] = { S: S, maxW: maxW, weeks: weeks, list: list, ws: Object.keys(weeks).map(Number).sort(function(a, b){ return a - b; }), lg: {}, sch: null, pp: null, cache: {}, nc: 0 };
         order.push(y);
       });
       // Each season keeps its own simulator calibration (the slow part, the same for every setting); fits are dropped after each pass over a season.
       function use(y){ var E = SE[y]; PE.meta = { espnYear: y, espnWeek: E.maxW }; PE.priors = M.priors || {}; PE.px = E.S; PX_LG = E.lg; PX._sch = E.sch; PEM._ppCache = E.pp; PX.fits = {}; PX.sims = {}; }
       function park(y){ var E = SE[y]; E.lg = PX_LG; E.sch = PX._sch; E.pp = PEM._ppCache; PX.fits = {}; }
-      function evalO(o){
-        var em = {}, per = {};
-        order.forEach(function(y){ use(y); var E = SE[y], sm = 0, n = 0;
-          E.ws.forEach(function(w){ var fit = pxFit(w, o); E.weeks[w].forEach(function(g){ var p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), e = Math.abs((p.home - p.away) - (g.hs - g.as)); em[y + "|" + g.id] = e; sm += e; n++; }); });
-          per[y] = n ? sm / n : null; park(y); });
-        return { em: em, per: per, m: pemMeanErr(em) };
+      // One setting's predictions on one season, kept: the held-out check revisits many of the same settings.
+      function preds(o, y){
+        var E = SE[y], key = JSON.stringify(o); if(E.cache[key]) return E.cache[key];
+        if(E.nc >= 600){ E.cache = {}; E.nc = 0; }
+        use(y); var out = new Float64Array(E.list.length);
+        E.ws.forEach(function(w){ var fit = pxFit(w, o); E.weeks[w].forEach(function(i){ var g = E.list[i].g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)); out[i] = p.home - p.away; }); });
+        park(y); E.cache[key] = out; E.nc++; return out;
       }
-      var o = Object.assign({}, PX_DEFAULTS, M.start), G = M.grid, keys = Object.keys(G), need = Math.ceil(order.length * 2 / 3), moves = [];
-      var perPass = 0; keys.forEach(function(k){ perPass += G[k].length; });
-      self.postMessage({ t: "prog", msg: "Grading the starting settings\u2026", pct: 0 });
-      var cur = evalO(o), start = cur, done = 0;
-      for(var pass = 0; pass < 3; pass++){
-        var acc = 0;
-        keys.forEach(function(key){
-          var best = null;
-          G[key].forEach(function(v){
-            done++;
-            if(v === o[key]) return;
-            self.postMessage({ t: "prog", msg: "Pass " + (pass + 1) + " \u00b7 " + key + " = " + v, pct: Math.min(0.99, done / (perPass * (pass + 1))), pass: pass + 1 });
-            var oo = Object.assign({}, o); oo[key] = v;
-            var r = evalO(oo); if(r.m !== null && (!best || r.m < best.r.m)) best = { v: v, r: r };
+      function trustOf(o, ys){
+        var P = []; ys.forEach(function(y){ var E = SE[y], pr = preds(o, y); E.list.forEach(function(it, i){ if(it.vh !== null) P.push([pr[i] - it.vh, it.act - it.vh]); }); });
+        return pxTrustFit(P);
+      }
+      // Score a setting on seasons ys. For aim "line", the trust comes from kFrom (default: ys itself).
+      function score(o, ys, kFrom){
+        var em = {}, per = {}, T = null, k = 0;
+        if(obj === "line"){ T = trustOf(o, kFrom || ys); k = T ? Math.max(0, T.k) : 0; }
+        ys.forEach(function(y){ var E = SE[y], pr = preds(o, y), sm = 0, n = 0;
+          E.list.forEach(function(it, i){ var e;
+            if(obj === "line"){ if(it.vh === null) return; e = Math.abs((it.act - it.vh) - k * (pr[i] - it.vh)); }
+            else e = Math.abs(pr[i] - it.act);
+            em[y + "|" + it.id] = e; sm += e; n++; });
+          per[y] = n ? sm / n : null; });
+        return { em: em, per: per, m: pemMeanErr(em), k: k, T: T };
+      }
+      var G = M.grid, keys = Object.keys(G), perPass = 0; keys.forEach(function(k){ perPass += G[k].length; });
+      var stages = 1 + (M.cv && order.length > 1 ? order.length : 0), stage = 0;
+      function search(ys, o0, live, tag){
+        var o = Object.assign({}, o0), need = Math.ceil(ys.length * 2 / 3), moves = [], done = 0;
+        self.postMessage({ t: "prog", msg: tag + "Grading the starting settings…", pct: stage / stages });
+        var cur = score(o, ys), start = cur;
+        for(var pass = 0; pass < 3; pass++){
+          var acc = 0;
+          keys.forEach(function(key){
+            var best = null;
+            G[key].forEach(function(v){
+              done++;
+              if(v === o[key]) return;
+              self.postMessage({ t: "prog", msg: tag + "Pass " + (pass + 1) + " · " + key + " = " + v, pct: Math.min(0.99, (stage + Math.min(0.99, done / (perPass * (pass + 1)))) / stages), pass: pass + 1 });
+              var oo = Object.assign({}, o); oo[key] = v;
+              var r = score(oo, ys); if(r.m !== null && (!best || r.m < best.r.m)) best = { v: v, r: r };
+            });
+            if(!best) return;
+            var pd = pemPairedDiff(best.r.em, cur.em), wins = 0;
+            ys.forEach(function(y){ if(best.r.per[y] !== null && cur.per[y] !== null && best.r.per[y] < cur.per[y]) wins++; });
+            if(pd && pd.se > 0 && -pd.d / pd.se >= M.T && wins >= need){
+              var mv = { k: key, from: o[key], to: best.v, d: pd.d, se: pd.se, wins: wins, per: best.r.per };
+              moves.push(mv); o[key] = best.v; cur = best.r; acc++;
+              if(live) self.postMessage({ t: "move", mv: mv });
+            }
           });
-          if(!best) return;
-          var pd = pemPairedDiff(best.r.em, cur.em), wins = 0;
-          order.forEach(function(y){ if(best.r.per[y] !== null && cur.per[y] !== null && best.r.per[y] < cur.per[y]) wins++; });
-          if(pd && pd.se > 0 && -pd.d / pd.se >= M.T && wins >= need){
-            var mv = { k: key, from: o[key], to: best.v, d: pd.d, se: pd.se, wins: wins, per: best.r.per };
-            moves.push(mv); o[key] = best.v; cur = best.r; acc++;
-            self.postMessage({ t: "move", mv: mv });
-          }
-        });
-        if(!acc) break;
+          if(!acc) break;
+        }
+        stage++;
+        return { o: o, moves: moves, start: start, cur: cur };
       }
-      self.postMessage({ t: "tuned", o: o, moves: moves, startPer: start.per, endPer: cur.per, startM: start.m, endM: cur.m, n: Object.keys(cur.em).length, seasons: order });
+      var o0 = Object.assign({}, PX_DEFAULTS, M.start), main = search(order, o0, true, "");
+      // The closing line on its own, for scale (aim "line" is the same miss with trust 0).
+      var lm = []; order.forEach(function(y){ SE[y].list.forEach(function(it){ if(it.vh !== null) lm.push(Math.abs(it.act - it.vh)); }); });
+      var out = { t: "tuned", o: main.o, moves: main.moves, startPer: main.start.per, endPer: main.cur.per, startM: main.start.m, endM: main.cur.m, n: Object.keys(main.cur.em).length, seasons: order, obj: obj,
+                  lineM: lm.length ? lm.reduce(function(a, b){ return a + b; }, 0) / lm.length : null,
+                  kStart: (main.start.T || trustOf(o0, order) || {}).k, kEnd: (main.cur.T || trustOf(main.o, order) || {}).k };
+      if(stages > 1){
+        var cv = [], allA = {}, allB = {};
+        order.forEach(function(y){
+          var train = order.filter(function(z){ return z !== y; }), r = search(train, o0, false, "Check: " + y + " held out · ");
+          var a = score(r.o, [y], train), b = score(o0, [y], train), pd = pemPairedDiff(a.em, b.em);
+          for(var id in a.em){ allA[id] = a.em[id]; allB[id] = b.em[id]; }
+          cv.push({ y: y, moves: r.moves.map(function(m){ return { k: m.k, to: m.to }; }), d: pd ? pd.d : 0, se: pd ? pd.se : 0, n: pd ? pd.n : 0, a: a.m, b: b.m });
+        });
+        out.cv = cv; out.cvAll = pemPairedDiff(allA, allB);
+      }
+      self.postMessage(out);
     }
     self.onmessage = function(e){
       var M = e.data, FIRST = PX_FIRST_GRADED, total = 0, done = 0;
@@ -4010,7 +4101,8 @@ function pxBtWorker(){
               var o = Object.assign({}, PX_DEFAULTS, c.o), fit = pxFit(w, o);
               (weeks[w] || []).forEach(function(x){ var g = x.g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), L = (x.W.lines || {})[g.id] || null;
                 preds.push({ c: c.k, y: y, w: w, id: g.id, pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as,
-                  vh: L && isFinite(L.c) ? -L.c : null, vt: L && L.t !== null && L.t !== undefined && isFinite(L.t) ? +L.t : null, xT: (pxIsP4(g.h) ? 1 : 0) - (pxIsP4(g.a) ? 1 : 0) }); });
+                  vh: L && isFinite(L.c) ? -L.c : null, vt: L && L.t !== null && L.t !== undefined && isFinite(L.t) ? +L.t : null, xT: (pxIsP4(g.h) ? 1 : 0) - (pxIsP4(g.a) ? 1 : 0),
+                  vo: L && L.o !== null && L.o !== undefined && isFinite(L.o) ? -L.o : null, ph: pxIsP4(g.h) ? 1 : 0, pa: pxIsP4(g.a) ? 1 : 0, nu: g.n ? 1 : 0 }); });
             });
             done++;
           });
@@ -4074,12 +4166,13 @@ function pxBtTune(){
       if(d.t === "prog"){ PXB.pct = d.pct || 0; PXB.msg = d.msg; pxBtStatus(true); }
       else if(d.t === "move"){ PXB.tune.moves.push(d.mv); pxBtStatus(); }
       else if(d.t === "tuned"){
-        var ys = d.seasons, name = "Tuned on " + (ys.length > 1 ? ys[0] + "\u2013" + String(ys[ys.length - 1]).slice(2) : ys[0]);
+        var ys = d.seasons, name = "Tuned on " + (ys.length > 1 ? ys[0] + "\u2013" + String(ys[ys.length - 1]).slice(2) : ys[0]) + (d.obj === "line" ? " (vs line)" : "");
         var T = pxTunes(), id = null; pxTuneList().forEach(function(t){ if(t.n === name) id = t.id; }); if(!id) id = "t" + Date.now().toString(36);
         var keep = {}; for(var k in PX_DEFAULTS) keep[k] = typeof d.o[k] === "number" ? d.o[k] : PX_DEFAULTS[k];
         T[id] = { n: name, o: keep, at: (T[id] && T[id].at) || Date.now() };
         pxBtSel()["s:" + id] = 1; peSave();
-        PXB.tune = { moves: d.moves, startPer: d.startPer, endPer: d.endPer, startM: d.startM, endM: d.endM, n: d.n, seasons: ys, id: id, name: name, done: true, secs: Math.round((Date.now() - PXB.t0) / 1000) };
+        PXB.tune = { moves: d.moves, startPer: d.startPer, endPer: d.endPer, startM: d.startM, endM: d.endM, n: d.n, seasons: ys, id: id, name: name, done: true, secs: Math.round((Date.now() - PXB.t0) / 1000),
+                     obj: d.obj, lineM: d.lineM, kStart: d.kStart, kEnd: d.kEnd, cv: d.cv || null, cvAll: d.cvAll || null };
         pxBtTuneEnd(null);
         if(document.getElementById("px-ut")) pxUTStatus(true);          // the new tune shows in Saved tunes
         toast(d.moves.length ? "Saved \u201c" + name + "\u201d \u00b7 " + d.moves.length + " setting" + (d.moves.length === 1 ? "" : "s") + " moved" : "Nothing beat your settings clearly \u00b7 saved as \u201c" + name + "\u201d", "ok");
@@ -4087,7 +4180,7 @@ function pxBtTune(){
       else if(d.t === "err"){ pxBtTuneEnd("Tuning stopped: " + d.msg); }
     };
     w.onerror = function(ev){ pxBtTuneEnd("Tuning stopped: " + ((ev && ev.message) || "worker error")); };
-    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T });
+    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T, obj: PXB.obj === "line" ? "line" : "res", cv: !!PXB.cv });
   }).catch(function(e){ PXB.busy = false; PXB.mode = ""; PXB.msg = ""; PXB.err = (e && e.message) || String(e); PXB.tune = null; pxBtStatus(); });
 }
 function pxBtTuneEnd(err){
@@ -4107,8 +4200,19 @@ function pxBtTuneHtml(){
     h += '</div>';
   } else if(R.done) h += '<div class="pem-autosub">No setting beat your current ones clearly enough to move (a ' + PX_TUNE_T + '-standard-error gain that also holds in most seasons). Your settings are already about as good as this search can find.</div>';
   if(R.done){
-    h += '<div class="pem-autosub" style="margin-top:6px">Spread miss over <b>' + R.n + '</b> games: <b>' + R.startM.toFixed(2) + '</b> \u2192 <b>' + R.endM.toFixed(2) + '</b> \u00b7 by season ' +
+    var isL = R.obj === "line", f2 = function(v){ return v !== null && v !== undefined && isFinite(v) ? v.toFixed(2) : '\u2014'; };
+    h += '<div class="pem-autosub" style="margin-top:6px">' + (isL ? 'Miss of line + trust \u00d7 (model \u2212 line)' : 'Spread miss') + ' over <b>' + R.n + '</b> games: <b>' + R.startM.toFixed(2) + '</b> \u2192 <b>' + R.endM.toFixed(2) + '</b> \u00b7 by season ' +
          R.seasons.map(function(y){ var a = R.startPer[y], b = R.endPer[y]; return y + ' ' + (a !== null ? a.toFixed(2) : '\u2014') + '\u2192' + (b !== null ? b.toFixed(2) : '\u2014'); }).join(' \u00b7 ') + (R.secs ? ' \u00b7 took ' + (R.secs < 90 ? R.secs + ' s' : Math.round(R.secs / 60) + ' min') : '') + '</div>';
+    h += '<div class="pem-autosub" style="margin-top:4px">Trust in the model vs the close: <b>' + f2(R.kStart) + '</b> \u2192 <b>' + f2(R.kEnd) + '</b>' + (isL && R.lineM ? ' \u00b7 the closing line alone misses by ' + R.lineM.toFixed(2) + ', so the blend gains ' + (R.lineM - R.endM).toFixed(3) + ' a game' : '') + '</div>';
+    if(R.cv && R.cv.length){
+      var A = R.cvAll, real = A && A.se > 0 && -A.d / A.se >= 2;
+      h += '<div class="pem-hd" style="margin-top:10px">Held-out check</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Left out</span><span>Moves without it</span><span>Gain on it</span></div>';
+      R.cv.forEach(function(c){ var ok = c.se > 0 && -c.d / c.se >= 2;
+        h += '<div class="pem-bkrow"><span>' + c.y + '</span><span><small>' + (c.moves.length ? x(c.moves.map(function(m){ return kl(m.k).label + ' ' + kl(m.k).fmt(m.to); }).join(', ')) : 'none') + '</small></span><span><b class="' + (ok ? 'up' : c.se > 0 && c.d / c.se >= 2 ? 'dn' : '') + '">' + (-c.d >= 0 ? '+' : '') + (-c.d).toFixed(3) + '</b> <small>\u00b1' + c.se.toFixed(3) + '</small></span></div>'; });
+      if(A) h += '<div class="pem-bkrow"><span><b>All held out</b></span><span><small>' + A.n + ' games</small></span><span><b class="' + (real ? 'up' : A.se > 0 && A.d / A.se >= 2 ? 'dn' : '') + '">' + (-A.d >= 0 ? '+' : '') + (-A.d).toFixed(3) + '</b> <small>\u00b1' + A.se.toFixed(3) + '</small></span></div>';
+      h += '</div><div class="pem-autonote" style="margin-top:4px">Each season was left out, the search re-run on the others from Settings now, and the result graded on the season it never saw' + (isL ? ' (trust fitted on the others too)' : '') + '. ' +
+           (real ? '<b>It holds up</b>: tuning on other seasons helped the one left out, so the moves are likely real.' : '<b>It doesn\u2019t clearly hold up</b>: tuning on other seasons didn\u2019t reliably help the one left out, so treat the moves above as mostly noise and keep Settings now unless this season\u2019s record agrees.') + '</div>';
+    }
     h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-sm btn-ghost" data-bttune-load="' + R.id + '">Load \u201c' + x(R.name) + '\u201d into Your tune</button></div>';
     h += '<div class="pem-autonote" style="margin-top:4px">Saved as \u201c' + x(R.name) + '\u201d under Saved tunes and ticked above \u2014 press Run for its full record (ATS, totals, P4 vs G6). It was tuned on these same seasons, so its backtest numbers flatter it a little; the honest check is this season\u2019s record after you use it. The search starts from Settings now, tries each setting\u2019s values one at a time (including the P4 vs G6 adjustment and conference anchoring, which the in-season tuner leaves alone), and repeats up to three passes.</div>';
   }
@@ -4118,6 +4222,11 @@ function pxBtEnd(acc, err){
   if(PXB.worker){ try{ PXB.worker.terminate(); }catch(e){} PXB.worker = null; }
   PXB.busy = false; PXB.msg = ""; PXB.err = err || "";
   if(acc && acc.preds.length) PXB.res = { configs: acc.configs, preds: acc.preds, seasons: acc.seasons, partial: !!err, at: Date.now(), secs: Math.round((Date.now() - PXB.t0) / 1000) };
+  // Keep the baseline's trust from a finished run: the live Model vs market card uses it for trusted picks.
+  if(!err && acc && acc.preds.length){
+    var T = pxTrustFit(acc.preds.filter(function(q){ return q.c === "now" && q.vh !== null; }).map(function(q){ return [q.pred - q.vh, q.act - q.vh]; }));
+    if(T){ var S = pxState(); S.mk = { k: T.k, se: T.se, s: T.s, n: T.n, seasons: acc.seasons.slice(), sig: JSON.stringify(S.opts), at: Date.now() }; peSave(); }
+  }
   pxBtStatus();
 }
 function pxBtStop(){ if(!PXB.busy) return; if(PXB.mode === "tune"){ pxBtTuneEnd("Stopped \u2014 nothing was saved."); return; } var R = PXB.res; pxBtEnd(R ? { configs: R.configs, preds: R.preds, seasons: R.seasons } : null, "Stopped — showing the seasons that finished."); }
@@ -4163,8 +4272,86 @@ function pxBtResHtml(){
   h += '<div class="pem-bkrow"><span>Vegas close</span><span>' + f2(b0.tv, b0.tn) + '</span><span>' + (b0.xn ? sg(b0.xbv / b0.xn) : '—') + '</span></div></div>';
   var yl = R.seasons.map(function(y){ return y + ': ' + R.configs.map(function(c){ var s = pxBtGrade((by[c.k] || []).filter(function(q){ return q.y === y; })); return s.n ? (s.e / s.n).toFixed(2) : '—'; }).join(' / '); });
   h += '<div class="pem-autonote" style="margin-top:4px">Spread miss by season, in the order above — ' + yl.join(' · ') + '</div>';
+  h += pxBtTrustHtml(R, by);
+  h += pxBtSplitHtml(R, by);
   var load = R.configs.slice(1).filter(function(c){ return c.k !== "ut"; });
   if(load.length) h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' + load.map(function(c){ return '<button class="btn btn-sm btn-ghost" data-bt-load="' + c.k + '">Load “' + x(c.name) + '” into Your tune</button>'; }).join('') + '</div>';
+  return h;
+}
+// Trust for one setting's predictions. The gain and the trusted-pick record are held out by season:
+// each season is scored with k fitted on the other seasons only, so neither number has seen its games.
+function pxBtTrust(P, seasons){
+  var lined = P.filter(function(q){ return q.vh !== null; }), dr = function(q){ return [q.pred - q.vh, q.act - q.vh]; };
+  var held = seasons.length > 1, gains = [], rec = { w: 0, l: 0 };
+  seasons.forEach(function(y){
+    var T = pxTrustFit(lined.filter(function(q){ return !held || q.y !== y; }).map(dr)); if(!T) return;
+    lined.forEach(function(q){ if(q.y !== y) return; var d = q.pred - q.vh, r = q.act - q.vh, kk = Math.max(0, T.k);
+      gains.push(Math.abs(r) - Math.abs(r - kk * d));
+      if(T.gap !== null && Math.abs(d) >= T.gap && r !== 0){ if((r > 0) === (d > 0)) rec.w++; else rec.l++; } });
+  });
+  var op = lined.filter(function(q){ return q.vo !== null && q.vo !== undefined; });
+  return { all: pxTrustFit(lined.map(dr)), g: pxMeanSe(gains), rec: rec, held: held,
+           cl: pxTrustFit(op.map(function(q){ return [q.pred - q.vo, q.vh - q.vo]; })) };
+}
+function pxBtTrustHtml(R, by){
+  var TR = {}; R.configs.forEach(function(c){ TR[c.k] = pxBtTrust(by[c.k] || [], R.seasons); });
+  var nm = function(c, i){ return x(c.name) + (i ? "" : " <small>(baseline)</small>"); };
+  var kc = function(T){ if(!T) return '—'; var real = T.k - 2 * T.se > 0; return '<b class="' + (real ? 'up' : T.k + 2 * T.se < 0 ? 'dn' : '') + '">' + T.k.toFixed(2) + '</b> <small>±' + T.se.toFixed(2) + '</small>'; };
+  var h = '<div class="pem-hd" style="margin-top:12px">Trust in the model vs the closing line</div>';
+  h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Setting</span><span>Trust</span><span>Line moved its way</span></div>';
+  R.configs.forEach(function(c, i){ var T = TR[c.k];
+    h += '<div class="pem-bkrow"><span>' + nm(c, i) + '</span><span>' + kc(T.all) + '</span><span>' + kc(T.cl) + '</span></div>'; });
+  h += '</div>';
+  h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Leaning on the line' + (TR[R.configs[0].k].held ? ' <small>(held out)</small>' : '') + '</span><span>Gain over line</span><span>Trusted picks</span></div>';
+  R.configs.forEach(function(c, i){ var T = TR[c.k], g = T.g, n = T.rec.w + T.rec.l, gap = T.all && T.all.gap;
+    var gc = g ? '<b class="' + (g.m - 2 * g.se > 0 ? 'up' : g.m + 2 * g.se < 0 ? 'dn' : '') + '">' + (g.m >= 0 ? '+' : '') + g.m.toFixed(3) + '</b> <small>±' + g.se.toFixed(3) + '</small>' : '—';
+    var rc = n ? '<b class="' + (T.rec.w / n >= 0.524 ? 'up' : 'dn') + '">' + T.rec.w + '-' + T.rec.l + ' <small>' + (100 * T.rec.w / n).toFixed(1) + '%</small></b>' : '<small>none</small>';
+    h += '<div class="pem-bkrow"><span>' + nm(c, i) + '</span><span>' + gc + '</span><span>' + rc + (gap !== null && gap !== undefined ? '<br><small>' + (gap < 40 ? 'gap ' + gap.toFixed(1) + '+' : 'gap too big') + '</small>' : '') + '</span></div>'; });
+  h += '</div>';
+  var T0 = TR[R.configs[0].k].all;
+  h += '<div class="pem-autonote" style="margin-top:4px"><b>Trust</b> is how much of the model’s disagreement with the closing line showed up in the results: 0 means the line already knew it, 1 means take the model’s number outright' +
+       (T0 ? ' (the baseline’s ' + T0.k.toFixed(2) + ' means a 7-point disagreement was worth about ' + (7 * Math.max(0, T0.k)).toFixed(1) + ' points, a ' + (100 * pearNormCdf(7 * Math.max(0, T0.k) / T0.s)).toFixed(1) + '% cover chance)' : '') +
+       '. Green when it’s more than 2 standard errors above 0. <b>Line moved its way</b> is the same fit against the move from opener to close — the market agreeing with the model later in the week. ' +
+       '<b>Gain over line</b>: points a game by which line + trust × (model − line) beat the closing line alone. <b>Trusted picks</b>: only games where that blend clears break-even (the model at least the gap shown off the close). ' +
+       (TR[R.configs[0].k].held ? 'Both are held out: each season is scored with the trust fitted on the other seasons.' : 'With one season these use the same games they were fitted on, so they flatter.') + '</div>';
+  return h;
+}
+// Where the edge is: one setting's picks split several ways, the earlier seasons and the last one
+// side by side. A split only means something if it holds up in the season it wasn't picked on.
+function pxBtSplitHtml(R, by){
+  var cs = R.configs, ck = PXB.splitK && by[PXB.splitK] ? PXB.splitK : cs[0].k, P = by[ck] || [];
+  var ys = R.seasons.slice().sort(), last = ys[ys.length - 1], two = ys.length > 1;
+  var picks = P.filter(function(q){ return q.vh !== null && Math.abs(q.pred - q.vh) >= 0.05; });
+  var tots = P.filter(function(q){ return q.vt !== null && Math.abs(q.pt - q.vt) >= 0.05; });
+  var side = function(q){ return q.pred > q.vh; };                      // true: the model takes the home side
+  var S = [
+    ["Season part", [["Weeks 2–4", function(q){ return q.w <= 4; }], ["Weeks 5–8", function(q){ return q.w >= 5 && q.w <= 8; }], ["Week 9 on", function(q){ return q.w >= 9; }]]],
+    ["Matchup", [["P4 vs P4", function(q){ return q.ph && q.pa; }], ["P4 vs G6", function(q){ return q.ph !== q.pa; }], ["G6 vs G6", function(q){ return !q.ph && !q.pa; }]]],
+    ["Vegas favorite by", [["Under 7", function(q){ return Math.abs(q.vh) < 7; }], ["7–14", function(q){ return Math.abs(q.vh) >= 7 && Math.abs(q.vh) < 14; }], ["14+", function(q){ return Math.abs(q.vh) >= 14; }]]],
+    ["Model takes", [["The favorite", function(q){ return q.vh !== 0 && side(q) === (q.vh > 0); }], ["The underdog", function(q){ return q.vh !== 0 && side(q) !== (q.vh > 0); }],
+                     ["The home team", function(q){ return !q.nu && side(q); }], ["The road team", function(q){ return !q.nu && !side(q); }]]],
+    ["Model off the close by", [["Under 3", function(q){ return Math.abs(q.pred - q.vh) < 3; }], ["3–6", function(q){ var a = Math.abs(q.pred - q.vh); return a >= 3 && a < 6; }], ["6+", function(q){ return Math.abs(q.pred - q.vh) >= 6; }]]]
+  ];
+  var TS = [["All totals", function(){ return true; }], ["Model says over", function(q){ return q.pt > q.vt; }], ["Model says under", function(q){ return q.pt < q.vt; }],
+            ["Weeks 2–4", function(q){ return q.w <= 4; }], ["Week 9 on", function(q){ return q.w >= 9; }], ["Off the total by 6+", function(q){ return Math.abs(q.pt - q.vt) >= 6; }]];
+  var rec = function(L, tot){ var w = 0, l = 0; L.forEach(function(q){ var c = tot ? q.at - q.vt : q.act - q.vh; if(!c) return; if((c > 0) === (tot ? q.pt > q.vt : q.pred > q.vh)) w++; else l++; }); return { w: w, l: l, n: w + l, p: w + l ? w / (w + l) : null }; };
+  var cell = function(r){ return r.n ? '<b class="' + (r.p >= 0.524 ? 'up' : 'dn') + '">' + (100 * r.p).toFixed(1) + '%</b>&nbsp;<small>(' + r.n + ')</small>' : '—'; };
+  var row = function(lab, L, tot){
+    var A = rec(L.filter(function(q){ return !two || q.y !== last; }), tot), B = two ? rec(L.filter(function(q){ return q.y === last; }), tot) : null;
+    var T = pxTrustFit(L.map(function(q){ return tot ? [q.pt - q.vt, q.at - q.vt] : [q.pred - q.vh, q.act - q.vh]; }));
+    var holds = two && A.n >= 30 && B.n >= 15 && A.p >= 0.524 && B.p >= 0.524;
+    return '<div class="pem-bkrow"><span>' + lab + (holds ? ' <b class="up">✓</b>' : '') + '</span><span>' + cell(A) + (two ? ' · ' + cell(B) : '') + '</span><span>' +
+           (T ? '<b class="' + (T.k - 2 * T.se > 0 ? 'up' : '') + '">' + T.k.toFixed(2) + '</b> <small>±' + T.se.toFixed(2) + '</small>' : '<small>too few</small>') + '</span></div>'; };
+  var early = two ? (ys.length > 2 ? ys[0] + '–' + String(ys[ys.length - 2]).slice(2) : String(ys[0])) : '';
+  var h = '<div class="pem-hd" style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">Where the edge is <select id="px-btsplit" style="font:800 12px Nunito,sans-serif;max-width:220px">' +
+          cs.map(function(c){ return '<option value="' + x(c.k) + '"' + (c.k === ck ? ' selected' : '') + '>' + x(c.name) + '</option>'; }).join('') + '</select></div>';
+  var hd = '<div class="pem-bkhd"><span>Spread picks</span><span>' + (two ? early + ' · ' + last : 'ATS') + '</span><span>Trust</span></div>';
+  S.forEach(function(grp){
+    h += '<div class="pem-bk" style="margin-top:6px">' + hd.replace('Spread picks', x(grp[0])) + grp[1].map(function(z){ return row(z[0], picks.filter(z[1]), false); }).join('') + '</div>'; });
+  h += '<div class="pem-bk" style="margin-top:6px">' + hd.replace('Spread picks', 'Totals (O/U)') + TS.map(function(z){ return row(z[0], tots.filter(z[1]), true); }).join('') + '</div>';
+  h += '<div class="pem-autonote" style="margin-top:4px">Each split’s record against the closing line' + (two ? ' in ' + early + ' and then in ' + last + ' alone' : '') + ', and its trust (as above, fitted on all seasons). ' +
+       (two ? 'A ✓ means it cleared 52.4% in both. Treat ' + early + ' as where you look for an edge and ' + last + ' as the check: with this many splits a couple will look good by luck, and only one that holds in the season it wasn’t picked on is worth acting on. ' : 'Save at least two seasons to check a split on one it wasn’t found on. ') +
+       'Records need a few hundred picks before a 2–3 point gap from 50% means much.</div>';
   return h;
 }
 function pxBtCardHtml(){
@@ -4179,7 +4366,11 @@ function pxBtCardHtml(){
     return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '><span>' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + (c.sub ? '<br><small style="font-weight:700;color:var(--muted)">' + x(c.sub) + '</small>' : '') + '</span></label>'; }).join('') + '</div>';
   if(PXB.busy) h += '<div class="pem-autosub" id="px-btprog" style="margin-top:8px">⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div></div>';
   if(!PXB.busy && ys.length) h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-sm btn-ghost" id="px-bttune">\ud83c\udf9b\ufe0f Tune on ' + (ys.length > 1 ? ys[0] + '\u2013' + String(ys[ys.length - 1]).slice(2) : ys[0]) + '</button>' +
-       '<small style="font-weight:700;color:var(--muted);flex:1;min-width:140px">Searches every setting on all ' + ys.length + ' seasons and saves the best as a tune. Takes a while \u2014 keep this tab open.</small></div>';
+       '<small style="font-weight:700;color:var(--muted);flex:1;min-width:140px">Searches every setting on all ' + ys.length + ' seasons and saves the best as a tune. Takes a while \u2014 keep this tab open.</small></div>' +
+       '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px"><small style="font-weight:800;color:var(--muted)">Aim for</small>' +
+       [["res", "Closest to the result"], ["line", "Best correction to the line"]].map(function(z){ return '<button class="btn btn-sm ' + ((PXB.obj || "res") === z[0] ? 'btn-gold' : 'btn-ghost') + '" data-bt-obj="' + z[0] + '">' + z[1] + '</button>'; }).join('') + '</div>' +
+       '<div class="pem-autonote" style="margin-top:4px">' + (PXB.obj === "line" ? '<b>Correction to the line</b> grades each setting by how much it improves the closing line once blended in at its own trust (line + trust \u00d7 (model \u2212 line)), only on games with a line. It rewards settings whose disagreements with the market are right, not ones that are just close to the result where the line already is.' : '<b>Closest to the result</b> grades each setting by its own spread miss against the final score, the way the in-season tuner does.') + '</div>' +
+       (ys.length > 1 ? '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" id="px-btcv"' + (PXB.cv ? ' checked' : '') + '><span>Check it on held-out seasons<br><small style="font-weight:700;color:var(--muted)">Re-runs the search with each season left out and grades it on that season. About ' + ys.length + '\u00d7 as long.</small></span></label>' : '');
   if(PXB.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXB.err) + '</div>';
   h += pxBtTuneHtml();
   h += pxBtResHtml();
@@ -4195,6 +4386,9 @@ function pxBtBind(){
   var s = document.getElementById("px-btstop"); if(s) s.onclick = function(){ pxBtStop(); };
   var rt = document.getElementById("px-btretry"); if(rt) rt.onclick = function(){ PXH.idxErr = ""; pxBtStatus(); };
   var tn = document.getElementById("px-bttune"); if(tn) tn.onclick = function(){ pxBtTune(); };
+  var sp = document.getElementById("px-btsplit"); if(sp) sp.onchange = function(){ PXB.splitK = this.value; pxBtStatus(); };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-bt-obj]"), function(b){ b.onclick = function(){ PXB.obj = this.getAttribute("data-bt-obj"); pxBtStatus(); }; });
+  var cv = document.getElementById("px-btcv"); if(cv) cv.onchange = function(){ PXB.cv = this.checked; };
   Array.prototype.forEach.call(document.querySelectorAll("[data-bttune-load]"), function(btn){ btn.onclick = function(){
     pxTuneLoad(this.getAttribute("data-bttune-load")); var u = document.getElementById("px-ut"); if(u && u.scrollIntoView) u.scrollIntoView({ behavior: "smooth" }); }; });
   Array.prototype.forEach.call(document.querySelectorAll("[data-bt-sel]"), function(cb){ cb.onchange = function(){ pxBtSel()[this.getAttribute("data-bt-sel")] = this.checked ? 1 : 0; }; });
@@ -6142,7 +6336,7 @@ function pearGamesHtml(){
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
     if(!PEAR.edgeKind){ try{ PEAR.edgeKind = localStorage.getItem("ps_ekind") || "spread"; }catch(_){ PEAR.edgeKind = "spread"; } }
-    h += '<button class="p10-btn" data-pear-p10>\ud83d\udce4 Week ' + (PEAR.week || '') + ' Prophescore 10</button>';
+    h += '<button class="p10-btn" data-pear-p10>\ud83d\udce4 Week ' + (PEAR.week || '') + ' Prophescore 10' + (PEAR.edgeKind === "spread" ? ' \u00b7 spreads' : PEAR.edgeKind === "total" ? ' \u00b7 over/unders' : '') + '</button>';
     h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind === "spread" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
     var emin = pearEdgeRange().min, emax = pearEdgeRange().max;
     var erl = function(a, b){ return a <= 0 && b >= 15 ? 'Any' : a <= 0 ? '0\u2013' + b.toFixed(1) : b >= 15 ? a.toFixed(1) + '+' : a.toFixed(1) + '\u2013' + b.toFixed(1); };
@@ -7165,19 +7359,30 @@ function px10Calib(){
   PX10._cal = { src: hr, v: v };
   return v;
 }
-function px10Plays(week){
-  var games = (PEAR.games || []).filter(function(g){ return pearFbsGame(g) && (!g.week || +g.week === +week); });
+// What the Edges tab is showing: spread edges, over/under edges, or both (neither tab lit), the
+// edge-size range, and whether volatile games are hidden. The graphic follows all three.
+function px10Sel(week){
+  var kind = PEAR.edgeKind; if(!kind){ try{ kind = localStorage.getItem("ps_ekind"); }catch(_){} }
+  if(kind !== "spread" && kind !== "total" && kind !== "all") kind = "spread";
+  var R = pearEdgeRange(), noVol = pearNoVol();
+  return { kind: kind, min: R.min, max: R.max, ranged: R.min > 0 || R.max < 15, noVol: noVol, vm: noVol ? pearVolMap(week) : null,
+           inR: function(gap){ return gap >= R.min - 1e-9 && (R.max >= 15 || gap <= R.max + 1e-9); } };
+}
+function px10RangeTxt(S){ return !S.ranged ? "" : (S.min > 0 ? S.min.toFixed(1) : "0") + (S.max < 15 ? "\u2013" + S.max.toFixed(1) : "+") + " point edges"; }
+function px10Plays(week, S){
+  S = S || px10Sel(week);
+  var games = (PEAR.games || []).filter(function(g){ return pearFbsGame(g) && (!g.week || +g.week === +week) && !(S.noVol && pearVolGame(S.vm, g.away.id, g.home.id)); });
   var fit = pearFitFor(week) || null, out = [], late = week >= PX10.late, CAL = px10Calib() || {};
   var logit = function(z){ return 1 / (1 + Math.exp(-z)); };
   games.forEach(function(g){
     var pj = pearProject(g.away.id, g.home.id, !!g.neutral, fit, g); if(!pj) return;
     var sp = pearModelPick(g, pj.margin), tt = pearModelTotal(g, pj.total);
-    if(sp){ var gap = Math.abs(pj.margin - (sp.team === g.home.id ? -sp.line : sp.line)), z = PX10.spr[late ? 1 : 0] * Math.min(10, gap);
+    if(sp && S.kind !== "total"){ var gap = Math.abs(pj.margin - (sp.team === g.home.id ? -sp.line : sp.line)), z = PX10.spr[late ? 1 : 0] * Math.min(10, gap);
       var QM = pxQbMarks(String(g.id)); if(QM){ var qv = function(v){ return v === 1 ? PX_PICK_CUR.qb1 : v === 2 ? PX_PICK_CUR.qb2 : 0; }, qz = qv(QM[g.away.id]) - qv(QM[g.home.id]); z += (sp.team === g.home.id ? 1 : -1) * qz; }
       var op0 = PE.opens && PE.opens[g.id], vc0 = pearVegasHome(g);
       if(op0 && vc0 !== null){ var vo0 = -op0.h, mv0 = (vc0 - vo0) * (pj.margin > vo0 ? 1 : pj.margin < vo0 ? -1 : 0), ms = mv0 > 0.01 ? 1 : mv0 < -0.01 ? -1 : 0; if(CAL["s" + ms]) z += CAL["s" + ms].shift; }
-      out.push({ kind: "spread", g: g, p: pj, pick: sp, gap: gap, chance: logit(z), qb: QM }); }
-    if(tt){ var tz = PX10.tot[late ? 1 : 0] * Math.min(10, tt.gap), tb = "t" + (tt.gap < 3 ? 0 : tt.gap < 6 ? 1 : 2); if(CAL[tb]) tz += CAL[tb].shift;
+      if(S.inR(gap)) out.push({ kind: "spread", g: g, p: pj, pick: sp, gap: gap, chance: logit(z), qb: QM }); }
+    if(tt && S.kind !== "spread" && S.inR(tt.gap)){ var tz = PX10.tot[late ? 1 : 0] * Math.min(10, tt.gap), tb = "t" + (tt.gap < 3 ? 0 : tt.gap < 6 ? 1 : 2); if(CAL[tb]) tz += CAL[tb].shift;
       out.push({ kind: "total", g: g, p: pj, pick: tt, gap: tt.gap, chance: logit(tz) }); }
   });
   out.sort(function(a, b){ return (b.chance - a.chance) || (b.gap - a.gap); });
@@ -7204,7 +7409,8 @@ function px10Why(pl){
   }
   return (s1 + " " + s2).trim();
 }
-function px10Draw(week, plays, logos, rec){
+function px10Draw(week, plays, logos, rec, S){
+  S = S || px10Sel(week);
   var W = 1080, P = 56, cv = document.createElement("canvas"); cv.width = W; cv.height = 4200;
   var X = cv.getContext("2d"), y = 0, F = "Nunito, 'Helvetica Neue', Arial, sans-serif", ink = "#111111", muted = "#6b6459", gold = "#e8c840", green = "#15803d", red = "#c62828";
   var font = function(sz, w){ X.font = (w || 900) + " " + sz + "px " + F; };
@@ -7216,8 +7422,10 @@ function px10Draw(week, plays, logos, rec){
   y = 78; font(26, 900); X.letterSpacing = "6px"; txt("WEEK " + week, W / 2, y, "center", muted); X.letterSpacing = "0px";
   y += 86; font(84, 900); txt("PROPHESCORE 10", W / 2, y, "center");
   X.fillStyle = gold; X.fillRect(W / 2 - 150, y + 18, 300, 10);
-  y += 72; font(28, 800); txt("The model’s 10 best plays vs the current Vegas line", W / 2, y, "center", muted);
-  y += 38; font(24, 800); txt("Ranked by estimated hit rate, highest first", W / 2, y, "center", muted);
+  var what = S.kind === "spread" ? "spread plays" : S.kind === "total" ? "over/under plays" : "plays", whatL = S.kind === "spread" ? "Vegas spread" : S.kind === "total" ? "Vegas total" : "Vegas line";
+  y += 72; font(28, 800); txt("The model’s " + (plays.length < 10 ? "best " + plays.length : "10 best") + " " + what + " vs the current " + whatL, W / 2, y, "center", muted);
+  var sub = "Ranked by estimated hit rate, highest first", rt = px10RangeTxt(S); if(rt) sub = rt.charAt(0).toUpperCase() + rt.slice(1) + (S.noVol ? " \u00b7 volatile games left out" : "") + " \u00b7 ranked by estimated hit rate"; else if(S.noVol) sub += " \u00b7 volatile games left out";
+  y += 38; font(24, 800); txt(sub, W / 2, y, "center", muted);
   y += 36;
   plays.forEach(function(pl, i){
     var g = pl.g, fin = pl.pick.res, isT = pl.kind === "total", why = wrap(px10Why(pl), W - 2 * P - 170, 25, 700), rowH = 150 + why.length * 33;
@@ -7247,7 +7455,7 @@ function px10Draw(week, plays, logos, rec){
   if(!plays.length){ font(32, 800); txt("No posted lines to compare with yet this week.", W / 2, y + 60, "center", muted); y += 120; }
   // Footer
   y += 8;
-  if(rec){ var l1 = "Model this season vs the closing line:  ATS " + rec.ats + "  ·  O/U " + rec.ou; fit(l1, W - 2 * P, 26, 900); txt(l1, W / 2, y + 10, "center"); y += 46; }
+  if(rec){ var rp = S.ranged ? " (" + px10RangeTxt(S) + ")" : "", l1 = "Model this season vs the closing line" + rp + ":  " + (S.kind === "spread" ? "ATS " + rec.ats : S.kind === "total" ? "O/U " + rec.ou : "ATS " + rec.ats + "  ·  O/U " + rec.ou); fit(l1, W - 2 * P, 26, 900); txt(l1, W / 2, y + 10, "center"); y += 46; }
   font(21, 800); txt("Estimated hit rates from 2023–2026 results. For fun — not betting advice.", W / 2, y, "center", muted); y += 46;
   font(26, 900); X.letterSpacing = "3px"; txt("SCORECERY · PROPHESCORE", W / 2, y, "center", ink); X.letterSpacing = "0px"; y += 30;
   var Hh = y + 40, out = document.createElement("canvas"); out.width = W + 60; out.height = Hh + 80;
@@ -7259,17 +7467,23 @@ function px10Draw(week, plays, logos, rec){
   return out;
 }
 function px10Share(){
-  var week = PEAR.week, plays = px10Plays(week);
-  if(!plays.length){ toast("No lines to compare with yet this week"); return; }
+  var week = PEAR.week, S = px10Sel(week), plays = px10Plays(week, S);
+  if(!plays.length){ toast(S.ranged || S.kind !== "all" ? "No " + (S.kind === "spread" ? "spread" : S.kind === "total" ? "over/under" : "") + " plays in this selection yet" : "No lines to compare with yet this week"); return; }
   var ov = document.getElementById("pear-shareov"); if(ov) ov.remove();
   ov = document.createElement("div"); ov.id = "pear-shareov"; ov.innerHTML = '<div class="sbar"><button class="sx" data-pear-shareclose aria-label="Close">✕</button><span class="sp">Building the Prophescore 10…</span></div>'; document.body.appendChild(ov);
   var r = (typeof pemAts === "function") ? pemAts() : null, rec = r ? { ats: r.w + "-" + r.l, ou: r.ou.w + "-" + r.ou.l } : null;
+  // The record in the same range, as the Edges tab's "season record in this range" card counts it.
+  if(r && r.games && (S.ranged || S.noVol)){
+    var cnt = function(total){ var w = 0, l = 0; r.games.forEach(function(G){ var res = total ? G.tres : G.res, gp = total ? (G.vt === null || G.vt === undefined ? null : Math.abs(G.pt - G.vt)) : Math.abs(G.pred - G.vh);
+      if(!res || gp === null || !S.inR(gp)) return; if(S.noVol && pearVolGame(pearVolMap(G.w), G.g.homeId, G.g.awayId)) return; if(res === "W") w++; else if(res === "L") l++; }); return w + "-" + l; };
+    rec = { ats: cnt(false), ou: cnt(true) };
+  }
   var fontReady = (document.fonts && document.fonts.load) ? Promise.race([document.fonts.load("900 40px Nunito"), new Promise(function(res){ setTimeout(res, 1500); })]) : Promise.resolve();
   var lg = function(id){ var i = PEAR.info[id]; return i && i.logo ? i.logo : ""; };
   var jobs = plays.map(function(pl){ var ids = pl.kind === "total" ? [pl.g.away.id, pl.g.home.id] : [pl.pick.team]; return Promise.all(ids.map(function(id){ return pearLoadImg(lg(id)); })); });
   Promise.all([fontReady, Promise.all(jobs)]).then(function(res){
-    var cv; try{ cv = px10Draw(week, plays, res[1], rec); cv.toDataURL(); }catch(e){ cv = px10Draw(week, plays, [], rec); }
-    PEAR_SHARE.name = "prophescore-10-week-" + week + ".png"; PEAR_SHARE.url = cv.toDataURL("image/png"); PEAR_SHARE.blob = null;
+    var cv; try{ cv = px10Draw(week, plays, res[1], rec, S); cv.toDataURL(); }catch(e){ cv = px10Draw(week, plays, [], rec, S); }
+    PEAR_SHARE.name = "prophescore-10-week-" + week + (S.kind === "all" ? "" : "-" + S.kind) + ".png"; PEAR_SHARE.url = cv.toDataURL("image/png"); PEAR_SHARE.blob = null;
     cv.toBlob(function(b){ PEAR_SHARE.blob = b; });
     var canShare = !!(navigator.share && navigator.canShare);
     ov.innerHTML = '<div class="sbar"><button class="sx" data-pear-shareclose aria-label="Close">✕</button><span class="sp">Week ' + week + ' Prophescore 10</span>' +
