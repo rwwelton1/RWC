@@ -2606,7 +2606,7 @@ function loadData(){
       // Only the most recent slice is kept — an old thread shouldn't cost a big read.
       DB.ref(BASE+"/chat").limitToLast(CHAT_KEEP).on("value",function(sn){ ST.chat=sn.val()||{}; scheduleDraw(); });
       // Who's typing. Updates the typing line only — never a full repaint.
-      DB.ref(BASE+"/typing").on("value",function(sn){ chatTypingIn(sn.val()); });
+      DB.ref(BASE+"/typing").on("value",function(sn){ chatTypingIn(sn.val()); }, function(){ /* not readable yet — no indicator */ });
       DB.ref(BASE+"/meta/money").on("value",function(sn){ST.money=sn.val()||null;scheduleDraw();});
       // Picks: only listen to the current week — load others lazily on week change
       var _picksRef=null;
@@ -3531,11 +3531,25 @@ function chatSend(text){
   var q=_chatReplyTo&&chatMsgById(_chatReplyTo);
   if(q) msg.reply={ id:q._id, uid:q.uid||"", text:chatSnippet(q) };
   if(_chatThread) msg.tid=_chatThread;
-  DB.ref(BASE+"/chat").push().set(msg);
+  // A rejected write shows for a split second and then vanishes, so say so and
+  // hand the words back rather than losing them.
+  DB.ref(BASE+"/chat").push().set(msg).catch(function(err){
+    chatWriteFailed(err, "Message didn't send");
+    var inp=document.getElementById("chat-input");
+    if(inp && !inp.value) inp.value=text;
+  });
   _chatDividerTs=null;          // you've clearly caught up
   chatSetReply(null);
   chatTypingStop();
   return true;
+}
+// Any chat write the database refuses ends up here. Permission errors get the
+// plain-English version; the code stays in the console for whoever fixes it.
+function chatWriteFailed(err, what){
+  var code=String((err&&(err.code||err.message))||"").toUpperCase();
+  try{ console.warn("[chat] "+what+":", err); }catch(e){}
+  if(code.indexOf("PERMISSION")>=0) toast(what+" — the pool's database isn't letting your account post. Ask an admin.");
+  else toast(what+" — check your connection and try again.");
 }
 function chatTime(ts){
   if(!ts) return "";
@@ -3600,7 +3614,7 @@ function chatReact(id, emoji){
   var cur=(m.r||{})[ST.user];
   var next=(cur===emoji)?null:emoji;
   _chatRxPop=next?id:null;
-  DB.ref(BASE+"/chat/"+id+"/r/"+ST.user).set(next).catch(function(){ toast("Couldn't save reaction"); });
+  DB.ref(BASE+"/chat/"+id+"/r/"+ST.user).set(next).catch(function(e){ chatWriteFailed(e,"Reaction didn't save"); });
 }
 function chatRxWho(id){
   var rx=chatRxSummary(chatMsgById(id)); if(!rx) return;
@@ -3641,7 +3655,7 @@ function chatDelete(id){
   if(!confirm(m.kind==="thread"?"Delete this game thread and all its replies?":"Delete this message for everyone?")) return;
   var upd={}; upd[id]=null;
   if(m.kind==="thread") chatSorted().forEach(function(r){ if(r.tid===id) upd[r._id]=null; });
-  DB.ref(BASE+"/chat").update(upd).catch(function(){ toast("Couldn't delete that message"); });
+  DB.ref(BASE+"/chat").update(upd).catch(function(e){ chatWriteFailed(e,"Couldn't delete that message"); });
   if(_chatReplyTo===id) chatSetReply(null);
   if(_chatThread===id) _chatThread=null;
 }
@@ -3795,7 +3809,7 @@ function chatVote(id,i){
   var m=chatMsgById(id); if(!m) return;
   var cur=(m.v||{})[ST.user];
   var next=(cur!==undefined&&cur!==null&&Number(cur)===i)?null:i;
-  DB.ref(BASE+"/chat/"+id+"/v/"+ST.user).set(next).catch(function(){ toast("Couldn't save vote"); });
+  DB.ref(BASE+"/chat/"+id+"/v/"+ST.user).set(next).catch(function(e){ chatWriteFailed(e,"Vote didn't save"); });
 }
 function chatPollVoters(id){
   var m=chatMsgById(id); if(!m) return;
@@ -3848,7 +3862,7 @@ function chatPollOpen(){
     if(!DB){ toast("Offline — poll not posted"); return; }
     var msg={uid:ST.user, text:q, ts:Date.now(), kind:"poll", poll:{opts:opts}};
     if(_chatThread) msg.tid=_chatThread;
-    DB.ref(BASE+"/chat").push().set(msg);
+    DB.ref(BASE+"/chat").push().set(msg).catch(function(e){ chatWriteFailed(e,"Poll didn't post"); });
     chatSheetClose();
   });
   setTimeout(function(){ var q=document.getElementById("poll-q"); if(q) q.focus(); }, 50);
@@ -4010,18 +4024,19 @@ function chatAfterFinal(wk,gid,result){
 // is judged by when *we* last saw it change, so clock skew between phones
 // doesn't matter. Updates touch only the typing line, never a full repaint.
 var _typingLast=0, _typingOn=false, _typingSeen={}, _typingFirst=true;
+var _typingBlocked=false;   // the database refused once; stop trying this session
 function chatTypingPing(){
-  if(!DB||!chatCanPost()) return;
+  if(!DB||!chatCanPost()||_typingBlocked) return;
   var now=Date.now(); if(now-_typingLast<2500) return;
   _typingLast=now;
   var ref=DB.ref(BASE+"/typing/"+ST.user);
   if(!_typingOn){ try{ ref.onDisconnect().remove(); }catch(e){} _typingOn=true; }
-  ref.set({ts:now, tid:_chatThread||""});
+  ref.set({ts:now, tid:_chatThread||""}).catch(function(){ _typingBlocked=true; _typingOn=false; });
 }
 function chatTypingStop(){
   if(!_typingOn||!DB) return;
   _typingOn=false; _typingLast=0;
-  DB.ref(BASE+"/typing/"+ST.user).remove();
+  DB.ref(BASE+"/typing/"+ST.user).remove().catch(function(){});
 }
 function chatTypingIn(v){
   v=v||{}; var now=Date.now(), old=ST.typing||{};
