@@ -1548,7 +1548,7 @@ function playerMetrics(uid){
     });
     if(field>1){
       finishes.push({rank:better+1, field:field});
-      if(better===0) weekWins++;            // shared wins count for everyone tied
+      if(weekWinners(w).indexOf(uid)>=0) weekWins++;   // tiebreaker decides a tie; a true tie shares
       if(better<3 && field>3) podiums++;    // a "top three" needs a real field
       if(mine>bestWeekPts){ bestWeekPts=mine; bestWeekId=w; }
     }
@@ -2059,6 +2059,42 @@ function weekScore(weekId,user){
 // A week counts toward the season once it's "complete": either the admin locked it,
 // or every active game in it has a result. This prevents correct picks from silently
 // not counting when an admin forgets (or is slow) to lock a finished week.
+// ── WEEK WINNER ───────────────────────────────────────────────────────────
+// Most points wins. If that's tied, the closest tiebreaker guess takes it; only a
+// tie on both splits the week. Players with no guess lose a tiebreak to anyone
+// who made one. Until the tiebreaker has an actual result it can't separate
+// anyone, so a points tie stays a tie.
+function tbMiss(weekId, uid){
+  var tb=(ST.tiebreaker&&ST.tiebreaker[weekId])||{};
+  if(tb.actual==null||tb.actual==="") return null;
+  var actual=Number(tb.actual); if(isNaN(actual)) return null;
+  var g=((ST.picks[weekId]||{})[uid]||{}).tb;
+  if(g==null||g==="") return null;
+  g=Number(g); if(isNaN(g)) return null;
+  return Math.abs(g-actual);
+}
+function weekWinners(weekId){
+  var best=null, top=[];
+  (PARTS||[]).forEach(function(p){
+    var t=weekScore(weekId,p).total;
+    if(best===null||t>best){ best=t; top=[p]; }
+    else if(t===best) top.push(p);
+  });
+  if(best===null||best<=0) return [];               // nobody scored; nothing to award
+  if(top.length<2) return top;
+  var min=null;
+  top.forEach(function(p){ var m=tbMiss(weekId,p); if(m!==null && (min===null||m<min)) min=m; });
+  if(min===null) return top;                        // tiebreaker can't separate anyone yet
+  return top.filter(function(p){ return tbMiss(weekId,p)===min; });
+}
+// Did the tiebreaker, rather than points, decide this week?
+function weekDecidedByTiebreak(weekId){
+  var w=weekWinners(weekId); if(w.length!==1) return false;
+  var t=weekScore(weekId,w[0]).total, n=0;
+  (PARTS||[]).forEach(function(p){ if(weekScore(weekId,p).total===t) n++; });
+  return n>1;
+}
+
 // ── MONEY LEAGUE ──────────────────────────────────────────────────────────
 // Settings live on the group so every member sees the same pot.
 function moneyOn(){ return !!(ST.money && ST.money.enabled && Number(ST.money.buyIn)>0); }
@@ -2098,14 +2134,9 @@ function moneyWinnings(){
   (ST.weekIds||[]).forEach(function(w){
     if(!per) return;                                // nothing paid weekly
     if(!weekIsComplete(w)) return;                  // not won until it's finished
-    var best=null, winners=[];
-    (PARTS||[]).forEach(function(p){
-      var t=weekScore(w,p).total;
-      if(best===null||t>best){ best=t; winners=[p]; }
-      else if(t===best) winners.push(p);
-    });
-    if(best===null||best<=0) return;                // nobody scored; nothing to award
-    var share=per/winners.length;                   // ties split the week
+    var winners=weekWinners(w);                     // points, then the tiebreaker
+    if(!winners.length) return;                     // nobody scored; nothing to award
+    var share=per/winners.length;                   // only a tie on both splits the week
     winners.forEach(function(p){ out[p]=(out[p]||0)+share; });
   });
 
@@ -2412,13 +2443,8 @@ function publishSeasonToHub(metaOnly){
           if(!allIn) return;          // the rest only make sense on a finished week
 
           // Did they win the week outright, and by how much?
-          var mine=weekScore(w,p).total, best=null, tied=false;
-          PARTS.forEach(function(q){
-            var t=weekScore(w,q).total;
-            if(best===null||t>best){ best=t; tied=false; }
-            else if(t===best && q!==p) tied=true;
-          });
-          var wonThis = (best!==null && mine===best && best>0);
+          var mine=weekScore(w,p).total;
+          var wonThis = weekWinners(w).indexOf(p)>=0;
           if(!openerSeen){ openerSeen=true; wonOpener=wonThis; }   // first finished week
           if(wonThis){
             nWeekWins++; curStreak++;
@@ -4850,14 +4876,12 @@ function _weeklyWinCounts(uptoWeekId){
   var idx=ST.weekIds.indexOf(uptoWeekId);
   var weeks=ST.weekIds.slice(0, idx+1).filter(function(w){ return weekIsComplete(w); });
   weeks.forEach(function(w){
-    var best=-1, winners=[];
-    PARTS.forEach(function(p){
+    // Points, then the tiebreaker; only a tie on both shares the win.
+    weekWinners(w).forEach(function(p){
       var ws=weekScore(w,p);
       if((ws.correct+ws.wrong)===0) return;   // didn't play
-      if(ws.total>best){ best=ws.total; winners=[p]; }
-      else if(ws.total===best){ winners.push(p); }
+      wins[p]=(wins[p]||0)+1;
     });
-    winners.forEach(function(p){ wins[p]=(wins[p]||0)+1; });
   });
   return wins;
 }
@@ -5065,6 +5089,11 @@ function buildWeekRecap(weekId, mode){
   // Group into placement tiers (handles ties).
   var winnerScore=scored[0].total;
   var winners=scored.filter(function(r){return r.total===winnerScore;}).map(function(r){return nameOf(r.name);});
+  // A points tie that the tiebreaker settled: the tiebreaker winner is THE winner,
+  // and the others are narrated as the ones who tied them on points.
+  var _wwUids=weekWinners(weekId), _tbWon=weekDecidedByTiebreak(weekId);
+  var _tiedOnPts=winners.slice(), _winnerUid=_wwUids.length?_wwUids[0]:scored[0].name;
+  if(_wwUids.length && _wwUids.length<winners.length) winners=_wwUids.map(nameOf);
   var secondScore=null, seconds=[];
   for(var i=0;i<scored.length;i++){ if(scored[i].total<winnerScore){ secondScore=scored[i].total; break; } }
   if(secondScore!=null) seconds=scored.filter(function(r){return r.total===secondScore;}).map(function(r){return nameOf(r.name);});
@@ -5125,7 +5154,7 @@ function buildWeekRecap(weekId, mode){
     // so a week always reads the same however often it's shared.
     var rnd=_recapRand(weekId);
     var parts=[];
-    var wc = winCounts[scored[0].name]||1;
+    var wc = winCounts[_winnerUid]||1;
     var margin = (secondScore!=null) ? (winnerScore-secondScore) : null;
 
     // Winner.
@@ -5139,7 +5168,7 @@ function buildWeekRecap(weekId, mode){
       var w=winners[0];
       // "our first two-time winner" only holds if nobody has got there already.
       var firstMulti = wc>1 && !Object.keys(winCounts).some(function(k){
-        return k!==scored[0].name && (winCounts[k]||0)>=wc;
+        return k!==_winnerUid && (winCounts[k]||0)>=wc;
       });
       var tag = firstMulti ? (" \u2014 our first "+(wc===2?"two":wc===3?"three":wc)+"-time winner")
               : wc>1       ? (" \u2014 win number "+wc+" this season")
@@ -5150,6 +5179,15 @@ function buildWeekRecap(weekId, mode){
         label+" belongs to "+w+" \u2014 "+winnerScore+" points"+tag+".",
         w+" is your "+label+" winner on "+winnerScore+tag+"."
       ]));
+      if(_tbWon){
+        var _act=Number(ST.tiebreaker[weekId].actual), _wm=tbMiss(weekId,_winnerUid);
+        var _others=_tiedOnPts.filter(function(n){ return n!==w; });
+        parts.push(_pick(rnd,[
+          _joinNames(_others)+" matched "+winnerScore+", but "+w+" was "+(_wm===0?"dead on":_wm+" off")+" the tiebreaker ("+_act+") and takes it.",
+          "Level on "+winnerScore+" with "+_joinNames(_others)+" \u2014 the tiebreaker went to "+w+", "+(_wm===0?"who nailed "+_act:_wm+" off "+_act)+".",
+          "Tied at the top, settled on the tiebreaker: "+w+" "+(_wm===0?"hit "+_act+" exactly.":"was "+_wm+" away from "+_act+".")
+        ]));
+      }
       if(_seasonHigh(weekId, winnerScore)){
         parts.push(_pick(rnd,[
           "That's the highest score anyone has posted this season.",
@@ -5229,7 +5267,7 @@ function buildWeekRecap(weekId, mode){
       ]));
     }
     var _tbLine=_tiebreakNote(weekId, rnd, winners.length>1);
-    if(_tbLine) addColour(null, _tbLine);
+    if(_tbLine && !_tbWon) addColour(null, _tbLine);
 
     // The biggest calls. Worth a line whichever way it broke.
     var tp=_topPickCarnage(weekId, active);
@@ -6835,11 +6873,12 @@ function renderStandings(){
 
   var leaderTotal=rows.length?rows[0].total:0;
 
-  var weekBest={}, weekWorst={};
+  var weekBest={}, weekWorst={}, weekWinnersMap={};
   completedWeeks.forEach(function(w){
     var scores=PARTS.map(function(p){ return weekScore(w,p).total; });
     weekBest[w]=Math.max.apply(null,scores);
     weekWorst[w]=Math.min.apply(null,scores);
+    weekWinnersMap[w]=weekWinners(w);
   });
 
   // Controls row above table
@@ -6976,14 +7015,14 @@ function renderStandings(){
 
     visibleWeeks.forEach(function(w){
       var ws=r.weekScores[w];
-      var isBest=ws.total>0&&ws.total===weekBest[w];
-      var isWorst=ws.total===weekWorst[w]&&weekBest[w]!==weekWorst[w];
+      var isBest=weekWinnersMap[w].indexOf(r.name)>=0;
+      var isWorst=ws.total===weekWorst[w]&&weekBest[w]!==weekWorst[w]&&!isBest;
       var col=isBest?'var(--green)':isWorst?'var(--red2)':'var(--text)';
       var bg=isBest?'rgba(93,186,74,.1)':isWorst?'rgba(232,85,85,.1)':'';
       var weight=isBest||isWorst?'900':'700';
       var tbW=ST.tiebreaker[w]||{};
-      var tiedForBest=isBest&&PARTS.filter(function(p){return weekScore(w,p).total===weekBest[w];}).length>1;
-      var showAsterisk=tiedForBest&&tbW.actual!=null;
+      var tiedForBest=ws.total>0&&ws.total===weekBest[w]&&PARTS.filter(function(p){return weekScore(w,p).total===weekBest[w];}).length>1;
+      var showAsterisk=isBest&&tiedForBest&&tbW.actual!=null;
       h+='<td style="text-align:center;padding:7px 6px'+(bg?';background:'+bg:'')+'">';
       if(ws.total>0||ws.correct>0||ws.wrong>0){
         h+='<div style="font-size:13px;font-weight:'+weight+';color:'+col+'">'+ws.total+(showAsterisk?'<span style="font-size:9px;color:var(--purple);vertical-align:super">*</span>':'')+'</div>';
@@ -7673,7 +7712,23 @@ function whatIfRanks(weekId){
 // Standing for the week as it really is, independent of how the table happens to
 // be sorted — you can order by Poss or by a game column and still read position.
 function weekRanks(weekId){
-  return rankMap(weekId, function(u){ return weekScore(weekId,u).total; });
+  var out=rankMap(weekId, function(u){ return weekScore(weekId,u).total; });
+  // The tiebreaker orders a tie at the very top, since that's the one that decides
+  // a winner. Everyone else keeps shared places.
+  var top=(PARTS||[]).filter(function(u){ return out[u]===1; });
+  if(top.length>1){
+    var miss={}; top.forEach(function(u){ miss[u]=tbMiss(weekId,u); });
+    top.forEach(function(u){
+      var ahead=0;
+      top.forEach(function(o){
+        if(o===u) return;
+        var mo=miss[o], mu=miss[u];
+        if(mo!==null && (mu===null || mo<mu)) ahead++;
+      });
+      out[u]=1+ahead;
+    });
+  }
+  return out;
 }
 
 function renderGroupPicks(){
