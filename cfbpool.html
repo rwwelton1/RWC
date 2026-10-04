@@ -460,6 +460,32 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
 .chat-send{border:2px solid var(--border);border-radius:9px;background:var(--gold);font-weight:900;
   font-size:12px;padding:0 14px;box-shadow:2px 2px 0 var(--border);cursor:pointer}
 
+/* ── CHAT REACTIONS (double-tap, iMessage tapback style) ── */
+/* manipulation kills Safari's double-tap-to-zoom so the second tap reaches us. */
+.chat-msg{position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  -webkit-touch-callout:none;cursor:default;transition:transform .12s ease}
+.chat-msg.has-rx{margin-top:12px}
+.chat-msg.rx-focus{transform:scale(1.03);box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.chat-rx{position:absolute;top:-14px;right:-8px;display:flex;align-items:center;gap:1px;
+  background:#fff;border:2px solid var(--border2);border-radius:14px;padding:1px 6px 1px 4px;
+  font-size:13px;line-height:18px;box-shadow:1px 1px 0 var(--border2);cursor:pointer;
+  -webkit-user-select:none;user-select:none;white-space:nowrap;z-index:1}
+.chat-msg.mine .chat-rx{right:auto;left:-8px}
+.chat-rx.me{border-color:#3b82f6;background:#eff6ff}
+.chat-rx-n{font-size:10px;font-weight:900;color:var(--muted);margin-left:2px}
+.chat-rx.pop{animation:rxPop .35s cubic-bezier(.3,1.6,.5,1)}
+@keyframes rxPop{0%{transform:scale(.2);opacity:0}100%{transform:scale(1);opacity:1}}
+/* Picker lives on <body>, outside #root, so a live repaint can't wipe it mid-choice. */
+.rx-back{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.12)}
+.rx-pick{position:fixed;z-index:9001;display:flex;gap:2px;padding:5px 7px;background:#fff;
+  border:2px solid var(--border);border-radius:26px;box-shadow:3px 3px 0 var(--border);
+  animation:rxIn .16s ease-out}
+@keyframes rxIn{0%{transform:scale(.6);opacity:0}100%{transform:scale(1);opacity:1}}
+.rx-opt{width:36px;height:36px;border:none;background:transparent;border-radius:50%;font-size:21px;
+  line-height:36px;padding:0;cursor:pointer;transition:transform .1s}
+.rx-opt:active{transform:scale(1.25)}
+.rx-opt.sel{background:#dbeafe}
+
 /* Header row */
 .gp-table th{padding:7px 9px;background:var(--cream);border-bottom:2px solid var(--border);border-right:1px solid var(--border2);font-weight:900;text-align:center;vertical-align:bottom;font-size:10px}
 /* Data cells */
@@ -3322,10 +3348,115 @@ function chatTime(ts){
                  : d.toLocaleDateString("en-US",{month:"numeric",day:"numeric"})+" "+
                    d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
 }
+// ── CHAT REACTIONS ──
+// Double-tap a bubble for an iMessage-style tapback. Stored on the message itself
+// (chat/<id>/r/<uid> = emoji), so they ride the existing chat listener for free.
+// One reaction per person per message; picking the same one again removes it.
+var CHAT_RX=["❤️","👍","👎","😂","‼️","❓","💀"];
+var _chatRxPop=null;         // message id whose badge should animate on next paint
+var _chatTap={id:null,t:0};  // last tap, for double-tap detection
+
+function chatRxSummary(m){
+  var r=m&&m.r; if(!r||typeof r!=="object") return null;
+  var by={}, total=0, me=false;
+  Object.keys(r).forEach(function(uid){
+    var e=r[uid]; if(!e||typeof e!=="string") return;
+    (by[e]=by[e]||[]).push(uid); total++;
+    if(uid===ST.user) me=true;
+  });
+  if(!total) return null;
+  var list=Object.keys(by).map(function(e){ return {e:e, uids:by[e]}; })
+    .sort(function(a,b){ return b.uids.length-a.uids.length; });
+  return {list:list, total:total, me:me};
+}
+function chatMsgById(id){ var m=(ST.chat||{})[id]; return m||null; }
+function chatReact(id, emoji){
+  if(!chatCanPost()||!id) return;
+  if(!DB){ toast("Offline — reaction not saved"); return; }
+  var m=chatMsgById(id); if(!m) return;
+  var cur=(m.r||{})[ST.user];
+  var next=(cur===emoji)?null:emoji;
+  _chatRxPop=next?id:null;
+  DB.ref(BASE+"/chat/"+id+"/r/"+ST.user).set(next).catch(function(){
+    toast("Couldn't save reaction");
+  });
+}
+function chatRxClose(){
+  var b=document.getElementById("rx-back"); if(b) b.remove();
+  var p=document.getElementById("rx-pick"); if(p) p.remove();
+  var f=document.querySelector(".chat-msg.rx-focus"); if(f) f.classList.remove("rx-focus");
+}
+function chatRxOpen(bubble){
+  chatRxClose();
+  if(!chatCanPost()) return;
+  var id=bubble.getAttribute("data-mid"); if(!id) return;
+  var m=chatMsgById(id); if(!m) return;
+  var mine=(m.r||{})[ST.user]||null;
+  try{ if(window.getSelection) window.getSelection().removeAllRanges(); }catch(e){}
+  bubble.classList.add("rx-focus");
+
+  var back=document.createElement("div");
+  back.className="rx-back"; back.id="rx-back";
+  back.addEventListener("click", chatRxClose);
+  back.addEventListener("touchmove", function(ev){ ev.preventDefault(); }, {passive:false});
+
+  var pick=document.createElement("div");
+  pick.className="rx-pick"; pick.id="rx-pick";
+  pick.innerHTML=CHAT_RX.map(function(e){
+    return '<button class="rx-opt'+(e===mine?" sel":"")+'" data-e="'+e+'">'+e+'</button>';
+  }).join("");
+  pick.addEventListener("click", function(ev){
+    var b=ev.target.closest(".rx-opt"); if(!b) return;
+    chatReact(id, b.getAttribute("data-e"));
+    chatRxClose();
+  });
+  document.body.appendChild(back);
+  document.body.appendChild(pick);
+
+  // Sit above the bubble, on its side of the thread; drop below if there's no room.
+  var r=bubble.getBoundingClientRect(), pw=pick.offsetWidth, ph=pick.offsetHeight;
+  var vw=document.documentElement.clientWidth;
+  var top=r.top-ph-8;
+  if(top<70) top=r.bottom+8;
+  var left=bubble.classList.contains("mine") ? r.right-pw
+         : bubble.classList.contains("bot") ? r.left+(r.width-pw)/2
+         : r.left;
+  left=Math.max(8, Math.min(left, vw-pw-8));
+  pick.style.top=Math.round(top)+"px";
+  pick.style.left=Math.round(left)+"px";
+}
+function chatRxWho(id){
+  var rx=chatRxSummary(chatMsgById(id)); if(!rx) return;
+  toast(rx.list.map(function(r){
+    return r.e+" "+r.uids.map(function(u){ return x(u===ST.user?"You":(nameOf(u)||"Player")); }).join(", ");
+  }).join("<br>"));
+}
+function bindChatReactions(){
+  var log=document.getElementById("chat-log"); if(!log) return;
+  log.addEventListener("click", function(ev){
+    var badge=ev.target.closest(".chat-rx");
+    if(badge){ chatRxWho(badge.getAttribute("data-rx")); _chatTap.id=null; return; }
+    var bubble=ev.target.closest(".chat-msg"); if(!bubble) return;
+    var id=bubble.getAttribute("data-mid"), now=Date.now();
+    if(_chatTap.id===id && now-_chatTap.t<350){
+      _chatTap.id=null;
+      chatRxOpen(bubble);
+    } else {
+      _chatTap={id:id, t:now};
+    }
+  });
+  // Desktop double-click would otherwise highlight a word under the cursor.
+  log.addEventListener("mousedown", function(ev){
+    if(ev.detail>1 && ev.target.closest(".chat-msg")) ev.preventDefault();
+  });
+  log.addEventListener("scroll", function(){ if(document.getElementById("rx-pick")) chatRxClose(); }, {passive:true});
+}
+
 function renderChat(){
   if(!chatOn()||PUBLIC_VIEW) return "";
   var h='<div class="chat-page">';
-  h+='<div class="chat-log" id="chat-log">';
+  var _lastMsg=chatSorted().slice(-1)[0];
+  h+='<div class="chat-log" id="chat-log" data-last="'+x(_lastMsg?_lastMsg._id:"")+'">';
   var msgs=chatSorted();
   if(!msgs.length){
     h+='<div class="chat-empty">No messages yet \u2014 say something.</div>';
@@ -3333,7 +3464,14 @@ function renderChat(){
     msgs.forEach(function(m){
       var mine=(m.uid===ST.user);
       var isBot=(m.uid===BOT_UID||m.bot);
-      h+='<div class="chat-msg'+(mine?" mine":"")+(isBot?" bot":"")+'">';
+      var rx=chatRxSummary(m);
+      h+='<div class="chat-msg'+(mine?" mine":"")+(isBot?" bot":"")+(rx?" has-rx":"")+'" data-mid="'+x(m._id)+'">';
+      if(rx){
+        h+='<div class="chat-rx'+(rx.me?" me":"")+(_chatRxPop===m._id?" pop":"")+'" data-rx="'+x(m._id)+'">';
+        rx.list.slice(0,3).forEach(function(r){ h+='<span>'+r.e+'</span>'; });
+        if(rx.total>1) h+='<span class="chat-rx-n">'+rx.total+'</span>';
+        h+='</div>';
+      }
       if(!mine) h+='<div class="chat-who">'+pem(m.uid)+x(nameOf(m.uid)||"Player")+'</div>';
       // Auto-posts arrive with newlines; keep them rather than running the whole
       // recap into one paragraph.
@@ -7157,11 +7295,23 @@ function draw(){
 
   h+=renderMyStatsSheet();
   h+=renderTeamPicker();
+  // A reaction repaints the whole thread; remember where the reader was so
+  // reacting to an old message doesn't yank them to the bottom.
+  var _oldLog=document.getElementById("chat-log"), _chatPos=null;
+  if(_oldLog) _chatPos={top:_oldLog.scrollTop, last:_oldLog.getAttribute("data-last"),
+    atBottom:(_oldLog.scrollHeight-_oldLog.scrollTop-_oldLog.clientHeight)<40};
   document.getElementById("root").innerHTML=h;
   bind();
+  _chatRxPop=null;
+  if(ST.page!=="chat") chatRxClose();
   if(ST.page==="chat"){
     var _log=document.getElementById("chat-log");
-    if(_log) _log.scrollTop=_log.scrollHeight;   // newest message in view
+    if(_log){
+      if(_chatPos && !_chatPos.atBottom && _chatPos.last===_log.getAttribute("data-last"))
+        _log.scrollTop=_chatPos.top;               // same thread, just repainted
+      else _log.scrollTop=_log.scrollHeight;       // newest message in view
+    }
+    bindChatReactions();
     chatMarkSeen();
     setTimeout(_fitChatToViewport, 0);
   }
