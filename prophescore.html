@@ -1056,6 +1056,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .rb-body>.pem-ats{border:0;box-shadow:none;margin:0;padding:0;background:none}
 .rb-body>.pem-ats>.pem-autotop{display:none}
 .rb-3 .pem-wkhd,.rb-3 .pem-wkrow{grid-template-columns:1.2fr 1fr 1fr}
+.rb-4 .pem-wkhd,.rb-4 .pem-wkrow{grid-template-columns:1.25fr 1.05fr .9fr .9fr}
 .p10-btn{display:block;width:100%;margin:0 0 10px;padding:11px 12px;border:2px solid var(--border);border-radius:12px;background:#111;color:#fff;font:900 15px 'Nunito',sans-serif;cursor:pointer;box-shadow:3px 3px 0 var(--gold)}
 .pe-kind button{flex:1;border:2px solid var(--border);background:#fff;border-radius:10px;padding:7px 8px;font:900 12.5px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
 .pe-kind button.on{background:var(--gold);color:var(--text)}
@@ -5043,6 +5044,129 @@ function pemRecByMove(r){
   [[1, "tw"], [-1, "aw"]].forEach(function(k){ var m = M[k[0]]; out[k[1]] = { so: t(m.so), sc: t(m.sc), to: t(m.to), tc: t(m.tc) }; });
   return out;
 }
+// ── Model or the move? · Where Vegas is going ──────────────────────────────
+// What following the line move ALONE covers against the opener, by the size of the move:
+// ½–1, 1½–2, 2½–3, 3½+ pts. 2021–25 FBS games from the cfbfastR betting data (median of the
+// ESPN Bet / Bovada / DraftKings openers against their closes): 3,427 moved spreads, 3,505 moved totals.
+// Comparing the model with this on the same games splits its record into "the move" and "the model".
+var PEM_MOVE_BASE = { s: [0.526, 0.557, 0.582, 0.617], t: [0.516, 0.548, 0.593, 0.610] };
+function pemMoveBase(kind, m){ var a = Math.abs(m), B = PEM_MOVE_BASE[kind]; return a < 0.5 ? 0.5 : a < 1.5 ? B[0] : a < 2.5 ? B[1] : a < 3.5 ? B[2] : B[3]; }
+var PEM_GAP_BANDS = [["Under 2", 0, 2], ["2–4", 2, 4], ["4–7", 4, 7], ["7+", 7, 999]];
+var PEM_MV_BANDS = [["½–1", 0.01, 1.5], ["1½–2", 1.5, 2.5], ["2½–3", 2.5, 3.5], ["3½+", 3.5, 999]];
+// For spreads (s) and totals (t): the model's record vs the opener split by how the line then moved,
+// with what the move alone would have covered on the same games (ew = expected wins); how the move
+// tracks the model's gap to the opener (slope, share moved its way); and the record by gap size.
+function pemMoveStudy(r){
+  if(!r || !r.games) return null;
+  if(r._mvs && r._mvsN === r.games.length) return r._mvs;
+  var out = {};
+  ["s", "t"].forEach(function(kind){
+    var rec = function(){ return { w: 0, l: 0, p: 0, ew: 0 }; };
+    var S = { tw: rec(), aw: rec(), st: rec(), mvAll: rec(), fol: rec(), n: 0, xs: [],
+              gaps: PEM_GAP_BANDS.map(function(b){ return { b: b, n: 0, tw: 0, ta: 0, mv: 0, pk: rec() }; }),
+              sizes: PEM_MV_BANDS.map(function(b){ return { b: b, r: rec() }; }) };
+    var put = function(o, rs, ew){ if(rs === "W") o.w++; else if(rs === "L") o.l++; else o.p++; if(rs !== "P") o.ew += ew; };
+    r.games.forEach(function(q){
+      var g, m, a;
+      if(kind === "s"){ if(typeof q.vo !== "number" || !isFinite(q.vo) || !isFinite(q.vh)) return; g = q.pred - q.vo; m = q.vh - q.vo; a = q.act - q.vo; }
+      else { if(typeof q.to !== "number" || !isFinite(q.to) || typeof q.vt !== "number" || !isFinite(q.vt)) return; g = q.pt - q.to; m = q.vt - q.to; a = q.at - q.to; }
+      if(Math.abs(g) < 0.05) return;                       // no pick off the opener
+      var dir = g > 0 ? 1 : -1, mv = m * dir, res = a === 0 ? "P" : (a * dir > 0 ? "W" : "L"), base = pemMoveBase(kind, m);
+      var ewModel = mv > 0.01 ? base : mv < -0.01 ? 1 - base : 0.5;   // the move alone, for the model's side
+      S.n++; S.xs.push([g, m]);
+      put(mv > 0.01 ? S.tw : mv < -0.01 ? S.aw : S.st, res, ewModel);
+      if(Math.abs(mv) > 0.01){
+        put(S.mvAll, res, ewModel);
+        put(S.fol, a === 0 ? "P" : (a * m > 0 ? "W" : "L"), base);      // just following the move
+        if(mv > 0) PEM_MV_BANDS.forEach(function(b, i){ if(mv >= b[1] && mv < b[2]) put(S.sizes[i].r, res, base); });
+      }
+      var ag = Math.abs(g);
+      S.gaps.forEach(function(B){ if(ag >= B.b[1] && ag < B.b[2]){ B.n++; B.mv += mv; if(mv > 0.01) B.tw++; else if(mv < -0.01) B.ta++; put(B.pk, res, 0.5); } });
+    });
+    var n = S.xs.length;
+    if(n >= 10){
+      var mx = 0, my = 0; S.xs.forEach(function(z){ mx += z[0]; my += z[1]; }); mx /= n; my /= n;
+      var sxx = 0, sxy = 0, syy = 0; S.xs.forEach(function(z){ sxx += (z[0] - mx) * (z[0] - mx); sxy += (z[0] - mx) * (z[1] - my); syy += (z[1] - my) * (z[1] - my); });
+      var b = sxx ? sxy / sxx : 0, rss = 0; S.xs.forEach(function(z){ var e = (z[1] - my) - b * (z[0] - mx); rss += e * e; });
+      S.beta = b; S.se = (sxx && n > 2) ? Math.sqrt(rss / (n - 2) / sxx) : null; S.rho = (sxx && syy) ? sxy / Math.sqrt(sxx * syy) : 0;
+      var ab = S.xs.map(function(z){ return Math.abs(z[0]); }).sort(function(p, q){ return p - q; }); S.medGap = ab[Math.floor(n / 2)];
+    }
+    delete S.xs;
+    out[kind] = S;
+  });
+  r._mvs = out; r._mvsN = r.games.length;
+  return out;
+}
+// Actual vs the move alone for one group: p = actual rate, e = expected from the move, d = the model's extra.
+function pemLift(o){ var n = o.w + o.l; if(!n) return null; var e = o.ew / n, p = o.w / n; return { n: n, p: p, e: e, d: p - e, se: Math.sqrt(Math.max(e * (1 - e), 0.01) / n) }; }
+function pemLiftWord(L){
+  if(!L || L.n < 20) return "too few games to say yet";
+  var z = L.d / L.se;
+  if(z >= 2) return "clearly adding to the move";
+  if(z >= 1) return "leaning positive, not proven yet";
+  if(z <= -2) return "clearly worse than the move alone";
+  if(z <= -1) return "leaning negative, not proven yet";
+  return "not separable from luck yet";
+}
+function pemPts(d, dp){ return (d >= 0 ? "+" : "−") + Math.abs(100 * d).toFixed(dp === undefined ? 1 : dp); }
+function pemMoveRow(lab, o, small){
+  var L = pemLift(o), n = o.w + o.l, cls = function(v){ return v === null || n < 8 ? "" : v > 0 ? "up" : "dn"; };
+  return '<div class="pem-wkrow"><span>' + lab + (small ? '<small>' + small + '</small>' : '') + '</span>' +
+         '<span><b class="' + (L ? cls(L.p - PEM_BE) : '') + '">' + pemRecTxt(o) + '</b><small>' + (L ? pemPctTxt(L.p) : '—') + '</small></span>' +
+         '<span><b>' + (L ? pemPctTxt(L.e) : '—') + '</b><small>expected</small></span>' +
+         '<span><b class="' + (L ? cls(L.d) : '') + '">' + (L ? pemPts(L.d) : '—') + '</b><small>' + (L ? '±' + (196 * L.se).toFixed(0) : '') + '</small></span></div>';
+}
+var PEM_MOVE_HD = '<div class="pem-wkhd"><span>Line moved</span><span>Model vs opener</span><span>Move alone</span><span>Model’s extra</span></div>';
+// On the Record card, under "When Vegas moves toward the model".
+function pemMoveModelHtml(r){
+  var M = pemMoveStudy(r), S = M && M.s; if(!S || !(S.tw.w + S.tw.l)) return "";
+  var A = pemLift(S.mvAll), F = pemLift(S.fol), T = M.t && pemLift(M.t.mvAll);
+  var h = '<div class="rb-tphd" style="margin-top:12px">Is it the model or the move?</div>' +
+          '<div class="rb-sub">Following a line move alone covers the opener about 53% for a ½-pt move up to 62% for 3½+ (2021–25). Each spread here is set against what its move alone would have covered.</div>' +
+          '<div class="pem-wk rb-4">' + PEM_MOVE_HD +
+          pemMoveRow('Toward model', S.tw, (S.tw.w + S.tw.l + S.tw.p) + ' games') +
+          pemMoveRow('Away from it', S.aw, (S.aw.w + S.aw.l + S.aw.p) + ' games') +
+          pemMoveRow('All moved', S.mvAll, (S.mvAll.w + S.mvAll.l + S.mvAll.p) + ' games') + '</div>';
+  if(S.st.w + S.st.l) h += '<div class="rb-sub" style="margin:6px 0 0">Line didn’t move: ' + pemRecTxt(S.st) + ' (' + pemPctTxt(pemPct(S.st.w, S.st.l)) + ') vs the opener — no move to lean on, so that’s the model on its own.</div>';
+  if(A) h += '<div class="rb-sub" style="color:var(--text);margin:8px 0 0"><b>Beyond the move: ' + pemPts(A.d) + ' pts</b> of cover rate on spreads where the line moved (±' + (196 * A.se).toFixed(1) + ') — ' + pemLiftWord(A) + '.' +
+              (T && T.n >= 20 ? ' Over/unders: ' + pemPts(T.d) + ' (±' + (196 * T.se).toFixed(1) + '), ' + pemLiftWord(T) + '.' : '') + '</div>';
+  if(F) h += '<div class="rb-sub" style="margin:4px 0 0">This season, just following every spread move went ' + pemRecTxt(S.fol) + ' (' + pemPctTxt(F.p) + ') vs the opener; history says ' + pemPctTxt(F.e) + ' on moves this size.</div>';
+  h += '<div class="pem-autonote" style="margin-top:6px"><b>Move alone</b> is how often the side the line moved toward covered the opener on 2021–25 games with a move that size, averaged over these games. When the line moves toward the model the model is on that side, so it starts with that edge; when it moves away it starts below 50%. <b>Model’s extra</b> is the record minus that, in percentage points, with a 95% range. Positive in both rows means the model knows something the move doesn’t. The history uses the median of three books’ openers; your opener is ESPN’s, so treat the expected rates as close, not exact.</div>';
+  return h;
+}
+// Fold-out: does the model's gap to the opener predict where the line goes?
+function pemMovePredictHtml(r){
+  var M = pemMoveStudy(r); if(!M || !M.s.n) return "";
+  var h = "";
+  [["s", "Spreads"], ["t", "Over/unders"]].forEach(function(k, ki){
+    var S = M[k[0]]; if(!S || S.n < 10) return;
+    h += '<div class="rb-tphd"' + (ki ? '' : ' style="margin-top:0;border-top:0;padding-top:0"') + '>' + k[1] + ' · ' + S.n + ' games</div>';
+    if(S.beta !== undefined){
+      var z = S.se ? S.beta / S.se : 0, typ = S.medGap * S.beta;
+      h += '<div class="rb-sub" style="color:var(--text)"><b>Vegas moved ' + S.beta.toFixed(2) + ' pts per point of the model’s gap</b> (±' + (1.96 * (S.se || 0)).toFixed(2) + ')' +
+           (z >= 2 ? ' — by kickoff the market took about <b>' + Math.round(100 * S.beta) + '%</b> of the model’s disagreement with the opener. At the typical gap (' + S.medGap.toFixed(1) + ' pts) that’s a ' + typ.toFixed(1) + '-pt move toward the model.'
+                     : ' — not distinguishable from zero yet.') + '</div>';
+    }
+    h += '<div class="pem-wk rb-4"><div class="pem-wkhd"><span>Model vs opener</span><span>Moved its way</span><span>Avg move</span><span>Pick vs opener</span></div>';
+    S.gaps.forEach(function(B){
+      if(!B.n) return;
+      var mvd = B.tw + B.ta, sh = mvd ? B.tw / mvd : null, pk = pemPct(B.pk.w, B.pk.l), pn = B.pk.w + B.pk.l;
+      h += '<div class="pem-wkrow"><span>' + B.b[0] + ' pts<small>' + B.n + ' games</small></span>' +
+           '<span><b class="' + (sh === null || mvd < 8 ? '' : sh > 0.5 ? 'up' : 'dn') + '">' + pemPctTxt(sh, 0) + '</b><small>' + B.tw + ' of ' + mvd + '</small></span>' +
+           '<span><b>' + ((B.mv / B.n) >= 0 ? '+' : '−') + Math.abs(B.mv / B.n).toFixed(1) + '</b><small>pts its way</small></span>' +
+           '<span><b class="' + (pk === null || pn < 8 ? '' : pk >= PEM_BE ? 'up' : 'dn') + '">' + pemRecTxt(B.pk) + '</b><small>' + pemPctTxt(pk) + '</small></span></div>';
+    });
+    h += '</div>';
+    var any = S.sizes.some(function(z){ return z.r.w + z.r.l; });
+    if(any){
+      h += '<div class="rb-sub" style="margin:10px 0 4px">When it moved toward the model, by how far it moved:</div><div class="pem-wk rb-4">' + PEM_MOVE_HD.replace('Line moved', 'Move');
+      S.sizes.forEach(function(z){ if(z.r.w + z.r.l + z.r.p) h += pemMoveRow(z.b[0] + ' pts', z.r, (z.r.w + z.r.l + z.r.p) + ' games'); });
+      h += '</div>';
+    }
+  });
+  if(!h) return "";
+  return h + '<div class="pem-autonote" style="margin-top:6px"><b>Model vs opener</b> is how far the model’s number was from the opening line. <b>Moved its way</b> counts games where the line moved at all. <b>Avg move</b> includes games that didn’t move, so it’s what to expect on a new game with that gap. <b>Pick vs opener</b> is the record if you locked the pick before the line moved — the number that matters for a pool graded on the opener when the pool locks early. Bigger gaps should move the line more and more often; if the top rows aren’t clearly stronger, the model’s big opinions aren’t leading the market yet. Every pick comes from the model fitted only on earlier weeks.</div>';
+}
 function pemRecCore(r){
   var C = r.clv, t = function(o){ return { w: o.w, l: o.l, p: o.p, n: o.w + o.l, pct: pemPct(o.w, o.l) }; };
   return { so: t(r.op), sc: t(r), to: t(r.ot), tc: t(r.ou), mv: pemRecByMove(r),
@@ -5057,6 +5181,9 @@ function pemRecPoints(r, K, HC){
   if(K.mvS.n >= 20)
     tp.push(["📈", "<b>Vegas moves toward it.</b> From open to kickoff, spreads moved toward Prophescore’s number in <b>" + K.mvS.w + " of " + K.mvS.n + "</b> games (" + mv(K.mvS) + "%)" +
              (K.mvT.n >= 20 ? ", totals in " + K.mvT.w + " of " + K.mvT.n + " (" + mv(K.mvT) + "%)" : "") + " \u2014 a classic sign a model is onto something."]);
+  try{ var MS = pemMoveStudy(r), LA = MS && pemLift(MS.s.mvAll);
+    if(LA && LA.n >= 30) tp.push(["\ud83e\udded", "<b>Beyond the move:</b> on spreads where the line moved, the model covered the opener " + pemPctTxt(LA.p) + " against " + pemPctTxt(LA.e) + " for the move alone \u2014 " + pemPts(LA.d) + " pts, " + pemLiftWord(LA) + "."]);
+  }catch(e){}
   var oc = function(lab, O, Cl){ if(!O.n || !Cl.n) return null;
     return "<b>" + lab + ":</b> " + pemPctTxt(O.pct) + " vs the opener, " + pemPctTxt(Cl.pct) + " vs the close." +
       (O.pct > Cl.pct + 0.005 ? " The opener is easier: the line then moves its way." : Cl.pct >= O.pct - 0.005 ? " It holds up even after the line moves." : ""); };
@@ -5194,6 +5321,7 @@ function pemAtsCardHtml(){
          '<span class="rb-rowhd">Over/<br>under</span>' + pemRecCell(MV.tw.to) + pemRecCell(MV.tw.tc) + '</div>' +
          '<div class="pem-autonote" style="margin-top:6px">When the line moved <b>away</b> from the model: spreads ' + awTxt(MV.aw.so) + ' vs the opener, ' + awTxt(MV.aw.sc) + ' vs the close · totals ' + awTxt(MV.aw.to) + ' vs the opener, ' + awTxt(MV.aw.tc) + ' vs the close.</div>';
   }
+  try{ h += pemMoveModelHtml(r); }catch(e){}
   h += pemMoverCardHtml();
   h += '<div class="pem-autonote">The <b>opening line</b> is Vegas’s first number of the week; the <b>closing line</b> is the last one before kickoff, after a week of bets have moved it. Beating the close is the tougher, gold-standard test. “Moved toward model” counts games where the line moved at all: if the model said a team was better than the opener and the line then moved that way, it counts.</div>';
   var tp = pemRecPoints(r, K, HC);
@@ -5209,6 +5337,8 @@ function pemAtsCardHtml(){
   var ev = ""; try{ ev = pxEvalCardHtml(); }catch(e){}
   var an = ""; try{ an = pemAnglesCardHtml(); }catch(e){}
   h += '<div class="rb-morehd">Full breakdown</div>';
+  var wv = ""; try{ wv = pemMovePredictHtml(r); }catch(e){}
+  h += pemRecSec("vegas", "Where Vegas is going", "Does the model\u2019s gap predict the line move?", wv);
   h += pemRecSec("edge", "By edge size", "Do bigger edges win more? Spreads and totals", pemEdgeBandsHtml(r));
   h += pemRecSec("spread", "By Vegas spread", "Close games vs blowouts · favorite or dog", pemSpreadRecHtml(r));
   h += pemRecSec("kinds", "Which picks win", "Favorite vs dog, small vs big spreads", pemProvenHtml(r));
