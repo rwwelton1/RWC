@@ -2326,8 +2326,7 @@ function pxSeasonInputs(y, call){
     call("/ratings/sp", { year: y - 1 }).catch(function(){ return []; }),
     call("/player/returning", { year: y }).catch(function(){ return []; }),
     call("/talent", { year: y }).catch(function(){ return []; }),
-    call("/player/portal", { year: y }).catch(function(){ return []; }),
-    pxPlayerPpa(y - 1, call)
+    call("/player/portal", { year: y }).catch(function(){ return []; })
   ]).then(function(r){
     var T = {};
     function t(name){ var id = pxTeamId(name); if(!id) return null; return (T[id] = T[id] || {}); }
@@ -2344,80 +2343,9 @@ function pxSeasonInputs(y, call){
       if(inn) inn.port = (inn.port || 0) + wgt * v;
       if(out) out.port = (out.port || 0) - wgt * v;
     });
-    pxRosterCont(T, r[1], r[3], r[4], t);
     return T;
   });
 }
-// Every player's PPA for one season: one call, or one per conference if CFBD wants a filter.
-function pxPlayerPpa(y, call){
-  return call("/ppa/players/season", { year: y, excludeGarbageTime: true }).catch(function(){ return []; }).then(function(list){
-    if(list && list.length) return list;
-    var cs = {}; Object.keys(pxState().teams || {}).forEach(function(id){ var c = pxState().teams[id].c; if(c) cs[c] = 1; });
-    return Promise.all(Object.keys(cs).map(function(c){ return call("/ppa/players/season", { year: y, conference: c, excludeGarbageTime: true }).catch(function(){ return []; }); }))
-      .then(function(parts){ return [].concat.apply([], parts); });
-  });
-}
-// ── Roster continuity (QB and coach-follow), one summary per team ─────────────
-// From one call of last season's player PPA plus the portal list and CFBD's returning
-// production (all already fetched), each team gets a handful of numbers; no player list is
-// kept. Per team:
-//   qbE   last season's main QB (most plays, 100+): EPA per play minus the average main QB
-//   pas   share of last season's passing PPA that returns (CFBD returning production)
-//   qbIn  best incoming portal QB with 100+ plays last season: his EPA per play vs average, × 0.7
-//         (a transfer carries over only part of it)
-//   qb    the QB input the prior uses: pas × qbE + (1 − pas) × qbIn. A star QB coming back keeps
-//         his team's passing level; a star leaving loses it; a proven transfer replaces part of it
-//   pin   who came in through the portal, by school they left: [share of that school's offensive
-//         PPA that followed, number of linemen / defenders]. Used once to score whether a new
-//         head coach brought his old roster, then dropped (pxFollow).
-function pxNameKey(n){ return String(n || "").toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, "").replace(/[^a-z]/g, ""); }
-var PX_NONSKILL = /^(OL|OT|OG|C|IOL|G|T|DL|DE|DT|NT|EDGE|LB|ILB|OLB|MLB|DB|CB|S|SAF|FS|SS|ATH)$/;
-function pxRosterCont(T, ret, portal, ppa, t){
-  var P = {}, teamPos = {}, qbs = [];
-  (ppa || []).forEach(function(p){
-    var id = pxTeamId(pxG(p, "team")); if(!id) return;
-    var av = pxG(p, "averagePPA", "average_ppa") || {}, tt = pxG(p, "totalPPA", "total_ppa") || {};
-    var a = +pxG(av, "all"), tot = +pxG(tt, "all"), cp = +pxG(p, "countablePlays", "countable_plays");
-    var plays = isFinite(cp) && cp > 0 ? cp : (isFinite(a) && Math.abs(a) > 1e-6 && isFinite(tot) ? Math.round(tot / a) : 0);
-    if(!isFinite(a) || !isFinite(tot)) return;
-    var e = { id: id, pos: String(pxG(p, "position") || "").toUpperCase(), a: a, tot: tot, n: plays };
-    P[pxNameKey(pxG(p, "name")) + "|" + id] = e;
-    teamPos[id] = (teamPos[id] || 0) + Math.max(0, tot);
-    if(e.pos === "QB" && plays >= 100) qbs.push(e);
-  });
-  var main = {}; qbs.forEach(function(e){ if(!main[e.id] || e.n > main[e.id].n) main[e.id] = e; });
-  var mids = Object.keys(main), qm = 0, qw = 0; mids.forEach(function(id){ qm += main[id].a * main[id].n; qw += main[id].n; }); qm = qw ? qm / qw : 0;
-  mids.forEach(function(id){ var o = T[id] = T[id] || {}; o.qbE = Math.round((main[id].a - qm) * 1000) / 1000; });
-  (ret || []).forEach(function(s){ var o = t(pxG(s, "team")); if(!o) return; var v = +pxG(s, "percentPassingPPA", "percent_passing_ppa"); if(isFinite(v)) o.pas = Math.max(0, Math.min(1, v)); });
-  (portal || []).forEach(function(p){
-    var to = pxTeamId(pxG(p, "destination")), from = pxTeamId(pxG(p, "origin")); if(!to || !from || to === from) return;
-    var o = T[to] = T[to] || {}, pos = String(pxG(p, "position") || "").toUpperCase();
-    var e = P[pxNameKey(String(pxG(p, "firstName", "first_name") || "") + " " + String(pxG(p, "lastName", "last_name") || "")) + "|" + from];
-    var pin = o.pin = o.pin || {}, q = pin[from] = pin[from] || [0, 0];
-    if(e && e.tot > 0 && teamPos[from] > 0) q[0] += e.tot / teamPos[from];
-    else if(PX_NONSKILL.test(pos)) q[1] += 1;
-    if(pos === "QB" && e && e.n >= 100){ var v = Math.round((e.a - qm) * 0.7 * 1000) / 1000; if(o.qbIn === undefined || v > o.qbIn) o.qbIn = v; }
-  });
-  Object.keys(T).forEach(function(id){ var o = T[id];
-    var pas = typeof o.pas === "number" ? o.pas : 0.5;
-    o.qb = Math.round((pas * (o.qbE || 0) + (1 - pas) * (o.qbIn || 0)) * 1000) / 1000;
-  });
-}
-function pxTeamName(id){ var tm = (pxState().teams || {})[id]; return tm ? tm.s : null; }
-// How much of the new head coach's old roster followed him: 0.6 × the share of the old school's
-// offensive production that transferred in (capped at 1) + 0.4 × linemen and defenders who came
-// with him / 12 (capped). 0 without a head coach who moved from another FBS head job.
-function pxFollow(o, fromId){
-  var q = fromId && o && o.pin && o.pin[fromId]; if(!q) return 0;
-  return Math.round((0.6 * Math.min(1, q[0]) + 0.4 * Math.min(1, q[1] / 12)) * 1000) / 1000;
-}
-// Shrink a fitted coefficient toward its fixed value by how many team-seasons actually carried
-// the input (few coaches take a roster with them, so that weight leans on the fixed value).
-function pxShrinkCoef(fit, fixed, nEff, K, lo, hi){
-  var v = isFinite(fit) ? (nEff * fit + K * fixed) / (nEff + K) : fixed;
-  return Math.max(lo, Math.min(hi, v));
-}
-var PX_QB_FIX = 8, PX_FOL_FIX = 0.4;   // fixed weights: points per EPA/play of QB carried over; share of the gap to the old school closed
 // A team with no SP+ last season (moving up from FCS) is not an average FBS
 // team, which is what a missing rating used to count as. It starts at the 10th
 // percentile of last season's FBS ratings instead (flagged "imp" for display).
@@ -2467,7 +2395,7 @@ function pxPriorRel(t){ if(!t) return 1; return (t.imp ? 0.5 : 1) * (t.nc ? 0.6 
 function pxLoadPrior(force){
   var S = pxState(), y = pxYear();
   var bad = S.prior && !pxPriorOk(S.prior), stale = !S.prior || !S.prior.at || Date.now() - S.prior.at > 12 * 3600e3;
-  if(S.prior && S.prior.y === y && S.prior.v === 4 && !force && !(bad && stale)) return Promise.resolve(pxPriorFix(S.prior));
+  if(S.prior && S.prior.y === y && S.prior.v === 3 && !force && !(bad && stale)) return Promise.resolve(pxPriorFix(S.prior));
   return pxBuildPrior(y, pxCall).then(function(out){
     out.at = Date.now();
     if(!pxPriorOk(out) && S.prior && S.prior.y === y && pxPriorOk(S.prior)) return S.prior;     // keep a good one over a failed rebuild
@@ -2512,29 +2440,23 @@ function pxBuildPrior(y, call){
     function coachFeat(id, h, spPrev, talZ){
       var c = CO.at[id], now = c && c[h], prev = c && c[h - 1];
       if(!now || !prev || now.n === prev.n || !isFinite(spPrev)) return { nc: 0, gap: 0, cvd: 0, coach: now ? now.n : null };
-      var a = cva(now.n, h), b = cva(prev.n, h), from = null;
-      (CO.career[now.n] || []).forEach(function(q){ if(q.yr === h - 1 && q.id !== id && (!from || q.g > from.g)) from = q; });
-      return { nc: 1, gap: (tk[0] + tk[1] * talZ) - spPrev, cvd: a - b, coach: now.n, prevCoach: prev.n, cvaNew: a, cvaOld: b, from: from ? from.id : null };
+      var a = cva(now.n, h), b = cva(prev.n, h);
+      return { nc: 1, gap: (tk[0] + tk[1] * talZ) - spPrev, cvd: a - b, coach: now.n, prevCoach: prev.n, cvaNew: a, cvaOld: b };
     }
-    // Coach-follow input: share of the old roster that came × (old school's rating − this team's).
-    function folFeat(T, id, cf){ var o = T[id], fol = pxFollow(o, cf.from), old = cf.from && T[cf.from] ? T[cf.from].sp : NaN;
-      return { fol: fol, x: (fol > 0 && isFinite(old) && isFinite(o.sp)) ? fol * (old - o.sp) : 0 }; }
     H.forEach(function(pair, i){
       var T = pair[0], fin = FIN[hist[i]], h = hist[i];
       Object.keys(T).forEach(function(id){ var o = T[id]; if(!isFinite(o.sp) || !isFinite(fin[id])) return;
-        var cf = coachFeat(id, h, o.sp, o.talZ), ff = folFeat(T, id, cf);
-        rows.push({ x: [1, o.sp, o.sp * ((typeof o.ret === "number" && isFinite(o.ret) ? o.ret : 0.5) - 0.5), o.talZ, o.port || 0, cf.gap, cf.cvd, o.qb || 0, ff.x], y: fin[id], w: REC[h] }); });
+        var cf = coachFeat(id, h, o.sp, o.talZ);
+        rows.push({ x: [1, o.sp, o.sp * ((typeof o.ret === "number" && isFinite(o.ret) ? o.ret : 0.5) - 0.5), o.talZ, o.port || 0, cf.gap, cf.cvd], y: fin[id], w: REC[h] }); });
     });
-    var coef = rows.length >= 150 ? pxOls(rows, 1.0) : [0, 0.55, 0.6, 3.0, 0.15, 0.3, 0.4, PX_QB_FIX, PX_FOL_FIX];   // fixed fallback: regress halfway, reward returning production and talent
+    var coef = rows.length >= 150 ? pxOls(rows, 1.0) : [0, 0.55, 0.6, 3.0, 0.15, 0.3, 0.4];   // fixed fallback: regress halfway, reward returning production and talent
     coef[5] = Math.max(0, Math.min(1, coef[5])); coef[6] = Math.max(0, Math.min(1.2, coef[6]));
-    var nQb = rows.filter(function(r){ return Math.abs(r.x[7]) > 0.01; }).length, nFol = rows.filter(function(r){ return r.x[8] !== 0; }).length;
-    coef[7] = pxShrinkCoef(coef[7], PX_QB_FIX, nQb, 150, 0, 25); coef[8] = pxShrinkCoef(coef[8], PX_FOL_FIX, nFol, 20, 0, 1);
-    var out = { y: y, v: 4, coef: coef, n: rows.length, t: {}, tk: tk, nQb: nQb, nFol: nFol, newCoaches: rows.filter(function(r){ return r.x[5] || r.x[6]; }).length };
+    var out = { y: y, v: 3, coef: coef, n: rows.length, t: {}, tk: tk, newCoaches: rows.filter(function(r){ return r.x[5] || r.x[6]; }).length };
     var mo = 0, md = 0, nm = 0; Object.keys(cur).forEach(function(id){ var o = cur[id]; if(isFinite(o.spo) && isFinite(o.spd)){ mo += o.spo; md += o.spd; nm++; } });
     if(nm){ mo /= nm; md /= nm; }
     Object.keys(cur).forEach(function(id){
-      var o = cur[id], sp = isFinite(o.sp) ? o.sp : 0, cf = coachFeat(id, y, o.sp, o.talZ || 0), ff = folFeat(cur, id, cf);
-      var x = [1, sp, sp * ((typeof o.ret === "number" && isFinite(o.ret) ? o.ret : 0.5) - 0.5), o.talZ || 0, o.port || 0, cf.gap, cf.cvd, o.qb || 0, ff.x];
+      var o = cur[id], sp = isFinite(o.sp) ? o.sp : 0, cf = coachFeat(id, y, o.sp, o.talZ || 0);
+      var x = [1, sp, sp * ((typeof o.ret === "number" && isFinite(o.ret) ? o.ret : 0.5) - 0.5), o.talZ || 0, o.port || 0, cf.gap, cf.cvd];
       var r = 0; x.forEach(function(v, i){ r += v * coef[i]; });
       // Offence/defence split follows last season's SP+ split (offence above average
       // vs defence better than average), applied to the new overall number.
@@ -2544,11 +2466,7 @@ function pxBuildPrior(y, call){
         if(Math.abs(tot) > 1 && (tot > 0) === (r > 0)) share = Math.max(0.1, Math.min(0.9, oD / tot));
       }
       out.t[id] = { r: r, off: r * share, def: -r * (1 - share), ret: o.ret, tal: o.tal, port: o.port || 0, sp: o.sp };
-      var tq = out.t[id];
-      if(o.qb){ tq.qb = o.qb; tq.qbAdj = Math.round(coef[7] * o.qb * 100) / 100; }
-      if(typeof o.qbE === "number") tq.qbE = o.qbE; if(typeof o.pas === "number") tq.pas = Math.round(o.pas * 100) / 100; if(typeof o.qbIn === "number") tq.qbIn = o.qbIn;
-      if(cf.nc){ var t = tq; t.nc = 1; t.coach = cf.coach; t.prevCoach = cf.prevCoach; t.cvaNew = cf.cvaNew; t.cvaOld = cf.cvaOld; t.coachAdj = coef[5] * cf.gap + coef[6] * cf.cvd;
-        if(cf.from){ t.fromId = cf.from; if(ff.fol > 0){ t.fol = ff.fol; t.folAdj = Math.round(coef[8] * ff.x * 100) / 100; } } }
+      if(cf.nc){ var t = out.t[id]; t.nc = 1; t.coach = cf.coach; t.prevCoach = cf.prevCoach; t.cvaNew = cf.cvaNew; t.cvaOld = cf.cvaOld; t.coachAdj = coef[5] * cf.gap + coef[6] * cf.cvd; }
     });
     return out;
   });
@@ -2584,16 +2502,226 @@ function pxOls(rows, ridge){
 // Settings: o.psrc picks the prior (0 = SP+ roster prior, 1 = own, in between = a mix). It is not a
 // tuner knob: you set it (as a lock) on the Priors & SP+ tab.
 var PX_OWN_V = 1;
-var PX_OWN_FALLBACK = [0, 0.45, 0.15, 0.6, 3.0, 0.15, 0.3, PX_QB_FIX, PX_FOL_FIX];   // 1, last season, season before, last × (returning − ½), talent z, portal, coach gap, QB carried over, coach-follow
+var PX_OWN_FALLBACK = [0, 0.45, 0.15, 0.6, 3.0, 0.15, 0.3];   // 1, last season, season before, last × (returning − ½), talent z, portal, coach gap
 var PXO = { busy: false, msg: "", err: "" };
+
+// ── ROSTER CONTINUITY (QB carried over, coach brought his roster) ──────────────
+// An add-on on top of whichever prior is in use (SP+, own, or the mix). It never rebuilds a prior
+// or re-downloads a saved season: each season's continuity is three CFBD calls made once —
+// returning production (for the share of passing that returns), the portal list (who moved where)
+// and last season's player PPA — plus one coaches call for every season at once. Only a few
+// numbers per team are kept, saved to prophescore/<uid>/hist/y<year>/cont (past seasons) or with
+// this season's data. Per team:
+//   qbE   last season's main QB (most plays, 100+): EPA per play minus the average main QB
+//   pas   share of last season's passing PPA that returns
+//   qbIn  best incoming portal QB with 100+ plays last season, his EPA/play vs average × 0.7
+//   qb    pas × qbE + (1 − pas) × qbIn: a star coming back keeps his level, a star leaving loses it
+//   fol   for a new head coach who ran another FBS program last season: how much of it followed him
+//         (0.6 × share of its offensive PPA that transferred in + 0.4 × linemen/defenders / 12, each capped at 1)
+//   from  that program
+// The prior moves by  wq × qb  (all offense)  +  wf × fol × (old program's rating last season − this
+// team's), split evenly between offense and defense. wq and wf are fitted on the saved seasons as
+// what the prior missed (how SP+ finished minus the prior), shrunk toward 8 and 0.4 by how many
+// team-seasons carry each input. Off with the "Roster continuity" switch (lock cont = 0).
+var PX_CONT_V = 1, PX_CONT_FIX = { q: 8, f: 0.4 }, PXC = { busy: false, msg: "", err: "" };
+function pxNameKey(n){ return String(n || "").toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, "").replace(/[^a-z]/g, ""); }
+var PX_NONSKILL = /^(OL|OT|OG|C|IOL|G|T|DL|DE|DT|NT|EDGE|LB|ILB|OLB|MLB|DB|CB|S|SAF|FS|SS)$/;
+// One season's continuity from the three lists (and the coach index). Teams by CFBD/ESPN id.
+function pxContBuild(y, ret, portal, ppa, CO){
+  var P = {}, teamPos = {}, main = {}, T = {};
+  function o(id){ return (T[id] = T[id] || {}); }
+  (ppa || []).forEach(function(p){
+    var id = pxTeamId(pxG(p, "team")); if(!id) return;
+    var av = pxG(p, "averagePPA", "average_ppa") || {}, tt = pxG(p, "totalPPA", "total_ppa") || {};
+    var a = +pxG(av, "all"), tot = +pxG(tt, "all"), cp = +pxG(p, "countablePlays", "countable_plays");
+    if(!isFinite(a) || !isFinite(tot)) return;
+    var n = isFinite(cp) && cp > 0 ? cp : (Math.abs(a) > 1e-6 ? Math.round(tot / a) : 0);
+    var e = { id: id, pos: String(pxG(p, "position") || "").toUpperCase(), a: a, tot: tot, n: n };
+    P[pxNameKey(pxG(p, "name")) + "|" + id] = e;
+    teamPos[id] = (teamPos[id] || 0) + Math.max(0, tot);
+    if(e.pos === "QB" && n >= 100 && (!main[id] || n > main[id].n)) main[id] = e;
+  });
+  var qm = 0, qw = 0; Object.keys(main).forEach(function(id){ qm += main[id].a * main[id].n; qw += main[id].n; }); qm = qw ? qm / qw : 0;
+  Object.keys(main).forEach(function(id){ o(id).qbE = Math.round((main[id].a - qm) * 1000) / 1000; });
+  (ret || []).forEach(function(r){ var id = pxTeamId(pxG(r, "team")), v = +pxG(r, "percentPassingPPA", "percent_passing_ppa"); if(id && isFinite(v)) o(id).pas = Math.round(Math.max(0, Math.min(1, v)) * 100) / 100; });
+  var pin = {};
+  (portal || []).forEach(function(p){
+    var to = pxTeamId(pxG(p, "destination")), from = pxTeamId(pxG(p, "origin")); if(!to || !from || to === from) return;
+    var pos = String(pxG(p, "position") || "").toUpperCase();
+    var e = P[pxNameKey(String(pxG(p, "firstName", "first_name") || "") + " " + String(pxG(p, "lastName", "last_name") || "")) + "|" + from];
+    var pt = pin[to] = pin[to] || {}, q = pt[from] = pt[from] || [0, 0];
+    if(e && e.tot > 0 && teamPos[from] > 0) q[0] += e.tot / teamPos[from];
+    else if(PX_NONSKILL.test(pos)) q[1] += 1;
+    if(pos === "QB" && e && e.n >= 100){ var v = Math.round((e.a - qm) * 0.7 * 1000) / 1000, t = o(to); if(t.qbIn === undefined || v > t.qbIn) t.qbIn = v; }
+  });
+  Object.keys(T).forEach(function(id){ var t = T[id], pas = typeof t.pas === "number" ? t.pas : 0.5;
+    var qb = Math.round((pas * (t.qbE || 0) + (1 - pas) * (t.qbIn || 0)) * 1000) / 1000; if(qb) t.qb = qb; });
+  // Coach-follow, for head coaches who moved from another FBS head job.
+  Object.keys((CO && CO.at) || {}).forEach(function(id){
+    var c = CO.at[id], now = c[y], prev = c[y - 1]; if(!now || !prev || now.n === prev.n) return;
+    var from = null; (CO.career[now.n] || []).forEach(function(q){ if(q.yr === y - 1 && q.id !== id && (!from || q.g > from.g)) from = q; });
+    if(!from) return;
+    var q = pin[id] && pin[id][from.id], t = o(id); t.from = from.id; t.coach = now.n;
+    t.fol = q ? Math.round((0.6 * Math.min(1, q[0]) + 0.4 * Math.min(1, q[1] / 12)) * 1000) / 1000 : 0;
+  });
+  return { y: y, v: PX_CONT_V, at: Date.now(), t: T, nPpa: (ppa || []).length, nPortal: (portal || []).length };
+}
+function pxContSeason(y, call, CO){
+  return Promise.all([call("/player/returning", { year: y }), call("/player/portal", { year: y }), call("/ppa/players/season", { year: y - 1, excludeGarbageTime: true })]).then(function(r){
+    if(!r[2] || !r[2].length) throw new Error("CFBD sent no player PPA for " + (y - 1) + " — nothing saved, try again later");
+    return pxContBuild(y, r[0], r[1], r[2], CO);
+  });
+}
+// The add-on, applied to one prior table. ref(e) = that table's rating of the team last season.
+function pxContAdj(t, C, W, ref){
+  var out = {};
+  Object.keys(t).forEach(function(id){
+    var e = t[id], c = C[id]; if(!c){ out[id] = e; return; }
+    var q = W.q * (c.qb || 0), f = 0, a = c.fol && c.from && t[c.from] ? ref(t[c.from]) : NaN, b = ref(e);
+    if(isFinite(a) && isFinite(b)) f = W.f * c.fol * (a - b);
+    if(!q && !f){ out[id] = e; return; }
+    out[id] = Object.assign({}, e, { r: e.r + q + f, off: e.off + q + f / 2, def: e.def - f / 2, qbAdj: Math.round(q * 100) / 100, folAdj: Math.round(f * 100) / 100 });
+  });
+  return out;
+}
+function pxContFor(S){ return (S && S.cont && S.cont.t && S.cont.y === pxYear()) ? S.cont : null; }
+function pxContW(S){ var W = S && S.contW; return (W && isFinite(W.q) && isFinite(W.f)) ? W : PX_CONT_FIX; }
+var PX_REF_SP = function(e){ return typeof e.sp === "number" ? e.sp : NaN; }, PX_REF_OWN = function(e){ return typeof e.r1 === "number" ? e.r1 : NaN; };
+// Fit wq, wf: rows of (continuity inputs → how SP+ finished minus the SP+ prior), from seasons
+// [{ y, prior, cont, next }] where next = { id: SP+ that season } (the next season's prior carries it).
+function pxContRows(list){
+  var rows = [];
+  list.forEach(function(L){
+    if(!L.prior || !L.prior.t || !L.cont || !L.cont.t || !L.next) return;
+    var P = L.prior.t, C = L.cont.t;
+    Object.keys(P).forEach(function(id){ var e = P[id], fin = L.next[id]; if(!isFinite(fin) || !isFinite(e.r) || e.imp) return;
+      var c = C[id] || {}, a = c.fol && c.from && P[c.from] ? PX_REF_SP(P[c.from]) : NaN, b = PX_REF_SP(e);
+      rows.push({ y: L.y, x: [1, c.qb || 0, (isFinite(a) && isFinite(b)) ? c.fol * (a - b) : 0], y2: fin - e.r }); });
+  });
+  return rows;
+}
+function pxContFit(rows, skipY){
+  var R = rows.filter(function(r){ return r.y !== skipY; }).map(function(r){ return { x: r.x, y: r.y2 }; });
+  var nq = R.filter(function(r){ return Math.abs(r.x[1]) > 0.01; }).length, nf = R.filter(function(r){ return r.x[2] !== 0; }).length;
+  var c = R.length >= 60 ? pxOls(R, 1.0) : [0, NaN, NaN];
+  var sh = function(fit, fix, n, K, lo, hi){ var v = isFinite(fit) ? (n * fit + K * fix) / (n + K) : fix; return Math.max(lo, Math.min(hi, v)); };
+  return { q: Math.round(sh(c[1], PX_CONT_FIX.q, nq, 150, 0, 25) * 100) / 100, f: Math.round(sh(c[2], PX_CONT_FIX.f, nf, 20, 0, 1) * 1000) / 1000,
+           rq: isFinite(c[1]) ? Math.round(c[1] * 100) / 100 : null, rf: isFinite(c[2]) ? Math.round(c[2] * 1000) / 1000 : null, nq: nq, nf: nf, n: R.length };
+}
+function pxSpOf(P){ var o = {}; Object.keys((P && P.t) || {}).forEach(function(id){ var v = P.t[id].sp; if(typeof v === "number" && isFinite(v) && !P.t[id].imp) o[id] = v; }); return o; }
+// Seasons for the fit: the saved past seasons' priors + continuity, each graded by the next season's prior's SP+.
+function pxContSeasonsFrom(byY){
+  var S = pxState(), y = pxYear(), out = [];
+  Object.keys(byY).map(Number).sort().forEach(function(h){
+    var nx = byY[h + 1] ? byY[h + 1].prior : (h + 1 === y ? S.prior : null);
+    out.push({ y: h, prior: byY[h].prior, cont: byY[h].cont, next: nx ? pxSpOf(nx) : null });
+  });
+  return out;
+}
+// Download what's missing (never a season already saved), then refit the weights.
+// thisSeason: also (re)fetch this season's continuity (three calls).
+function pxContSync(thisSeason){
+  if(PXC.busy) return;
+  var S = pxState(), y = pxYear(), memo = {};
+  var call = function(path, params){ var k = path + "?" + JSON.stringify(params || {}); if(!memo[k]) memo[k] = pxCall(path, params).catch(function(e){ delete memo[k]; throw e; }); return memo[k]; };
+  PXC.busy = true; PXC.err = ""; PXC.msg = "Checking what’s saved…"; pxContStatus();
+  var hasDb = !!(DB && ME()), idx = {};
+  (hasDb ? (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()) : Promise.resolve({})).then(function(I){
+    idx = I || {};
+    var past = hasDb ? PX_HIST_YEARS.filter(function(h){ var e = idx["y" + h]; return e && e.prior && !(e.cont && e.contV === PX_CONT_V); }) : [];
+    var cur = thisSeason || !pxContFor(S);
+    if(!past.length && !cur) return null;
+    var lo = Math.min.apply(null, past.concat([y])) - 1;
+    PXC.msg = "Coaches " + lo + "–" + y + "…"; pxContStatus();
+    return call("/coaches", { minYear: lo, maxYear: y }).then(function(list){
+      var CO = pxCoachIndex(list), chain = Promise.resolve();
+      past.forEach(function(h){ chain = chain.then(function(){
+        PXC.msg = h + ": returning production, portal, " + (h - 1) + " player PPA…"; pxContStatus();
+        return pxContSeason(h, call, CO).then(function(C){
+          return pxHistPut("hist/y" + h + "/cont", C).then(function(){ var e = idx["y" + h] = idx["y" + h] || {}; e.cont = Object.keys(C.t).length; e.contV = PX_CONT_V; return pxHistPut("histIdx/y" + h, e); });
+        }); }); });
+      if(cur) chain = chain.then(function(){ PXC.msg = y + ": returning production, portal, " + (y - 1) + " player PPA…"; pxContStatus();
+        return pxContSeason(y, call, CO).then(function(C){ S.cont = C; }); });
+      return chain;
+    });
+  }).then(function(){ return pxContRefit(); }).then(function(){
+    PXC.busy = false; PXC.msg = ""; pxContApplied(); toast("Roster continuity ready", "ok");
+  }).catch(function(e){ PXC.busy = false; PXC.msg = ""; PXC.err = (e && e.message) || String(e); peSave(); pxContStatus(); });
+}
+// Refit the weights from what's saved (Firebase reads only, no CFBD).
+function pxContRefit(){
+  var S = pxState();
+  if(!(DB && ME())) return Promise.resolve();
+  return (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(I){
+    var ys = PX_HIST_YEARS.filter(function(h){ var e = I["y" + h]; return e && e.prior; });
+    return Promise.all(ys.map(function(h){ return Promise.all([pxHistGet("hist/y" + h + "/prior"), (I["y" + h].cont ? pxHistGet("hist/y" + h + "/cont") : Promise.resolve(null))]).then(function(v){ return { y: h, prior: v[0], cont: v[1] }; }); }));
+  }).then(function(list){
+    var byY = {}; list.forEach(function(L){ byY[L.y] = L; });
+    var rows = pxContRows(pxContSeasonsFrom(byY));
+    S.contW = Object.assign(pxContFit(rows), { at: Date.now(), ys: Object.keys(byY).filter(function(h){ return byY[h].cont; }).map(Number) });
+  });
+}
+// Leave-one-season-out weights for the backtest seasons (no season's weights see that season).
+function pxContWLoso(seasons){
+  var byY = {}; (seasons || []).forEach(function(sd){ byY[sd.y] = { prior: sd.prior, cont: sd.cont }; });
+  var rows = pxContRows(pxContSeasonsFrom(byY)), out = {};
+  (seasons || []).forEach(function(sd){ out[sd.y] = pxContFit(rows, sd.y); });
+  return out;
+}
+function pxContApplied(){ var S = pxState(); PX._pcont = null; PX._pmix = null; pxOwnReset(); pxRebuild(); peSave(); pemRepaint(); }
+function pxContStatus(){ var el = document.getElementById("px-cont"); if(el){ el.outerHTML = pxContCardHtml(); pxBind(); } }
+function pxContCardHtml(){
+  var S = pxState(), y = pxYear(), C = pxContFor(S), W = pxContW(S), I = PXH.idx || {}, lk = S.lock || {}, on = lk.cont !== 0;
+  var saved = PX_HIST_YEARS.filter(function(h){ return (I["y" + h] || {}).cont; }), miss = PX_HIST_YEARS.filter(function(h){ var e = I["y" + h]; return e && e.prior && !e.cont; });
+  var need = (C ? 0 : 3) + miss.length * 3 + ((!C || miss.length) ? 1 : 0);
+  var h = '<div class="pem-ats" id="px-cont"><div class="pem-autotop"><b>🔁 Roster continuity</b>' +
+          '<button class="btn btn-sm btn-ghost" id="px-contgo"' + (PXC.busy ? ' disabled' : '') + '>' + (PXC.busy ? 'Loading…' : (C && !miss.length ? 'Refresh ' + y : 'Download')) + '</button></div>';
+  h += '<div class="pem-autosub">' + (C ? y + ' loaded' : y + ' not loaded') + ' · past seasons saved: ' + (saved.length ? saved.join(', ') : 'none') +
+       (need ? ' · next download ≈ <b>' + need + '</b> CFBD calls, once' : ' · Refresh re-pulls only ' + y + ' (4 calls), e.g. after the portal window') + '</div>';
+  if(PXC.busy) h += '<div class="pem-autosub">' + x(PXC.msg) + '</div>';
+  if(PXC.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXC.err) + '</div>';
+  h += '<div class="px-pick"><label for="px-conton">Use it</label><select id="px-conton"><option value="1"' + (on ? ' selected' : '') + '>On</option><option value="0"' + (on ? '' : ' selected') + '>Off</option></select></div>';
+  var Wf = S.contW;
+  h += '<div class="pem-autonote">Weights: <b>' + W.q.toFixed(1) + '</b> points per EPA/play of QB carried over · <b>' + W.f.toFixed(2) + '</b> of the gap to a coach’s old program, per share of it that followed. ' +
+       (Wf && Wf.n ? 'Fitted on ' + Wf.n + ' team-seasons (' + Wf.nq + ' with a QB input, ' + Wf.nf + ' with a coach who brought players; raw fit ' + (Wf.rq === null ? '—' : Wf.rq) + ' and ' + (Wf.rf === null ? '—' : Wf.rf) + ') and pulled toward 8 and 0.4 by how few there are.' : 'Fixed (8 and 0.4) until past seasons are downloaded.') + '</div>';
+  if(C && S.prior && S.prior.t){
+    var T = pxContAdj(S.prior.t, C.t, W, PX_REF_SP), ids = Object.keys(T).filter(function(id){ try{ return pearIsFbs(id); }catch(e){ return true; } });
+    var nm = function(id){ return x(pxOwnName(id)); }, sg = function(v){ return pemFmtSigned(v || 0, 1); };
+    var qb = ids.filter(function(id){ return T[id].qbAdj; }).sort(function(a, b){ return Math.abs(T[b].qbAdj) - Math.abs(T[a].qbAdj); }).slice(0, 10);
+    if(qb.length){
+      h += '<div class="pem-hd" style="margin-top:12px">Quarterback carried over</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Team</span><span>Last yr QB · back</span><span>Prior change</span></div>';
+      qb.forEach(function(id){ var c = C.t[id] || {};
+        h += '<div class="pem-bkrow"><span>' + nm(id) + (typeof c.qbIn === "number" && (c.pas || 0) < 0.5 ? ' <small>transfer QB ' + (c.qbIn >= 0 ? '+' : '−') + Math.abs(c.qbIn).toFixed(2) + '</small>' : '') + '</span><span>' +
+             (typeof c.qbE === "number" ? (c.qbE >= 0 ? '+' : '−') + Math.abs(c.qbE).toFixed(2) : '—') + ' <small>' + (typeof c.pas === "number" ? Math.round(c.pas * 100) + '% back' : '') + '</small></span>' +
+             '<b class="' + (T[id].qbAdj >= 0 ? 'up' : 'dn') + '">' + sg(T[id].qbAdj) + '</b></div>'; });
+      h += '</div>';
+    }
+    var fl = ids.filter(function(id){ return (C.t[id] || {}).from; }).sort(function(a, b){ return (C.t[b].fol || 0) - (C.t[a].fol || 0); });
+    if(fl.length){
+      h += '<div class="pem-hd" style="margin-top:12px">New coaches from another FBS head job</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Team · from</span><span>Roster followed</span><span>Prior change</span></div>';
+      fl.forEach(function(id){ var c = C.t[id];
+        h += '<div class="pem-bkrow"><span>' + nm(id) + ' <small>' + x(c.coach || '') + ', from ' + nm(c.from) + '</small></span><span>' + Math.round((c.fol || 0) * 100) + '%</span><b class="' + ((T[id].folAdj || 0) >= 0 ? 'up' : 'dn') + '">' + sg(T[id].folAdj) + '</b></div>'; });
+      h += '</div>';
+    }
+    h += '<div class="pem-autonote" style="margin-top:4px">Shown against the SP+ roster prior; your own prior gets the same change measured on its own ratings. QB: last season’s main QB in EPA per play against the average starter, times the share of passing production that returns; a team that lost its QB gets 70% of a proven transfer’s number. Coach: share of his old program that came with him (60% its offensive production, 40% linemen and defenders against a dozen) × the gap between the two programs last season. Only head coaches count: a coordinator promoted elsewhere isn’t flagged. It only matters early: it fades out with the prior.</div>';
+  }
+  return h + '</div>';
+}
 // The prior table a fit uses, by o.psrc. Falls back to the SP+ roster prior when no own prior is built
 // for this season (or the setting is 0). A mix blends team by team.
 function pxPriorT(o){
   var S = pxState(), sp = (S.prior || {}).t || {}, src = (o && typeof o.psrc === "number") ? o.psrc : 0;
   var OP = S.priorOwn, own = (OP && OP.t && OP.y === pxYear()) ? OP.t : null;
+  // Roster continuity on top (unless switched off), each table on its own scale.
+  var C = (o && o.cont === 0) ? null : pxContFor(S), W = pxContW(S);
+  var ck = C ? (S.key || "") + "|" + C.y + ":" + (C.at || 0) + "|" + W.q + ":" + W.f + "|" + (S.prior ? S.prior.y + ":" + S.prior.n + ":" + (S.prior.at || 0) : "-") + "|" + (OP ? OP.y + ":" + (OP.at || 0) : "-") : "";
+  if(C){
+    if(!PX._pcont || PX._pcont.key !== ck) PX._pcont = { key: ck, sp: pxContAdj(sp, C.t, W, PX_REF_SP), own: own ? pxContAdj(own, C.t, W, PX_REF_OWN) : null };
+    sp = PX._pcont.sp; own = PX._pcont.own;
+  }
   if(!(src > 0) || !own) return sp;
   if(src >= 1) return own;
-  var key = src + "|" + OP.y + "|" + (OP.at || 0) + "|" + (S.prior ? S.prior.y + ":" + S.prior.n : "-");
+  var key = src + "|" + OP.y + "|" + (OP.at || 0) + "|" + (S.prior ? S.prior.y + ":" + S.prior.n : "-") + "|" + ck;
   if(PX._pmix && PX._pmix.key === key) return PX._pmix.t;
   var t = {};
   Object.keys(own).forEach(function(id){ var a = own[id], b = sp[id];
@@ -2643,13 +2771,11 @@ function pxOwnTalZ(P){
 }
 // Inputs for one team going into season h. a / b: own ratings from h-1 / h-2 (b falls back to a);
 // t: that season's roster inputs (from the SP+ prior's record: returning production, talent, portal, new coach).
-function pxOwnFeat(a, b, t, z, line, p10, lastAll){
+function pxOwnFeat(a, b, t, z, line, p10){
   var imp = !a, r1 = a ? pxOwnR(a) : p10, r2 = b ? pxOwnR(b) : r1;
   var ret = (t && typeof t.ret === "number" && isFinite(t.ret)) ? t.ret : 0.5;
   var gap = (t && t.nc && line && !imp) ? (line[0] + line[1] * z) - r1 : 0;
-  // Coach-follow: share of the old roster that came × (old school's own rating last season − this team's).
-  var old = t && t.fol && t.fromId && lastAll && lastAll[t.fromId], folx = (old && !imp) ? t.fol * (pxOwnR(old) - r1) : 0;
-  return { x: [1, r1, r2, r1 * (ret - 0.5), z || 0, (t && +t.port) || 0, gap, (t && +t.qb) || 0, folx], imp: imp, r1: r1, folx: folx };
+  return { x: [1, r1, r2, r1 * (ret - 0.5), z || 0, (t && +t.port) || 0, gap], imp: imp, r1: r1 };
 }
 // OWN: { year: { id: [off, def, games] } }; PRI: { year: roster-prior record for that season }.
 // Builds the prior for season y using only seasons before y. Null when last season isn't rated.
@@ -2665,27 +2791,21 @@ function pxBuildOwnPrior(y, OWN, PRI){
   var rows = [];
   hs.forEach(function(h){ var Z = pxOwnTalZ(PRI[h]);
     Object.keys(OWN[h]).forEach(function(id){ var a = OWN[h - 1][id]; if(!a) return;
-      var f = pxOwnFeat(a, OWN[h - 2] && OWN[h - 2][id], PRI[h].t[id], Z[id], line, 0, OWN[h - 1]); rows.push({ x: f.x, y: pxOwnR(OWN[h][id]), w: REC(h) }); }); });
+      var f = pxOwnFeat(a, OWN[h - 2] && OWN[h - 2][id], PRI[h].t[id], Z[id], line, 0); rows.push({ x: f.x, y: pxOwnR(OWN[h][id]), w: REC(h) }); }); });
   var fitted = rows.length >= 120, coef = fitted ? pxOls(rows, 1.0) : PX_OWN_FALLBACK.slice();
   coef[6] = Math.max(0, Math.min(1, coef[6] || 0));
   if(!coef.every(function(v){ return isFinite(v); })){ coef = PX_OWN_FALLBACK.slice(); fitted = false; }
-  // QB and coach-follow weights lean on their fixed values until enough team-seasons carry them
-  // (a saved season's prior from before v4 has neither, so it adds nothing to these two).
-  var nQb = rows.filter(function(r){ return Math.abs(r.x[7]) > 0.01; }).length, nFol = rows.filter(function(r){ return r.x[8] !== 0; }).length;
-  coef[7] = pxShrinkCoef(fitted ? coef[7] : NaN, PX_QB_FIX, fitted ? nQb : 0, 150, 0, 25); coef[8] = pxShrinkCoef(fitted ? coef[8] : NaN, PX_FOL_FIX, fitted ? nFol : 0, 20, 0, 1);
   // A team new to FBS starts at the 10th percentile of last season's FBS ratings.
   var lv = Object.keys(last).map(function(id){ return pxOwnR(last[id]); }).sort(function(p, q){ return p - q; }), p10 = lv.length >= 20 ? lv[Math.floor(lv.length * 0.1)] : -15;
-  var Zy = pxOwnTalZ(cur), out = { y: y, v: PX_OWN_V, src: "own", coef: coef, n: rows.length, fitted: fitted, from: hs, last: y - 1, t: {}, at: Date.now(), nQb: nQb, nFol: nFol };
+  var Zy = pxOwnTalZ(cur), out = { y: y, v: PX_OWN_V, src: "own", coef: coef, n: rows.length, fitted: fitted, from: hs, last: y - 1, t: {}, at: Date.now() };
   Object.keys(cur.t).forEach(function(id){
-    var a = last[id], t = cur.t[id], f = pxOwnFeat(a, OWN[y - 2] && OWN[y - 2][id], t, Zy[id], line, p10, last), r = 0;
+    var a = last[id], t = cur.t[id], f = pxOwnFeat(a, OWN[y - 2] && OWN[y - 2][id], t, Zy[id], line, p10), r = 0;
     f.x.forEach(function(v, i){ r += v * coef[i]; });
     // Offense / defense split follows last season's own split (as the SP+ prior does with SP+'s).
     var share = 0.5;
     if(a){ var oD = a[0], dD = -a[1], tot = oD + dD; if(Math.abs(tot) > 1 && (tot > 0) === (r > 0)) share = Math.max(0.1, Math.min(0.9, oD / tot)); }
     var e = { r: Math.round(r * 100) / 100, off: Math.round(r * share * 100) / 100, def: Math.round(-r * (1 - share) * 100) / 100, r1: Math.round(f.r1 * 100) / 100 };
     if(f.imp) e.imp = 1; if(t && t.nc) e.nc = 1;
-    if(f.x[7]) e.qbAdj = Math.round(coef[7] * f.x[7] * 100) / 100;
-    if(f.folx) e.folAdj = Math.round(coef[8] * f.folx * 100) / 100;
     out.t[id] = e;
   });
   return out;
@@ -2791,8 +2911,7 @@ function pxOwnCardHtml(){
     h += '<div class="rb-sub" style="margin:10px 0 4px">Top of your own prior (points vs an average team, preseason)</div><div class="pem-wk rb-4">' + hd + top.map(row).join('') + '</div>';
     h += '<div class="rb-sub" style="margin:10px 0 4px">Where it disagrees most with the SP+ prior</div><div class="pem-wk rb-4">' + hd + dis.map(row).join('') + '</div>';
     var c = P.coef, f2 = function(v){ return (v >= 0 ? '' : '−') + Math.abs(v).toFixed(2); };
-    h += '<div class="pem-autonote" style="margin-top:6px"><b>How it’s built:</b> prior = ' + f2(c[1]) + ' × last season’s own rating + ' + f2(c[2]) + ' × the season before + ' + f2(c[3]) + ' × last season × (returning production − ½) + ' + f2(c[4]) + ' × talent (z) + ' + f2(c[5]) + ' × net portal + ' + f2(c[6]) + ' × the gap to talent for a new head coach + ' + f2(c[7] || 0) + ' × QB carried over + ' + f2(c[8] || 0) + ' × (share of a new coach’s old roster that followed him × his old school’s rating gap). ' +
-         'The last two lean on fixed weights (' + PX_QB_FIX + ' and ' + PX_FOL_FIX + ') until enough past seasons carry them (' + (P.nQb || 0) + ' and ' + (P.nFol || 0) + ' team-seasons do now). ' +
+    h += '<div class="pem-autonote" style="margin-top:6px"><b>How it’s built:</b> prior = ' + f2(c[1]) + ' × last season’s own rating + ' + f2(c[2]) + ' × the season before + ' + f2(c[3]) + ' × last season × (returning production − ½) + ' + f2(c[4]) + ' × talent (z) + ' + f2(c[5]) + ' × net portal + ' + f2(c[6]) + ' × the gap to talent for a new head coach. ' +
          'Own ratings are each season fitted on its plays alone — no SP+, no prior. Returning production, talent, portal and coaching changes come from CFBD. The SP+ prior’s coach track-record term is left out because it’s measured against SP+.</div>';
   }
   h += '<div class="pem-autonote" style="margin-top:6px">Both switches are locks: the tuner re-tunes everything else around them, and the record vs Vegas is regraded week by week. The prior only matters early (it fades out by the fade week); the weekly SP+ sheet still carries half of every spread from week 6 unless it’s off. Compare the versions on <b>Record → SP+ or your own prior?</b> and on past seasons in <b>Tune → Backtest</b>.</div>';
@@ -2956,13 +3075,13 @@ function pxHistSeason(y, idx, call){
   }).then(function(){
     // Roster prior as it would have stood before that season. One saved before the fit
     // was checked (no priorFit on record) or that failed the check is rebuilt.
-    if(I.prior && I.priorFit >= 150 && I.priorV === 4) return null;   // v4 adds the QB and coach-follow inputs
+    if(I.prior && I.priorFit >= 150) return null;
     say(y + " roster prior", y + ": roster prior (fitted on " + (y - 3) + "–" + (y - 1) + ")…");
     return (teams ? Promise.resolve(teams) : pxHistGet("hist/" + k + "/teams")).then(function(T){
       return pxBuildPrior(y, call).then(function(P){ return pxPriorFix(P, T || {}); });
     }).then(function(P){
       if(!pxPriorOk(P)) throw new Error("CFBD\u2019s SP+ history didn\u2019t come through (rate limit?) \u2014 wait a minute and press Resume");
-      return pxHistPut("hist/" + k + "/prior", P).then(function(){ I.prior = Object.keys(P.t || {}).length; I.priorFit = P.n; I.priorV = 4; return saveIdx(); });
+      return pxHistPut("hist/" + k + "/prior", P).then(function(){ I.prior = Object.keys(P.t || {}).length; I.priorFit = P.n; return saveIdx(); });
     });
   }).then(function(){
     // Every regular-season week: games, every book's lines, aggregated plays.
@@ -3813,7 +3932,7 @@ function pearBoxHtml(box, A, H){
   s += '<div style="font:800 10px Nunito,sans-serif;color:var(--muted);margin:8px 2px 2px;line-height:1.35">Averages from the drive-by-drive simulation behind the projection, not a single game. Pass plays include sacks and incompletions. Turnovers are each team\u2019s giveaways.</div>';
   return s;
 }
-function pxDataSig(){ var S = pxState(); return (Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0)) + "|sp:" + pxSheetSig() + (S.priorOwn ? "|own:" + (S.priorOwn.at || 0) : ""); }
+function pxDataSig(){ var S = pxState(); return (Object.keys(S.wk).length + ":" + (S.syncedAt || 0) + ":" + (S.prior ? S.prior.y + S.prior.n + "f" + (S.prior.fx || 0) : 0)) + "|sp:" + pxSheetSig() + (S.priorOwn ? "|own:" + (S.priorOwn.at || 0) : "") + (S.cont ? "|cont:" + (S.cont.at || 0) + ":" + pxContW(S).q + ":" + pxContW(S).f : ""); }
 // Changes whenever a sheet is pasted, replaced or deleted, so fits and tuning refresh.
 function pxSheetSig(){ var P = PE.priors || {}; return Object.keys(P).sort().map(function(k){ return k + (P[k] && P[k].at); }).join(","); }
 
@@ -4132,10 +4251,10 @@ function pxUTRefresh(msg){
   pxRebuild(); peSave(); pemRepaint(); pxAutoTune(); toast(msg, "ok");
 }
 function pxUTApply(){
-  var S = pxState(), o = pxUTInit(), ps = S.lock && S.lock.psrc; S.lock = {}; for(var k in o) S.lock[k] = o[k]; if(typeof ps === "number") S.lock.psrc = ps; S.opts = Object.assign({}, S.opts, o);
+  var S = pxState(), o = pxUTInit(), ps = S.lock && S.lock.psrc, pc = S.lock && S.lock.cont; S.lock = {}; for(var k in o) S.lock[k] = o[k]; if(typeof ps === "number") S.lock.psrc = ps; if(pc === 0) S.lock.cont = 0; S.opts = Object.assign({}, S.opts, o);
   pxUTRefresh("Your tune is in use · every setting locked");
 }
-function pxUTReset(){ var S = pxState(), ps = S.lock && S.lock.psrc; S.lock = {}; if(typeof ps === "number") S.lock.psrc = ps; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
+function pxUTReset(){ var S = pxState(), ps = S.lock && S.lock.psrc, pc = S.lock && S.lock.cont; S.lock = {}; if(typeof ps === "number") S.lock.psrc = ps; if(pc === 0) S.lock.cont = 0; PX.ut.o = null; PX.ut.res = null; pxUTRefresh("Back to auto · re-tuning"); }
 var PX_UT_GROUPS = [["Spreads", ["alpha", "half", "lev", "tier", "conf", "hfa", "tierAdj", "stretch", "vol"]], ["Priors & SP+", ["prior", "fade", "sp", "spLate"]], ["Totals", ["alphaT", "levT"]], ["Spots", ["sit", "qbOut1", "qbOut2"]]];
 var PX_UT_CSS = '<style>' +
   '#px-ut .ut-g{margin:12px 0 2px;font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;opacity:.6}' +
@@ -4330,6 +4449,8 @@ function pxBtConfigs(){
     out.push({ k: "own", name: "Own prior instead of SP+ prior", o: Object.assign({}, now, { psrc: 1 }) });
     out.push({ k: "mix", name: "Half own, half SP+ prior", o: Object.assign({}, now, { psrc: 0.5 }) });
   }
+  if(PXH.idx && PX_HIST_YEARS.some(function(y){ return (PXH.idx["y" + y] || {}).cont; }))
+    out.push({ k: "nocont", name: "Without roster continuity", o: Object.assign({}, now, { cont: 0 }) });
   out.push({ k: "noadj", name: "P4/G6 adjustment off", o: Object.assign({}, now, { tierAdj: 0 }) });
   out.push({ k: "c100", name: "Conference anchoring 100, P4/G6 off", o: Object.assign({}, now, { conf: 100, tierAdj: 0 }) });
   out.push({ k: "c300", name: "Conference anchoring 300, P4/G6 off", o: Object.assign({}, now, { conf: 300, tierAdj: 0 }) });
@@ -4364,7 +4485,7 @@ function pxBtWorker(){
     function runTune(M){
       var FIRST = PX_FIRST_GRADED, SE = {}, order = [], obj = M.obj === "line" ? "line" : "res";
       M.seasons.forEach(function(sd){
-        var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, priorOwn: (M.ownPriors || {})[y] || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y }, maxW = 0, weeks = {}, list = [];
+        var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, priorOwn: (M.ownPriors || {})[y] || null, cont: sd.cont || null, contW: (M.contW || {})[y] || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y }, maxW = 0, weeks = {}, list = [];
         Object.keys(sd.wk || {}).forEach(function(k){ var W = sd.wk[k]; if(!W) return; W.y = W.y || y; W.w = W.w || +k.replace(/\D/g, ""); S.wk[y + "-" + W.w] = W; if(W.w > maxW) maxW = W.w;
           (W.games || []).forEach(function(g){ if(g && g.c && W.w >= FIRST && g.hs !== null && g.hs !== undefined && g.as !== null && g.as !== undefined){
             var L = (W.lines || {})[g.id]; (weeks[W.w] = weeks[W.w] || []).push(list.length);
@@ -4455,7 +4576,7 @@ function pxBtWorker(){
       try{
         M.seasons.forEach(function(s){ Object.keys(s.wk || {}).forEach(function(k){ if(s.wk[k] && (s.wk[k].w || +k.replace(/\D/g, "")) >= FIRST) total++; }); });
         M.seasons.forEach(function(sd){
-          var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, priorOwn: (M.ownPriors || {})[y] || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y };
+          var y = sd.y, S = { key: "backtest", wk: {}, teams: sd.teams || {}, teamsYear: y, teamsV: 2, prior: sd.prior || null, priorOwn: (M.ownPriors || {})[y] || null, cont: sd.cont || null, contW: (M.contW || {})[y] || null, opts: Object.assign({}, PX_DEFAULTS), lock: {}, syncedAt: y };
           var maxW = 0;
           Object.keys(sd.wk || {}).forEach(function(k){ var W = sd.wk[k]; if(!W) return; W.y = W.y || y; W.w = W.w || +k.replace(/\D/g, ""); S.wk[y + "-" + W.w] = W; if(W.w > maxW) maxW = W.w; });
           PE.meta = { espnYear: y, espnWeek: maxW }; PE.priors = M.priors || {}; PE.px = S;
@@ -4493,10 +4614,11 @@ function pxBtRun(){
   (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(idx){
     var ys = PX_HIST_YEARS.filter(function(y){ var e = idx["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
     if(!ys.length) throw new Error("No past seasons saved yet. Download them under Data → Past seasons for backtesting first.");
-    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, wk: v.wk } : null; }); }));
+    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, cont: v.cont || null, wk: v.wk } : null; }); }));
   }).then(function(seasons){
     seasons = seasons.filter(Boolean);
     PXB.msg = "Building own priors…"; pxBtStatus();
+    PXB.contW = pxContWLoso(seasons);
     return pxOwnPriorsFor(seasons).then(function(OP){ PXB.ownPriors = OP; return seasons; });
   }).then(function(seasons){
     PXB.msg = "Starting…"; pxBtStatus();
@@ -4509,7 +4631,7 @@ function pxBtRun(){
       else if(d.t === "err"){ pxBtEnd(acc, "The backtest stopped: " + d.msg); }
     };
     w.onerror = function(ev){ pxBtEnd(acc, "The backtest stopped: " + ((ev && ev.message) || "worker error")); };
-    w.postMessage({ seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, configs: run.map(function(c){ return { k: c.k, o: c.o }; }) });
+    w.postMessage({ seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, configs: run.map(function(c){ return { k: c.k, o: c.o }; }) });
   }).catch(function(e){ PXB.busy = false; PXB.msg = ""; PXB.err = (e && e.message) || String(e); pxBtStatus(); });
 }
 // The saved seasons, from Firebase (each downloaded once per run).
@@ -4517,7 +4639,7 @@ function pxBtLoadSeasons(){
   return (PXH.idx ? Promise.resolve(PXH.idx) : pxHistLoadIdx()).then(function(idx){
     var ys = PX_HIST_YEARS.filter(function(y){ var e = idx["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
     if(!ys.length) throw new Error("No past seasons saved yet. Download them under Data \u2192 Past seasons for backtesting first.");
-    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, wk: v.wk } : null; }); }));
+    return Promise.all(ys.map(function(y){ return pxHistGet("hist/y" + y).then(function(v){ return v ? { y: y, teams: v.teams, prior: v.prior, cont: v.cont || null, wk: v.wk } : null; }); }));
   }).then(function(seasons){ return seasons.filter(Boolean); });
 }
 // Grid for tuning on history: the live tuner's, plus the two settings it leaves to you (P4 vs G6
@@ -4529,6 +4651,7 @@ function pxBtTune(){
   PXB.busy = true; PXB.mode = "tune"; PXB.err = ""; PXB.pct = 0; PXB.msg = "Loading saved seasons\u2026"; PXB.t0 = Date.now();
   PXB.tune = { moves: [], running: true }; pxBtStatus();
   pxBtLoadSeasons().then(function(seasons){
+    PXB.contW = pxContWLoso(seasons);
     return pxOwnPriorsFor(seasons).then(function(OP){ PXB.ownPriors = OP; return seasons; });
   }).then(function(seasons){
     PXB.msg = "Starting\u2026"; pxBtStatus();
@@ -4552,7 +4675,7 @@ function pxBtTune(){
       else if(d.t === "err"){ pxBtTuneEnd("Tuning stopped: " + d.msg); }
     };
     w.onerror = function(ev){ pxBtTuneEnd("Tuning stopped: " + ((ev && ev.message) || "worker error")); };
-    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T, obj: PXB.obj === "line" ? "line" : "res", cv: !!PXB.cv });
+    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T, obj: PXB.obj === "line" ? "line" : "res", cv: !!PXB.cv });
   }).catch(function(e){ PXB.busy = false; PXB.mode = ""; PXB.msg = ""; PXB.err = (e && e.message) || String(e); PXB.tune = null; pxBtStatus(); });
 }
 function pxBtTuneEnd(err){
@@ -4883,32 +5006,10 @@ function pxPriorCardHtml(){
            '<b class="' + ((t.coachAdj || 0) >= 0 ? 'up' : 'dn') + '">' + pemFmtSigned(t.coachAdj || 0, 1) + '</b></div>'; });
     h += '</div><div class="pem-autonote" style="margin-top:4px">Track record: how many points a game better than their recruiting talent predicted the coach\u2019s teams played at earlier jobs (recent seasons count most; short records are pulled toward zero), against the coach he replaced. Prior change: what the coaching change adds to the prior, from two fitted effects \u2014 new staffs pull a team back toward its talent level (coefficient ' + (P.coef[5] || 0).toFixed(2) + '), plus the track-record gap (' + (P.coef[6] || 0).toFixed(2) + ').';
   }
-  h += pxContHtml(P);
   var newbies = Object.keys(P.t).filter(function(id){ return P.t[id].imp && pearIsFbs(id); });
   if(newbies.length) h += '</div><div class="pem-autosub" style="margin-top:6px">No SP+ last season (new to FBS): <b>' + newbies.map(function(id){ return x(pearName(id)); }).join(', ') + '</b> \u2014 started near the bottom of FBS.';
-  h += '</div><div class="pem-autonote">Prior = last season’s SP+, regressed by how much production returns (QB-weighted), plus recruiting talent, position-weighted net transfer value (QB ×2.5, O-line ×2, pass rush ×1.5), the quarterback carried over and how much of a new coach’s old roster followed him, with weights fitted on the previous three seasons. CFBD’s returning production covers offense only, so defensive continuity comes through last season’s rating and the portal.</div>';
+  h += '</div><div class="pem-autonote">Prior = last season’s SP+, regressed by how much production returns (QB-weighted), plus recruiting talent and position-weighted net transfer value (QB ×2.5, O-line ×2, pass rush ×1.5), with weights fitted on the previous three seasons. CFBD’s returning production covers offense only, so defensive continuity comes through last season’s rating and the portal.</div>';
   return h + '</div>';
-}
-// Roster continuity on the prior card: the biggest QB effects and any coach who brought his roster.
-function pxContHtml(P){
-  var ids = Object.keys(P.t).filter(function(id){ try{ return pearIsFbs(id); }catch(e){ return true; } }), h = '', c = P.coef || [];
-  var nm = function(id){ return x(pxOwnName(id)); }, sg = function(v){ return pemFmtSigned(v || 0, 1); };
-  var qb = ids.filter(function(id){ return P.t[id].qbAdj; }).sort(function(a, b){ return Math.abs(P.t[b].qbAdj) - Math.abs(P.t[a].qbAdj); }).slice(0, 8);
-  if(qb.length){
-    h += '</div><div class="pem-hd" style="margin-top:12px">Quarterback carried over</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Team</span><span>Last yr QB · back</span><span>Prior change</span></div>';
-    qb.forEach(function(id){ var t = P.t[id];
-      h += '<div class="pem-bkrow"><span>' + nm(id) + (typeof t.qbIn === "number" && (t.pas || 0) < 0.5 ? ' <small>transfer QB ' + (t.qbIn >= 0 ? '+' : '−') + Math.abs(t.qbIn).toFixed(2) + '</small>' : '') + '</span><span>' + (typeof t.qbE === "number" ? (t.qbE >= 0 ? '+' : '−') + Math.abs(t.qbE).toFixed(2) : '—') + ' <small>' + (typeof t.pas === "number" ? Math.round(t.pas * 100) + '% back' : '') + '</small></span>' +
-           '<b class="' + (t.qbAdj >= 0 ? 'up' : 'dn') + '">' + sg(t.qbAdj) + '</b></div>'; });
-    h += '</div><div class="pem-autonote" style="margin-top:4px">Last season’s main QB, in EPA per play against the average starter, times the share of passing production that returns; a team that lost its QB gets 70% of a proven transfer’s number instead. Weight ' + (c[7] || 0).toFixed(1) + ' points per EPA/play.';
-  }
-  var fl = ids.filter(function(id){ return P.t[id].fol; }).sort(function(a, b){ return P.t[b].fol - P.t[a].fol; });
-  if(fl.length){
-    h += '</div><div class="pem-hd" style="margin-top:12px">Coaches who brought their roster</div><div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Team · from</span><span>Roster followed</span><span>Prior change</span></div>';
-    fl.forEach(function(id){ var t = P.t[id];
-      h += '<div class="pem-bkrow"><span>' + nm(id) + ' <small>from ' + nm(t.fromId) + '</small></span><span>' + Math.round(t.fol * 100) + '%</span><b class="' + ((t.folAdj || 0) >= 0 ? 'up' : 'dn') + '">' + sg(t.folAdj) + '</b></div>'; });
-    h += '</div><div class="pem-autonote" style="margin-top:4px">A new head coach who ran another FBS program last season: how much of it came with him through the portal (60% the share of its offensive production, 40% linemen and defenders against a dozen). The prior closes that share × ' + (c[8] || 0).toFixed(2) + ' of the gap to his old school’s rating. Only head coaches count: a coordinator promoted elsewhere isn’t flagged.';
-  }
-  return h;
 }
 // How each "priors gone by" week would have done: every past week predicted
 // only from the weeks before it, with that cutoff and the other settings as tuned.
@@ -5018,7 +5119,7 @@ function pxPanelHtml(){
     h += pxFadeCardHtml();
     h += pxSimCardHtml();
   } else if(cur === "priors"){
-    if(PX.active) h += pxOwnCardHtml() + pxPriorCardHtml();
+    if(PX.active) h += pxOwnCardHtml() + pxContCardHtml() + pxPriorCardHtml();
     h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
          '<div class="admin-panel">' + pemSheetsHtml() + '</div>';
   } else {
@@ -5060,6 +5161,15 @@ function pxBind(){
   if(sg) sg.onclick = function(){ pxSnapLines(); };
   var ob = document.getElementById("px-ownbuild");
   if(ob) ob.onclick = function(){ var I = PXH.idx || {}; pxOwnBuild(PX_HIST_YEARS.some(function(y){ return (I["y" + y] || {}).own; })); };
+  var cg = document.getElementById("px-contgo");
+  if(cg) cg.onclick = function(){ pxContSync(!!pxContFor(pxState())); };
+  var co = document.getElementById("px-conton");
+  if(co) co.onchange = function(){
+    var S = pxState(), on = this.value === "1"; S.lock = S.lock || {};
+    if(on){ delete S.lock.cont; delete S.opts.cont; } else { S.lock.cont = 0; S.opts.cont = 0; }
+    pxOwnReset(); pxRebuild(); peSave(); pemRepaint(); pxAutoTune();
+    toast(on ? "Roster continuity on \u00b7 re-tuning" : "Roster continuity off \u00b7 re-tuning");
+  };
   var ps = document.getElementById("px-psrc");
   if(ps) ps.onchange = function(){
     var S = pxState(), v = +this.value; S.lock = S.lock || {};
@@ -7491,10 +7601,12 @@ function pearTeamHtml(id){
        '<div class="tm-sub">' + (rk ? '<b>#' + rk + '</b> in Prophescore' : 'Not rated') +
        (S && S.rec ? ' · ' + x(S.rec) : (r && r.n ? ' · ' + r.w + '-' + r.l + ' vs FBS' : '')) + (S && S.standing ? ' · ' + x(S.standing) : '') + '</div>' +
        (function(){ var t = PX.active && pxState().prior && pxState().prior.t[id]; if(!t || !t.nc) return '';
-         return '<div class="tm-sub">New head coach: <b>' + x(t.coach || '') + '</b> · track record ' + pemFmtSigned(t.cvaNew || 0, 1) + ' · prior ' + pemFmtSigned(t.coachAdj || 0, 1) + ' for the change' +
-                (t.fol ? ' · brought ' + Math.round(t.fol * 100) + '% of ' + x(pxOwnName(t.fromId)) + ' (' + pemFmtSigned(t.folAdj || 0, 1) + ')' : '') + '</div>'; })() +
-       (function(){ var t = PX.active && pxState().prior && pxState().prior.t[id]; if(!t || !t.qbAdj) return '';
-         return '<div class="tm-sub">QB carried over: ' + pemFmtSigned(t.qbAdj, 1) + ' to the prior' + (typeof t.pas === "number" ? ' · ' + Math.round(t.pas * 100) + '% of passing back' : '') + '</div>'; })() +
+         return '<div class="tm-sub">New head coach: <b>' + x(t.coach || '') + '</b> · track record ' + pemFmtSigned(t.cvaNew || 0, 1) + ' · prior ' + pemFmtSigned(t.coachAdj || 0, 1) + ' for the change</div>'; })() +
+       (function(){ var S = pxState(), C = PX.active && pxContFor(S), c = C && C.t[id]; if(!c || !S.prior || (S.lock || {}).cont === 0) return '';
+         var a = pxContAdj(S.prior.t, (function(){ var o = {}; o[id] = c; return o; })(), pxContW(S), PX_REF_SP)[id] || {}, parts = [];
+         if(a.qbAdj) parts.push('QB carried over ' + pemFmtSigned(a.qbAdj, 1));
+         if(c.from && c.fol) parts.push('brought ' + Math.round(c.fol * 100) + '% of ' + x(pxOwnName(c.from)) + ' ' + pemFmtSigned(a.folAdj || 0, 1));
+         return parts.length ? '<div class="tm-sub">Roster continuity: ' + parts.join(' · ') + '</div>' : ''; })() +
        '</div></div>';
   if(r){
     h += '<div class="tm-stats">';
