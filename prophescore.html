@@ -3954,9 +3954,99 @@ function pxCVErr(o, weeksUpTo){
   });
   return em;
 }
-function pxWeek1Opts(){ var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k]; return o; }
+function pxWeek1Opts(){ return pxBaseOpts(); }
 function pxOptsForWeek(w){ var S = pxState(), e = S.wf && S.wf[w]; return (e && e.sig === pxWFSig(w)) ? e.o : null; }
-function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v17|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+function pxWFSig(w){ var S = pxState(), n = 0; pxGames().forEach(function(x){ if(x.W.w < w && x.g.c) n++; }); return "v18|" + pxBaseSig() + "|" + n + "|" + (S.prior ? S.prior.n : 0) + "|" + JSON.stringify(S.lock || {}); }
+// ── Evidence-weighted search (both tuners) ─────────────────────────────────
+// For each setting it tries every grid value, takes the best, and measures the gain over the current
+// value game by game (t = gain / its standard error). Instead of all-or-nothing at a fixed bar, the
+// setting moves part of the way toward the best value: w = 1 − τ²/t² (0 below t = τ). Weak evidence
+// moves it a little, strong evidence most of the way, and as games pile up t grows and so does w.
+// The partial value is then graded itself and kept only if it beats the current one. τ = 2 because
+// the best of ~6 values looks good by luck: with no real difference, this moves a setting an average
+// 2–3% of the way (simulated), about the same noise risk as the old 2.8 all-or-nothing bar.
+// After each pass over the settings, a joint step tries random nudges of 2–3 settings together
+// (one grid step each), so settings that only help in combination can move too.
+var PX_EV_TAU = 2.0, PX_EV_LOG = { alpha: 1, half: 1, alphaT: 1 };
+function pxEvW(t){ return t > PX_EV_TAU ? 1 - PX_EV_TAU * PX_EV_TAU / (t * t) : 0; }
+function pxEvRound(key, v){ return PX_EV_LOG[key] ? Math.round(v * 10) / 10 : Math.round(v * 1000) / 1000; }
+function pxEvMix(key, a, b, w){
+  if(w >= 0.999) return b;
+  if(PX_EV_LOG[key] && a > 0 && b > 0) return pxEvRound(key, Math.exp(Math.log(a) + w * (Math.log(b) - Math.log(a))));
+  return pxEvRound(key, a + w * (b - a));
+}
+// cfg: { o, keys, grid, score(o) -> { em, m, per? }, first (score of o, optional), ok(r, cur) (extra check, optional),
+//        passes (3), joint (number of joint tries per pass, 0 = none), seed, prog(msg, frac), onMove(mv) }
+// Returns a stepper: call .step() until .done; .o is the result, .moves what moved, .start / .cur the scores.
+function pxEvSearch(cfg){
+  var E = { o: Object.assign({}, cfg.o), moves: [], done: false, pass: 0 }, keys = cfg.keys.slice(), units = [], ui = 0, acc = 0, seed = cfg.seed || 7;
+  var rnd = function(){ seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  E.cur = cfg.first || cfg.score(E.o); E.start = E.cur;
+  function plan(){ units = keys.slice(); if(cfg.joint && keys.length >= 2) units.push("__joint__"); ui = 0; acc = 0; }
+  function tryMove(cands, label){
+    // cands: [{ o, r, ch: { key: [from, to] } }] — pick the best, size the move by its evidence, grade the partial step.
+    var best = null; cands.forEach(function(c){ if(c.r && c.r.m !== null && (!best || c.r.m < best.r.m)) best = c; });
+    if(!best) return;
+    var pd = pemPairedDiff(best.r.em, E.cur.em); if(!pd || !(pd.se > 0)) return;
+    var t = -pd.d / pd.se, w = pxEvW(t); if(!(w > 0)) return;
+    var oo = Object.assign({}, E.o), same = true;
+    Object.keys(best.ch).forEach(function(k){ var v = pxEvMix(k, best.ch[k][0], best.ch[k][1], w); if(Math.abs(v - E.o[k]) > 1e-9) same = false; oo[k] = v; });
+    if(same) return;
+    var full = Object.keys(best.ch).every(function(k){ return Math.abs(oo[k] - best.ch[k][1]) < 1e-9; });
+    var r = full ? best.r : cfg.score(oo), p2 = pemPairedDiff(r.em, E.cur.em);
+    if(!p2 || !(p2.d < 0) || (cfg.ok && !cfg.ok(r, E.cur))) return;
+    var joint = Object.keys(best.ch).length > 1;
+    Object.keys(best.ch).forEach(function(k){
+      var mv = { k: k, from: E.o[k], to: oo[k], best: best.ch[k][1], w: Math.round(w * 100) / 100, t: Math.round(t * 100) / 100, d: p2.d, se: p2.se, per: r.per || {}, joint: joint, pass: E.pass + 1 };
+      E.moves.push(mv); if(cfg.onMove) cfg.onMove(mv);
+    });
+    E.o = oo; E.cur = r; acc++;
+  }
+  function knob(key){
+    var cands = [];
+    cfg.grid[key].forEach(function(v){
+      if(Math.abs(v - E.o[key]) < 1e-9) return;
+      var oo = Object.assign({}, E.o); oo[key] = v; var ch = {}; ch[key] = [E.o[key], v];
+      if(cfg.prog) cfg.prog("Pass " + (E.pass + 1) + " · " + key + " = " + v);
+      cands.push({ o: oo, r: cfg.score(oo), ch: ch });
+    });
+    tryMove(cands);
+  }
+  function jointStep(){
+    var cands = [];
+    for(var j = 0; j < cfg.joint; j++){
+      var n = rnd() < 0.5 ? 2 : 3, pool = keys.slice(), pick = [], oo = Object.assign({}, E.o), ch = {};
+      while(pick.length < n && pool.length){ pick.push(pool.splice(Math.floor(rnd() * pool.length), 1)[0]); }
+      pick.forEach(function(k){
+        var G = cfg.grid[k], i = 0; G.forEach(function(v, ix){ if(Math.abs(v - E.o[k]) < Math.abs(G[i] - E.o[k])) i = ix; });
+        var dir = rnd() < 0.5 ? -1 : 1, i2 = i + dir; if(i2 < 0 || i2 >= G.length) i2 = i - dir;
+        var v = G[Math.max(0, Math.min(G.length - 1, i2))]; if(Math.abs(v - E.o[k]) > 1e-9){ oo[k] = v; ch[k] = [E.o[k], v]; }
+      });
+      if(Object.keys(ch).length < 2) continue;
+      if(cfg.prog) cfg.prog("Pass " + (E.pass + 1) + " · together: " + Object.keys(ch).join(" + "));
+      cands.push({ o: oo, r: cfg.score(oo), ch: ch });
+    }
+    tryMove(cands);
+  }
+  plan();
+  E.units = function(){ return units.length; };
+  E.at = function(){ return ui; };
+  E.step = function(){
+    if(E.done) return;
+    if(ui >= units.length){ E.pass++; if(!acc || E.pass >= (cfg.passes || 3)){ E.done = true; return; } plan(); }
+    var u = units[ui++];
+    if(u === "__joint__") jointStep(); else knob(u);
+  };
+  return E;
+}
+// Base settings: what tuning on the saved seasons settled on (when it held up on held-out seasons),
+// else the defaults. Locks override both. The in-season tuner starts from here.
+function pxBaseOpts(){
+  var S = pxState(), B = S.base && S.base.o, LK = pxLocks(), o = {};
+  for(var k in PX_DEFAULTS){ o[k] = (B && typeof B[k] === "number") ? B[k] : PX_DEFAULTS[k]; if(LK[k] !== undefined) o[k] = LK[k]; }
+  return o;
+}
+function pxBaseSig(){ var S = pxState(); return S.base ? "b" + (S.base.at || 0) : "b0"; }
 // Tune from the defaults; a knob only moves when the gain is at least PX_TUNE_T
 // standard errors game by game (see below).
 // Settings you've set by hand. The tuner starts from them and never moves them.
@@ -3966,40 +4056,42 @@ function pxLocks(){ return pxState().lock || {}; }
 // t >= 2 easy to reach by luck: in simulation, with no value truly better, 2.0 moved a knob about
 // 10% of the time (most full tunes moved at least one of the 12 on noise); 2.8 about 1.5%.
 var PX_TUNE_T = 2.8;
-function pxTune(weeksUpTo, done){
-  var o = {}, LK = pxLocks(); for(var k in PX_DEFAULTS) o[k] = LK[k] !== undefined ? LK[k] : PX_DEFAULTS[k];
-  var cur = pxCVErr(o, weeksUpTo), keys = Object.keys(PX_GRID).filter(function(k0){ return LK[k0] === undefined; }), pass = 0, acc = 0, ki = 0;
-  if(Object.keys(cur).length < 40){ done(o, []); return; }
+// Starts from `start` (the previous week's tune, or the base settings) so progress carries forward,
+// and moves settings by the evidence (pxEvSearch). done(o, moved keys vs the base, moves).
+function pxTune(weeksUpTo, done, start){
+  var LK = pxLocks(), base = pxBaseOpts(), o = Object.assign({}, base, start || {}); for(var k in LK) o[k] = LK[k];
+  var keys = Object.keys(PX_GRID).filter(function(k0){ return LK[k0] === undefined; });
+  var em0 = pxCVErr(o, weeksUpTo);
+  if(Object.keys(em0).length < 40){ done(o, keys.filter(function(k2){ return Math.abs(o[k2] - base[k2]) > 1e-9; }), []); return; }
+  var E = pxEvSearch({ o: o, keys: keys, grid: PX_GRID, first: { em: em0, m: pemMeanErr(em0) }, passes: 3, joint: 8, seed: 97 + (weeksUpTo || 0),
+                       score: function(oo){ var em = pxCVErr(oo, weeksUpTo); return { em: em, m: pemMeanErr(em) }; } });
   (function step(){
-    if(ki >= keys.length){ pass++; ki = 0; if(!acc || pass >= 3){ done(o, keys.filter(function(k2){ return o[k2] !== PX_DEFAULTS[k2]; })); return; } acc = 0; }
-    var key = keys[ki++], best = null;
-    PX_GRID[key].forEach(function(v){
-      if(v === o[key]) return;
-      var oo = {}; for(var kk in o) oo[kk] = o[kk]; oo[key] = v;
-      var em = pxCVErr(oo, weeksUpTo), m = pemMeanErr(em);
-      if(m !== null && (!best || m < best.m)) best = { v: v, m: m, em: em };
-    });
-    if(best){ var pd = pemPairedDiff(best.em, cur); if(pd && pd.se > 0 && -pd.d / pd.se >= PX_TUNE_T){ o[key] = best.v; cur = best.em; acc++; } }
-    setTimeout(step, 0);
+    if(E.done){ done(E.o, keys.filter(function(k2){ return Math.abs(E.o[k2] - base[k2]) > 1e-9; }), E.moves); return; }
+    E.step(); setTimeout(step, 0);
   })();
 }
 var PX_T = { running: false, msg: "" };
 function pxAutoTune(){
   if(PX_T.running || !PX.active) return;
   var S = pxState(), sig0 = pxTuneSig(); PX_T.running = true; pxStatus();
-  pxTune(null, function(o, moved){
-    // Signature from the start: a lock changed mid-run leaves it stale, so the next check re-tunes.
-    S.opts = Object.assign(o, pxLocks()); S.moved = moved; S.tunedAt = Date.now(); S.tuneSig = sig0;
-    // Then settings for each past week, tuned only on the weeks before it.
-    var ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED && !pxOptsForWeek(w); });
-    (function next(){
-      if(!ws.length){ PX_T.running = false; pxRebuild(); peSave(); if(SC.screen === "prophescore") renderPoolEdge(); return; }
+  // Settings for each past week first, each tuned only on the weeks before it and starting from the
+  // week before's tune (so it builds up through the season); then today's, from the latest week's.
+  var prevOf = function(w){ var best = null; pxWeeks().forEach(function(v){ if(v < w && pxOptsForWeek(v)) best = v; }); return best === null ? null : pxOptsForWeek(best); };
+  var ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED && !pxOptsForWeek(w); });
+  (function next(){
+    if(ws.length){
       var w = ws.shift();
-      pxTune(w, function(ow){ S.wf = S.wf || {}; S.wf[w] = { sig: pxWFSig(w), o: ow }; setTimeout(next, 0); });
-    })();
-  });
+      pxTune(w, function(ow, mv, moves){ S.wf = S.wf || {}; S.wf[w] = { sig: pxWFSig(w), o: ow, n: moves.length }; setTimeout(next, 0); }, prevOf(w));
+      return;
+    }
+    pxTune(null, function(o, moved, moves){
+      // Signature from the start: a lock changed mid-run leaves it stale, so the next check re-tunes.
+      S.opts = Object.assign(o, pxLocks()); S.moved = moved; S.movesLast = moves; S.tunedAt = Date.now(); S.tuneSig = sig0;
+      PX_T.running = false; pxRebuild(); peSave(); if(SC.screen === "prophescore") renderPoolEdge();
+    }, prevOf(9999));
+  })();
 }
-function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m18|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
+function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m19|" + pxBaseSig() + "|" + JSON.stringify(pxState().lock || {}); }          // model version: a change forces a re-tune
 // Record vs Vegas in the same shape the cards already use.
 // Record vs Vegas, graded walk-forward: every week predicted by the model fit
 // only on the weeks before it. Spreads and totals, errors against the result
@@ -4520,36 +4612,21 @@ function pxBtWorker(){
           per[y] = n ? sm / n : null; });
         return { em: em, per: per, m: pemMeanErr(em), k: k, T: T };
       }
-      var G = M.grid, keys = Object.keys(G), perPass = 0; keys.forEach(function(k){ perPass += G[k].length; });
+      var G = M.grid, keys = Object.keys(G).filter(function(k){ return !M.locks || M.locks[k] === undefined; }), perPass = 0; keys.forEach(function(k){ perPass += G[k].length; });
       var stages = 1 + (M.cv && order.length > 1 ? order.length : 0), stage = 0;
+      // Evidence-weighted search (pxEvSearch) on seasons ys: a move must also help in at least two of three seasons.
       function search(ys, o0, live, tag){
-        var o = Object.assign({}, o0), need = Math.ceil(ys.length * 2 / 3), moves = [], done = 0;
+        var need = Math.ceil(ys.length * 2 / 3), evals = 0, est = (perPass + 10) * 2;
         self.postMessage({ t: "prog", msg: tag + "Grading the starting settings…", pct: stage / stages });
-        var cur = score(o, ys), start = cur;
-        for(var pass = 0; pass < 3; pass++){
-          var acc = 0;
-          keys.forEach(function(key){
-            var best = null;
-            G[key].forEach(function(v){
-              done++;
-              if(v === o[key]) return;
-              self.postMessage({ t: "prog", msg: tag + "Pass " + (pass + 1) + " · " + key + " = " + v, pct: Math.min(0.99, (stage + Math.min(0.99, done / (perPass * (pass + 1)))) / stages), pass: pass + 1 });
-              var oo = Object.assign({}, o); oo[key] = v;
-              var r = score(oo, ys); if(r.m !== null && (!best || r.m < best.r.m)) best = { v: v, r: r };
-            });
-            if(!best) return;
-            var pd = pemPairedDiff(best.r.em, cur.em), wins = 0;
-            ys.forEach(function(y){ if(best.r.per[y] !== null && cur.per[y] !== null && best.r.per[y] < cur.per[y]) wins++; });
-            if(pd && pd.se > 0 && -pd.d / pd.se >= M.T && wins >= need){
-              var mv = { k: key, from: o[key], to: best.v, d: pd.d, se: pd.se, wins: wins, per: best.r.per };
-              moves.push(mv); o[key] = best.v; cur = best.r; acc++;
-              if(live) self.postMessage({ t: "move", mv: mv });
-            }
-          });
-          if(!acc) break;
-        }
+        var E = pxEvSearch({ o: o0, keys: keys, grid: G, passes: 3, joint: 10, seed: 31 + ys.length,
+          score: function(oo){ evals++; return score(oo, ys); },
+          ok: function(r, cur){ var wins = 0; ys.forEach(function(y){ if(r.per[y] !== null && cur.per[y] !== null && r.per[y] < cur.per[y]) wins++; }); return wins >= need; },
+          prog: function(msg){ self.postMessage({ t: "prog", msg: tag + msg, pct: Math.min(0.99, (stage + Math.min(0.97, evals / est)) / stages) }); },
+          onMove: function(mv){ if(live) self.postMessage({ t: "move", mv: mv }); } });
+        while(!E.done) E.step();
+        E.moves.forEach(function(mv){ var w = 0; ys.forEach(function(y){ if(mv.per[y] !== null && E.start.per[y] !== null && mv.per[y] < E.start.per[y]) w++; }); mv.wins = w; });
         stage++;
-        return { o: o, moves: moves, start: start, cur: cur };
+        return { o: E.o, moves: E.moves, start: E.start, cur: E.cur };
       }
       var o0 = Object.assign({}, PX_DEFAULTS, M.start), main = search(order, o0, true, "");
       // The closing line on its own, for scale (aim "line" is the same miss with trust 0).
@@ -4655,7 +4732,7 @@ function pxBtTune(){
     return pxOwnPriorsFor(seasons).then(function(OP){ PXB.ownPriors = OP; return seasons; });
   }).then(function(seasons){
     PXB.msg = "Starting\u2026"; pxBtStatus();
-    var w = PXB.worker = pxBtWorker(), start = Object.assign({}, pxState().opts);
+    var w = PXB.worker = pxBtWorker(), start = pxBaseOpts();
     w.onmessage = function(e){
       var d = e.data;
       if(d.t === "prog"){ PXB.pct = d.pct || 0; PXB.msg = d.msg; pxBtStatus(true); }
@@ -4668,6 +4745,8 @@ function pxBtTune(){
         pxBtSel()["s:" + id] = 1; peSave();
         PXB.tune = { moves: d.moves, startPer: d.startPer, endPer: d.endPer, startM: d.startM, endM: d.endM, n: d.n, seasons: ys, id: id, name: name, done: true, secs: Math.round((Date.now() - PXB.t0) / 1000),
                      obj: d.obj, lineM: d.lineM, kStart: d.kStart, kEnd: d.kEnd, cv: d.cv || null, cvAll: d.cvAll || null };
+        PXB.tune.holds = pxBaseHolds(PXB.tune);
+        if(d.moves.length && PXB.tune.holds) pxBaseSet(keep, PXB.tune);
         pxBtTuneEnd(null);
         if(document.getElementById("px-ut")) pxUTStatus(true);          // the new tune shows in Saved tunes
         toast(d.moves.length ? "Saved \u201c" + name + "\u201d \u00b7 " + d.moves.length + " setting" + (d.moves.length === 1 ? "" : "s") + " moved" : "Nothing beat your settings clearly \u00b7 saved as \u201c" + name + "\u201d", "ok");
@@ -4675,8 +4754,31 @@ function pxBtTune(){
       else if(d.t === "err"){ pxBtTuneEnd("Tuning stopped: " + d.msg); }
     };
     w.onerror = function(ev){ pxBtTuneEnd("Tuning stopped: " + ((ev && ev.message) || "worker error")); };
-    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, start: start, grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T, obj: PXB.obj === "line" ? "line" : "res", cv: !!PXB.cv });
+    w.postMessage({ mode: "tune", seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, start: start, locks: pxLocks(), grid: Object.assign({}, PX_GRID, PX_HIST_GRID_EXTRA), T: PX_TUNE_T, obj: PXB.obj === "line" ? "line" : "res", cv: PXB.cv !== false });
   }).catch(function(e){ PXB.busy = false; PXB.mode = ""; PXB.msg = ""; PXB.err = (e && e.message) || String(e); PXB.tune = null; pxBtStatus(); });
+}
+// Tuned on history: does it hold up on the seasons left out? Positive held-out gain overall and
+// in at least two of three held-out seasons.
+function pxBaseHolds(R){
+  if(!R || !R.cv || !R.cv.length || !R.cvAll) return false;
+  var good = R.cv.filter(function(c){ return c.d < 0; }).length;
+  return R.cvAll.d < 0 && good >= Math.ceil(R.cv.length * 2 / 3);
+}
+// Adopt a history tune as the base: the in-season tuner starts from it and re-tunes this season.
+function pxBaseSet(o, R){
+  var S = pxState(), keep = {}, ks = Object.keys(PX_GRID).concat(Object.keys(PX_HIST_GRID_EXTRA));
+  ks.forEach(function(k){ if(typeof o[k] === "number") keep[k] = o[k]; });
+  S.base = { o: keep, at: Date.now(), ys: (R && R.seasons) || [], obj: R && R.obj, cv: R && R.cvAll ? { d: R.cvAll.d, se: R.cvAll.se, n: R.cvAll.n } : null, name: R && R.name };
+  S.wf = {}; S.tuneSig = ""; PX._ats = null; peSave(); pxRebuild(); pxAutoTune();
+  toast("New base settings from " + ((R && R.seasons) || []).join(", ") + " · re-tuning this season", "ok");
+}
+function pxBaseClear(){ var S = pxState(); if(!S.base) return; delete S.base; S.wf = {}; S.tuneSig = ""; PX._ats = null; peSave(); pxRebuild(); pxAutoTune(); toast("Base back to defaults · re-tuning", "ok"); }
+function pxBaseHtml(){
+  var S = pxState(), B = S.base, h = '<div class="pem-autosub" style="margin-top:8px"><b>Base settings:</b> ';
+  if(!B) return h + 'the defaults (tuned on 2023–25 when the model was built). A history tune that holds up on held-out seasons becomes the base automatically.</div>';
+  var diff = []; Object.keys(B.o).forEach(function(k){ if(Math.abs(B.o[k] - PX_DEFAULTS[k]) > 1e-9){ var kd = pxUTKnob(k); diff.push(kd ? kd.label + ' ' + kd.fmt(B.o[k]) : k + ' ' + B.o[k]); } });
+  return h + 'tuned on ' + x((B.ys || []).join(', ')) + (B.cv ? ' · held-out gain ' + (-B.cv.d >= 0 ? '+' : '') + (-B.cv.d).toFixed(3) + ' ±' + B.cv.se.toFixed(3) + ' a game' : '') +
+         (diff.length ? '<br><small>' + x(diff.join(' · ')) + '</small>' : '') + ' <button class="btn btn-sm btn-ghost" id="px-baseclr">Back to defaults</button></div>';
 }
 function pxBtTuneEnd(err){
   if(PXB.worker){ try{ PXB.worker.terminate(); }catch(e){} PXB.worker = null; }
@@ -4689,11 +4791,11 @@ function pxBtTuneHtml(){
   var kl = function(key){ var kd = pxUTKnob(key); return kd ? kd : { label: key, fmt: function(v){ return String(v); } }; };
   var h = '<div class="pem-hd" style="margin-top:12px">' + (R.done ? 'Tuned on ' + R.seasons.join(', ') : (R.running ? 'Tuning\u2026 moves so far' : 'Stopped \u2014 moves before it stopped (not saved)')) + '</div>';
   if(R.moves.length){
-    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Setting</span><span>Now \u2192 tuned</span><span>Gain a game</span></div>';
+    h += '<div class="pem-bk" style="margin-top:4px"><div class="pem-bkhd"><span>Setting</span><span>Before \u2192 tuned</span><span>Gain a game</span></div>';
     R.moves.forEach(function(m){ var k = kl(m.k);
-      h += '<div class="pem-bkrow"><span>' + x(k.label) + '</span><span>' + x(k.fmt(m.from)) + ' \u2192 <b>' + x(k.fmt(m.to)) + '</b></span><span><b class="up">' + (-m.d).toFixed(2) + '</b> <small>\u00b1' + m.se.toFixed(2) + ' \u00b7 ' + m.wins + ' of ' + Object.keys(m.per).length + ' seasons</small></span></div>'; });
-    h += '</div>';
-  } else if(R.done) h += '<div class="pem-autosub">No setting beat your current ones clearly enough to move (a ' + PX_TUNE_T + '-standard-error gain that also holds in most seasons). Your settings are already about as good as this search can find.</div>';
+      h += '<div class="pem-bkrow"><span>' + x(k.label) + (m.joint ? ' <small>together</small>' : '') + '</span><span>' + x(k.fmt(m.from)) + ' \u2192 <b>' + x(k.fmt(m.to)) + '</b>' + (m.w < 0.999 ? ' <small>' + Math.round(m.w * 100) + '% toward ' + x(k.fmt(m.best)) + '</small>' : '') + '</span><span><b class="up">' + (-m.d).toFixed(3) + '</b> <small>\u00b1' + m.se.toFixed(3) + (m.wins !== undefined ? ' \u00b7 ' + m.wins + ' of ' + Object.keys(m.per).length + ' seasons' : '') + '</small></span></div>'; });
+    h += '</div><div class="pem-autonote" style="margin-top:4px">Each setting moves part of the way toward its best value, by how strong the evidence is (it moves fully only when the gain is far outside the noise). Gains are cumulative: each row is measured against the settings before it.</div>';
+  } else if(R.done) h += '<div class="pem-autosub">Nothing moved: no setting\u2019s best value beat the current one by more than 2 standard errors while also helping in most seasons.</div>';
   if(R.done){
     var isL = R.obj === "line", f2 = function(v){ return v !== null && v !== undefined && isFinite(v) ? v.toFixed(2) : '\u2014'; };
     h += '<div class="pem-autosub" style="margin-top:6px">' + (isL ? 'Miss of line + trust \u00d7 (model \u2212 line)' : 'Spread miss') + ' over <b>' + R.n + '</b> games: <b>' + R.startM.toFixed(2) + '</b> \u2192 <b>' + R.endM.toFixed(2) + '</b> \u00b7 by season ' +
@@ -4706,8 +4808,9 @@ function pxBtTuneHtml(){
         h += '<div class="pem-bkrow"><span>' + c.y + '</span><span><small>' + (c.moves.length ? x(c.moves.map(function(m){ return kl(m.k).label + ' ' + kl(m.k).fmt(m.to); }).join(', ')) : 'none') + '</small></span><span><b class="' + (ok ? 'up' : c.se > 0 && c.d / c.se >= 2 ? 'dn' : '') + '">' + (-c.d >= 0 ? '+' : '') + (-c.d).toFixed(3) + '</b> <small>\u00b1' + c.se.toFixed(3) + '</small></span></div>'; });
       if(A) h += '<div class="pem-bkrow"><span><b>All held out</b></span><span><small>' + A.n + ' games</small></span><span><b class="' + (real ? 'up' : A.se > 0 && A.d / A.se >= 2 ? 'dn' : '') + '">' + (-A.d >= 0 ? '+' : '') + (-A.d).toFixed(3) + '</b> <small>\u00b1' + A.se.toFixed(3) + '</small></span></div>';
       h += '</div><div class="pem-autonote" style="margin-top:4px">Each season was left out, the search re-run on the others from Settings now, and the result graded on the season it never saw' + (isL ? ' (trust fitted on the others too)' : '') + '. ' +
-           (real ? '<b>It holds up</b>: tuning on other seasons helped the one left out, so the moves are likely real.' : '<b>It doesn\u2019t clearly hold up</b>: tuning on other seasons didn\u2019t reliably help the one left out, so treat the moves above as mostly noise and keep Settings now unless this season\u2019s record agrees.') + '</div>';
-    }
+           (real ? '<b>It holds up</b>: tuning on other seasons helped the one left out, so the moves are likely real.' : R.holds ? '<b>It mostly holds up</b>: the seasons left out came out a little better on balance, though not clearly outside the noise.' : '<b>It doesn\u2019t hold up</b>: tuning on other seasons didn\u2019t help the one left out, so treat the moves above as noise.') +
+           (R.holds && R.moves.length ? ' <b>Now your base settings</b>: the in-season tuner starts from them.' : ' Your base settings are unchanged.') + '</div>';
+    } else if(R.moves.length) h += '<div class="pem-autosub" style="margin-top:6px">Not checked on held-out seasons, so it isn\u2019t used as the base. <button class="btn btn-sm btn-ghost" data-bt-base="1">Use as base anyway</button></div>';
     h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn btn-sm btn-ghost" data-bttune-load="' + R.id + '">Load \u201c' + x(R.name) + '\u201d into Your tune</button></div>';
     h += '<div class="pem-autonote" style="margin-top:4px">Saved as \u201c' + x(R.name) + '\u201d under Saved tunes and ticked above \u2014 press Run for its full record (ATS, totals, P4 vs G6). It was tuned on these same seasons, so its backtest numbers flatter it a little; the honest check is this season\u2019s record after you use it. The search starts from Settings now, tries each setting\u2019s values one at a time (including the P4 vs G6 adjustment and conference anchoring, which the in-season tuner leaves alone), and repeats up to three passes.</div>';
   }
@@ -4861,12 +4964,13 @@ function pxBtCardHtml(){
     return '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" data-bt-sel="' + c.k + '"' + (c.fixed || sel[c.k] ? ' checked' : '') + (c.fixed || PXB.busy ? ' disabled' : '') + '><span>' + x(c.name) + (c.fixed ? ' <small style="opacity:.6;font-weight:700">(baseline)</small>' : '') + (c.sub ? '<br><small style="font-weight:700;color:var(--muted)">' + x(c.sub) + '</small>' : '') + '</span></label>'; }).join('') + '</div>';
   if(PXB.busy) h += '<div class="pem-autosub" id="px-btprog" style="margin-top:8px">⏳ ' + x(PXB.msg) + ' · ' + Math.round(PXB.pct * 100) + '%<div style="height:6px;border:1.5px solid var(--border);border-radius:4px;margin-top:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(PXB.pct * 100) + '%;background:var(--gold)"></div></div></div>';
   if(!PXB.busy && ys.length) h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn btn-sm btn-ghost" id="px-bttune">\ud83c\udf9b\ufe0f Tune on ' + (ys.length > 1 ? ys[0] + '\u2013' + String(ys[ys.length - 1]).slice(2) : ys[0]) + '</button>' +
-       '<small style="font-weight:700;color:var(--muted);flex:1;min-width:140px">Searches every setting on all ' + ys.length + ' seasons and saves the best as a tune. Takes a while \u2014 keep this tab open.</small></div>' +
+       '<small style="font-weight:700;color:var(--muted);flex:1;min-width:140px">Searches every setting on all ' + ys.length + ' seasons (one at a time and in combination), saves it as a tune, and makes it your base if it holds up on held-out seasons. Takes a while \u2014 keep this tab open.</small></div>' +
        '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px"><small style="font-weight:800;color:var(--muted)">Aim for</small>' +
        [["res", "Closest to the result"], ["line", "Best correction to the line"]].map(function(z){ return '<button class="btn btn-sm ' + ((PXB.obj || "res") === z[0] ? 'btn-gold' : 'btn-ghost') + '" data-bt-obj="' + z[0] + '">' + z[1] + '</button>'; }).join('') + '</div>' +
        '<div class="pem-autonote" style="margin-top:4px">' + (PXB.obj === "line" ? '<b>Correction to the line</b> grades each setting by how much it improves the closing line once blended in at its own trust (line + trust \u00d7 (model \u2212 line)), only on games with a line. It rewards settings whose disagreements with the market are right, not ones that are just close to the result where the line already is.' : '<b>Closest to the result</b> grades each setting by its own spread miss against the final score, the way the in-season tuner does.') + '</div>' +
-       (ys.length > 1 ? '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" id="px-btcv"' + (PXB.cv ? ' checked' : '') + '><span>Check it on held-out seasons<br><small style="font-weight:700;color:var(--muted)">Re-runs the search with each season left out and grades it on that season. About ' + ys.length + '\u00d7 as long.</small></span></label>' : '');
+       (ys.length > 1 ? '<label class="pem-sheetlab" style="gap:8px;margin-top:6px;align-items:flex-start"><input type="checkbox" id="px-btcv"' + (PXB.cv !== false ? ' checked' : '') + '><span>Check it on held-out seasons<br><small style="font-weight:700;color:var(--muted)">Re-runs the search with each season left out and grades it on that season. About ' + ys.length + '\u00d7 as long, and needed for it to become your base settings.</small></span></label>' : '');
   if(PXB.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PXB.err) + '</div>';
+  h += pxBaseHtml();
   h += pxBtTuneHtml();
   h += pxBtResHtml();
   h += '<div class="pem-autonote">Runs in the background on this device, with its own copy of the model, so your live season, settings and record are never touched. Most of the time goes to calibrating the play simulator for each week (shared by every setting), so adding settings costs little; three seasons take a minute or two on a computer and a few minutes on a phone. Keep this tab in front — a phone pauses background tabs. Settings are held fixed for the whole season (no in-season re-tuning). “vs baseline” is the game-by-game difference in miss: negative is better; under 2 standard errors it’s marked noise. “P4 beat it by”: how far the Power-4 side beat that number in P4-vs-G6 games, so near 0 is right.</div>';
@@ -4884,6 +4988,8 @@ function pxBtBind(){
   var sp = document.getElementById("px-btsplit"); if(sp) sp.onchange = function(){ PXB.splitK = this.value; pxBtStatus(); };
   Array.prototype.forEach.call(document.querySelectorAll("[data-bt-obj]"), function(b){ b.onclick = function(){ PXB.obj = this.getAttribute("data-bt-obj"); pxBtStatus(); }; });
   var cv = document.getElementById("px-btcv"); if(cv) cv.onchange = function(){ PXB.cv = this.checked; };
+  var bc = document.getElementById("px-baseclr"); if(bc) bc.onclick = function(){ pxBaseClear(); pxBtStatus(); };
+  Array.prototype.forEach.call(document.querySelectorAll("[data-bt-base]"), function(btn){ btn.onclick = function(){ var R = PXB.tune; if(!R) return; var T = pxTunes()[R.id]; if(T) pxBaseSet(T.o, R); pxBtStatus(); }; });
   Array.prototype.forEach.call(document.querySelectorAll("[data-bttune-load]"), function(btn){ btn.onclick = function(){
     pxTuneLoad(this.getAttribute("data-bttune-load")); var u = document.getElementById("px-ut"); if(u && u.scrollIntoView) u.scrollIntoView({ behavior: "smooth" }); }; });
   Array.prototype.forEach.call(document.querySelectorAll("[data-bt-sel]"), function(cb){ cb.onchange = function(){ pxBtSel()[this.getAttribute("data-bt-sel")] = this.checked ? 1 : 0; }; });
@@ -5059,7 +5165,7 @@ function pxFadeCardHtml(){
 function pxKnobsHtml(){
   var S = pxState(), o = S.opts;
   var h = '<div class="pem-ats"><div class="pem-autotop"><b>⚙️ Model settings</b><button class="btn btn-sm btn-ghost" id="px-tune">' + (PX_T.running ? 'Tuning…' : 'Re-tune') + '</button></div>';
-  h += '<div class="pem-autosub">' + (S.moved ? (S.moved.length ? 'Moved off default by cross-validation: <b>' + S.moved.map(function(k){ var kd = null; PX_KNOBS.forEach(function(z){ if(z.key === k) kd = z; }); return x(kd.label) + ' ' + kd.fmt(o[k]); }).join(' · ') + '</b>' : 'Every setting held at its default (no change beat the noise)') : 'Tunes itself once data is loaded.') + '</div>';
+  h += '<div class="pem-autosub">' + (S.moved ? (S.moved.length ? 'Moved off ' + (S.base ? 'the base (tuned on ' + x((S.base.ys || []).join(', ')) + ')' : 'default') + ' by this season’s evidence: <b>' + S.moved.map(function(k){ var kd = null; PX_KNOBS.forEach(function(z){ if(z.key === k) kd = z; }); return kd ? x(kd.label) + ' ' + kd.fmt(o[k]) : x(k); }).join(' · ') + '</b>' : 'Every setting at ' + (S.base ? 'the base tuned on ' + x((S.base.ys || []).join(', ')) : 'its default') + ' (this season’s evidence isn’t strong enough yet to move any)') : 'Tunes itself once data is loaded.') + '</div>';
   PX_KNOBS.forEach(function(k){
     h += '<div class="px-knob"><div><b>' + x(k.label) + '</b><span>' + k.fmt(o[k.key]) + (pxLocks()[k.key] !== undefined ? ' \ud83d\udd12' : '') + '</span></div><small>' + x(k.help) + '</small></div>';
   });
