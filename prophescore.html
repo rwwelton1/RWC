@@ -1244,6 +1244,22 @@ function ME(){
 }
 function isRootMaster(uid){ return !!(uid && MASTER_UIDS[uid]); }
 
+// Everyone else who signs in sees the owner's saved model, picks and CFBD data
+// read-only. The CFBD key lives in its own node (prophescorekey/<uid>) that only
+// the owner can read, so it is never part of what viewers load.
+var OWNER_UID = "SJr0tv9puDcNZLAcNy1ErOUGijg1";
+function PE_VIEW(){ var u = ME(); return !!u && !MASTER_UIDS[u]; }
+function DUID(){ return PE_VIEW() ? OWNER_UID : ME(); }
+var PX_KEYVAL = "";
+function pxKeyPut(v){
+  PX_KEYVAL = v || "";
+  try{ if(DB && ME() && !PE_VIEW()) DB.ref("prophescorekey/" + ME()).set(PX_KEYVAL || null); }catch(e){}
+}
+function pxKeyLoad(done){
+  if(PE_VIEW() || !DB || !ME()){ if(done) done(); return; }
+  DB.ref("prophescorekey/" + ME()).once("value", function(sn){ var v = sn.val(); if(typeof v === "string" && v) PX_KEYVAL = v; if(done) done(); }, function(){ if(done) done(); });
+}
+
 function x(s){ var t=String(s||""); t=t.replace(/&/g,"&amp;"); t=t.replace(/</g,"&lt;"); t=t.replace(/>/g,"&gt;"); t=t.replace(/'/g,"&#39;"); return t; }
 
 function toast(msg, type){
@@ -1325,11 +1341,11 @@ function topbar(showBack){
 }
 
 // ── DATA AND STORAGE ────────────────────────────────────────────────────────
-// Owner-only. Gated on isRootMaster() — the single root UID. NOTE: this gate is
-// cosmetic; the real protection is the Firebase rule on prophescore/{uid}.
+// Open to any signed-in account. Each user's data lives under prophescore/{uid},
+// protected by the Firebase rule on that path.
 var PE = { games: [], history: [], meta: null, priors: {}, lines: {}, opens: {}, px: null, ready: false, err: "" };
 
-function peOwner(){ return isRootMaster(ME()); }
+function peOwner(){ return !!ME(); } // any signed-in Scorecery account; data is per-uid
 
 function peLocalKey(){ return "prophescore_" + (ME() || "anon"); }
 // Pre-rename key. Read-only fallback so data saved as "Pool Edge" survives.
@@ -1346,11 +1362,11 @@ function peTake(o, keepOld){
 function peLoad(cb){
   if(PE.ready){ if(cb) cb(); return; }
   // Local first so the screen paints instantly, then reconcile with the server.
-  try{
+  if(!PE_VIEW()) try{
     var raw = localStorage.getItem(peLocalKey()) || localStorage.getItem(peLegacyLocalKey());
     if(raw) peTake(JSON.parse(raw), false);
   }catch(e){}
-  var uid = ME();
+  var uid = DUID();
   if(!DB || !uid){ peAfterLoad(); PE.ready = true; if(cb) cb(); return; }
   // One read per piece, not the whole record: past seasons (hist) and daily line
   // snapshots (snaps) live under the same path and would otherwise download every visit.
@@ -1366,7 +1382,7 @@ function peLoad(cb){
     peAfterLoad();
     PE.ready = true;
     var code = (err && (err.code || err.message)) ? String(err.code || err.message) : "unknown";
-    PE.err = /permission|denied/i.test(code)
+    PE.err = PE_VIEW() ? ("Couldn\u2019t load the shared data (" + code + ").") : /permission|denied/i.test(code)
       ? "PERMISSION_DENIED \u2014 Firebase is refusing to read prophescore/$uid. Add the rule below. Using this device\u2019s copy."
       : ("Cloud read failed (" + code + ") \u2014 using this device\u2019s copy.");
     if(cb) cb();
@@ -1377,6 +1393,11 @@ function peLoad(cb){
 // peLoad so no path can quietly skip it.
 function peAfterLoad(){
   try{ localStorage.removeItem("ps_hist_v1"); }catch(e){}
+  // The CFBD key used to be saved inside px. Move it to the private node and drop it from px.
+  if(PE.px && PE.px.key !== undefined){
+    var oldKey = PE.px.key; delete PE.px.key;
+    if(!PE_VIEW()){ if(oldKey && !PX_KEYVAL) pxKeyPut(oldKey); PE._hadOld = true; }
+  }
   // One write drops the old model's caches from the saved record for good.
   if(PE._hadOld){ PE._hadOld = false; setTimeout(function(){ try{ peSave(); }catch(e){} }, 0); }
   PEM.restoreErr = "";
@@ -1393,6 +1414,7 @@ function peClean(o){
 
 var PE_LEGACY_NULLS = { settings: null, turnovers: null, season: null, runs: null, baseline: null, teamstats: null, tune: null, gmeta: null };
 function peSave(){
+  if(PE_VIEW()) return;   // viewers never write
   var payload = peClean({
     // The old weekly pick board, kept as it was saved.
     games:   PE.games   || [],
@@ -1729,7 +1751,7 @@ function pemPairedDiff(ea, eb){
 function pemRefit(){
   pemRestorePrior();                                   // newest SP+ sheet: benchmark, and fallback model
   PEM._ranks = null; PEM._ats = null;
-  if(pxKey() && pxRebuild()) return true;
+  if(pxHas() && pxRebuild()) return true;
   PX.active = false;
   PEM.ratings = PEM.prior || null; PEM.avg = PEM_SHEET_AVG; PEM.n = 0; PEM.opts.hfa = 2.5; PEM.opts.oppW = 1;
   return !!PEM.ratings;
@@ -2025,7 +2047,8 @@ function pxState(){
 }
 function pxOpts(){ return pxState().opts; }
 function pxYear(){ return (PE.meta && PE.meta.espnYear) || new Date().getFullYear(); }
-function pxKey(){ return (PE.px && PE.px.key) || ""; }
+function pxKey(){ return PE_VIEW() ? "" : PX_KEYVAL; }
+function pxHas(){ return PE_VIEW() || !!PX_KEYVAL; }   // the model has data to show (own key, or the owner's shared copy)
 function pxG(o){ for(var i = 1; i < arguments.length; i++){ var v = o && o[arguments[i]]; if(v !== undefined && v !== null) return v; } return null; }
 
 // ── Data ─────────────────────────────────────────────────────────────────────
@@ -2530,8 +2553,8 @@ function pxSync(force){
 // the last saved week. Never loaded when the page opens; it is there for the export.
 var PX_HIST_YEARS = [2023, 2024, 2025];
 var PXH = { busy: false, msg: "", err: "", step: "", idx: null, loading: false, idxErr: "" };
-function pxHistRef(sub){ return DB.ref("prophescore/" + ME() + "/" + sub); }
-function pxHistPut(sub, val){ return new Promise(function(res, rej){ pxHistRef(sub).set(peClean(val), function(err){ if(err) rej(err); else res(); }); }); }
+function pxHistRef(sub){ return DB.ref("prophescore/" + DUID() + "/" + sub); }
+function pxHistPut(sub, val){ if(PE_VIEW()) return Promise.reject(new Error("View only")); return new Promise(function(res, rej){ pxHistRef(sub).set(peClean(val), function(err){ if(err) rej(err); else res(); }); }); }
 function pxHistGet(sub){ return pxHistRef(sub).once("value").then(function(sn){ return sn.val(); }); }
 function pxHistLoadIdx(){
   if(!DB || !ME()) return Promise.resolve({});
@@ -2807,12 +2830,12 @@ function pxEvOpenTotal(od){
   return v;
 }
 function pxSnapMaybe(){
-  if(!PE.ready || PXS.busy || !DB || !ME()) return;
+  if(!PE.ready || PXS.busy || !DB || !ME() || PE_VIEW()) return;
   if(pxState().snapDay === pxEtDay()) return;
   pxSnapLines();
 }
 function pxSnapLines(){
-  if(PXS.busy || !DB || !ME()) return Promise.resolve();
+  if(PXS.busy || !DB || !ME() || PE_VIEW()) return Promise.resolve();
   PXS.busy = true; PXS.err = ""; pxSnapStatus();
   var day = pxEtDay(), dk = "d" + day.replace(/-/g, ""), now = Date.now();
   var y = PE.meta && PE.meta.espnYear, w = PE.meta && PE.meta.espnWeek;
@@ -4356,7 +4379,7 @@ function pxBtSplitHtml(R, by){
   return h;
 }
 function pxBtCardHtml(){
-  if(!PX.active || !pxKey()) return "";
+  if(!PX.active || !pxHas()) return "";
   if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(function(){ pxBtStatus(); }, function(){ pxBtStatus(); }); }
   var I = PXH.idx || {}, ys = PX_HIST_YEARS.filter(function(y){ var e = I["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
   var h = '<div class="pem-ats" id="px-bt"><div class="pem-autotop"><b>🧪 Backtest on past seasons</b>' +
@@ -4426,7 +4449,7 @@ function pxPowerRatings(fit){
 function pxRebuild(){
   var S = pxState(), ws = pxWeeks();
   if(S.prior) pxPriorFix(S.prior);
-  PX.active = !!(pxKey() && ws.length);
+  PX.active = !!(pxHas() && ws.length);
   if(!PX.active) return false;
   var next = ws[ws.length - 1] + 1, fit = pxFit(next, S.opts);
   PX.live = fit;
@@ -4484,6 +4507,11 @@ function pxDataCardHtml(){
   var S = pxState(), ws = pxWeeks(), g = pxGames().filter(function(x){ return x.g.c; }).length;
   var h = '<div class="pem-ats" id="px-data"><div class="pem-autotop"><b>🏈 Play-by-play data (CFBD)</b>' +
           (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-sync">' + (PX.busy ? 'Loading…' : 'Refresh') + '</button>' : '') + '</div>';
+  if(PE_VIEW()){
+    h += '<div class="pem-autosub">' + (ws.length ? ('<b>' + g + '</b> FBS games from weeks ' + ws[0] + '\u2013' + ws[ws.length - 1]) : 'No play-by-play data saved yet.') + '</div>' +
+         '<div class="pem-autonote">Read-only copy of the owner\u2019s data' + (S.syncedAt ? ', last refreshed ' + new Date(S.syncedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : '') + '.</div>';
+    return h + '</div>';
+  }
   if(!pxKey()){
     h += '<div class="pem-autosub">Paste a free CollegeFootballData API key to switch the model to play-by-play efficiency.</div>' +
          '<div class="pem-autonote">Get one at collegefootballdata.com/key (free tier: about 1,000 calls a month; this page uses about 40 to set up and 3 a week after). It’s stored with your account.</div>';
@@ -4601,7 +4629,7 @@ function pxMsub(){
   PE.ui = PE.ui || {};
   if(!PE.ui.msub){ try{ PE.ui.msub = localStorage.getItem("ps_msub") || ""; }catch(_){ PE.ui.msub = ""; } }
   if(!PX_MSUBS.some(function(t){ return t[0] === PE.ui.msub; })) PE.ui.msub = "record";
-  if(!pxKey() || !PX.active){ if(PE.ui.msub === "record" || PE.ui.msub === "tune") return "data"; }   // nothing to show there yet
+  if(!pxHas() || !PX.active){ if(PE.ui.msub === "record" || PE.ui.msub === "tune") return "data"; }   // nothing to show there yet
   return PE.ui.msub;
 }
 // Downloads still to finish (or an error) put a dot on the Data tab.
@@ -4610,7 +4638,7 @@ function pxDataDot(){
 }
 function pxSubNavHtml(cur){
   return '<div class="pe-sub" role="tablist">' + PX_MSUBS.map(function(t){
-    var off = (!pxKey() || !PX.active) && (t[0] === "record" || t[0] === "tune");
+    var off = (!pxHas() || !PX.active) && (t[0] === "record" || t[0] === "tune");
     return '<button role="tab" class="' + (t[0] === cur ? "on" : "") + '" data-pe-msub="' + t[0] + '"' + (off ? ' disabled style="opacity:.45"' : '') + '>' + t[1] + (t[0] === "data" && pxDataDot() ? '<span class="dot"></span>' : '') + '</button>';
   }).join('') + '</div>';
 }
@@ -4640,7 +4668,7 @@ function pxBind(){
   if(sv) sv.onclick = function(){
     var v = (document.getElementById("px-key") || {}).value || ""; v = v.trim();
     if(!v){ toast("Paste your CFBD key first"); return; }
-    pxState().key = v; peSave(); PX.synced = false; toast("CFBD key saved · loading data");
+    pxKeyPut(v); peSave(); PX.synced = false; toast("CFBD key saved · loading data");
     pxMaybe(); renderPoolEdge();
   };
   var sy = document.getElementById("px-sync");
@@ -5599,6 +5627,7 @@ function renderPoolEdge(){
   h += '<div class="main fade-up">';
   h += '<div class="pe-hdr"><div class="pe-title">&#128201; Prophescore</div>' +
        '<button class="btn btn-ghost btn-sm" id="pe-back">&#8592; Back</button></div>';
+  if(PE_VIEW()) h += '<div class="pem-autonote" style="margin:-4px 0 10px">Read-only view of the owner\u2019s Prophescore: their model, data and pool picks. Nothing you change here is saved.</div>';
 
   // Games (default) = every FBS game with projections and a matchup card for any
   // two teams. Rankings = every FBS team. Model = data, record and settings.
@@ -5612,7 +5641,7 @@ function renderPoolEdge(){
   else {
     if(PE.err){
       h += '<div class="pe-err">' + x(PE.err) + '</div>';
-      if(/PERMISSION_DENIED/.test(PE.err)){
+      if(/PERMISSION_DENIED/.test(PE.err) && !PE_VIEW()){
         h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase rules, then reload</div>' +
              '<pre>"prophescore": {\n  "$uid": {\n    ".read":  "auth != null &amp;&amp; auth.uid === $uid",\n    ".write": "auth != null &amp;&amp; auth.uid === $uid"\n  }\n}</pre>' +
              '<div class="pe-rulenote">Same level as "users" and "groups". Until it is there, everything here lives only on this device.</div></div>';
@@ -6234,7 +6263,7 @@ function pePoolLoad(w, done){
 // cfbpool; the main pool counts if you have picks in it.
 PEPOOL.list = null; PEPOOL.finding = false;
 function pePoolGroupIds(){
-  var uid = ME();
+  var uid = DUID();
   return DB.ref("users/" + uid + "/groups").once("value").then(function(sn){
     var v = sn.val(); if(!v) return null;
     return Array.isArray(v) ? v.filter(Boolean).map(String) : Object.keys(v).map(function(k){ var e = v[k]; return (e === true || typeof e !== "string") ? k : e; });
@@ -6249,7 +6278,7 @@ function pePoolGroupIds(){
 function pePoolDiscover(done){
   if(PEPOOL.finding || !DB || !ME()){ if(done) done(); return; }
   PEPOOL.finding = true;
-  var uid = ME(), out = [];
+  var uid = DUID(), out = [];
   var one = function(path){ return DB.ref(path).once("value").then(function(sn){ return sn.val(); }).catch(function(){ return null; }); };
   var mainP = one("pools/cfb/meta/weekIds").then(function(ids){
     if(!ids || !ids.length) return;
@@ -6345,7 +6374,7 @@ function pePoolFindGame(w, homeId, awayId){
 function pePoolRecLoad(done){
   if(PEPOOL.recBusy || !DB || !ME()){ if(done) done(); return; }
   PEPOOL.recBusy = true; PEPOOL.recErr = "";
-  var base = pePoolBase(), uid = ME(), one = function(path){ return DB.ref(path).once("value").then(function(sn){ return sn.val(); }); };
+  var base = pePoolBase(), uid = DUID(), one = function(path){ return DB.ref(path).once("value").then(function(sn){ return sn.val(); }); };
   Promise.all([one(base + "/meta"), one(base + "/games"), one(base + "/results")]).then(function(r){
     var meta = r[0] || {}, G = r[1] || {}, RES = r[2] || {}, wids = (meta.weekIds || []).filter(function(w){ return RES[w]; });
     return Promise.all(wids.map(function(w){ return one(base + "/picks/" + w + "/" + uid).catch(function(){ return null; }); })).then(function(P){
@@ -7862,12 +7891,8 @@ function psStart(){
     psGate("Not signed in", "Prophescore runs on your Scorecery account. Sign in on the hub and come back.");
     return;
   }
-  if(!isRootMaster(uid)){
-    psGate("Owner only", "This tool is not part of your account.");
-    return;
-  }
   // Load the user record so the topbar has what it needs.
-  function go(){ renderPoolEdge(); }
+  function go(){ pxKeyLoad(function(){ renderPoolEdge(); }); }
   if(DB){
     DB.ref("users/" + uid).once("value", function(sn){
       SC.currentUser = sn.val() || { uid: uid };
