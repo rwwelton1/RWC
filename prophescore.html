@@ -3037,12 +3037,13 @@ function pmRefresh(){
 document.addEventListener("input", function(ev){ var t = ev.target; if(!t || !t.id) return; if(t.id === "pm-t") PM.dt = t.value; else if(t.id === "pm-d") PM.dd = t.value; });
 document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
-  var act = t.getAttribute("data-ps-act"); if(!/^pm(share|cmp|try|link|del|sort)$/.test(act)) return;
+  var act = t.getAttribute("data-ps-act"); if(!/^(pm(share|cmp|try|link|del|sort)|rkbuild)$/.test(act)) return;
   ev.stopImmediatePropagation(); var id = t.getAttribute("data-id");
   if(act === "pmshare") pmShare();
   else if(act === "pmcmp") pmToggle(id);
   else if(act === "pmtry") pmTry(id);
   else if(act === "pmlink") pmLink(id);
+  else if(act === "rkbuild"){ PEAR.rkBuild = id === "1"; try{ localStorage.setItem("ps_rkbuild", PEAR.rkBuild ? "1" : "0"); }catch(_){} renderPoolEdge(); }
   else if(act === "pmsort"){ PM.sort = id; pmRefresh(); }
   else if(act === "pmdel"){ if(!confirm("Delete this shared model?")) return; psRef("models/" + id).remove(); PM.sel = PM.sel.filter(function(q){ return q !== id; }); }
 }, true);
@@ -3052,6 +3053,35 @@ document.addEventListener("click", function(ev){
   renderPoolEdge = function(){
     if(PM.deep && psMember() && PX.active){ PE.ui = PE.ui || {}; PE.ui.view = "me"; PE.ui.mesub = "model"; PE.ui.msub = "models"; PM.focus = PM.deep; PM.deep = null; try{ history.replaceState(null, "", location.pathname + location.search); }catch(_){} }
     return prev.apply(this, arguments);
+  };
+})();
+// ── Power rankings from your build ──
+// Switch the rankings page between the model in use and the panels as set in Build. The same page code runs both ways:
+// the settings, ratings and rank caches are swapped for the render and put back afterwards.
+function psRkCan(){ return !!(PX.active && PEM.ratings && pxUTChanged() > 0); }
+function psRkOn(){
+  if(PEAR.rkBuild === undefined){ try{ PEAR.rkBuild = localStorage.getItem("ps_rkbuild") === "1"; }catch(_){ PEAR.rkBuild = false; } }
+  return !!PEAR.rkBuild && psRkCan();
+}
+function psRkToggle(){
+  if(!psRkCan()) return "";
+  var on = psRkOn(), n = pxUTChanged();
+  return '<div class="pr-tools" style="margin:2px 0 8px;align-items:center"><div class="pr-seg"><button class="' + (!on ? 'on' : '') + '" data-ps-act="rkbuild" data-id="0">Model in use</button><button class="' + (on ? 'on' : '') + '" data-ps-act="rkbuild" data-id="1">Your build</button></div>' +
+    '<span class="ps-sm">' + (on ? 'Ranked with your ' + n + ' changed setting' + (n === 1 ? '' : 's') + ' from Build' : 'Build has ' + n + ' change' + (n === 1 ? '' : 's') + ' not in use yet') + '</span></div>';
+}
+(function(){
+  var base = pearRankHtml;
+  pearRankHtml = function(){
+    var tog = psRkToggle();
+    if(!psRkOn()){ var h0 = base.apply(this, arguments); return tog ? h0.replace('<div class="pr-h1">Power Rankings</div>', '<div class="pr-h1">Power Rankings</div>' + tog) : h0; }
+    var S = pxState(), sv = { opts: S.opts, rat: PEM.ratings, avg: PEM.avg, rk: PEM._ranks, rkf: PEM._ranksFor }, h;
+    try{
+      var o = Object.assign({}, S.opts, pmClean(pxUTInit())), ws = pxWeeks(), fit = pxFit(ws[ws.length - 1] + 1, o), PR = pxPowerRatings(fit), R = {};
+      Object.keys(PR).forEach(function(id){ var q = PR[id]; R[id] = { off: q.off, def: q.def, games: (fit.tm[id] || {}).g || 0, px: { o: q.o, d: q.d } }; });
+      S.opts = o; PEM.ratings = R; PEM.avg = (fit.tf || fit).mPts + ((fit.tf || fit).tb || 0) / 2; PEM._ranks = null; PEM._ranksFor = null;
+      h = base.apply(this, arguments);
+    }finally{ S.opts = sv.opts; PEM.ratings = sv.rat; PEM.avg = sv.avg; PEM._ranks = sv.rk; PEM._ranksFor = sv.rkf; }
+    return h.replace('<div class="pr-h1">Power Rankings</div>', '<div class="pr-h1">Power Rankings</div>' + tog).replace('Prophescore model · through', 'Your build · through');
   };
 })();
 
