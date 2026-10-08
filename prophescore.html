@@ -3557,6 +3557,7 @@ document.addEventListener("click", function(ev){
 }, true);
 
 // ── Pool picks follow your model ──
+// (Pick = the model's side; movement, SP+ and QB marks raise or lower confidence only.)
 // A pool pick is the model's side of YOUR pool's line (the line the pool is graded on), ranked by how often
 // edges that size covered this season (fitted on the games already graded, anchored to the history fit).
 // The line's move since that line still counts, and so do QB-out marks; the old SP+ / play-by-play
@@ -3592,16 +3593,21 @@ function pxPoolK(){
     if(SPS && SPS[homeId] && SPS[awayId]){ var spm = SPS[homeId].fpi - SPS[awayId].fpi + (neutral ? 0 : PX_PICK.hfa); parts.spPts = spm - ref; parts.sp = spw * PX_PICK.sp * clip(spm - ref, 10); z += parts.sp; }
     var QM = pxQbMarks(gid);
     if(QM){ var qv = function(v){ return v === 1 ? PX_PICK.qb1 : v === 2 ? PX_PICK.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; z += parts.qb; }
-    if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
-    var p = 1 / (1 + Math.exp(-Math.abs(z)));
-    return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: false, model: true };
+    // The model picks the side. Line movement, SP+ and QB marks only move the confidence: up when they agree, down when they
+    // don't (never enough to flip the pick). With no model view at all (under 0.05 pts), they decide as before.
+    var zm = parts.md, zo = z - zm, pickHome, zf;
+    if(Math.abs(parts.pbpPts) >= 0.05){ pickHome = zm > 0; zf = Math.max(0.004, Math.abs(zm) + (pickHome ? zo : -zo)); parts.agree = (pickHome ? zo : -zo) >= 0; }
+    else { if(Math.abs(z) < 1e-6) return { none: true, parts: parts }; pickHome = z > 0; zf = Math.abs(z); parts.agree = true; }
+    var p = 1 / (1 + Math.exp(-zf));
+    return { pickHome: pickHome, chance: p + Math.min(Math.abs(parts.pbpPts), 10) * 1e-7, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: false, model: true };
   };
   var why = pxPickWhy;
   pxPickWhy = function(k, ha, aa){
     if(!k || !k.model) return why.apply(this, arguments);
     var s = [], side = function(v){ return v > 0 ? ha : aa; }, P = k.parts;
-    if(P.pbpPts !== undefined) s.push(Math.abs(P.pbpPts) >= 0.5 ? 'your model ' + Math.abs(P.pbpPts).toFixed(1) + ' higher on ' + side(P.pbpPts) : 'your model agrees with the line');
-    if(P.mvPts !== undefined && Math.abs(P.mvPts) >= 0.5) s.push('line moved ' + Math.abs(P.mvPts).toFixed(1) + ' toward ' + side(P.mvPts));
+    if(P.pbpPts !== undefined) s.push(Math.abs(P.pbpPts) >= 0.5 ? 'your model ' + Math.abs(P.pbpPts).toFixed(1) + ' higher on ' + side(P.pbpPts) : 'your model is within ' + Math.abs(P.pbpPts).toFixed(1) + ' of the line');
+    var mine = k.pickHome ? 1 : -1;
+    if(P.mvPts !== undefined && Math.abs(P.mvPts) >= 0.5) s.push('line moved ' + Math.abs(P.mvPts).toFixed(1) + ' toward ' + side(P.mvPts) + ((P.mvPts > 0 ? 1 : -1) === mine ? ' (with the pick)' : ' (against, lowers confidence)'));
     if(P.spPts !== undefined && Math.abs(P.spPts) >= 0.5 && P.sp) s.push('SP+ ' + Math.abs(P.spPts).toFixed(1) + ' higher on ' + side(P.spPts));
     var qbt = function(v){ return v === 1 ? 'backup’s 1st start' : 'backup starting'; };
     if(P.qbH) s.push(ha + ' QB out (' + qbt(P.qbH) + ')');
