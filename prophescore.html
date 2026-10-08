@@ -1568,6 +1568,9 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pb-res b{font:900 14px 'Nunito',sans-serif}.pb-res span{font:800 12px 'Nunito',sans-serif}
 .pb-res small{font:700 10.5px/1.3 'Nunito',sans-serif;color:var(--muted)}
 .pb-ch{display:flex;flex-wrap:wrap;gap:4px}.pb-ch i{font:800 10.5px 'Nunito',sans-serif;font-style:normal;padding:2px 8px;border:1.5px solid var(--border);border-radius:99px;background:#fff}
+.pg-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pg-two .pg-b{padding:10px 8px;gap:8px}.pg-two .pg-b em{font-size:10.5px}
+.pg-b.pool{background:var(--ps-acc,#7c4ddb);color:#fff}
 
 </style>
 </head>
@@ -3488,36 +3491,73 @@ function pbCands(p, cur){
   var off = Object.assign({}, cur); p.keys.forEach(function(k){ off[k.k] = k.off; }); add(off);
   return out.slice(1);
 }
+// ── Tune for my pool: judged only on your pool's games, scored the way the pool scores ──
+// Each week's picks get confidence points by size of the model's edge (biggest edge = most points); a win earns them, a loss costs them.
+var PB_TROPHY = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10v5a5 5 0 0 1-10 0zM7 6H4v1a3 3 0 0 0 3 3M17 6h3v1a3 3 0 0 1-3 3M12 14v4M8 21h8"/></svg>';
+function pbPoolMap(){
+  var gl = pxGames(), by = {}, out = [];
+  gl.forEach(function(x){ if(x.g.c) by[x.W.w + "|" + x.g.h + "|" + x.g.a] = x.g.id; });
+  (PE.games || []).forEach(function(pg){
+    if(!pg || pg.src !== "pool" || typeof pg.pool !== "number" || !pg.w) return;
+    var id = by[pg.w + "|" + pg.homeId + "|" + pg.awayId]; if(id === undefined) return;
+    out.push({ id: id, w: +pg.w, ref: (pg.favIsHome ? 1 : -1) * pg.pool });
+  });
+  return out;
+}
+function pbPoolList(G, map){
+  var wk = {}; map.forEach(function(m){ var q = G[m.id]; if(!q) return; (wk[m.w] = wk[m.w] || []).push({ id: m.id, e: q.pred - m.ref, mg: q.act - m.ref, miss: Math.abs(q.pred - q.act) }); });
+  var out = [];
+  Object.keys(wk).map(Number).sort(function(a, b){ return a - b; }).forEach(function(w){
+    var L = wk[w].sort(function(a, b){ return Math.abs(a.e) - Math.abs(b.e) || (a.id < b.id ? -1 : 1); });
+    L.forEach(function(q, i){ var pts = i + 1, pick = Math.abs(q.e) >= 0.05, win = pick && q.mg !== 0 && (q.mg > 0) === (q.e > 0), loss = pick && q.mg !== 0 && !win;
+      out.push({ w: w, pts: pts, win: win, loss: loss, net: win ? pts : loss ? -pts : 0, miss: q.miss }); });
+  });
+  return out;
+}
+function pbPoolScore(G, map, part){
+  var L = pbPoolList(G, map), h = Math.floor(L.length / 2); if(part === 1) L = L.slice(0, h); else if(part === 2) L = L.slice(h);
+  var net = 0, miss = 0; L.forEach(function(q){ net += q.net; miss += q.miss; });
+  return L.length ? net - 60 * miss / L.length : 0;
+}
+function pbPoolSum(G, map){ var L = pbPoolList(G, map), r = { w: 0, l: 0, pts: 0, e: 0, n: L.length }; L.forEach(function(q){ if(q.win) r.w++; if(q.loss) r.l++; r.pts += q.net; r.e += q.miss; }); r.e = r.n ? r.e / r.n : 0; return r; }
 function pbRowHtml(){
   var tv = psView() === "t";
-  if(PB.run) return '<div class="pb-run"><div class="pb-t"><b>Building the best ' + (PB.view === "t" ? 'over/under' : 'spread') + ' model</b><span>' + x(PB.txt) + '</span></div><span class="pb-bar"><i style="width:' + Math.round(PB.pct || 0) + '%"></i></span><button class="pg-b" data-ps-act="pbstop">Stop and keep what it found</button></div>';
-  var h = '<button class="pg-b best" data-ps-act="pbgo">' + PB_WAND + '<span>Build the best ' + (tv ? 'over/under' : 'spread') + ' model<em>tests every ' + (tv ? 'over/under' : 'spread') + ' panel, keeps what improves your ' + (tv ? 'O/U' : 'ATS') + ' record · a few minutes</em></span></button>' +
-    '<button class="pg-b dice" data-ps-act="pgdice">' + PG_DICE + '<span>Surprise me<em>try a random panel</em></span></button>';
-  var L = PB.last && PB.last.view === psView() ? PB.last : null;
+  if(PB.run) return '<div class="pb-run"><div class="pb-t"><b>' + (PB.view === "pool" ? 'Tuning for your pool' : 'Building the best ' + (PB.view === "t" ? 'over/under' : 'spread') + ' model') + '</b><span>' + x(PB.txt) + '</span></div><span class="pb-bar"><i style="width:' + Math.round(PB.pct || 0) + '%"></i></span><button class="pg-b" data-ps-act="pbstop">Stop and keep what it found</button></div>';
+  var h = '<button class="pg-b best" data-ps-act="pbgo" data-id="m">' + PB_WAND + '<span>Build the best ' + (tv ? 'over/under' : 'spread') + ' model<em>tests every ' + (tv ? 'over/under' : 'spread') + ' panel, keeps what improves your ' + (tv ? 'O/U' : 'ATS') + ' record · a few minutes</em></span></button>' +
+    '<div class="pg-two"><button class="pg-b dice" data-ps-act="pgdice">' + PG_DICE + '<span>Surprise me<em>try a random panel</em></span></button>' +
+    (tv ? '' : '<button class="pg-b pool" data-ps-act="pbgo" data-id="pool">' + PB_TROPHY + '<span>Tune for my pool<em>best pool points</em></span></button>') + '</div>';
+  var L = PB.last && (PB.last.view === psView() || (PB.last.view === "pool" && !tv)) ? PB.last : null;
+  if(L && L.view === "pool") h += '<div class="pb-res"><b>' + (L.changes.length ? 'Best pool build found' : 'Nothing beat your build for the pool') + '</b><span>' + (L.changes.length ? 'Pool picks ' + L.after.w + '-' + L.after.l + ' · ' + (L.after.pts >= 0 ? '+' : '') + L.after.pts + ' confidence points (was ' + L.before.w + '-' + L.before.l + ', ' + (L.before.pts >= 0 ? '+' : '') + L.before.pts + ')' : 'It is already the best of everything tried on your pool games.') + '</span>' +
+    (L.changes.length ? '<div class="pb-ch">' + L.changes.slice(0, 10).map(function(c){ return '<i>' + x(c) + '</i>'; }).join('') + (L.changes.length > 10 ? '<i>+' + (L.changes.length - 10) + ' more</i>' : '') + '</div>' : '') +
+    '<small>Judged on ' + L.after.n + ' of your pool games, scored with confidence points (your biggest edges earn the most). That is a small sample, so each change had to clear a higher bar and help both halves. The whole-season scoreboard may move the other way.</small></div>';
+  else
   if(L) h += '<div class="pb-res"><b>' + (L.changes.length ? 'Best build found' : 'Nothing beat your build') + '</b><span>' + (L.changes.length ? L.after.w + '-' + L.after.l + (tv ? ' on over/unders' : ' vs Vegas') + ' (was ' + L.before.w + '-' + L.before.l + ') · ' + (tv ? 'total' : 'spread') + ' miss ' + L.after.e.toFixed(2) + ' (was ' + L.before.e.toFixed(2) + ')' : 'It is already the best of everything tried.') + '</span>' +
     (L.changes.length ? '<div class="pb-ch">' + L.changes.slice(0, 10).map(function(c){ return '<i>' + x(c) + '</i>'; }).join('') + (L.changes.length > 10 ? '<i>+' + (L.changes.length - 10) + ' more</i>' : '') + '</div>' : '') +
     '<small>It was tuned on the same games it is graded on, so treat the record as a best case. Each change had to help both halves of the season' + (tv ? ', with a stricter bar because totals are noisier' : '') + '.</small></div>';
   return h;
 }
 function pbRender(){ var el = document.getElementById("pg-row"); if(el) el.innerHTML = pbRowHtml(); }
-function pbGo(){
+function pbGo(mode){
   if(PB.run) return;
   if(PX.ut.busy || PXP.busy){ toast("Hang on, a test is still running"); return; }
   var n = 0; pxGames().forEach(function(x){ if(x.g.c) n++; });
   if(!PX.active || n < 40){ toast("Needs at least 40 graded games first"); return; }
+  var pool = mode === "pool", pmap = pool ? pbPoolMap() : null;
+  if(pool && pmap.length < 30){ toast("Needs at least 30 graded pool games (found " + pmap.length + "). Open the Games tab to load your pool."); return; }
   clearTimeout(PX.ut.timer); psPSnap();
-  var V = psView(), tv = V === "t", need = tv ? 2.5 : 1.5, halfMin = tv ? -1 : -1.5;
-  PB.run = true; PB.view = V; PB.stop = false; PB.last = null; PB.pct = 0; PB.txt = "Starting…"; PXP.busy = "pb"; PXP.prog = ""; PB.cache = PB.cache || {};
-  var cur = Object.assign({}, pxUTInit()), curG = null, before = null, changes = {}, order = psViewPanels(V), total = order.length * 2, done = 0, pass = 0;
+  var V = pool ? "s" : psView(), tv = V === "t", need = pool ? 8 : tv ? 2.5 : 1.5, halfMin = pool ? -2 : tv ? -1 : -1.5;
+  var SC = function(G, part){ return pool ? pbPoolScore(G, pmap, part) : pbScore(G, tv, part); };
+  PB.run = true; PB.view = pool ? "pool" : V; PB.stop = false; PB.last = null; PB.pct = 0; PB.txt = "Starting…"; PXP.busy = "pb"; PXP.prog = ""; PB.cache = PB.cache || {};
+  var poolG0 = null, cur = Object.assign({}, pxUTInit()), curG = null, before = null, changes = {}, order = psViewPanels(V), total = order.length * 2, done = 0, pass = 0;
   function apply(o){ var w = pxUTInit(); pmKeys().forEach(function(k){ w[k] = o[k]; }); }
   function finish(){
     PB.run = false; PXP.busy = null;
     var names = Object.keys(changes).map(function(id){ var p = psPById(id); return p.name + " " + pmPanelVal(p, cur); });
     var after = pxUTSummary(curG), bef = before, pk = function(A){ return tv ? { w: A.ow, l: A.ol, e: A.tn ? A.te / A.tn : 0 } : { w: A.w, l: A.l, e: A.e / A.n }; };
-    PB.last = { view: V, changes: names, before: pk(bef), after: pk(after) };
+    PB.last = { view: pool ? "pool" : V, changes: names, before: pool ? pbPoolSum(poolG0, pmap) : pk(bef), after: pool ? pbPoolSum(curG, pmap) : pk(after) };
     apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false;
     psFeel("win"); psPanelsRefresh(); pxUTStatus(); pbRender();
-    if(names.length){ psPUndoShow("Best model built · " + names.length + " panel" + (names.length === 1 ? "" : "s") + " changed"); if(PB.last.after.w - PB.last.after.l > PB.last.before.w - PB.last.before.l + 2) pgConfetti(40); }
+    if(names.length){ psPUndoShow("Best model built · " + names.length + " panel" + (names.length === 1 ? "" : "s") + " changed"); if((pool ? PB.last.after.pts - PB.last.before.pts > 10 : PB.last.after.w - PB.last.after.l > PB.last.before.w - PB.last.before.l + 2)) pgConfetti(40); }
     else toast("Nothing beat your current build", "info");
   }
   function pass1(){
@@ -3525,8 +3565,8 @@ function pbGo(){
     pass++; var changedThis = false, i = 0;
     (function panel(){
       if(PB.stop || i >= order.length){ if(!changedThis || PB.stop) finish(); else pass1(); return; }
-      var p = order[i++]; done++; PB.pct = Math.min(99, done / total * 100); PB.txt = "Pass " + pass + " of 2 · " + p.name + " (" + i + " of " + order.length + ")"; pbRender();
-      var cands = pbCands(p, cur), j = 0, best = null, tot = tv, s0 = pbScore(curG, tot), a0 = pbScore(curG, tot, 1), b0 = pbScore(curG, tot, 2);
+      var p = order[i++]; done++; PB.pct = Math.min(99, done / total * 100); PB.txt = (pool ? "Your pool · " : "") + "Pass " + pass + " of 2 · " + p.name + " (" + i + " of " + order.length + ")"; pbRender();
+      var cands = pbCands(p, cur), j = 0, best = null, s0 = SC(curG), a0 = SC(curG, 1), b0 = SC(curG, 2);
       (function tryc(){
         if(PB.stop || j >= cands.length){
           if(best){ cur = best.o; curG = best.G; changes[p.id] = 1; changedThis = true; apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false; psFeel("tap"); psPanelsRefresh(); }
@@ -3534,14 +3574,14 @@ function pbGo(){
         }
         var o = cands[j++];
         pbEval(o, function(G){
-          if(G){ var s1 = pbScore(G, tot), a1 = pbScore(G, tot, 1), b1 = pbScore(G, tot, 2);
+          if(G){ var s1 = SC(G), a1 = SC(G, 1), b1 = SC(G, 2);
             if(s1 - s0 >= need && a1 - a0 >= halfMin && b1 - b0 >= halfMin && (!best || s1 > best.s)) best = { o: o, G: G, s: s1 }; }
           setTimeout(tryc, 0);
         });
       })();
     })();
   }
-  pbEval(cur, function(G){ if(!G){ PB.run = false; PXP.busy = null; toast("Test failed", "err"); pbRender(); return; } curG = G; before = pxUTSummary(G); pass1(); });
+  pbEval(cur, function(G){ if(!G){ PB.run = false; PXP.busy = null; toast("Test failed", "err"); pbRender(); return; } curG = G; poolG0 = G; before = pxUTSummary(G); pass1(); });
 }
 (function(){
   var ph = psPanelsHtml; psPanelsHtml = function(){ var h = ph.apply(this, arguments);
@@ -3553,7 +3593,7 @@ document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
   var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop") return;
   ev.stopImmediatePropagation();
-  if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
+  if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(t.getAttribute("data-id")); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
 }, true);
 
 // ── Pool picks follow your model ──
