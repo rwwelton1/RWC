@@ -1266,6 +1266,19 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 
 .topbar{background:var(--team-bar,#ffffff)}
 
+.ps-hello,.ps-prof{margin:2px 0 14px;gap:12px}
+.ps-prof{padding:4px 0 6px}
+.ps-hi{line-height:1.2;padding-bottom:2px}
+.ps-prof .ps-sm{margin-top:4px}
+.ps-role{display:inline-block;line-height:1.5;padding:0 8px}
+.ps-av{margin:3px 3px 3px 3px}
+.ps-hello .pr-ats,.ps-prof .pr-ats{flex:none;white-space:nowrap;font-size:12px}
+.ps-home>.pr-weeks{margin-bottom:14px}
+.ps-sec>.pem-ats,.ps-home>.pem-ats{margin-top:4px}
+.ps-sec .pem-autosub{margin:2px 0 4px;line-height:1.4}
+.ps-sec .btn{margin-top:10px}
+.ps-omen.top .om-n{color:#fff}
+
 </style>
 </head>
 <body>
@@ -1653,7 +1666,8 @@ function psMigrHtml(){
 function psAdminLoad(){
   if(!psAdmin()) return Promise.resolve();
   var one = function(p){ return psRef(p).once("value").then(function(sn){ return sn.val() || {}; }).catch(function(){ return {}; }); };
-  return Promise.all([one("requests"), one("roles/members"), one("roles/editors")]).then(function(r){ PS.admin = { req: r[0], mem: r[1], ed: r[2], at: Date.now() }; psAdminStatus(); });
+  var dir = DB.ref("users").once("value").then(function(sn){ var all = sn.val() || {}, d = {}; Object.keys(all).forEach(function(k){ var u = all[k] || {}; if(u.username) d[k] = { username: String(u.username), emoji: u.emoji || "" }; }); return d; }).catch(function(){ return {}; });
+  return Promise.all([one("requests"), one("roles/members"), one("roles/editors"), dir]).then(function(r){ PS.admin = { req: r[0], mem: r[1], ed: r[2], at: Date.now() }; PS.dir = r[3]; psAdminStatus(); });
 }
 function psAdminStatus(){ var el = document.getElementById("ps-admin"); if(el) el.outerHTML = psAdminCardHtml(); }
 function psAdminCardHtml(){
@@ -1664,27 +1678,36 @@ function psAdminCardHtml(){
   if(req.length){
     h += '<div class="pem-hd" style="margin-top:6px">Asking to join</div>';
     req.forEach(function(uid){ var r = A.req[uid] || {};
-      h += '<div class="ps-mrow"><span><b>' + x(r.n || uid) + '</b><small>' + (r.at ? psAgo(r.at) : '') + '</small></span><span><button class="btn btn-sm btn-gold" data-ps-act="admok" data-uid="' + x(uid) + '">Approve</button> <button class="btn btn-sm btn-ghost" data-ps-act="admno" data-uid="' + x(uid) + '">Decline</button></span></div>'; });
+      h += '<div class="ps-mrow"><span><b>' + x(r.n || ((PS.dir || {})[uid] || {}).username || uid) + '</b><small>' + (r.at ? psAgo(r.at) : '') + '</small></span><span><button class="btn btn-sm btn-gold" data-ps-act="admok" data-uid="' + x(uid) + '">Approve</button> <button class="btn btn-sm btn-ghost" data-ps-act="admno" data-uid="' + x(uid) + '">Decline</button></span></div>'; });
   }
   var mem = Object.keys(A.mem || {});
   h += '<div class="pem-hd" style="margin-top:8px">Members (' + mem.length + ')</div>';
   if(!mem.length) h += '<div class="pem-autosub">Nobody yet. Anyone who opens Prophescore can ask to join, and they show up above.</div>';
   mem.sort(function(a, b){ return String((A.mem[a] || {}).n || a).localeCompare(String((A.mem[b] || {}).n || b)); }).forEach(function(uid){ var m = A.mem[uid] || {}, ed = !!(A.ed || {})[uid];
-    h += '<div class="ps-mrow"><span><b>' + x(m.n || uid) + '</b>' + (ed ? '<small>editor · can refresh the data</small>' : '<small>member</small>') + '</span><span>' +
+    h += '<div class="ps-mrow"><span><b>' + x(m.n || ((PS.dir || {})[uid] || {}).username || uid) + '</b>' + (ed ? '<small>editor · can refresh the data</small>' : '<small>member</small>') + '</span><span>' +
          '<button class="btn btn-sm btn-ghost" data-ps-act="admed" data-uid="' + x(uid) + '">' + (ed ? 'Remove editor' : 'Make editor') + '</button> ' +
          '<button class="btn btn-sm btn-ghost" data-ps-act="admrm" data-uid="' + x(uid) + '">Remove</button></span></div>'; });
-  h += '<div style="display:flex;gap:6px;margin-top:8px"><input id="ps-adduid" placeholder="Add by account id" autocomplete="off" style="flex:1;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:800 13px Nunito,sans-serif;background:var(--cream)"><button class="btn btn-sm btn-ghost" data-ps-act="admadd">Add</button></div>';
+  h += '<div class="pem-hd" style="margin-top:10px">Add someone from Scorecery</div><input id="ps-find" placeholder="Search by username" autocomplete="off" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;padding:9px 10px;border:2px solid var(--border);border-radius:9px;font:800 14px Nunito,sans-serif;background:var(--cream)"><div id="ps-found">' + psFoundHtml("") + '</div>';
   h += '<div class="pem-autonote">Members read the shared data and keep their own settings, tunes, favorites and picks. Editors can also press Refresh (with their own CFBD key) to update the shared data for everyone. You are always both.</div>';
   h += '<details style="margin-top:6px"><summary class="pem-autosub" style="cursor:pointer"><b>Firebase rules</b> (paste once, in the console)</summary><pre class="ps-rules">' + x(PS_RULES) + '</pre></details>';
   return h + '</div>';
 }
+function psFoundHtml(q){
+  q = String(q || "").trim().toLowerCase(); var A = PS.admin || {}, D = PS.dir || {};
+  if(!q) return '<div class="pem-autosub">Type a name to find them. Everyone with a Scorecery username is listed.</div>';
+  var hit = Object.keys(D).filter(function(k){ return !(A.mem || {})[k] && !(A.ed || {})[k] && k !== ME() && D[k].username.toLowerCase().indexOf(q) >= 0; })
+    .sort(function(a, b){ return D[a].username.localeCompare(D[b].username); }).slice(0, 8);
+  if(!hit.length) return '<div class="pem-autosub">No one by that name who isn\u2019t already in.</div>';
+  return hit.map(function(k){ return '<div class="ps-mrow"><span><b>' + x((D[k].emoji ? D[k].emoji + ' ' : '') + D[k].username) + '</b></span><span><button class="btn btn-sm btn-gold" data-ps-act="admadd" data-uid="' + x(k) + '">Add</button></span></div>'; }).join('');
+}
+document.addEventListener("input", function(e){ var t = e.target; if(t && t.id === "ps-find"){ var el = document.getElementById("ps-found"); if(el) el.innerHTML = psFoundHtml(t.value); } });
 function psAdminAct(act, uid){
   var A = PS.admin || {}, up = {};
   if(act === "admok"){ var r = (A.req || {})[uid] || {}; up["roles/members/" + uid] = { n: r.n || uid, at: Date.now() }; up["requests/" + uid] = null; }
   else if(act === "admno"){ up["requests/" + uid] = null; }
   else if(act === "admed"){ up["roles/editors/" + uid] = (A.ed || {})[uid] ? null : true; }
   else if(act === "admrm"){ if(!confirm("Remove this member? Their own settings stay saved, but they lose access.")) return; up["roles/members/" + uid] = null; up["roles/editors/" + uid] = null; }
-  else if(act === "admadd"){ var el = document.getElementById("ps-adduid"), v = el ? el.value.trim() : ""; if(!/^[A-Za-z0-9_-]{6,64}$/.test(v)){ toast("That doesn’t look like an account id", "err"); return; } up["roles/members/" + v] = { n: v, at: Date.now() }; }
+  else if(act === "admadd"){ var dd = (PS.dir || {})[uid]; if(!dd){ toast("Couldn\u2019t find that person", "err"); return; } up["roles/members/" + uid] = { n: dd.username, at: Date.now() }; up["requests/" + uid] = null; }
   DB.ref("ps").update(up, function(err){ if(err){ toast("Couldn’t save: " + (err.code || err.message), "err"); return; } psAdminLoad(); });
 }
 // ── Not a member yet: ask to join ──
@@ -2235,6 +2258,7 @@ function psEnsureGames(){
     setTimeout(function(){ pearLoadFbs(); pearLoadInfo(); PEAR.loading = false; pearLoadWeek(null, null); }, 0);
   }
 }
+function psChip(){ return String(pemAtsChip() || "").replace(/^\s*\u00B7\s*/, ""); }
 function psRole(){ return psAdmin() ? "Owner" : (PS.role && PS.role.editor) ? "Editor" : "Member"; }
 function psMiniRow(g, p){
   var d = new Date(g.date), fin = g.state === "post";
@@ -2281,7 +2305,7 @@ function psOmenCard(o, i){
 function psHomeHtml(){
   psEnsureGames();
   var W = psBoardWk(), h = '<div class="ps-home">';
-  h += '<div class="ps-hello"><div><div class="ps-hi">Hey, ' + x(psName()) + '</div><div class="ps-sm">Week ' + (PEAR.week || W.w || '') + (PX.active ? ' \u00B7 ' + PEM.n + ' games fit' : '') + '</div></div>' + (PX.active ? pemAtsChip() : '') + '</div>';
+  h += '<div class="ps-hello"><div><div class="ps-hi">Hey, ' + x(psName()) + '</div><div class="ps-sm">Week ' + (PEAR.week || W.w || '') + (PX.active ? ' \u00B7 ' + PEM.n + ' games fit' : '') + '</div></div>' + (PX.active ? psChip() : '') + '</div>';
   if(PEAR.weeks){
     h += '<div class="pr-weeks">' + PEAR.weeks.map(function(w){ return '<button class="pr-wk' + (w === PEAR.week ? ' on' : '') + psWkCls(w) + '" data-pear-week="' + w + '">' + w + '</button>'; }).join('') + '</div>';
   }
@@ -2306,8 +2330,8 @@ function psHomeHtml(){
 function psMeHtml(){
   var sub = PE.ui.mesub; if(sub !== "model") sub = "me";
   var ini = (psName() || "?").charAt(0).toUpperCase();
-  var h = '<div class="ps-home"><div class="ps-prof"><span class="ps-av">' + (((SC.currentUser || {}).emoji) ? x(SC.currentUser.emoji) : x(ini)) + '</span><div style="flex:1;min-width:0"><div class="ps-hi">' + x(psName()) + '</div><div class="ps-sm"><span class="ps-role">' + psRole() + '</span></div></div>' + (PX.active ? pemAtsChip() : '') + '</div>';
-  h += '<div class="pe-sub" role="tablist" style="position:static"><button class="' + (sub === "me" ? 'on' : '') + '" data-ps-act="mesub" data-v="me">Overview</button><button class="' + (sub === "model" ? 'on' : '') + '" data-ps-act="mesub" data-v="model">My model</button></div>';
+  var h = '<div class="ps-home"><div class="ps-prof"><span class="ps-av">' + (((SC.currentUser || {}).emoji) ? x(SC.currentUser.emoji) : x(ini)) + '</span><div style="flex:1;min-width:0"><div class="ps-hi">' + x(psName()) + '</div><div class="ps-sm"><span class="ps-role">' + psRole() + '</span></div></div>' + (PX.active ? psChip() : '') + '</div>';
+  h += '<div class="pe-sub" role="tablist" style="position:static;margin:10px -14px 14px"><button class="' + (sub === "me" ? 'on' : '') + '" data-ps-act="mesub" data-v="me">Overview</button><button class="' + (sub === "model" ? 'on' : '') + '" data-ps-act="mesub" data-v="model">My model</button></div>';
   if(sub === "model"){
     if(PE.err){
       h += '<div class="pe-err">' + x(PE.err) + '</div>';
