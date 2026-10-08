@@ -1199,6 +1199,31 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .ps-mrow small{display:block;color:var(--muted);font-weight:700}
 .ps-rules{white-space:pre-wrap;word-break:break-all;font:600 11px ui-monospace,Menlo,monospace;background:var(--cream);border:1.5px solid var(--border);border-radius:8px;padding:8px;max-height:280px;overflow:auto}
 .ps-thread{margin-top:6px}
+.ps-app{padding-bottom:92px}
+.ps-tabbar{position:fixed;left:0;right:0;bottom:0;z-index:40;display:grid;grid-template-columns:repeat(5,1fr);background:#fff;border-top:3px solid var(--border);padding:4px 6px calc(6px + env(safe-area-inset-bottom));max-width:560px;margin:0 auto}
+.ps-tabbar button{border:none;background:none;display:flex;flex-direction:column;align-items:center;gap:1px;padding:5px 0;border-radius:10px;font:900 10px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
+.ps-tabbar button i{font-style:normal;font-size:20px;line-height:1.1;filter:grayscale(1);opacity:.7}
+.ps-tabbar button.on{background:var(--gold);color:var(--text)}
+.ps-tabbar button.on i{filter:none;opacity:1}
+.ps-home{display:block}
+.ps-hello,.ps-prof{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+.ps-hello>div:first-child{flex:1;min-width:0}
+.ps-hi{font-size:22px;font-weight:900;letter-spacing:-.02em;line-height:1.1;overflow:hidden;text-overflow:ellipsis}
+.ps-sm{font:800 11px 'Nunito',sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.ps-card{background:#fff;border:2px solid var(--border);border-radius:14px;box-shadow:3px 3px 0 var(--border);padding:10px 12px;margin:0 0 14px}
+.ps-ch{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;font-size:14px}
+.ps-link{border:none;background:none;color:var(--text);font:900 12px 'Nunito',sans-serif;text-decoration:underline;cursor:pointer;padding:4px 0}
+.ps-mini{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid rgba(0,0,0,.08);cursor:pointer}
+.ps-mini:first-of-type{border-top:none}
+.pm-t{flex:1;min-width:0;font-size:13px;line-height:1.25}
+.pm-t b{font-weight:900}
+.pm-t small{display:block;font:800 10px 'Nunito',sans-serif;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.pm-pick{flex:none;font:900 12px 'Nunito',sans-serif;background:var(--gold);border:2px solid var(--border);border-radius:8px;padding:3px 8px}
+.pm-pick.win{background:#c9f2cf}.pm-pick.loss{background:#f6c9c9}
+.pm-edge{flex:none;font:900 11px 'Nunito',sans-serif;color:var(--muted)}
+.ps-av{width:44px;height:44px;border-radius:50%;background:var(--gold);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font:900 20px 'Nunito',sans-serif;flex:none}
+.ps-role{background:var(--gold);border:1.5px solid var(--border);border-radius:6px;padding:1px 6px;color:var(--text)}
+
 </style>
 </head>
 <body>
@@ -1706,6 +1731,8 @@ function psFeedRefresh(){
   var gf = document.getElementById("ps-gfeed"); if(gf) gf.innerHTML = psGameFeedInner(gf.getAttribute("data-wk"), gf.getAttribute("data-gid"));
   var pf = document.getElementById("ps-pkfeed"); if(pf) pf.innerHTML = psPicksFeedHtml();
   var lb = document.getElementById("ps-lb"); if(lb) lb.innerHTML = psLeaderHtml();
+  var hf = document.getElementById("ps-hfeed"); if(hf) hf.innerHTML = psHomeFeedInner();
+  var hl = document.getElementById("ps-hlb"); if(hl) hl.innerHTML = psHomeLbInner();
 }
 // ── Expert picks ──
 var PS_KINDS = [["pick", "Pick"], ["parlay", "Parlay"], ["prop", "Prop"], ["future", "Future"], ["fantasy", "Fantasy"]];
@@ -1789,7 +1816,111 @@ function psPickPost(){
               no: v("pk-no").slice(0, 600) || null, at: Date.now(), st: "open", y: W.y, w: W.w };
   psRef("picks").push(rec, function(err){ if(err){ toast("Couldn’t post: " + (err.code || err.message), "err"); return; } PS.ui.form = false; PS.ui.pk = "open"; psBoardRender(); toast("Pick posted", "ok"); });
 }
-// ── Board view (the fourth tab) ──
+// ── UI shell: Home, Me, bottom tab bar ──
+var PS_TABS = [["home", "🏠", "Home"], ["games", "🏈", "Games"], ["board", "💬", "Board"], ["rank", "📊", "Teams"], ["me", "👤", "Me"]];
+function psTabbarHtml(v){
+  return '<nav class="ps-tabbar" aria-label="Sections">' + PS_TABS.map(function(t){
+    return '<button class="' + (v === t[0] ? 'on' : '') + '" data-pe-view="' + t[0] + '"><i>' + t[1] + '</i><span>' + t[2] + '</span></button>'; }).join('') + '</nav>';
+}
+function psEnsureGames(){
+  if(!PEAR.games && !PEAR.loading && !PEAR.err){
+    PEAR.loading = true;
+    setTimeout(function(){ pearLoadFbs(); pearLoadInfo(); PEAR.loading = false; pearLoadWeek(null, null); }, 0);
+  }
+}
+function psRole(){ return psAdmin() ? "Owner" : (PS.role && PS.role.editor) ? "Editor" : "Member"; }
+function psMiniRow(g, p){
+  var d = new Date(g.date), fin = g.state === "post";
+  var when = fin ? "Final" : g.state === "in" ? "● LIVE" : d.toLocaleDateString(undefined, { weekday: "short" }) + " " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  var mp = p ? pearModelPick(g, p.margin) : null;
+  var sc = (g.state !== "pre" && g.away.score !== null && g.home.score !== null) ? ' · ' + g.away.score + '–' + g.home.score : '';
+  return '<div class="ps-mini" role="button" data-pear-game="' + x(g.id) + '">' + psStarHtml(g.id) +
+         '<span class="pm-t"><b>' + x(pearName(g.away.id)) + '</b> at <b>' + x(pearName(g.home.id)) + '</b><small>' + x(when) + x(sc) + '</small></span>' +
+         (mp ? '<span class="pm-pick' + (mp.res ? ' ' + mp.res : '') + '">' + x(mp.txt) + '</span>' : '') + '</div>';
+}
+function psWeekGames(){
+  var pastFit = PEAR.games ? pearFitFor(PEAR.week) : null;
+  return (PEAR.games || []).filter(function(g){ return pearFbsGame(g); }).map(function(g){
+    var p = pearProject(g.away.id, g.home.id, g.neutral, pastFit || null, g);
+    return { g: g, p: p, e: pastFit === false ? null : pearEdge(g, p) };
+  });
+}
+function psHomeFeedInner(){
+  var W = psBoardWk(), k = psWkKey(W.y, W.w); psBoardWatch(k);
+  if(!PS.board[k]) return '<div class="pem-autosub">Loading…</div>';
+  if(PS.board[k].__err) return '<div class="pem-autosub" style="color:var(--red2)">Couldn’t read the board (' + x(PS.board[k].__err) + ').</div>';
+  var P = psPosts(k, null).slice(0, 3);
+  if(!P.length) return '<div class="pem-autosub">Quiet so far this week. Start it off.</div>';
+  return P.map(function(p){ return psPostHtml(k, p, true); }).join('');
+}
+function psHomeLbInner(){
+  psPicksWatch();
+  if(!PS.picks) return '<div class="pem-autosub">Loading…</div>';
+  var lb = psLeaderHtml();
+  var mine = psPickList().filter(function(p){ return p.u === ME() && (p.st || "open") === "open"; }).length;
+  var all = psPickList().filter(function(p){ return (p.st || "open") === "open"; }).length;
+  return (lb || '<div class="pem-autosub">No picks yet.</div>') + '<div class="pem-autosub" style="margin-top:6px">' + all + ' open pick' + (all === 1 ? '' : 's') + ' from the group · ' + mine + ' yours</div>';
+}
+function psHomeHtml(){
+  psEnsureGames();
+  var W = psBoardWk(), h = '<div class="ps-home">';
+  h += '<div class="ps-hello"><div><div class="ps-hi">Hey, ' + x(psName()) + '</div><div class="ps-sm">Prophescore · Week ' + (PEAR.week || W.w || '') + (PX.active ? ' · ' + PEM.n + ' games fit' : '') + '</div></div>' + (PX.active ? pemAtsChip() : '') + '</div>';
+  if(PEAR.weeks){
+    h += '<div class="pr-weeks">' + PEAR.weeks.map(function(w){ return '<button class="pr-wk' + (w === PEAR.week ? ' on' : '') + (w === PEAR.curWeek && PEAR.year === PEAR.curYear ? ' now' : '') + '" data-pear-week="' + w + '">' + w + '</button>'; }).join('') + '</div>';
+  }
+  if(!PEM.ratings) h += '<div class="pr-note"><b>No model yet.</b> ' + (pxCanFetch() ? 'Open Me → My model to build the shared data.' : 'Ask an editor to refresh the shared data, or paste an SP+ sheet in Me → My model.') + '</div>';
+  if(PEAR.loading || !PEAR.games){ return h + '<div class="pr-empty">' + (PEAR.err ? x(PEAR.err) : 'Loading week ' + (PEAR.week || '') + '…') + '</div></div>'; }
+  var L = psWeekGames();
+  // Favorites
+  var fav = L.filter(function(o){ return psFav(o.g.id); });
+  h += '<section class="ps-card"><div class="ps-ch"><b>★ Your games</b><span class="ps-sm">' + fav.length + ' this week</span></div>';
+  h += fav.length ? fav.map(function(o){ return psMiniRow(o.g, o.p); }).join('') : '<div class="pem-autosub">Tap the ☆ on any game and it lands here with the model’s pick.</div>';
+  h += '</section>';
+  // Edges
+  var ed = L.filter(function(o){ return o.e && o.g.state === "pre" && o.p; }).sort(function(a, b){ return b.e.edge - a.e.edge; }).slice(0, 4);
+  if(ed.length){
+    h += '<section class="ps-card"><div class="ps-ch"><b>🎯 Biggest edges</b><button class="ps-link" data-pear-filter="edge" data-pe-view="games">All edges</button></div>';
+    h += ed.map(function(o){ return psMiniRow(o.g, o.p).replace('</span></div>', '</span><span class="pm-edge">' + o.e.edge.toFixed(1) + '</span></div>'); }).join('');
+    h += '</section>';
+  }
+  // Board
+  h += '<section class="ps-card"><div class="ps-ch"><b>💬 The board</b><button class="ps-link" data-pe-view="board">Open</button></div><div id="ps-hfeed">' + psHomeFeedInner() + '</div></section>';
+  // Picks
+  h += '<section class="ps-card"><div class="ps-ch"><b>🏆 Expert picks</b><button class="ps-link" data-ps-act="gopick">Post a pick</button></div><div id="ps-hlb">' + psHomeLbInner() + '</div></section>';
+  return h + '</div>';
+}
+function psMeHtml(){
+  var sub = PE.ui.mesub; if(sub !== "model") sub = "me";
+  var ini = (psName() || "?").charAt(0).toUpperCase();
+  var h = '<div class="ps-home"><div class="ps-prof"><span class="ps-av">' + x(ini) + '</span><div style="flex:1;min-width:0"><div class="ps-hi">' + x(psName()) + '</div><div class="ps-sm"><span class="ps-role">' + psRole() + '</span></div></div>' + (PX.active ? pemAtsChip() : '') + '</div>';
+  h += '<div class="pe-sub" role="tablist" style="position:static"><button class="' + (sub === "me" ? 'on' : '') + '" data-ps-act="mesub" data-v="me">Overview</button><button class="' + (sub === "model" ? 'on' : '') + '" data-ps-act="mesub" data-v="model">My model</button></div>';
+  if(sub === "model"){
+    if(PE.err){
+      h += '<div class="pe-err">' + x(PE.err) + '</div>';
+      if(/PERMISSION_DENIED/.test(PE.err)) h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase rules, then reload</div><pre class="ps-rules">' + x(PS_RULES) + '</pre></div>';
+    }
+    if(PEM.restoreErr) h += '<div class="pem-stale">The saved data would not load: <b>' + x(PEM.restoreErr) + '</b>.</div>';
+    return h + pxPanelHtml() + '</div>';
+  }
+  psPicksWatch();
+  var favAll = Object.keys(PE.favs || {}), cur = {}; (PEAR.games || []).forEach(function(g){ cur[g.id] = g; });
+  var thisWk = favAll.filter(function(id){ return cur[id]; });
+  h += '<section class="ps-card"><div class="ps-ch"><b>★ Favorites</b><span class="ps-sm">' + favAll.length + ' saved</span></div>';
+  if(thisWk.length){ var pf = PEAR.games ? pearFitFor(PEAR.week) : null;
+    h += thisWk.map(function(id){ var g = cur[id]; return psMiniRow(g, pearFbsGame(g) ? pearProject(g.away.id, g.home.id, g.neutral, pf || null, g) : null); }).join(''); }
+  h += (favAll.length > thisWk.length ? '<div class="pem-autosub">' + (favAll.length - thisWk.length) + ' from other weeks — switch weeks on Home to see them.</div>' : '');
+  if(!favAll.length) h += '<div class="pem-autosub">No favorites yet. Tap the ☆ on a game.</div>';
+  h += '</section>';
+  var mine = psPickList().filter(function(p){ return p.u === ME(); });
+  h += '<section class="ps-card"><div class="ps-ch"><b>🏆 My picks</b><button class="ps-link" data-ps-act="gopick">Post a pick</button></div>' +
+       (mine.length ? mine.slice(0, 8).map(psPickHtml).join('') : '<div class="pem-autosub">' + (PS.picks ? 'You haven’t posted any picks.' : 'Loading…') + '</div>') + '</section>';
+  h += '<section class="ps-card"><div class="ps-ch"><b>⚙️ Account</b></div><div class="pem-autosub">Signed in as ' + x(psName()) + ' · ' + psRole() + '. ' + (pxCanFetch() ? 'You can refresh the shared data.' : 'You read the shared data; your model settings, favorites and picks are saved to your own account.') + '</div>' +
+       '<button class="btn btn-sm btn-ghost" id="pe-back" style="margin-top:8px">← Back to Scorecery</button></section>';
+  if(psAdmin()) h += psAdminCardHtml();
+  return h + '</div>';
+}
+
+// ── Board view ──
 function psBoardHtml(){
   if(!DB || !ME()) return '<div class="pem-autosub">Sign in to see the board.</div>';
   var t = PS.ui.tab;
@@ -1812,6 +1943,8 @@ document.addEventListener("click", function(e){
     psPost(gi && gi.value, gid, t.getAttribute("data-gl"), t.getAttribute("data-wk")).then(function(ok){ t.disabled = false; if(ok && gi) gi.value = ""; }); return; }
   if(act === "del"){ if(!confirm("Delete this post?")) return; psRef("board/" + t.getAttribute("data-wk") + "/" + t.getAttribute("data-id")).remove(); return; }
   if(act === "opengame"){ if((PEAR.games || []).some(function(z){ return z.id === gid; })) pearOpenGame(gid); else toast("Open that week on the Games tab first", "info"); return; }
+  if(act === "mesub"){ PE.ui.mesub = t.getAttribute("data-v"); try{ localStorage.setItem("ps_mesub", PE.ui.mesub); }catch(_){} renderPoolEdge(); window.scrollTo(0, 0); return; }
+  if(act === "gopick"){ PE.ui.view = "board"; PS.ui.tab = "picks"; PS.ui.form = true; try{ localStorage.setItem("ps_view", "board"); }catch(_){} renderPoolEdge(); window.scrollTo(0, 0); return; }
   if(act === "pkform"){ PS.ui.form = !PS.ui.form; psBoardRender(); return; }
   if(act === "pkpost"){ psPickPost(); return; }
   if(act === "pkfilt"){ PS.ui.pk = t.getAttribute("data-v"); psBoardRender(); return; }
@@ -6499,7 +6632,7 @@ function psNow(){
     if(m.espnYear !== y || m.espnWeek !== w){
       PE.meta = Object.assign({}, m, { espnYear: y, espnWeek: w });
       pemRefit(); peSave();
-      if(SC.screen === "prophescore" && PE.ui && PE.ui.view === "model") renderPoolEdge();
+      if(SC.screen === "prophescore" && PE.ui && PE.ui.view === "me" && PE.ui.mesub === "model") renderPoolEdge();
     }
     return { y: y, w: w };
   }).catch(function(){ return null; });
@@ -6640,42 +6773,24 @@ function renderPoolEdge(){
   PE.ui = PE.ui || {};
 
   var h = topbar(false);
-  h += '<div class="main fade-up">';
-  h += '<div class="pe-hdr"><div class="pe-title">&#128201; Prophescore</div>' +
-       '<button class="btn btn-ghost btn-sm" id="pe-back">&#8592; Back</button></div>';
-
-  // Games (default) = every FBS game with projections and a matchup card for any
-  // two teams. Rankings = every FBS team. Model = data, record and settings.
-  if(!PE.ui.view){ try{ var _sv = localStorage.getItem("ps_view"); PE.ui.view = (_sv === "model" || _sv === "rank" || _sv === "board") ? _sv : "games"; }catch(_){ PE.ui.view = "games"; } }
-  h += '<div class="pe-nav four"><button class="' + (PE.ui.view === "games" ? "on" : "") + '" data-pe-view="games">Games</button>' +
-       '<button class="' + (PE.ui.view === "rank" ? "on" : "") + '" data-pe-view="rank">Rankings</button>' +
-       '<button class="' + (PE.ui.view === "board" ? "on" : "") + '" data-pe-view="board">Board</button>' +
-       '<button class="' + (PE.ui.view !== "games" && PE.ui.view !== "rank" && PE.ui.view !== "board" ? "on" : "") + '" data-pe-view="model">Model</button></div>';
-
+  h += '<div class="main fade-up ps-app">';
+  if(!PE.ui.view){ try{ var _sv = localStorage.getItem("ps_view"); PE.ui.view = /^(home|games|board|rank|me)$/.test(_sv || "") ? _sv : (_sv === "model" ? "me" : "home"); if(_sv === "model") PE.ui.mesub = "model"; }catch(_){ PE.ui.view = "home"; } }
+  if(PE.ui.view === "model"){ PE.ui.view = "me"; PE.ui.mesub = "model"; }
+  if(!PE.ui.mesub){ try{ PE.ui.mesub = localStorage.getItem("ps_mesub") === "model" ? "model" : "me"; }catch(_){ PE.ui.mesub = "me"; } }
   if(PE.ui.view === "rank") h += pearRankHtml();
   else if(PE.ui.view === "games") h += pearGamesHtml();
   else if(PE.ui.view === "board") h += psBoardHtml();
-  else {
-    if(PE.err){
-      h += '<div class="pe-err">' + x(PE.err) + '</div>';
-      if(/PERMISSION_DENIED/.test(PE.err)){
-        h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase rules, then reload</div>' +
-             '<pre class="ps-rules">' + x(PS_RULES) + '</pre>' +
-             '<div class="pe-rulenote">Same level as "users" and "groups" (keep the old "prophescore" rule: the first run copies your data from there). Until it is there, everything here lives only on this device.</div></div>';
-      }
-    }
-    if(PEM.restoreErr) h += '<div class="pem-stale">The saved data would not load: <b>' + x(PEM.restoreErr) + '</b>.</div>';
-    h += pxPanelHtml();
-  }
-  h += '</div>';
+  else if(PE.ui.view === "me") h += psMeHtml();
+  else h += psHomeHtml();
+  h += '</div>' + psTabbarHtml(PE.ui.view);
   render(h);
 
   try{ var tbEl = document.querySelector(".topbar"); if(tbEl) document.documentElement.style.setProperty("--pe-tb", (tbEl.offsetHeight + 3) + "px"); }catch(_){}
   var bk = document.getElementById("pe-back");
   if(bk) bk.addEventListener("click", function(){ SC.screen = "profile"; draw(); });
   if(PE.ui.view === "rank") pearBindRank();
-  else if(PE.ui.view !== "games" && PE.ui.view !== "board"){ pxBind(); pemBindSheets(); }
-  else pePoolBind();
+  else if(PE.ui.view === "me" && PE.ui.mesub === "model"){ pxBind(); pemBindSheets(); }
+  else if(PE.ui.view === "games") pePoolBind();
   setTimeout(pemAutoMaybe, 400);
 }
 
@@ -8815,7 +8930,7 @@ function pearRenderCard(){
     });
   }
 }
-function pearRepaint(){ if(PE.ui && PE.ui.view === "games" && SC.screen === "prophescore") renderPoolEdge(); }
+function pearRepaint(){ if(PE.ui && (PE.ui.view === "games" || PE.ui.view === "home" || PE.ui.view === "me") && SC.screen === "prophescore") renderPoolEdge(); }
 
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
@@ -8841,6 +8956,8 @@ document.addEventListener("click", function(e){
   }
   if(t.hasAttribute("data-pe-view")){
     PE.ui.view = t.getAttribute("data-pe-view");
+    if(PE.ui.view === "model"){ PE.ui.view = "me"; PE.ui.mesub = "model"; }
+    if(t.hasAttribute("data-pear-filter")){ PEAR.filter = t.getAttribute("data-pear-filter"); try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){} }
     try{ localStorage.setItem("ps_view", PE.ui.view); }catch(_){}
     renderPoolEdge(); window.scrollTo(0, 0); return;
   }
@@ -8863,8 +8980,8 @@ document.addEventListener("click", function(e){
   }
   if(t.id === "pear-custom"){ pearOpenCustom(); return; }
   if(t.id === "pear-build"){
-    PE.ui.view = "model";
-    try{ localStorage.setItem("ps_view", "model"); }catch(_){}
+    PE.ui.view = "me"; PE.ui.mesub = "model";
+    try{ localStorage.setItem("ps_view", "me"); }catch(_){}
     renderPoolEdge(); window.scrollTo(0, 0); return;
   }
   if(t.hasAttribute("data-pear-close")){ pearClose(); return; }
