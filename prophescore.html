@@ -1547,6 +1547,20 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 @keyframes pg-pop{from{transform:translateX(-50%) scale(.3) rotate(-12deg);opacity:0}}
 @media (prefers-reduced-motion:reduce){.pg-ban{animation:none}.pg-conf{display:none}}
 
+.pg-row{display:flex;flex-direction:column;gap:10px}
+.pg-b.best{background:var(--ps-deep,#111);color:#fff;border-color:var(--border)}
+.pg-b.best svg{color:var(--ps-bead,#f2c230)}
+.pg-b.dice{background:#fff;color:var(--text)}
+.pb-run{border:3px solid var(--border);border-radius:16px;box-shadow:3px 3px 0 var(--border);background:#fff;padding:12px;display:flex;flex-direction:column;gap:10px}
+.pb-t{display:flex;flex-direction:column;gap:2px}.pb-t b{font:900 15px 'Nunito',sans-serif}.pb-t span{font:800 12px 'Nunito',sans-serif;color:var(--muted)}
+.pb-bar{display:block;height:12px;border:2px solid var(--border);border-radius:99px;background:#eee;overflow:hidden}
+.pb-bar i{display:block;height:100%;background:var(--ps-acc,#7c4ddb);transition:width .3s}
+.pb-run .pg-b{padding:8px;font-size:13px;justify-content:center}
+.pb-res{border:2px solid var(--border);border-radius:14px;background:#f1ebfd;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.pb-res b{font:900 14px 'Nunito',sans-serif}.pb-res span{font:800 12px 'Nunito',sans-serif}
+.pb-res small{font:700 10.5px/1.3 'Nunito',sans-serif;color:var(--muted)}
+.pb-ch{display:flex;flex-wrap:wrap;gap:4px}.pb-ch i{font:800 10.5px 'Nunito',sans-serif;font-style:normal;padding:2px 8px;border:1.5px solid var(--border);border-radius:99px;background:#fff}
+
 </style>
 </head>
 <body>
@@ -3385,16 +3399,105 @@ function pgDice(){
   var p = off[Math.floor(Math.random() * off.length)]; psFeel("tap");
   toast("Rolled: " + x(p.name), "info"); psPAdd(p);
 }
+// ── Build the best model: tries every panel's values, keeps what improves the record ──
+var PB = { run: false, stop: false, cache: {}, txt: "", pass: 0, k: 0, last: null };
+var PB_WAND = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20L15 9M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM19 12l.7 1.3L21 14l-1.3.7L19 16l-.7-1.3L17 14l1.3-.7z"/></svg>';
+function pbEval(o, cb){
+  var sig = pmSig(o), hit = PB.cache[sig]; if(hit){ cb(hit); return; }
+  var weeks = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; }), G = {}, i = 0;
+  (function step(){
+    if(i >= weeks.length){ PB.cache[sig] = G; cb(G); return; }
+    var w = weeks[i++];
+    setTimeout(function(){
+      try{
+        var fit = pxFit(w, o);
+        pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return; var g = x.g, L = x.W.lines[g.id], p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g));
+          G[g.id] = { pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as, w: w, vh: (L && isFinite(L.c)) ? -L.c : null, vt: (L && L.t !== null && isFinite(L.t)) ? L.t : null }; });
+      }catch(err){ cb(null); return; }
+      step();
+    }, 0);
+  })();
+}
+// Record against the opening line, with the miss as a gentle tie-break (1 point of average miss ≈ 12 net wins).
+function pbScore(G, tot, part){
+  var ids = Object.keys(G).sort(function(a, b){ return G[a].w - G[b].w || (a < b ? -1 : 1); }), h = Math.floor(ids.length / 2);
+  if(part === 1) ids = ids.slice(0, h); else if(part === 2) ids = ids.slice(h);
+  var sub = {}; ids.forEach(function(id){ sub[id] = G[id]; });
+  var S = pxUTSummary(sub);
+  if(tot) return S.tn ? (S.ow - S.ol) - 12 * S.te / S.tn : 0;
+  return S.n ? (S.w - S.l) - 12 * S.e / S.n : 0;
+}
+function pbCands(p, cur){
+  var out = [], seen = {}, add = function(o){ var sg = pmKeys().map(function(k){ return o[k]; }).join(","); if(seen[sg]) return; seen[sg] = 1; out.push(o); };
+  add(cur);
+  p.grid.forEach(function(c){ add(psPApplyC(cur, p, c)); });
+  var off = Object.assign({}, cur); p.keys.forEach(function(k){ off[k.k] = k.off; }); add(off);
+  return out.slice(1);
+}
+function pbRowHtml(){
+  if(PB.run) return '<div class="pb-run"><div class="pb-t"><b>Building the best model</b><span>' + x(PB.txt) + '</span></div><span class="pb-bar"><i style="width:' + Math.round(PB.pct || 0) + '%"></i></span><button class="pg-b" data-ps-act="pbstop">Stop and keep what it found</button></div>';
+  var h = '<button class="pg-b best" data-ps-act="pbgo">' + PB_WAND + '<span>Build the best model<em>tests every panel, keeps what improves your record · a few minutes</em></span></button>' +
+    '<button class="pg-b dice" data-ps-act="pgdice">' + PG_DICE + '<span>Surprise me<em>try a random panel</em></span></button>';
+  var L = PB.last;
+  if(L) h += '<div class="pb-res"><b>' + (L.changes.length ? 'Best build found' : 'Nothing beat your build') + '</b><span>' + (L.changes.length ? L.after.w + '-' + L.after.l + ' vs Vegas (was ' + L.before.w + '-' + L.before.l + ') · spread miss ' + L.after.e.toFixed(2) + ' (was ' + L.before.e.toFixed(2) + ')' : 'It is already the best of everything tried.') + '</span>' +
+    (L.changes.length ? '<div class="pb-ch">' + L.changes.slice(0, 10).map(function(c){ return '<i>' + x(c) + '</i>'; }).join('') + (L.changes.length > 10 ? '<i>+' + (L.changes.length - 10) + ' more</i>' : '') + '</div>' : '') +
+    '<small>It was tuned on the same games it is graded on, so treat the record as a best case. Each change had to help both halves of the season.</small></div>';
+  return h;
+}
+function pbRender(){ var el = document.getElementById("pg-row"); if(el) el.innerHTML = pbRowHtml(); }
+function pbGo(){
+  if(PB.run) return;
+  if(PX.ut.busy || PXP.busy){ toast("Hang on, a test is still running"); return; }
+  var n = 0; pxGames().forEach(function(x){ if(x.g.c) n++; });
+  if(!PX.active || n < 40){ toast("Needs at least 40 graded games first"); return; }
+  clearTimeout(PX.ut.timer); psPSnap();
+  PB.run = true; PB.stop = false; PB.last = null; PB.pct = 0; PB.txt = "Starting…"; PXP.busy = "pb"; PXP.prog = ""; PB.cache = PB.cache || {};
+  var cur = Object.assign({}, pxUTInit()), curG = null, before = null, changes = {}, order = PS_PANELS.slice(), total = order.length * 2, done = 0, pass = 0;
+  function apply(o){ var w = pxUTInit(); pmKeys().forEach(function(k){ w[k] = o[k]; }); }
+  function finish(){
+    PB.run = false; PXP.busy = null;
+    var names = Object.keys(changes).map(function(id){ var p = psPById(id); return p.name + " " + pmPanelVal(p, cur); });
+    var after = pxUTSummary(curG), bef = before;
+    PB.last = { changes: names, before: { w: bef.w, l: bef.l, e: bef.e / bef.n }, after: { w: after.w, l: after.l, e: after.e / after.n } };
+    apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false;
+    psFeel("win"); psPanelsRefresh(); pxUTStatus(); pbRender();
+    if(names.length){ psPUndoShow("Best model built · " + names.length + " panel" + (names.length === 1 ? "" : "s") + " changed"); if(after.w - after.l > bef.w - bef.l + 2) pgConfetti(40); }
+    else toast("Nothing beat your current build", "info");
+  }
+  function pass1(){
+    if(PB.stop || pass >= 2){ finish(); return; }
+    pass++; var changedThis = false, i = 0;
+    (function panel(){
+      if(PB.stop || i >= order.length){ if(!changedThis || PB.stop) finish(); else pass1(); return; }
+      var p = order[i++]; done++; PB.pct = Math.min(99, done / total * 100); PB.txt = "Pass " + pass + " of 2 · " + p.name + " (" + i + " of " + order.length + ")"; pbRender();
+      var cands = pbCands(p, cur), j = 0, best = null, tot = !!p.tot, s0 = pbScore(curG, tot), a0 = pbScore(curG, tot, 1), b0 = pbScore(curG, tot, 2);
+      (function tryc(){
+        if(PB.stop || j >= cands.length){
+          if(best){ cur = best.o; curG = best.G; changes[p.id] = 1; changedThis = true; apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false; psFeel("tap"); psPanelsRefresh(); }
+          setTimeout(panel, 0); return;
+        }
+        var o = cands[j++];
+        pbEval(o, function(G){
+          if(G){ var s1 = pbScore(G, tot), a1 = pbScore(G, tot, 1), b1 = pbScore(G, tot, 2);
+            if(s1 - s0 >= 1.5 && a1 - a0 >= -1.5 && b1 - b0 >= -1.5 && (!best || s1 > best.s)) best = { o: o, G: G, s: s1 }; }
+          setTimeout(tryc, 0);
+        });
+      })();
+    })();
+  }
+  pbEval(cur, function(G){ if(!G){ PB.run = false; PXP.busy = null; toast("Test failed", "err"); pbRender(); return; } curG = G; before = pxUTSummary(G); pass1(); });
+}
 (function(){
   var ph = psPanelsHtml; psPanelsHtml = function(){ var h = ph.apply(this, arguments);
-    return h.replace('<div id="ps-pgrid">', '<div class="pg-row"><button class="pg-b dice" data-ps-act="pgdice">' + PG_DICE + '<span>Surprise me<em>try a random panel</em></span></button></div><div id="ps-pgrid">'); };
-  var pr = psPanelsRefresh; psPanelsRefresh = function(){ pr.apply(this, arguments); try{ pgWatch(); }catch(_){} };
+    return h.replace('<div id="ps-pgrid">', '<div class="pg-row" id="pg-row">' + pbRowHtml() + '</div><div id="ps-pgrid">'); };
+  var pr = psPanelsRefresh; psPanelsRefresh = function(){ pr.apply(this, arguments); try{ pgWatch(); pbRender(); }catch(_){} };
   var ps = psPSumInner; psPSumInner = function(){ var h = ps.apply(this, arguments), r = pgRaceHtml(); return r ? h.replace('<div class="sb-bot">', r + '<div class="sb-bot">') : h; };
 })();
 document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
-  if(t.getAttribute("data-ps-act") !== "pgdice") return;
-  ev.stopImmediatePropagation(); pgDice();
+  var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop") return;
+  ev.stopImmediatePropagation();
+  if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
 }, true);
 
 // ── Board view ──
