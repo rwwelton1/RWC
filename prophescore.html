@@ -1571,6 +1571,9 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pg-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .pg-two .pg-b{padding:10px 8px;gap:8px}.pg-two .pg-b em{font-size:10.5px}
 .pg-b.pool{background:var(--ps-acc,#7c4ddb);color:#fff}
+.pe-sub button small.lv{background:#d93a2b;color:#fff;border-radius:99px;padding:0 5px;margin-left:2px;animation:pg-live 1.4s ease-in-out infinite}
+@keyframes pg-live{50%{opacity:.55}}
+@media (prefers-reduced-motion:reduce){.pe-sub button small.lv{animation:none}}
 
 </style>
 </head>
@@ -8586,7 +8589,7 @@ function pearEdgeRange(){
   return { min: mn, max: mx };
 }
 var PEAR = { year:null, week:null, curWeek:null, curYear:null, weeks:null, games:null,
-             loading:false, err:"", cache:{}, info:{}, card:null, pick:null, filter:(function(){ try{ var f = localStorage.getItem("ps_gsub"); return /^(all|top|close|edge|pool)$/.test(f || "") ? f : "all"; }catch(_){ return "all"; } })() };
+             loading:false, err:"", cache:{}, info:{}, card:null, pick:null, filter:(function(){ try{ var f = localStorage.getItem("ps_gsub"); return /^(all|top|close|edge|pool|live|final)$/.test(f || "") ? f : "all"; }catch(_){ return "all"; } })() };
 var PEAR_SCORE = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard";
 
 function pearLogo(id){
@@ -9353,7 +9356,7 @@ function pePoolRecordHtml(){
   return h + '</div>';
 }
 // Games tab sub-tabs. "Pool" lists your pool's games; it loads them from the pool on first open each week.
-var PEAR_SUBS = [["all", "All"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
+var PEAR_SUBS = [["all", "All"], ["live", "Live"], ["final", "Final"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
 function pearPoolIds(){
   var o = { n: 0, k: {} };
   (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number" && (!pg.w || !PEAR.week || +pg.w === +PEAR.week)){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
@@ -9380,14 +9383,15 @@ function pearGamesHtml(){
     h += '<div class="pr-note"><b>No model yet.</b> Add your CFBD key in the Model tab (or paste an SP+ sheet) to get projections, win chances and GQI for every game.' +
          '<button class="pr-btn" id="pear-build">Open Model tab</button></div>';
   }
-  var poolN = pearPoolIds().n;
+  var poolN = pearPoolIds().n, stN = { in: 0, post: 0 };
+  (PEAR.games || []).forEach(function(g){ if(g && g.state === "in") stN.in++; else if(g && g.state === "post") stN.post++; });
   // First look at the Pool tab each week (and each session): load that week from the pool.
   if(PEAR.filter === "pool" && typeof DB !== "undefined" && DB && ME()){
     if(!PEPOOL.list && !PEPOOL.finding) setTimeout(function(){ pePoolDiscover(function(){ pearRepaint(); }); }, 0);
     else if(PEPOOL.loadedKey !== pePoolKeyNow() && !PEPOOL.busy && (pePoolSrc().key || pePoolSrc().group || (PEPOOL.list && !PEPOOL.list.length))) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
   }
   h += '<div class="pe-sub" role="tablist">' + PEAR_SUBS.map(function(t){
-         return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + '</button>'; }).join('') + '</div>';
+         return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + (t[0] === "live" && stN.in ? ' <small class="lv">' + stN.in + '</small>' : '') + (t[0] === "final" && stN.post ? ' <small>' + stN.post + '</small>' : '') + '</button>'; }).join('') + '</div>';
   h += '<div class="pr-tools">' +
        '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
        '<div style="position:relative;margin:0 0 10px"><input id="pear-q" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="\ud83d\udd0d Search teams" value="' + x(PEAR.q || '') + '" ' +
@@ -9493,6 +9497,11 @@ function pearGamesHtml(){
     h += pePoolBarHtml(list.length) + pePoolRecordHtml();
     list.forEach(function(o){ pePoolLogPick(o.pg, o.k, o.g); });
   }
+  // Finished games live in the Final tab, live ones in Live. Edges and Pool keep theirs (they show how each pick did).
+  var nFin = list.filter(function(o){ return o.g.state === "post"; }).length, nAllG = list.length;
+  if(/^(all|fav|top|close)$/.test(PEAR.filter)) list = list.filter(function(o){ return o.g.state !== "post"; });
+  if(PEAR.filter === "live") list = list.filter(function(o){ return o.g.state === "in"; });
+  if(PEAR.filter === "final"){ list = list.filter(function(o){ return o.g.state === "post"; }); list.sort(function(a, b){ return new Date(b.g.date) - new Date(a.g.date); }); }
   if(PEAR.filter === "top") list = list.filter(function(o){ return o.g.away.rank || o.g.home.rank; });
   if(PEAR.filter === "fav") list = list.filter(function(o){ return psFav(o.g.id); });
   if(PEAR.filter === "close"){
@@ -9510,7 +9519,7 @@ function pearGamesHtml(){
       ? (!PEM.ratings ? 'Add your CFBD key in the Model tab to find edges.'
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
          : 'No posted lines to compare with yet this week.')
-      : PEAR.filter === "fav" ? 'No favorites this week. Tap \u2606 on a game to keep it here.' : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
+      : PEAR.filter === "live" ? 'No games are live right now.' : PEAR.filter === "final" ? 'No games have finished this week yet.' : (nFin && nFin === nAllG && /^(all|fav|top|close)$/.test(PEAR.filter)) ? 'Every game this week has finished \u2014 see the Final tab.' : PEAR.filter === "fav" ? 'No favorites this week. Tap \u2606 on a game to keep it here.' : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
   var lastDay = "", VM = pearVolMap(PEAR.week);
   var isRad = function(g){ return !!VM && VM[g.away.id] !== undefined && VM[g.home.id] !== undefined && (Math.abs(VM[g.away.id]) >= PEAR_VOL_AT || Math.abs(VM[g.home.id]) >= PEAR_VOL_AT); };
   if(VM && list.some(function(o){ return isRad(o.g); })) h += '<div style="font:800 11px Nunito,sans-serif;color:var(--muted);margin:2px 2px 8px">\u2622\ufe0f = a team in the game has moved ' + PEAR_VOL_AT + '+ rating points in the last 3 weeks \u2014 harder to price.</div>';
