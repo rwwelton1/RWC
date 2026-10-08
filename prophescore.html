@@ -1479,6 +1479,8 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 /* section-rule diamond: centred on the line whatever the font does; inputs at 16px so iOS doesn't zoom the page on focus */
 .ps-ch:after{box-sizing:border-box;width:14px;height:14px;left:2px;top:calc(100% + 1.5px);bottom:auto;margin:-7px 0 0 0;transform:rotate(45deg) scale(.8)}
 .ps-app input,.ps-app textarea,.ps-app select,.pm-inp,#ps-find,#ps-fanteam{font-size:16px !important}
+.pm-nums span{font:900 14px 'Nunito',sans-serif}.pm-nums em{font:800 12px 'Nunito',sans-serif;font-style:normal;color:var(--muted)}
+.pm-wait{font-weight:800;color:var(--muted)}
 
 /* game outlook, simple and fun */
 .gc{padding-bottom:12px}
@@ -3118,7 +3120,7 @@ function pmRunOne(e, cb){
     }, 30);
   })();
 }
-function pmScore(S){ return S && S.n ? { e: Math.round(S.e / S.n * 100) / 100, te: S.tn ? Math.round(S.te / S.tn * 100) / 100 : null, w: S.w, l: S.l, n: S.n, wk: Math.max.apply(null, Object.keys(S.wk).map(Number)) } : null; }
+function pmScore(S){ return S && S.n ? { e: Math.round(S.e / S.n * 100) / 100, te: S.tn ? Math.round(S.te / S.tn * 100) / 100 : null, w: S.w, l: S.l, ow: S.ow, ol: S.ol, n: S.n, wk: Math.max.apply(null, Object.keys(S.wk).map(Number)) } : null; }
 function pmShare(){
   if(PM.posting) return;
   if(!psMember()){ toast("Models are shared between approved members", "err"); return; }
@@ -3208,7 +3210,7 @@ function pmCmpInner(){
       h += '<div class="pm-tr" style="' + cols + '"><span class="pm-k">' + r[0] + '</span>' + S.map(function(s, i){ return '<span class="' + (i === best && !tie ? 'best' : '') + '">' + r[2](s) + '</span>'; }).join('') + '</div>'; });
     h += '<div class="pem-autosub" style="margin-top:6px">' + (S[0].n || 0) + ' graded games, weeks ' + PX_FIRST_GRADED + '+. Vegas missed the spread by ' + f2(S[0].ev, S[0].n) + (S[0].tn ? ' and the total by ' + f2(S[0].tv, S[0].tn) : '') + ' on the same games. Gaps under about a quarter point are noise.</div>';
     // settings that differ
-    var diff = PS_PANELS.map(function(p){ var v = ents.map(function(e){ return pmPanelVal(p, e.o); }); return v.every(function(q){ return q === v[0]; }) ? null : [p.name, v]; }).filter(Boolean);
+    var diff = PS_PANELS.map(function(p){ var v = ents.map(function(e){ return pmPanelVal(p, e.o); }); return v.every(function(q){ return q === v[0]; }) ? null : [(p.src ? "O/U: " : "") + p.name, v]; }).filter(Boolean);
     h += psAccOpen("pm_set", "Settings that differ", diff.length + ' panel' + (diff.length === 1 ? '' : 's'), true, 1) +
       (diff.length ? diff.map(function(d){ return '<div class="pm-tr" style="' + cols + '"><span class="pm-k">' + x(d[0]) + '</span>' + d[1].map(function(v){ return '<span class="' + (v === 'off' ? 'dim' : '') + '">' + x(v) + '</span>'; }).join('') + '</div>'; }).join('') : '<div class="pem-autosub">These models use the same settings.</div>') + psAccClose();
     // by week
@@ -3231,8 +3233,24 @@ function pmListInner(){
     var m = q.m, s = m.s, mine = m.u === ME(), sel = PM.sel.indexOf(q.id) >= 0, o = pmClean(m.o);
     return '<div class="pm-card' + (sel ? ' sel' : '') + '"><div class="pm-top"><span class="pm-av">' + x(String(m.n || '?').charAt(0).toUpperCase()) + '</span><div style="min-width:0"><b class="pm-ti">' + x(m.t) + '</b><div class="ps-sm">' + x(String(m.n || 'member').slice(0, 24)) + (mine ? ' (you)' : '') + ' · ' + pmAgo(m.at || 0) + ' · ' + pmOnCount(o) + ' panels</div></div></div>' +
       (m.d ? '<div class="pm-note">' + x(String(m.d).slice(0, 200)) + '</div>' : '') +
-      (s && s.n ? '<div class="pm-nums"><span>Spread <b>' + (+s.e).toFixed(2) + '</b></span>' + (s.te ? '<span>Total <b>' + (+s.te).toFixed(2) + '</b></span>' : '') + (s.w + s.l ? '<span>ATS <b>' + (100 * s.w / (s.w + s.l)).toFixed(1) + '%</b></span>' : '') + '<small>' + s.n + ' games, through week ' + s.wk + ' when shared</small></div>' : '') +
+      (s && s.n ? pmNumsHtml(s, o) : '') +
       '<div class="pm-row"><button class="pm-btn' + (sel ? ' pri' : '') + '" data-ps-act="pmcmp" data-id="' + x(q.id) + '">' + (sel ? '✓ Comparing' : 'Compare') + '</button><button class="pm-btn" data-ps-act="pmtry" data-id="' + x(q.id) + '">Try it</button><button class="pm-btn" data-ps-act="pmlink" data-id="' + x(q.id) + '">Link</button>' + ((mine || psAdmin()) ? '<button class="pm-btn del" data-ps-act="pmdel" data-id="' + x(q.id) + '">Delete</button>' : '') + '</div></div>'; }).join('');
+}
+// A card's record: ATS and O/U. Models shared before the O/U record was saved get it tested here, one at a time.
+function pmRec(w, l){ var n = (w || 0) + (l || 0); return n ? '<b>' + (100 * w / n).toFixed(1) + '%</b> <em>' + w + '-' + l + '</em>' : '<b>—</b>'; }
+function pmNumsHtml(s, o){
+  var ow = s.ow, ol = s.ol, later = false;
+  if(typeof ow !== "number"){ var c = PM.res[pmSig(o)]; if(c){ ow = c.ow; ol = c.ol; later = true; } else pmBackfillSoon(); }
+  return '<div class="pm-nums"><span>ATS ' + pmRec(s.w, s.l) + '</span><span>O/U ' + (typeof ow === "number" ? pmRec(ow, ol) : '<b class="pm-wait">testing…</b>') + '</span>' +
+    '<small>Miss: spread ' + (+s.e).toFixed(2) + (s.te ? ' · total ' + (+s.te).toFixed(2) : '') + ' · ' + s.n + ' games through week ' + s.wk + (later ? ' (O/U tested on today’s games)' : ' when shared') + '</small></div>';
+}
+function pmBackfillSoon(){
+  if(PM.bf) return; PM.bf = true;
+  setTimeout(function(){
+    var q = null; (pmModels() || []).forEach(function(e){ var s = e.m && e.m.s; if(q || !s || !s.n || typeof s.ow === "number") return; var o = pmClean(e.m.o); if(!PM.res[pmSig(o)]) q = o; });
+    if(!q || typeof pbEval !== "function"){ PM.bf = false; return; }
+    pbEval(q, function(G){ if(G) PM.res[pmSig(q)] = pxUTSummary(G); PM.bf = false; if(G) pmRefresh(); });
+  }, 300);
 }
 function psModelsHtml(){
   pmWatch();
@@ -3537,6 +3555,60 @@ document.addEventListener("click", function(ev){
   ev.stopImmediatePropagation();
   if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
 }, true);
+
+// ── Pool picks follow your model ──
+// A pool pick is the model's side of YOUR pool's line (the line the pool is graded on), ranked by how often
+// edges that size covered this season (fitted on the games already graded, anchored to the history fit).
+// The line's move since that line still counts, and so do QB-out marks; the old SP+ / play-by-play
+// terms are replaced by the model itself, which already carries both.
+var PX_POOLK = { n: -1, k: 0.038 };
+function pxPoolK(){
+  var cal = []; try{ cal = (pxAts() || {}).cal || []; }catch(_){}
+  if(PX_POOLK.n === cal.length) return PX_POOLK.k;
+  var k0 = 0.038, lam = 200, k = k0, n = 0;
+  var xs = cal.map(function(c){ var e = Math.max(-10, Math.min(10, c[0] - c[2])); return c[1] === c[2] || Math.abs(c[0] - c[2]) < 0.05 ? null : [e, c[1] > c[2] ? 1 : 0]; }).filter(Boolean);
+  n = xs.length;
+  if(n >= 30){
+    for(var it = 0; it < 25; it++){
+      var g = -lam * (k - k0), h = -lam;
+      xs.forEach(function(q){ var p = 1 / (1 + Math.exp(-k * q[0])); g += (q[1] - p) * q[0]; h -= p * (1 - p) * q[0] * q[0]; });
+      var nk = k - g / h; if(!isFinite(nk)) break; nk = Math.max(0.01, Math.min(0.12, nk)); if(Math.abs(nk - k) < 1e-6){ k = nk; break; } k = nk;
+    }
+  }
+  PX_POOLK = { n: cal.length, k: k, games: n };
+  return k;
+}
+(function(){
+  var base = pxPickSide;
+  pxPickSide = function(awayId, homeId, neutral, ref, now, week, fit, gid, cur){
+    if(cur || ref === null || ref === undefined || !isFinite(ref) || !PX.active) return base.apply(this, arguments);
+    var f = fit || PX.live || (typeof pearFitFor === "function" ? pearFitFor(week) : null);
+    if(!f) return base.apply(this, arguments);
+    var clip = function(v, a){ return Math.max(-a, Math.min(a, v)); }, parts = { mv: 0, md: 0 }, z = 0;
+    if(now !== null && now !== undefined && isFinite(now)){ parts.mvPts = now - ref; parts.mv = PX_PICK.mv * clip(now - ref, 4); z += parts.mv; }
+    var q = pxPredict(f, awayId, homeId, !!neutral);
+    parts.pbpPts = (q.home - q.away) - ref; parts.md = pxPoolK() * clip(parts.pbpPts, 10); z += parts.md;
+    var spw = f.o && typeof f.o.sp === "number" ? Math.max(0, 1 - f.o.sp) : 0, SPS = (spw > 0 && typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
+    if(SPS && SPS[homeId] && SPS[awayId]){ var spm = SPS[homeId].fpi - SPS[awayId].fpi + (neutral ? 0 : PX_PICK.hfa); parts.spPts = spm - ref; parts.sp = spw * PX_PICK.sp * clip(spm - ref, 10); z += parts.sp; }
+    var QM = pxQbMarks(gid);
+    if(QM){ var qv = function(v){ return v === 1 ? PX_PICK.qb1 : v === 2 ? PX_PICK.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; z += parts.qb; }
+    if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
+    var p = 1 / (1 + Math.exp(-Math.abs(z)));
+    return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: false, model: true };
+  };
+  var why = pxPickWhy;
+  pxPickWhy = function(k, ha, aa){
+    if(!k || !k.model) return why.apply(this, arguments);
+    var s = [], side = function(v){ return v > 0 ? ha : aa; }, P = k.parts;
+    if(P.pbpPts !== undefined) s.push(Math.abs(P.pbpPts) >= 0.5 ? 'your model ' + Math.abs(P.pbpPts).toFixed(1) + ' higher on ' + side(P.pbpPts) : 'your model agrees with the line');
+    if(P.mvPts !== undefined && Math.abs(P.mvPts) >= 0.5) s.push('line moved ' + Math.abs(P.mvPts).toFixed(1) + ' toward ' + side(P.mvPts));
+    if(P.spPts !== undefined && Math.abs(P.spPts) >= 0.5 && P.sp) s.push('SP+ ' + Math.abs(P.spPts).toFixed(1) + ' higher on ' + side(P.spPts));
+    var qbt = function(v){ return v === 1 ? 'backup’s 1st start' : 'backup starting'; };
+    if(P.qbH) s.push(ha + ' QB out (' + qbt(P.qbH) + ')');
+    if(P.qbA) s.push(aa + ' QB out (' + qbt(P.qbA) + ')');
+    return s.join(' · ');
+  };
+})();
 
 // ── Board view ──
 function psBoardHtml(){
