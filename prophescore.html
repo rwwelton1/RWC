@@ -1176,6 +1176,29 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .tm-wp b.fav{color:#2f5fd0}.tm-wp b.dog{color:var(--red2)}
 .tm-wp i{display:block;width:54px;height:5px;background:var(--red-bg);border-radius:3px;overflow:hidden}
 .tm-wp i em{display:block;height:100%;background:#2f5fd0}
+.pe-nav.four{grid-template-columns:1fr 1fr 1fr 1fr}
+.ps-star{display:inline-block;font-size:17px;line-height:1;margin-right:6px;color:var(--muted);cursor:pointer;vertical-align:-1px}
+.ps-star.on{color:#d4a017}
+.ps-post{background:#fff;border:2px solid var(--border);border-radius:10px;padding:8px 10px;margin:6px 0}
+.ps-ph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font:800 13px Nunito,sans-serif}
+.ps-ph small{color:var(--muted);font-weight:700}
+.ps-pt{font:700 14px Nunito,sans-serif;margin-top:4px;word-wrap:break-word;overflow-wrap:anywhere}
+.ps-gtag{font:800 11px Nunito,sans-serif;background:var(--cream);border:1.5px solid var(--border);border-radius:999px;padding:1px 8px;cursor:pointer}
+.ps-del{margin-left:auto;font:800 11px Nunito,sans-serif;color:var(--muted);cursor:pointer;text-decoration:underline}
+.ps-ta{width:100%;box-sizing:border-box;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:700 16px Nunito,sans-serif;background:var(--cream);color:inherit}
+.ps-sel{flex:1;min-width:0;padding:7px 8px;border:2px solid var(--border);border-radius:9px;font:800 13px Nunito,sans-serif;background:#fff;color:inherit}
+.ps-wkbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px;font:900 15px Nunito,sans-serif}
+.ps-form{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.ps-chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}
+.ps-kind{font:900 10px Nunito,sans-serif;text-transform:uppercase;letter-spacing:.04em;background:var(--gold);border:1.5px solid var(--border);border-radius:6px;padding:1px 6px}
+.ps-st{margin-left:auto;font:900 12px Nunito,sans-serif}
+.ps-pick.st-won .ps-st{color:#1f8a3b}.ps-pick.st-lost .ps-st{color:var(--red2,#c0392b)}
+.ps-legs{margin:4px 0 0 18px;padding:0;font:700 13px Nunito,sans-serif}
+.ps-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.ps-mrow{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1.5px dashed var(--border)}
+.ps-mrow small{display:block;color:var(--muted);font-weight:700}
+.ps-rules{white-space:pre-wrap;word-break:break-all;font:600 11px ui-monospace,Menlo,monospace;background:var(--cream);border:1.5px solid var(--border);border-radius:8px;padding:8px;max-height:280px;overflow:auto}
+.ps-thread{margin-top:6px}
 </style>
 </head>
 <body>
@@ -1348,27 +1371,35 @@ function peLoad(cb){
   // Local first so the screen paints instantly, then reconcile with the server.
   try{
     var raw = localStorage.getItem(peLocalKey()) || localStorage.getItem(peLegacyLocalKey());
-    if(raw) peTake(JSON.parse(raw), false);
+    if(raw){ var _lc = JSON.parse(raw); peTake(_lc, false); PE.favs = _lc.favs || PE.favs || {}; }
   }catch(e){}
   var uid = ME();
   if(!DB || !uid){ peAfterLoad(); PE.ready = true; if(cb) cb(); return; }
-  // One read per piece, not the whole record: past seasons (hist) and daily line
-  // snapshots (snaps) live under the same path and would otherwise download every visit.
-  Promise.all(PE_KEYS.map(function(k){ return DB.ref("prophescore/" + uid + "/" + k).once("value").then(function(sn){ return [k, sn.val()]; }); })).then(function(pairs){
-    var v = {}, any = false;
-    pairs.forEach(function(q){ if(q[1] !== null && q[1] !== undefined){ v[q[0]] = q[1]; any = true; } });
-    if(any) peTake(v, true);
+  // Shared data (ps/data/cur) and your own part (ps/users/<uid>), two reads. Past seasons and line
+  // snapshots live beside the shared data and are only read when a card needs them.
+  psLoadRole().then(function(){
+    if(!psMember()) throw Object.assign(new Error("not a member"), { code: "NOT_MEMBER" });
+    var one = function(p){ return psRef(p).once("value").then(function(sn){ return sn.val(); }); };
+    return Promise.all([one("data/cur"), one("users/" + uid)]);
+  }).then(function(r){
+    var sh = r[0], us = r[1];
+    if((!sh || !sh.px) && psAdmin()) return psMigrateCore(uid);     // first run of the shared version: move your record across
+    psTakeRemote(sh, us);
+  }).then(function(){
+    PS.loaded = true;
     peAfterLoad();
+    psMarkShared();          // after the rebuild, so lines it derives from the weeks aren't re-uploaded
     PE.ready = true; PE.err = "";
     if(cb) cb();
+    if(psAdmin()) setTimeout(psMigrateRestMaybe, 1500);
   }, function(err){
     // Read denied or offline — keep the local copy and name the reason.
     peAfterLoad();
     PE.ready = true;
     var code = (err && (err.code || err.message)) ? String(err.code || err.message) : "unknown";
     PE.err = /permission|denied/i.test(code)
-      ? "PERMISSION_DENIED \u2014 Firebase is refusing to read prophescore/$uid. Add the rule below. Using this device\u2019s copy."
-      : ("Cloud read failed (" + code + ") \u2014 using this device\u2019s copy.");
+      ? "PERMISSION_DENIED \u2014 Firebase is refusing to read ps/. Add the rules below. Using this device\u2019s copy."
+      : code === "NOT_MEMBER" ? "" : ("Cloud read failed (" + code + ") \u2014 using this device\u2019s copy.");
     if(cb) cb();
   });
 }
@@ -1406,9 +1437,10 @@ function peSave(){
     // Play-by-play model: CFBD key, cached weeks (aggregated plays), roster prior, settings.
     px:      PE.px      || null
   });
+  payload.favs = PE.favs || null;
   try{ localStorage.setItem(peLocalKey(), JSON.stringify(payload)); }catch(e){}
   var uid = ME();
-  if(!DB || !uid) return;
+  if(!DB || !uid || !PS.loaded) return;
   var was = PE.err;
   function fail(err){
     var code = (err && (err.code || err.message)) ? String(err.code || err.message) : "unknown";
@@ -1418,15 +1450,390 @@ function peSave(){
     if(was !== PE.err && SC.screen === "prophescore") renderPoolEdge();
   }
   try{
-    // update(), not set(): set() replaced the whole record and would wipe the past
-    // seasons and line snapshots saved beside it. The old model's leftover keys go too.
-    DB.ref("prophescore/"+uid).update(Object.assign({}, payload, PE_LEGACY_NULLS), function(err){
-      if(err){ fail(err); return; }
+    // Yours to ps/users/<uid>; the shared data to ps/data/cur only for editors, and only what changed.
+    psSaveRemote(payload).then(function(){
       PE.err = "";
       if(was !== PE.err && SC.screen === "prophescore") renderPoolEdge();
-    });
+    }, fail);
   }catch(e){ fail(e); }
 }
+
+
+// ── SHARED DATA, MEMBERS AND YOUR OWN MODEL ─────────────────────────────────
+// Firebase layout, all under ps/:
+//   ps/data/cur        the data every model runs on, fetched once: season and week, SP+ sheets, lines,
+//                      opens, and px — weeks of aggregated plays, teams, roster priors, roster continuity,
+//                      weather, line-snapshot status, QB watch
+//   ps/data/hist, histIdx, qb, qbIdx, snaps     past seasons, QB games, daily line snapshots
+//   ps/users/<uid>     yours alone, and small: settings, locks, saved tunes, base settings, week-by-week
+//                      tunes, QB marks, pool log, favorites, your CFBD key (editors only need one)
+//   ps/roles           members (approved by the owner) and editors (may refresh the shared data)
+//   ps/requests        people asking to join
+//   ps/board/<y..w..>  the discussion board, a page per week; ps/picks  expert picks
+// Members read ps/data and run their own model on it; only the owner and editors write it.
+var PS = { role: null, roleP: null, loaded: false, last: {}, migr: null, board: {}, boardOn: {}, picks: null, picksOn: false, admin: null,
+           ui: { tab: "talk", wk: null, pk: "open", kind: "all", form: false } };
+var PS_SHARED_PX = ["wk", "teams", "names", "teamsYear", "teamsV", "prior", "priorOwn", "cont", "contW", "syncedAt", "wxOff", "snapDay", "snapN", "snapAt", "snapDays", "qbw", "qbwY", "qbwAt"];
+var PS_SHARED_META = ["espnYear", "espnWeek"];
+var PS_SHARED_TOP = ["priors", "lines", "opens"];
+var PS_ROOT_UID = Object.keys(MASTER_UIDS)[0];
+function psRef(p){ return DB.ref("ps/" + p); }
+function psAdmin(){ return isRootMaster(ME()); }
+function psEditor(){ return psAdmin() || !!(PS.role && PS.role.editor); }
+function psMember(){ return psAdmin() || !!(PS.role && (PS.role.member || PS.role.editor)); }
+// Fetching from CFBD (and ESPN line snapshots) is for editors with a key; everyone else reads the shared copy.
+function pxCanFetch(){ return psEditor() && !!pxKey(); }
+function psName(){ var u = SC.currentUser || {}; return String(u.username || u.name || u.displayName || "Member").slice(0, 40); }
+function psLoadRole(force){
+  var uid = ME();
+  if(!uid || !DB){ PS.role = { member: false, editor: false }; return Promise.resolve(PS.role); }
+  if(PS.roleP && !force) return PS.roleP;
+  if(psAdmin()){ PS.role = { member: true, editor: true, admin: true }; return (PS.roleP = Promise.resolve(PS.role)); }
+  var one = function(p){ return psRef(p).once("value").then(function(sn){ return sn.val(); }).catch(function(){ return null; }); };
+  return (PS.roleP = Promise.all([one("roles/members/" + uid), one("roles/editors/" + uid), one("requests/" + uid)]).then(function(r){
+    PS.role = { member: !!r[0], editor: !!r[1], requested: r[2] || null }; return PS.role; }));
+}
+function psHash(s){ var h = 5381, i = s.length; while(i) h = ((h * 33) ^ s.charCodeAt(--i)) | 0; return (h >>> 0).toString(36) + ":" + s.length; }
+// Everything this page keeps, in one object (the device copy holds all of it).
+function psPayload(){
+  return peClean({ games: PE.games || [], history: PE.history || [], meta: PE.meta || null, priors: PE.priors || null,
+                   lines: PE.lines || null, opens: PE.opens || null, px: PE.px || null, favs: PE.favs || null });
+}
+// Shared part as Firebase paths under ps/data/cur (a week per path, so a refresh rewrites only the weeks that
+// changed), and your part as one small object for ps/users/<uid>.
+function psSplit(P){
+  var sh = {}, us = { games: P.games || [], history: P.history || [], meta: {}, px: {}, favs: P.favs || null };
+  var M = P.meta || {}; Object.keys(M).forEach(function(k){ if(PS_SHARED_META.indexOf(k) >= 0) sh["meta/" + k] = M[k]; else us.meta[k] = M[k]; });
+  PS_SHARED_TOP.forEach(function(k){ if(P[k] !== undefined && P[k] !== null) sh[k] = P[k]; });
+  var X = P.px || {};
+  Object.keys(X).forEach(function(k){
+    if(PS_SHARED_PX.indexOf(k) < 0){ us.px[k] = X[k]; return; }
+    if(k === "wk"){ Object.keys(X.wk || {}).forEach(function(w){ sh["px/wk/" + w] = X.wk[w]; }); return; }
+    if(X[k] !== undefined && X[k] !== null) sh["px/" + k] = X[k];
+  });
+  return { shared: sh, user: us };
+}
+function psMarkShared(){ var sh = psSplit(psPayload()).shared; PS.last = {}; Object.keys(sh).forEach(function(p){ PS.last[p] = psHash(JSON.stringify(sh[p])); }); }
+// Server copy in, over the device copy: your part from ps/users, the shared part from ps/data/cur.
+function psTakeRemote(sh, us){
+  sh = sh || {}; us = us || {};
+  var v = {};
+  if(us.games) v.games = us.games;
+  if(us.history) v.history = us.history;
+  v.meta = Object.assign({}, PE.meta || {}, sh.meta || {}, us.meta || {});
+  PS_SHARED_TOP.forEach(function(k){ if(sh[k]) v[k] = sh[k]; });
+  var px = Object.assign({}, PE.px || {});
+  Object.keys(us.px || {}).forEach(function(k){ px[k] = us.px[k]; });
+  Object.keys(sh.px || {}).forEach(function(k){ px[k] = sh.px[k]; });
+  v.px = px;
+  peTake(v, true);
+  PE.favs = us.favs || PE.favs || {};
+}
+// Save: your part every time (it's small); the shared part only if you're an editor, and only the pieces that changed.
+function psSaveRemote(P){
+  var uid = ME(); if(!DB || !uid || !PS.loaded || !psMember()) return Promise.resolve();
+  var parts = psSplit(P), jobs = [];
+  jobs.push(new Promise(function(res, rej){ psRef("users/" + uid).update(peClean(parts.user), function(err){ if(err) rej(err); else res(); }); }));
+  if(psEditor()){
+    var up = {}, nh = {}, n = 0;
+    Object.keys(parts.shared).forEach(function(p){ var hs = psHash(JSON.stringify(parts.shared[p])); if(PS.last[p] !== hs){ up[p] = parts.shared[p]; nh[p] = hs; n++; } });
+    if(n) jobs.push(new Promise(function(res, rej){ psRef("data/cur").update(peClean(up), function(err){ if(err) rej(err); else { Object.assign(PS.last, nh); res(); } }); }));
+  }
+  return Promise.all(jobs);
+}
+// ── One-time move from prophescore/<uid> (the owner's old single-user record) ──
+// Nothing old is deleted. The current season moves first (the page works from there); past seasons,
+// QB games and line snapshots follow in the background.
+function psMigrateCore(uid){
+  PS.migr = { busy: true, msg: "Moving your data to shared storage…" };
+  var one = function(p){ return DB.ref("prophescore/" + uid + "/" + p).once("value").then(function(sn){ return sn.val(); }).catch(function(){ return null; }); };
+  return Promise.all(PE_KEYS.map(one)).then(function(vals){
+    var v = {}, any = false;
+    PE_KEYS.forEach(function(k, i){ if(vals[i] !== null && vals[i] !== undefined){ v[k] = vals[i]; any = true; } });
+    if(!any){ PS.migr = null; return; }
+    peTake(v, true);
+    var parts = psSplit(psPayload()), up = {};
+    Object.keys(parts.shared).forEach(function(p){ up["data/cur/" + p] = parts.shared[p]; });
+    up["users/" + uid] = parts.user;
+    up["data/migrated"] = { at: Date.now(), by: uid, rest: 0 };
+    return new Promise(function(res, rej){ DB.ref("ps").update(peClean(up), function(err){ if(err) rej(err); else res(); }); }).then(function(){ PS.migr.msg = "Current season moved. Copying past seasons…"; });
+  });
+}
+function psMigrateRestMaybe(){
+  var uid = ME(); if(!psAdmin() || !DB) return;
+  psRef("data/migrated").once("value").then(function(sn){
+    var M = sn.val(); if(!M || M.rest) { if(PS.migr && !PS.migr.err) PS.migr = null; return; }
+    var subs = ["histIdx", "qbIdx", "snaps"].concat(PX_HIST_YEARS.map(function(y){ return "hist/y" + y; })).concat(pxQbYears().map(function(y){ return "qb/y" + y; }));
+    PS.migr = { busy: true, msg: "Copying past seasons to shared storage…" };
+    var chain = Promise.resolve(), done = 0;
+    subs.forEach(function(sub){ chain = chain.then(function(){
+      PS.migr.msg = "Copying " + sub + " (" + (++done) + " of " + subs.length + ")…"; psMigrStatus();
+      return Promise.all([DB.ref("prophescore/" + uid + "/" + sub).once("value"), psRef("data/" + sub).once("value")]).then(function(r){
+        var v = r[0].val(); if(v === null || r[1].exists()) return;
+        return new Promise(function(res, rej){ psRef("data/" + sub).set(v, function(err){ if(err) rej(err); else res(); }); });
+      }); }); });
+    return chain.then(function(){ return psRef("data/migrated/rest").set(Date.now()); }).then(function(){
+      PS.migr = null; PXH.idx = null; PXQ.idx = null; psMigrStatus(); toast("Past seasons moved to shared storage", "ok");
+    });
+  }).catch(function(e){ PS.migr = { err: (e && (e.message || e.code)) || String(e) }; psMigrStatus(); });
+}
+function psMigrStatus(){ var el = document.getElementById("ps-migr"); if(el) el.outerHTML = psMigrHtml(); }
+function psMigrHtml(){
+  if(!PS.migr) return '<div id="ps-migr"></div>';
+  return '<div class="pem-ats" id="ps-migr"><div class="pem-autosub">' + (PS.migr.err ? '<span style="color:var(--red2)">Moving to shared storage stopped: ' + x(PS.migr.err) + '. It picks up again next time you open the page.</span>' : '⏳ ' + x(PS.migr.msg || "")) + '</div></div>';
+}
+// ── Members (owner only) ──
+function psAdminLoad(){
+  if(!psAdmin()) return Promise.resolve();
+  var one = function(p){ return psRef(p).once("value").then(function(sn){ return sn.val() || {}; }).catch(function(){ return {}; }); };
+  return Promise.all([one("requests"), one("roles/members"), one("roles/editors")]).then(function(r){ PS.admin = { req: r[0], mem: r[1], ed: r[2], at: Date.now() }; psAdminStatus(); });
+}
+function psAdminStatus(){ var el = document.getElementById("ps-admin"); if(el) el.outerHTML = psAdminCardHtml(); }
+function psAdminCardHtml(){
+  if(!psAdmin()) return "";
+  if(!PS.admin){ setTimeout(psAdminLoad, 0); return '<div class="pem-ats" id="ps-admin"><div class="pem-autotop"><b>👥 Members</b></div><div class="pem-autosub">Loading…</div></div>'; }
+  var A = PS.admin, h = '<div class="pem-ats" id="ps-admin"><div class="pem-autotop"><b>👥 Members</b><button class="btn btn-sm btn-ghost" data-ps-act="admreload">Refresh</button></div>';
+  var req = Object.keys(A.req || {});
+  if(req.length){
+    h += '<div class="pem-hd" style="margin-top:6px">Asking to join</div>';
+    req.forEach(function(uid){ var r = A.req[uid] || {};
+      h += '<div class="ps-mrow"><span><b>' + x(r.n || uid) + '</b><small>' + (r.at ? psAgo(r.at) : '') + '</small></span><span><button class="btn btn-sm btn-gold" data-ps-act="admok" data-uid="' + x(uid) + '">Approve</button> <button class="btn btn-sm btn-ghost" data-ps-act="admno" data-uid="' + x(uid) + '">Decline</button></span></div>'; });
+  }
+  var mem = Object.keys(A.mem || {});
+  h += '<div class="pem-hd" style="margin-top:8px">Members (' + mem.length + ')</div>';
+  if(!mem.length) h += '<div class="pem-autosub">Nobody yet. Anyone who opens Prophescore can ask to join, and they show up above.</div>';
+  mem.sort(function(a, b){ return String((A.mem[a] || {}).n || a).localeCompare(String((A.mem[b] || {}).n || b)); }).forEach(function(uid){ var m = A.mem[uid] || {}, ed = !!(A.ed || {})[uid];
+    h += '<div class="ps-mrow"><span><b>' + x(m.n || uid) + '</b>' + (ed ? '<small>editor · can refresh the data</small>' : '<small>member</small>') + '</span><span>' +
+         '<button class="btn btn-sm btn-ghost" data-ps-act="admed" data-uid="' + x(uid) + '">' + (ed ? 'Remove editor' : 'Make editor') + '</button> ' +
+         '<button class="btn btn-sm btn-ghost" data-ps-act="admrm" data-uid="' + x(uid) + '">Remove</button></span></div>'; });
+  h += '<div style="display:flex;gap:6px;margin-top:8px"><input id="ps-adduid" placeholder="Add by account id" autocomplete="off" style="flex:1;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:800 13px Nunito,sans-serif;background:var(--cream)"><button class="btn btn-sm btn-ghost" data-ps-act="admadd">Add</button></div>';
+  h += '<div class="pem-autonote">Members read the shared data and keep their own settings, tunes, favorites and picks. Editors can also press Refresh (with their own CFBD key) to update the shared data for everyone. You are always both.</div>';
+  h += '<details style="margin-top:6px"><summary class="pem-autosub" style="cursor:pointer"><b>Firebase rules</b> (paste once, in the console)</summary><pre class="ps-rules">' + x(PS_RULES) + '</pre></details>';
+  return h + '</div>';
+}
+function psAdminAct(act, uid){
+  var A = PS.admin || {}, up = {};
+  if(act === "admok"){ var r = (A.req || {})[uid] || {}; up["roles/members/" + uid] = { n: r.n || uid, at: Date.now() }; up["requests/" + uid] = null; }
+  else if(act === "admno"){ up["requests/" + uid] = null; }
+  else if(act === "admed"){ up["roles/editors/" + uid] = (A.ed || {})[uid] ? null : true; }
+  else if(act === "admrm"){ if(!confirm("Remove this member? Their own settings stay saved, but they lose access.")) return; up["roles/members/" + uid] = null; up["roles/editors/" + uid] = null; }
+  else if(act === "admadd"){ var el = document.getElementById("ps-adduid"), v = el ? el.value.trim() : ""; if(!/^[A-Za-z0-9_-]{6,64}$/.test(v)){ toast("That doesn’t look like an account id", "err"); return; } up["roles/members/" + v] = { n: v, at: Date.now() }; }
+  DB.ref("ps").update(up, function(err){ if(err){ toast("Couldn’t save: " + (err.code || err.message), "err"); return; } psAdminLoad(); });
+}
+// ── Not a member yet: ask to join ──
+function psGateRequest(){
+  var R = PS.role || {}, sent = !!R.requested;
+  document.getElementById("root").innerHTML =
+    '<div class="ps-gate"><h1>Prophescore is invite-only</h1><p>' + (sent ? 'Your request is in. You’ll get in as soon as it’s approved — reload this page then.' : 'Ask to join and the owner can approve you. You’ll get your own model settings, favorites and picks, running on the shared data.') + '</p>' +
+    (sent ? '' : '<button class="btn btn-gold" id="ps-reqgo">Ask to join</button> ') +
+    '<a class="btn btn-ghost" href="' + HUB + '">Back to Scorecery</a></div>';
+  var b = document.getElementById("ps-reqgo");
+  if(b) b.onclick = function(){ this.disabled = true;
+    psRef("requests/" + ME()).set({ n: psName(), at: Date.now() }, function(err){
+      if(err){ toast("Couldn’t send: " + (err.code || err.message), "err"); b.disabled = false; return; }
+      PS.role = Object.assign({}, PS.role, { requested: { at: Date.now() } }); psGateRequest(); }); };
+}
+// ── Favorites ──
+function psFav(gid){ return !!(PE.favs && PE.favs[gid]); }
+function psFavToggle(gid){
+  PE.favs = PE.favs || {};
+  if(PE.favs[gid]) delete PE.favs[gid]; else PE.favs[gid] = { at: Date.now(), y: PEAR.year || pxYear(), w: PEAR.week || null };
+  peSave();
+}
+function psStarHtml(gid){ var on = psFav(gid); return '<span class="ps-star' + (on ? ' on' : '') + '" role="button" aria-label="' + (on ? 'Unfavorite' : 'Favorite') + '" data-ps-act="fav" data-gid="' + x(gid) + '">' + (on ? '★' : '☆') + '</span>'; }
+// ── Discussion board ──
+function psWkKey(y, w){ return "y" + y + "w" + w; }
+function psBoardWk(){ var W = PS.ui.wk; if(W) return W; return { y: PEAR.year || pxYear(), w: PEAR.week || (PE.meta && PE.meta.espnWeek) || 1 }; }
+function psAgo(at){ var s = Math.max(0, (Date.now() - at) / 1000); if(s < 60) return "just now"; if(s < 3600) return Math.floor(s / 60) + "m ago"; if(s < 86400) return Math.floor(s / 3600) + "h ago"; return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" }); }
+function psBoardWatch(k){
+  if(PS.boardOn[k] || !DB || !psMember()) return;
+  PS.boardOn[k] = true;
+  psRef("board/" + k).limitToLast(300).on("value", function(sn){ PS.board[k] = sn.val() || {}; psFeedRefresh(); }, function(err){ PS.board[k] = { __err: (err && err.code) || "error" }; psFeedRefresh(); });
+}
+function psPosts(k, gid){
+  var B = PS.board[k] || {}, out = [];
+  Object.keys(B).forEach(function(id){ if(id === "__err") return; var p = B[id]; if(!p || (gid && p.g !== gid)) return; out.push(Object.assign({ id: id }, p)); });
+  return out.sort(function(a, b){ return (b.at || 0) - (a.at || 0); });
+}
+function psPostHtml(k, p, showGame){
+  var mine = p.u === ME() || psAdmin();
+  return '<div class="ps-post"><div class="ps-ph"><b>' + x(p.n || "Member") + '</b><small>' + psAgo(p.at || 0) + '</small>' +
+         (showGame && p.g ? '<span class="ps-gtag" data-ps-act="opengame" data-gid="' + x(p.g) + '">' + x(p.gl || "game") + '</span>' : '') +
+         (mine ? '<span class="ps-del" role="button" data-ps-act="del" data-wk="' + x(k) + '" data-id="' + x(p.id) + '">Delete</span>' : '') + '</div>' +
+         '<div class="ps-pt">' + x(p.t || "").replace(/\n/g, "<br>") + '</div></div>';
+}
+function psFeedHtml(){
+  var W = psBoardWk(), k = psWkKey(W.y, W.w); psBoardWatch(k);
+  if(!PS.board[k]) return '<div class="pem-autosub">Loading…</div>';
+  if(PS.board[k].__err) return '<div class="pem-autosub" style="color:var(--red2)">Couldn’t read the board (' + x(PS.board[k].__err) + '). The Firebase rules for ps/board may be missing.</div>';
+  var P = psPosts(k, null);
+  if(!P.length) return '<div class="pem-autosub">Nothing posted for week ' + W.w + ' yet. Start it off.</div>';
+  return P.map(function(p){ return psPostHtml(k, p, true); }).join('');
+}
+function psTalkHtml(){
+  var W = psBoardWk(), games = (PEAR.games && +PEAR.week === +W.w) ? PEAR.games : [];
+  var h = '<div class="ps-wkbar"><button class="btn btn-sm btn-ghost" data-ps-act="wk" data-d="-1">←</button><b>' + W.y + ' · Week ' + W.w + '</b><button class="btn btn-sm btn-ghost" data-ps-act="wk" data-d="1">→</button></div>';
+  h += '<div class="pem-ats"><textarea id="ps-text" maxlength="1000" rows="3" placeholder="Say something about this week…" class="ps-ta"></textarea>' +
+       '<div style="display:flex;gap:6px;margin-top:6px"><select id="ps-game" class="ps-sel"><option value="">General</option>' +
+       games.map(function(g){ return '<option value="' + x(g.id) + '">' + x(pearName(g.away.id) + ' at ' + pearName(g.home.id)) + '</option>'; }).join('') +
+       '</select><button class="btn btn-sm btn-gold" data-ps-act="post">Post</button></div></div>';
+  h += '<div id="ps-feed">' + psFeedHtml() + '</div>';
+  return h;
+}
+function psPost(text, gid, gl, k){
+  text = String(text || "").trim().slice(0, 1000); if(!text) return Promise.resolve(false);
+  var W = psBoardWk(); k = k || psWkKey(W.y, W.w);
+  return new Promise(function(res){ psRef("board/" + k).push({ u: ME(), n: psName(), t: text, at: Date.now(), g: gid || null, gl: gl || null }, function(err){
+    if(err){ toast("Couldn’t post: " + (err.code || err.message), "err"); res(false); } else res(true); }); });
+}
+// Thread on a game card.
+function psCardThreadHtml(g, week){
+  if(!g || !DB || !psMember()) return '';
+  var y = PEAR.year || pxYear(), k = psWkKey(y, week || PEAR.week || 1); psBoardWatch(k);
+  return '<div class="ps-thread"><div class="pem-hd" style="margin-top:12px">Talk about this game</div>' +
+         '<div id="ps-gfeed" data-wk="' + x(k) + '" data-gid="' + x(g.id) + '">' + psGameFeedInner(k, g.id) + '</div>' +
+         '<div style="display:flex;gap:6px;margin-top:6px"><input id="ps-gt" maxlength="1000" placeholder="Add a comment" class="ps-ta" style="flex:1">' +
+         '<button class="btn btn-sm btn-gold" data-ps-act="gpost" data-wk="' + x(k) + '" data-gid="' + x(g.id) + '" data-gl="' + x(pearName(g.away.id) + ' at ' + pearName(g.home.id)) + '">Post</button></div></div>';
+}
+function psGameFeedInner(k, gid){
+  if(!PS.board[k]) return '<div class="pem-autosub">Loading…</div>';
+  var P = psPosts(k, gid); if(!P.length) return '<div class="pem-autosub">No comments yet.</div>';
+  return P.map(function(p){ return psPostHtml(k, p, false); }).join('');
+}
+// New posts or picks arrived: redraw the lists only, so whatever you're typing stays put.
+function psFeedRefresh(){
+  var f = document.getElementById("ps-feed"); if(f) f.innerHTML = psFeedHtml();
+  var gf = document.getElementById("ps-gfeed"); if(gf) gf.innerHTML = psGameFeedInner(gf.getAttribute("data-wk"), gf.getAttribute("data-gid"));
+  var pf = document.getElementById("ps-pkfeed"); if(pf) pf.innerHTML = psPicksFeedHtml();
+  var lb = document.getElementById("ps-lb"); if(lb) lb.innerHTML = psLeaderHtml();
+}
+// ── Expert picks ──
+var PS_KINDS = [["pick", "Pick"], ["parlay", "Parlay"], ["prop", "Prop"], ["future", "Future"], ["fantasy", "Fantasy"]];
+function psKindLabel(k){ var o = k; PS_KINDS.forEach(function(z){ if(z[0] === k) o = z[1]; }); return o; }
+function psPicksWatch(){
+  if(PS.picksOn || !DB || !psMember()) return;
+  PS.picksOn = true;
+  psRef("picks").limitToLast(500).on("value", function(sn){ PS.picks = sn.val() || {}; psFeedRefresh(); }, function(err){ PS.picks = { __err: (err && err.code) || "error" }; psFeedRefresh(); });
+}
+function psPickList(){ var P = PS.picks || {}, out = []; Object.keys(P).forEach(function(id){ if(id !== "__err" && P[id]) out.push(Object.assign({ id: id }, P[id])); }); return out.sort(function(a, b){ return (b.at || 0) - (a.at || 0); }); }
+// Units won on a settled pick: a win pays at its odds (−110 when none given for a pick or prop, even money otherwise).
+function psPickUnits(p){
+  var u = +p.un || 1, o = +p.o;
+  if(!isFinite(o) || !o) o = (p.k === "pick" || p.k === "prop") ? -110 : 100;
+  if(p.st === "won") return u * (o > 0 ? o / 100 : 100 / Math.abs(o));
+  if(p.st === "lost") return -u;
+  return 0;
+}
+function psOddsTxt(o){ o = +o; return isFinite(o) && o ? (o > 0 ? "+" + o : String(o)) : ""; }
+function psPickHtml(p){
+  var mine = p.u === ME() || psAdmin(), st = p.st || "open", u = psPickUnits(p);
+  var h = '<div class="ps-post ps-pick st-' + x(st) + '"><div class="ps-ph"><span class="ps-kind">' + x(psKindLabel(p.k)) + '</span><b>' + x(p.n || "Member") + '</b><small>' + psAgo(p.at || 0) + (p.w ? ' · wk ' + x(p.w) : '') + '</small>' +
+          '<span class="ps-st">' + (st === "open" ? 'Open' : st === "won" ? 'Won ' + (u >= 0 ? '+' : '') + u.toFixed(2) + 'u' : st === "lost" ? 'Lost ' + u.toFixed(2) + 'u' : st === "push" ? 'Push' : 'Void') + '</span></div>';
+  h += '<div class="ps-pt"><b>' + x(p.ti || "") + '</b>' + (psOddsTxt(p.o) ? ' <small>' + psOddsTxt(p.o) + '</small>' : '') + ' <small>· ' + (+p.un || 1) + 'u</small></div>';
+  if(p.lg && p.lg.length) h += '<ul class="ps-legs">' + p.lg.map(function(l){ return '<li>' + x(l) + '</li>'; }).join('') + '</ul>';
+  if(p.no) h += '<div class="ps-pt" style="opacity:.85">' + x(p.no).replace(/\n/g, "<br>") + '</div>';
+  if(mine){
+    h += '<div class="ps-acts">' + (st === "open" ? [["won", "Won"], ["lost", "Lost"], ["push", "Push"], ["void", "Void"]].map(function(s){ return '<button class="btn btn-sm btn-ghost" data-ps-act="pkset" data-id="' + x(p.id) + '" data-st="' + s[0] + '">' + s[1] + '</button>'; }).join('')
+                                    : '<button class="btn btn-sm btn-ghost" data-ps-act="pkset" data-id="' + x(p.id) + '" data-st="open">Reopen</button>') +
+         '<button class="btn btn-sm btn-ghost" data-ps-act="pkdel" data-id="' + x(p.id) + '">Delete</button></div>';
+  }
+  return h + '</div>';
+}
+function psPicksFeedHtml(){
+  psPicksWatch();
+  if(!PS.picks) return '<div class="pem-autosub">Loading…</div>';
+  if(PS.picks.__err) return '<div class="pem-autosub" style="color:var(--red2)">Couldn’t read picks (' + x(PS.picks.__err) + '). The Firebase rules for ps/picks may be missing.</div>';
+  var L = psPickList().filter(function(p){ var st = p.st || "open";
+    return (PS.ui.kind === "all" || p.k === PS.ui.kind) && (PS.ui.pk === "all" || (PS.ui.pk === "open" ? st === "open" : st !== "open")); });
+  if(!L.length) return '<div class="pem-autosub">No picks here yet.</div>';
+  return L.map(psPickHtml).join('');
+}
+function psLeaderHtml(){
+  if(!PS.picks || PS.picks.__err) return '';
+  var by = {};
+  psPickList().forEach(function(p){ if(PS.ui.kind !== "all" && p.k !== PS.ui.kind) return; var st = p.st || "open"; if(st === "open" || st === "void") return;
+    var e = by[p.u] = by[p.u] || { n: p.n, w: 0, l: 0, p: 0, u: 0, risk: 0 };
+    if(st === "won") e.w++; else if(st === "lost") e.l++; else e.p++;
+    e.u += psPickUnits(p); if(st !== "push") e.risk += (+p.un || 1); e.n = p.n || e.n; });
+  var rows = Object.keys(by).map(function(k){ return by[k]; }).sort(function(a, b){ return b.u - a.u; });
+  if(!rows.length) return '<div class="pem-autosub">Records show up once picks are settled.</div>';
+  return '<div class="pem-bk"><div class="pem-bkhd"><span>Member</span><span>Record</span><span>Units · ROI</span></div>' + rows.map(function(e){
+    return '<div class="pem-bkrow"><span>' + x(e.n || "Member") + '</span><span>' + e.w + '-' + e.l + (e.p ? '-' + e.p : '') + '</span><b class="' + (e.u >= 0 ? 'up' : 'dn') + '">' + (e.u >= 0 ? '+' : '') + e.u.toFixed(2) + 'u' + (e.risk ? ' <small>' + (100 * e.u / e.risk).toFixed(0) + '%</small>' : '') + '</b></div>'; }).join('') + '</div>';
+}
+function psPicksHtml(){
+  var W = psBoardWk(), h = '';
+  h += '<div class="pem-ats"><div class="pem-autotop"><b>🏆 Leaderboard</b></div><div id="ps-lb">' + psLeaderHtml() + '</div>' +
+       '<div class="pem-autonote">Units won on settled picks: a win pays at its odds (−110 for a pick or prop with none given, even money for the rest), a loss costs the units risked. ROI = units won ÷ units risked. Each member settles their own picks.</div></div>';
+  h += '<div class="pem-ats"><div class="pem-autotop"><b>✍️ Post a pick</b><button class="btn btn-sm btn-ghost" data-ps-act="pkform">' + (PS.ui.form ? 'Hide' : 'Open') + '</button></div>';
+  if(PS.ui.form){
+    h += '<div class="ps-form"><select id="pk-k" class="ps-sel">' + PS_KINDS.map(function(z){ return '<option value="' + z[0] + '">' + z[1] + '</option>'; }).join('') + '</select>' +
+         '<input id="pk-ti" class="ps-ta" maxlength="120" placeholder="The pick, e.g. Ohio State −7.5 or Indiana to win the Big Ten">' +
+         '<textarea id="pk-lg" class="ps-ta" rows="3" maxlength="600" placeholder="Parlay legs, one per line (optional)"></textarea>' +
+         '<div style="display:flex;gap:6px"><input id="pk-o" class="ps-ta" inputmode="numeric" maxlength="6" placeholder="Odds, e.g. -110 or +450" style="flex:1"><input id="pk-un" class="ps-ta" inputmode="decimal" maxlength="4" placeholder="Units (1)" style="width:96px"></div>' +
+         '<textarea id="pk-no" class="ps-ta" rows="2" maxlength="600" placeholder="Why (optional)"></textarea>' +
+         '<button class="btn btn-sm btn-gold" data-ps-act="pkpost">Post pick · week ' + W.w + '</button></div>';
+  }
+  h += '</div>';
+  h += '<div class="pe-sub" role="tablist" style="margin-top:4px;position:static">' + [["open", "Open"], ["done", "Settled"], ["all", "All"]].map(function(t){ return '<button class="' + (PS.ui.pk === t[0] ? 'on' : '') + '" data-ps-act="pkfilt" data-v="' + t[0] + '">' + t[1] + '</button>'; }).join('') + '</div>';
+  h += '<div class="ps-chips">' + [["all", "All kinds"]].concat(PS_KINDS).map(function(t){ return '<button class="btn btn-sm ' + (PS.ui.kind === t[0] ? 'btn-gold' : 'btn-ghost') + '" data-ps-act="pkkind" data-v="' + t[0] + '">' + t[1] + '</button>'; }).join('') + '</div>';
+  h += '<div id="ps-pkfeed">' + psPicksFeedHtml() + '</div>';
+  return h;
+}
+function psPickPost(){
+  var v = function(id){ var el = document.getElementById(id); return el ? el.value.trim() : ""; };
+  var ti = v("pk-ti").slice(0, 120); if(!ti){ toast("Write the pick first", "err"); return; }
+  var o = parseInt(v("pk-o").replace(/[^\d+-]/g, ""), 10), un = parseFloat(v("pk-un"));
+  if(isFinite(o) && Math.abs(o) < 100) o = NaN;
+  var W = psBoardWk(), lg = v("pk-lg").split(/\n+/).map(function(s){ return s.trim().slice(0, 120); }).filter(Boolean).slice(0, 12);
+  var rec = { u: ME(), n: psName(), k: v("pk-k") || "pick", ti: ti, lg: lg.length ? lg : null, o: isFinite(o) ? o : null, un: isFinite(un) && un > 0 ? Math.min(10, Math.round(un * 10) / 10) : 1,
+              no: v("pk-no").slice(0, 600) || null, at: Date.now(), st: "open", y: W.y, w: W.w };
+  psRef("picks").push(rec, function(err){ if(err){ toast("Couldn’t post: " + (err.code || err.message), "err"); return; } PS.ui.form = false; PS.ui.pk = "open"; psBoardRender(); toast("Pick posted", "ok"); });
+}
+// ── Board view (the fourth tab) ──
+function psBoardHtml(){
+  if(!DB || !ME()) return '<div class="pem-autosub">Sign in to see the board.</div>';
+  var t = PS.ui.tab;
+  var h = '<div id="ps-board"><div class="pe-sub" role="tablist">' + [["talk", "Talk"], ["picks", "Expert picks"]].map(function(z){ return '<button class="' + (t === z[0] ? 'on' : '') + '" data-ps-act="tab" data-v="' + z[0] + '">' + z[1] + '</button>'; }).join('') + '</div>';
+  h += t === "picks" ? psPicksHtml() : psTalkHtml();
+  return h + '</div>';
+}
+function psBoardRender(){ var el = document.getElementById("ps-board"); if(el) el.outerHTML = psBoardHtml(); }
+// One click handler for everything above, in the capture phase so a star inside a game row doesn't also open the game.
+document.addEventListener("click", function(e){
+  var t = e.target && e.target.closest ? e.target.closest("[data-ps-act]") : null; if(!t) return;
+  e.stopPropagation(); e.preventDefault();
+  var act = t.getAttribute("data-ps-act"), gid = t.getAttribute("data-gid");
+  if(act === "fav"){ psFavToggle(gid); if(PEAR.card) pearRenderCard(); else pearRepaint(); return; }
+  if(act === "tab"){ PS.ui.tab = t.getAttribute("data-v"); psBoardRender(); return; }
+  if(act === "wk"){ var W = psBoardWk(), w = Math.max(1, Math.min(17, W.w + (+t.getAttribute("data-d")))); PS.ui.wk = { y: W.y, w: w }; psBoardRender(); return; }
+  if(act === "post"){ var ta = document.getElementById("ps-text"), sel = document.getElementById("ps-game"), g = sel && sel.value, gl = g && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : null;
+    t.disabled = true; psPost(ta && ta.value, g || null, gl).then(function(ok){ t.disabled = false; if(ok && ta) ta.value = ""; }); return; }
+  if(act === "gpost"){ var gi = document.getElementById("ps-gt"); t.disabled = true;
+    psPost(gi && gi.value, gid, t.getAttribute("data-gl"), t.getAttribute("data-wk")).then(function(ok){ t.disabled = false; if(ok && gi) gi.value = ""; }); return; }
+  if(act === "del"){ if(!confirm("Delete this post?")) return; psRef("board/" + t.getAttribute("data-wk") + "/" + t.getAttribute("data-id")).remove(); return; }
+  if(act === "opengame"){ if((PEAR.games || []).some(function(z){ return z.id === gid; })) pearOpenGame(gid); else toast("Open that week on the Games tab first", "info"); return; }
+  if(act === "pkform"){ PS.ui.form = !PS.ui.form; psBoardRender(); return; }
+  if(act === "pkpost"){ psPickPost(); return; }
+  if(act === "pkfilt"){ PS.ui.pk = t.getAttribute("data-v"); psBoardRender(); return; }
+  if(act === "pkkind"){ PS.ui.kind = t.getAttribute("data-v"); psBoardRender(); return; }
+  if(act === "pkset"){ var st = t.getAttribute("data-st"); psRef("picks/" + t.getAttribute("data-id")).update({ st: st, sa: st === "open" ? null : Date.now() }); return; }
+  if(act === "pkdel"){ if(!confirm("Delete this pick?")) return; psRef("picks/" + t.getAttribute("data-id")).remove(); return; }
+  if(act === "admreload"){ PS.admin = null; psAdminLoad(); return; }
+  if(/^adm/.test(act)){ psAdminAct(act, t.getAttribute("data-uid")); return; }
+}, true);
+// Firebase rules for all of the above (shown to the owner on the Data tab and on a permission error).
+var PS_MEMBER = "auth != null && (auth.uid === '" + PS_ROOT_UID + "' || root.child('ps/roles/members/' + auth.uid).exists() || root.child('ps/roles/editors/' + auth.uid).exists())";
+var PS_EDITOR = "auth != null && (auth.uid === '" + PS_ROOT_UID + "' || root.child('ps/roles/editors/' + auth.uid).exists())";
+var PS_OWNER = "auth != null && auth.uid === '" + PS_ROOT_UID + "'";
+var PS_AUTHOR = "(data.exists() ? (data.child('u').val() === auth.uid || auth.uid === '" + PS_ROOT_UID + "') : newData.child('u').val() === auth.uid)";
+var PS_RULES = JSON.stringify({ ps: {
+  roles: { ".read": PS_OWNER, ".write": PS_OWNER, members: { "$uid": { ".read": "auth != null && auth.uid === $uid" } }, editors: { "$uid": { ".read": "auth != null && auth.uid === $uid" } } },
+  requests: { ".read": PS_OWNER, "$uid": { ".read": "auth != null && auth.uid === $uid", ".write": "auth != null && (auth.uid === $uid || auth.uid === '" + PS_ROOT_UID + "')" } },
+  data: { ".read": PS_MEMBER, ".write": PS_EDITOR },
+  users: { "$uid": { ".read": "auth != null && auth.uid === $uid", ".write": "auth != null && auth.uid === $uid" } },
+  board: { ".read": PS_MEMBER, "$wk": { ".indexOn": ["at"], "$post": { ".write": PS_MEMBER + " && " + PS_AUTHOR } } },
+  picks: { ".read": PS_MEMBER, ".indexOn": ["at"], "$id": { ".write": PS_MEMBER + " && " + PS_AUTHOR } }
+} }, null, 2).replace(/^\{\n|\n\}$/g, "");
 
 // ── MODEL STATE AND SP+ SHEETS ──────────────────────────────────────────────
 // Shared model state the Games, Rankings and team pages read. The play-by-play
@@ -1729,7 +2136,7 @@ function pemPairedDiff(ea, eb){
 function pemRefit(){
   pemRestorePrior();                                   // newest SP+ sheet: benchmark, and fallback model
   PEM._ranks = null; PEM._ats = null;
-  if(pxKey() && pxRebuild()) return true;
+  if(pxRebuild()) return true;
   PX.active = false;
   PEM.ratings = PEM.prior || null; PEM.avg = PEM_SHEET_AVG; PEM.n = 0; PEM.opts.hfa = 2.5; PEM.opts.oppW = 1;
   return !!PEM.ratings;
@@ -2260,7 +2667,7 @@ function pxParseLines(list){
 // replace any that changed, and re-grade. Reports what moved.
 var PXR = { busy: false, msg: "", res: null };
 function pxRecheckLines(){
-  if(PXR.busy || !pxKey()) return;
+  if(PXR.busy || !pxCanFetch()) return;
   var S = pxState(), y = pxYear(), ws = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; });
   if(!ws.length){ toast("No graded weeks yet"); return; }
   var before = pxAts(), b0 = before ? { w: before.w, l: before.l, p: before.p } : null, changed = [], added = 0, n = 0;
@@ -2621,7 +3028,7 @@ function pxContSeasonsFrom(byY){
 // Download what's missing (never a season already saved), then refit the weights.
 // thisSeason: also (re)fetch this season's continuity (three calls).
 function pxContSync(thisSeason){
-  if(PXC.busy) return;
+  if(PXC.busy || !pxCanFetch()) return;
   var S = pxState(), y = pxYear(), memo = {};
   var call = function(path, params){ var k = path + "?" + JSON.stringify(params || {}); if(!memo[k]) memo[k] = pxCall(path, params).catch(function(e){ delete memo[k]; throw e; }); return memo[k]; };
   PXC.busy = true; PXC.err = ""; PXC.msg = "Checking what’s saved…"; pxContStatus();
@@ -2675,7 +3082,7 @@ function pxContCardHtml(){
   var saved = PX_HIST_YEARS.filter(function(h){ return (I["y" + h] || {}).cont; }), miss = PX_HIST_YEARS.filter(function(h){ var e = I["y" + h]; return e && e.prior && !e.cont; });
   var need = (C ? 0 : 3) + miss.length * 3 + ((!C || miss.length) ? 1 : 0);
   var h = '<div class="pem-ats" id="px-cont"><div class="pem-autotop"><b>🔁 Roster continuity</b>' +
-          '<button class="btn btn-sm btn-ghost" id="px-contgo"' + (PXC.busy ? ' disabled' : '') + '>' + (PXC.busy ? 'Loading…' : (C && !miss.length ? 'Refresh ' + y : 'Download')) + '</button></div>';
+          (psEditor() ? '<button class="btn btn-sm btn-ghost" id="px-contgo"' + (PXC.busy ? ' disabled' : '') + '>' + (PXC.busy ? 'Loading…' : (C && !miss.length ? 'Refresh ' + y : 'Download')) + '</button>' : '') + '</div>';
   h += '<div class="pem-autosub">' + (C ? y + ' loaded' : y + ' not loaded') + ' · past seasons saved: ' + (saved.length ? saved.join(', ') : 'none') +
        (need ? ' · next download ≈ <b>' + need + '</b> CFBD calls, once' : ' · Refresh re-pulls only ' + y + ' (4 calls), e.g. after the portal window') + '</div>';
   if(PXC.busy) h += '<div class="pem-autosub">' + x(PXC.msg) + '</div>';
@@ -2832,7 +3239,7 @@ function pxOwnPriorsFor(seasons){
 function pxOwnReset(){ var S = pxState(); S.wf = {}; S.tuneSig = ""; PX.fits = {}; PX._ats = null; PX._fc = null; PX.sims = {}; PX._ptest = null; PX._pmix = null; }
 // Rate the saved seasons (those not rated yet, or all with force), then build this season's own prior.
 function pxOwnBuild(force){
-  if(PXO.busy) return;
+  if(PXO.busy || !psEditor()) return;
   if(!DB || !ME()){ PXO.err = "Needs the Firebase connection (sign in on the hub)."; pxOwnStatus(); return; }
   if(PXB.busy){ PXO.err = "Wait for the backtest to finish, then try again."; pxOwnStatus(); return; }
   PXO.busy = true; PXO.err = ""; PXO.msg = "Checking saved seasons…"; pxOwnStatus();
@@ -2885,7 +3292,7 @@ function pxOwnCardHtml(){
   var lk = S.lock || {}, src = typeof lk.psrc === "number" ? lk.psrc : 0;
   var sheetOff = lk.sp === 0 && lk.spLate === 0, sheetCustom = !sheetOff && (lk.sp !== undefined || lk.spLate !== undefined);
   var h = '<div class="pem-ats" id="px-own"><div class="pem-autotop"><b>🧭 Your own prior</b>' +
-          (saved.length ? '<button class="btn btn-sm btn-ghost" id="px-ownbuild"' + (PXO.busy ? ' disabled' : '') + '>' + (PXO.busy ? 'Building…' : (rated.length ? 'Rebuild' : 'Build')) + '</button>' : '') + '</div>';
+          (saved.length && psEditor() ? '<button class="btn btn-sm btn-ghost" id="px-ownbuild"' + (PXO.busy ? ' disabled' : '') + '>' + (PXO.busy ? 'Building…' : (rated.length ? 'Rebuild' : 'Build')) + '</button>' : '') + '</div>';
   h += '<div class="pem-autosub">' + (P ? 'Built from your own ratings of ' + (P.from.length ? P.from.concat([P.last]).filter(function(v, i, a){ return a.indexOf(v) === i; }).join(', ') : P.last) + ' · ' +
         (P.fitted ? 'weights fitted on <b>' + P.n + '</b> team-seasons' : 'fixed weights (only ' + P.n + ' team-seasons to fit)') + ' · no SP+'
         : (saved.length ? 'Not built yet. It rates every team on each saved season (' + saved.join(', ') + ') from the plays alone, then builds this season’s prior from those ratings.' : 'Needs past seasons: download them under <b>Data → Past seasons</b> first.')) + '</div>';
@@ -2969,7 +3376,7 @@ function pxPriorTestHtml(){
 }
 // Load everything this season needs, week by week, then rebuild.
 function pxSync(force){
-  if(PX.busy || !pxKey()) return;
+  if(PX.busy || !pxCanFetch()) return;
   PX.busy = true; PX.err = ""; PX.msg = "Loading teams…"; pxStatus();
   var S = pxState(), weeks = [];
   psNow().then(function(){
@@ -3010,7 +3417,7 @@ function pxSync(force){
 // the last saved week. Never loaded when the page opens; it is there for the export.
 var PX_HIST_YEARS = [2023, 2024, 2025];
 var PXH = { busy: false, msg: "", err: "", step: "", idx: null, loading: false, idxErr: "" };
-function pxHistRef(sub){ return DB.ref("prophescore/" + ME() + "/" + sub); }
+function pxHistRef(sub){ return psRef("data/" + sub); }        // shared: past seasons, QB games, snapshots
 function pxHistPut(sub, val){ return new Promise(function(res, rej){ pxHistRef(sub).set(peClean(val), function(err){ if(err) rej(err); else res(); }); }); }
 function pxHistGet(sub){ return pxHistRef(sub).once("value").then(function(sn){ return sn.val(); }); }
 function pxHistLoadIdx(){
@@ -3031,7 +3438,7 @@ function pxHistCallsLeft(){
 }
 function pxHistSync(){
   if(PXH.busy) return;
-  if(!pxKey()){ PXH.err = "Save your CFBD key first."; pxHistStatus(); return; }
+  if(!pxCanFetch()){ PXH.err = psEditor() ? "Save your CFBD key first." : "Only editors download past seasons."; pxHistStatus(); return; }
   if(!DB || !ME()){ PXH.err = "Needs the Firebase connection (sign in on the hub)."; pxHistStatus(); return; }
   if(PX.busy){ PXH.err = "Wait for this season’s refresh to finish, then try again."; pxHistStatus(); return; }
   PXH.busy = true; PXH.err = ""; PXH.msg = "Checking what’s already saved…"; pxHistStatus();
@@ -3103,7 +3510,7 @@ function pxHistCardHtml(){
   if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(pxHistStatus, pxHistStatus); }
   var S = pxState(), I = PXH.idx || {};
   var h = '<div class="pem-ats" id="px-hist"><div class="pem-autotop"><b>📚 Past seasons for backtesting</b>' +
-          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? (pxHistCallsLeft() ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
+          (pxCanFetch() ? '<button class="btn btn-sm btn-ghost" id="px-histgo"' + (PXH.busy ? ' disabled' : '') + '>' + (PXH.busy ? 'Saving…' : (I.y2023 || I.y2024 || I.y2025 ? (pxHistCallsLeft() ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Season</span><span>Weeks saved</span><span>Prior</span></div>';
   PX_HIST_YEARS.forEach(function(y){ var e = I["y" + y] || {}, have = e.wk ? Object.keys(e.wk).length : 0, all = e.weeks ? e.weeks.length : null;
     h += '<div class="pem-bkrow"><span>' + y + '</span><span>' + (e.done && e.priorFit >= 150 ? '<b class="up">all ' + have + '</b>' : (have + (all ? ' of ' + all : ''))) + '</span><b>' + (e.prior && e.priorFit >= 150 ? '✓ ' + e.prior + ' teams' : (e.prior ? 'needs rebuild' : '—')) + '</b></div>'; });
@@ -3179,7 +3586,7 @@ function pxQbParse(box, ppa){
 }
 function pxQbSync(){
   if(PXQ.busy) return;
-  if(!pxKey()){ PXQ.err = "Save your CFBD key first."; pxQbStatus(); return; }
+  if(!pxCanFetch()){ PXQ.err = psEditor() ? "Save your CFBD key first." : "Only editors download QB data."; pxQbStatus(); return; }
   if(!DB || !ME()){ PXQ.err = "Needs the Firebase connection (sign in on the hub)."; pxQbStatus(); return; }
   if(PX.busy || PXH.busy){ PXQ.err = "Wait for the other download to finish, then try again."; pxQbStatus(); return; }
   PXQ.busy = true; PXQ.err = ""; PXQ.msg = "Checking what’s already saved…"; pxQbStatus();
@@ -3245,7 +3652,7 @@ function pxQbCardHtml(){
   if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(pxQbStatus, pxQbStatus); }
   var I = PXQ.idx || {}, S = pxState(), todo = PXQ.idx ? pxQbTodo() : [], any = pxQbYears().some(function(y){ return I["y" + y]; });
   var h = '<div class="pem-ats" id="px-qb"><div class="pem-autotop"><b>🏈 Quarterbacks</b>' +
-          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-qbgo"' + (PXQ.busy ? ' disabled' : '') + '>' + (PXQ.busy ? 'Saving…' : (any ? (todo.length ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
+          (pxCanFetch() ? '<button class="btn btn-sm btn-ghost" id="px-qbgo"' + (PXQ.busy ? ' disabled' : '') + '>' + (PXQ.busy ? 'Saving…' : (any ? (todo.length ? 'Resume' : 'Re-check') : 'Download')) + '</button>' : '') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Season</span><span>Weeks saved</span><span>QB games</span></div>';
   pxQbYears().forEach(function(y){ var e = (I["y" + y] || {}).wk || {}, want = Object.keys(pxQbWeeks(y)).length, have = Object.keys(e).length, g = 0;
     Object.keys(e).forEach(function(k){ g += e[k].g || 0; });
@@ -3287,12 +3694,12 @@ function pxEvOpenTotal(od){
   return v;
 }
 function pxSnapMaybe(){
-  if(!PE.ready || PXS.busy || !DB || !ME()) return;
+  if(!PE.ready || PXS.busy || !DB || !ME() || !psEditor() || !PS.loaded) return;
   if(pxState().snapDay === pxEtDay()) return;
   pxSnapLines();
 }
 function pxSnapLines(){
-  if(PXS.busy || !DB || !ME()) return Promise.resolve();
+  if(PXS.busy || !DB || !ME() || !psEditor()) return Promise.resolve();
   PXS.busy = true; PXS.err = ""; pxSnapStatus();
   var day = pxEtDay(), dk = "d" + day.replace(/-/g, ""), now = Date.now();
   var y = PE.meta && PE.meta.espnYear, w = PE.meta && PE.meta.espnWeek;
@@ -3314,7 +3721,7 @@ function pxSnapLines(){
     }); });
     if(!ds.some(Boolean)) throw new Error("Couldn’t reach ESPN");
     if(!n){ var S0 = pxState(); S0.snapDay = day; S0.snapN = 0; S0.snapAt = now; peSave(); return; }
-    return new Promise(function(res, rej){ DB.ref("prophescore/" + ME()).update(peClean(up), function(err){ if(err) rej(err); else res(); }); }).then(function(){
+    return new Promise(function(res, rej){ psRef("data").update(peClean(up), function(err){ if(err) rej(err); else res(); }); }).then(function(){
       var S = pxState(); S.snapDay = day; S.snapN = n; S.snapAt = now; S.snapDays = (S.snapDays || 0) + 1; peSave();
     });
   }).then(function(){ PXS.busy = false; pxSnapStatus(); }, function(e){ PXS.busy = false; PXS.err = (e && (e.message || e.code)) || String(e); pxSnapStatus(); });
@@ -4953,7 +5360,7 @@ function pxBtSplitHtml(R, by){
   return h;
 }
 function pxBtCardHtml(){
-  if(!PX.active || !pxKey()) return "";
+  if(!PX.active) return "";
   if(!PXH.idx && !PXH.loading && !PXH.idxErr && DB && ME()){ pxHistLoadIdx().then(function(){ pxBtStatus(); }, function(){ pxBtStatus(); }); }
   var I = PXH.idx || {}, ys = PX_HIST_YEARS.filter(function(y){ var e = I["y" + y]; return e && e.wk && Object.keys(e.wk).length >= 4; });
   var h = '<div class="pem-ats" id="px-bt"><div class="pem-autotop"><b>🧪 Backtest on past seasons</b>' +
@@ -5026,7 +5433,7 @@ function pxPowerRatings(fit){
 function pxRebuild(){
   var S = pxState(), ws = pxWeeks();
   if(S.prior) pxPriorFix(S.prior);
-  PX.active = !!(pxKey() && ws.length);
+  PX.active = ws.length > 0;          // anyone with the shared data; fetching it is what needs a key
   if(!PX.active) return false;
   var next = ws[ws.length - 1] + 1, fit = pxFit(next, S.opts);
   PX.live = fit;
@@ -5067,12 +5474,12 @@ function pxRebuild(){
 }
 // Coming back to the tab after a dropped download picks the sync up again.
 document.addEventListener("visibilitychange", function(){
-  if(document.visibilityState === "visible" && pxKey() && PX.err && /reach CFBD|cut off/.test(PX.err) && !PX.busy){ PX.err = ""; pxSync(false); }
+  if(document.visibilityState === "visible" && pxCanFetch() && PX.err && /reach CFBD|cut off/.test(PX.err) && !PX.busy){ PX.err = ""; pxSync(false); }
 });
 // Auto-tune when the data changes.
 function pxMaybe(){
-  if(!pxKey()) return;
   var S = pxState();
+  if(!PX.synced && !PX.busy && !pxCanFetch()){ PX.synced = true; pxRebuild(); }     // members: the shared data as it stands
   if(!PX.synced && !PX.busy){ PX.synced = true; pxRebuild();
     var old = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && W.v !== PX_AGG_V; });
     if(S.prior && S.prior.v !== 3) old = true;                                       // roster prior predates coaching data
@@ -5083,7 +5490,12 @@ function pxStatus(){ var el = document.getElementById("px-data"); if(el){ el.out
 function pxDataCardHtml(){
   var S = pxState(), ws = pxWeeks(), g = pxGames().filter(function(x){ return x.g.c; }).length;
   var h = '<div class="pem-ats" id="px-data"><div class="pem-autotop"><b>🏈 Play-by-play data (CFBD)</b>' +
-          (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-sync">' + (PX.busy ? 'Loading…' : 'Refresh') + '</button>' : '') + '</div>';
+          (pxCanFetch() ? '<button class="btn btn-sm btn-ghost" id="px-sync">' + (PX.busy ? 'Loading…' : 'Refresh') + '</button>' : '') + '</div>';
+  if(!psEditor()){
+    h += '<div class="pem-autosub">' + (ws.length ? '<b>' + g + '</b> FBS games from weeks ' + ws[0] + '–' + ws[ws.length - 1] + ' · shared data' : 'No shared data yet.') + (S.syncedAt ? ' · refreshed ' + new Date(S.syncedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : '') + '</div>' +
+         '<div class="pem-autonote">Everyone\u2019s model runs on one shared copy of the CFBD data, kept up to date by the editors, so you don\u2019t need a key. Your settings, tunes, favorites and picks are yours alone.</div>';
+    return h + '</div>';
+  }
   if(!pxKey()){
     h += '<div class="pem-autosub">Paste a free CollegeFootballData API key to switch the model to play-by-play efficiency.</div>' +
          '<div class="pem-autonote">Get one at collegefootballdata.com/key (free tier: about 1,000 calls a month; this page uses about 40 to set up and 3 a week after). It’s stored with your account.</div>';
@@ -5201,7 +5613,7 @@ function pxMsub(){
   PE.ui = PE.ui || {};
   if(!PE.ui.msub){ try{ PE.ui.msub = localStorage.getItem("ps_msub") || ""; }catch(_){ PE.ui.msub = ""; } }
   if(!PX_MSUBS.some(function(t){ return t[0] === PE.ui.msub; })) PE.ui.msub = "record";
-  if(!pxKey() || !PX.active){ if(PE.ui.msub === "record" || PE.ui.msub === "tune") return "data"; }   // nothing to show there yet
+  if(!PX.active){ if(PE.ui.msub === "record" || PE.ui.msub === "tune") return "data"; }   // nothing to show there yet
   return PE.ui.msub;
 }
 // Downloads still to finish (or an error) put a dot on the Data tab.
@@ -5210,7 +5622,7 @@ function pxDataDot(){
 }
 function pxSubNavHtml(cur){
   return '<div class="pe-sub" role="tablist">' + PX_MSUBS.map(function(t){
-    var off = (!pxKey() || !PX.active) && (t[0] === "record" || t[0] === "tune");
+    var off = !PX.active && (t[0] === "record" || t[0] === "tune");
     return '<button role="tab" class="' + (t[0] === cur ? "on" : "") + '" data-pe-msub="' + t[0] + '"' + (off ? ' disabled style="opacity:.45"' : '') + '>' + t[1] + (t[0] === "data" && pxDataDot() ? '<span class="dot"></span>' : '') + '</button>';
   }).join('') + '</div>';
 }
@@ -5226,12 +5638,13 @@ function pxPanelHtml(){
     h += pxSimCardHtml();
   } else if(cur === "priors"){
     if(PX.active) h += pxOwnCardHtml() + pxContCardHtml() + pxPriorCardHtml();
-    h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
+    if(psEditor()) h += '<div class="section-label">SP+ sheets <span style="font-weight:800;color:var(--dim)">&middot; ' + (PX.active ? 'blended into projections' : 'projections until CFBD data loads') + '</span></div>' +
          '<div class="admin-panel">' + pemSheetsHtml() + '</div>';
   } else {
+    h += psMigrHtml() + psAdminCardHtml();
     h += pxDataCardHtml();
-    h += pxSnapCardHtml();
-    if(pxKey()) h += pxHistCardHtml() + pxQbCardHtml();
+    if(psEditor()) h += pxSnapCardHtml();
+    if(pxCanFetch()) h += pxHistCardHtml() + pxQbCardHtml();
   }
   return h;
 }
@@ -5923,7 +6336,7 @@ document.addEventListener("toggle", function(e){
 function pemAtsCardHtml(){
   if(!PX.active) return "";
   var r = pemAts();
-  var h = '<div class="pem-ats rec rb"><div class="pem-autotop"><b>🎰 Record vs Vegas</b>' + (pxKey() ? '<button class="btn btn-sm btn-ghost" id="px-recheck"' + (PXR.busy ? ' disabled' : '') + '>' + (PXR.busy ? x(PXR.msg || 'Checking…') : '↻ Re-check lines') + '</button>' : '') + '</div>';
+  var h = '<div class="pem-ats rec rb"><div class="pem-autotop"><b>🎰 Record vs Vegas</b>' + (pxCanFetch() ? '<button class="btn btn-sm btn-ghost" id="px-recheck"' + (PXR.busy ? ' disabled' : '') + '>' + (PXR.busy ? x(PXR.msg || 'Checking…') : '↻ Re-check lines') + '</button>' : '') + '</div>';
   if(PXR.res){ var RR = PXR.res, fmtR = function(q){ return q ? q.w + '-' + q.l + (q.p ? '-' + q.p : '') : '—'; };
     h += '<div class="pem-autosub" style="margin-bottom:8px">' + (RR.changed.length || RR.added ? '<b>' + RR.changed.length + ' closing line' + (RR.changed.length === 1 ? '' : 's') + ' corrected</b>' + (RR.added ? ', ' + RR.added + ' added' : '') + ' · record ' + fmtR(RR.before) + ' → <b>' + fmtR(RR.after) + '</b>' +
          (RR.changed.length ? '<br>' + RR.changed.slice(0, 6).map(function(c){ var vh0 = -c.from, vh1 = -c.to; return 'Wk ' + c.w + ' ' + x(pearAbbr(c.a)) + ' @ ' + x(pearAbbr(c.h)) + ': ' + x(pearAbbr(vh0 >= 0 ? c.h : c.a)) + ' -' + Math.abs(vh0) + ' → ' + x(pearAbbr(vh1 >= 0 ? c.h : c.a)) + ' -' + Math.abs(vh1); }).join(' · ') + (RR.changed.length > 6 ? ' …' : '') : '')
@@ -6069,7 +6482,7 @@ function pemAutoMaybe(){
   if(!PE.ready) return;
   psNow().then(function(){ try{ pxSnapMaybe(); }catch(e){} });
   if(!PXS.timer) PXS.timer = setInterval(function(){ try{ pxSnapMaybe(); }catch(e){} }, 3600e3);
-  if(pxKey()) pxMaybe();
+  pxMaybe();
   pemEnsureFbs();
 }
 // Current season and week from ESPN's live scoreboard, once per session. Also
@@ -6222,7 +6635,7 @@ function pemShowPasteModal(forWeek){
 }
 
 function renderPoolEdge(){
-  if(!peOwner()){ SC.screen = "profile"; draw(); return; }
+  if(!psMember()){ if(PS.role) psGateRequest(); else psLoadRole().then(function(){ if(psMember()) renderPoolEdge(); else psGateRequest(); }); return; }
   if(!PE.ready){ peLoad(function(){ if(SC.screen==="prophescore") renderPoolEdge(); }); }
   PE.ui = PE.ui || {};
 
@@ -6233,20 +6646,22 @@ function renderPoolEdge(){
 
   // Games (default) = every FBS game with projections and a matchup card for any
   // two teams. Rankings = every FBS team. Model = data, record and settings.
-  if(!PE.ui.view){ try{ var _sv = localStorage.getItem("ps_view"); PE.ui.view = (_sv === "model" || _sv === "rank") ? _sv : "games"; }catch(_){ PE.ui.view = "games"; } }
-  h += '<div class="pe-nav three"><button class="' + (PE.ui.view === "games" ? "on" : "") + '" data-pe-view="games">Games</button>' +
+  if(!PE.ui.view){ try{ var _sv = localStorage.getItem("ps_view"); PE.ui.view = (_sv === "model" || _sv === "rank" || _sv === "board") ? _sv : "games"; }catch(_){ PE.ui.view = "games"; } }
+  h += '<div class="pe-nav four"><button class="' + (PE.ui.view === "games" ? "on" : "") + '" data-pe-view="games">Games</button>' +
        '<button class="' + (PE.ui.view === "rank" ? "on" : "") + '" data-pe-view="rank">Rankings</button>' +
-       '<button class="' + (PE.ui.view !== "games" && PE.ui.view !== "rank" ? "on" : "") + '" data-pe-view="model">Model</button></div>';
+       '<button class="' + (PE.ui.view === "board" ? "on" : "") + '" data-pe-view="board">Board</button>' +
+       '<button class="' + (PE.ui.view !== "games" && PE.ui.view !== "rank" && PE.ui.view !== "board" ? "on" : "") + '" data-pe-view="model">Model</button></div>';
 
   if(PE.ui.view === "rank") h += pearRankHtml();
   else if(PE.ui.view === "games") h += pearGamesHtml();
+  else if(PE.ui.view === "board") h += psBoardHtml();
   else {
     if(PE.err){
       h += '<div class="pe-err">' + x(PE.err) + '</div>';
       if(/PERMISSION_DENIED/.test(PE.err)){
         h += '<div class="pe-rule"><div class="pe-rulehd">Add this to your Firebase rules, then reload</div>' +
-             '<pre>"prophescore": {\n  "$uid": {\n    ".read":  "auth != null &amp;&amp; auth.uid === $uid",\n    ".write": "auth != null &amp;&amp; auth.uid === $uid"\n  }\n}</pre>' +
-             '<div class="pe-rulenote">Same level as "users" and "groups". Until it is there, everything here lives only on this device.</div></div>';
+             '<pre class="ps-rules">' + x(PS_RULES) + '</pre>' +
+             '<div class="pe-rulenote">Same level as "users" and "groups" (keep the old "prophescore" rule: the first run copies your data from there). Until it is there, everything here lives only on this device.</div></div>';
       }
     }
     if(PEM.restoreErr) h += '<div class="pem-stale">The saved data would not load: <b>' + x(PEM.restoreErr) + '</b>.</div>';
@@ -6259,7 +6674,7 @@ function renderPoolEdge(){
   var bk = document.getElementById("pe-back");
   if(bk) bk.addEventListener("click", function(){ SC.screen = "profile"; draw(); });
   if(PE.ui.view === "rank") pearBindRank();
-  else if(PE.ui.view !== "games"){ pxBind(); pemBindSheets(); }
+  else if(PE.ui.view !== "games" && PE.ui.view !== "board"){ pxBind(); pemBindSheets(); }
   else pePoolBind();
   setTimeout(pemAutoMaybe, 400);
 }
@@ -7047,7 +7462,7 @@ function pePoolRecordHtml(){
   return h + '</div>';
 }
 // Games tab sub-tabs. "Pool" lists your pool's games; it loads them from the pool on first open each week.
-var PEAR_SUBS = [["all", "All"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
+var PEAR_SUBS = [["all", "All"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
 function pearPoolIds(){
   var o = { n: 0, k: {} };
   (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number" && (!pg.w || !PEAR.week || +pg.w === +PEAR.week)){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
@@ -7188,6 +7603,7 @@ function pearGamesHtml(){
     list.forEach(function(o){ pePoolLogPick(o.pg, o.k, o.g); });
   }
   if(PEAR.filter === "top") list = list.filter(function(o){ return o.g.away.rank || o.g.home.rank; });
+  if(PEAR.filter === "fav") list = list.filter(function(o){ return psFav(o.g.id); });
   if(PEAR.filter === "close"){
     list = list.filter(function(o){ return o.p && pearFbsGame(o.g); });
     list.sort(function(a, b){ return b.p.gqi - a.p.gqi; });
@@ -7203,7 +7619,7 @@ function pearGamesHtml(){
       ? (!PEM.ratings ? 'Add your CFBD key in the Model tab to find edges.'
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
          : 'No posted lines to compare with yet this week.')
-      : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
+      : PEAR.filter === "fav" ? 'No favorites this week. Tap \u2606 on a game to keep it here.' : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
   var lastDay = "", VM = pearVolMap(PEAR.week);
   var isRad = function(g){ return !!VM && VM[g.away.id] !== undefined && VM[g.home.id] !== undefined && (Math.abs(VM[g.away.id]) >= PEAR_VOL_AT || Math.abs(VM[g.home.id]) >= PEAR_VOL_AT); };
   if(VM && list.some(function(o){ return isRad(o.g); })) h += '<div style="font:800 11px Nunito,sans-serif;color:var(--muted);margin:2px 2px 8px">\u2622\ufe0f = a team in the game has moved ' + PEAR_VOL_AT + '+ rating points in the last 3 weeks \u2014 harder to price.</div>';
@@ -7214,7 +7630,7 @@ function pearGamesHtml(){
     var when = g.state === "post" ? "Final" : g.state === "in" ? ('<span class="pr-live">● LIVE</span> ' + x(g.detail))
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
-    h += '<div class="pr-gtop"><span>' + (isRad(g) ? '<i style="font-style:normal" title="A team here has moved ' + PEAR_VOL_AT + '+ rating points in 3 weeks">\u2622\ufe0f</i> ' : '') + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
+    h += '<div class="pr-gtop"><span>' + psStarHtml(g.id) + (isRad(g) ? '<i style="font-style:normal" title="A team here has moved ' + PEAR_VOL_AT + '+ rating points in 3 weeks">\u2622\ufe0f</i> ' : '') + when + (g.tv ? ' · ' + x(g.tv) : '') + (g.neutral ? ' · Neutral' : '') + '</span>' +
          // Edge = points between the model and the line (the same "edge" as the record's Edge 3+);
          // a game with a proven rating adds it, e.g. EDGE 8.6 · 6/10.
          (PEAR.filter === "edge" && o.ou && PEAR.edgeKind !== "all" ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
@@ -7917,7 +8333,7 @@ function pearCardHtml(){
   h += '<button class="pc-x" data-pear-close aria-label="Close">✕</button>';
   if(PEAR.backTeam) h += '<div class="pc-backrow"><button class="pc-bk" data-pear-backteam>← ' + x(pearName(PEAR.backTeam)) + ' schedule</button></div>';
   h += '<div class="pc-title">' + x(pearName(A)) + (c.neutral ? ' vs ' : ' at ') + x(pearName(H)) + '</div>';
-  h += '<div class="pc-sub">' + x(sub) + '</div>';
+  h += '<div class="pc-sub">' + (g ? psStarHtml(g.id) : '') + x(sub) + '</div>';
   // Compact header: teams and projected score on one row, then win bar, lines, edge.
   var hdTeam = function(id, side){ return '<div class="ph-tm"><button class="ph-logo" data-pear-swap="' + side + '" aria-label="Change team">' + pearImg(id, "") + '</button>' +
     '<button class="ph-nm" data-pear-cardteam="' + x(id) + '">' + x(pearName(id)) + '</button></div>'; };
@@ -7979,6 +8395,7 @@ function pearCardHtml(){
     }
     h += '</div>';
   }
+  if(g) h += psCardThreadHtml(g, c.week);
   h += '<div class="pc-foot">@Scorecery · Prophescore</div>';
   h += '</div>';
   if(PEAR.pick) h += pearPickerHtml();
@@ -8498,12 +8915,8 @@ function psStart(){
     psGate("Not signed in", "Prophescore runs on your Scorecery account. Sign in on the hub and come back.");
     return;
   }
-  if(!isRootMaster(uid)){
-    psGate("Owner only", "This tool is not part of your account.");
-    return;
-  }
-  // Load the user record so the topbar has what it needs.
-  function go(){ renderPoolEdge(); }
+  // Load the user record so the topbar has what it needs, then check membership.
+  function go(){ psLoadRole().then(function(){ if(psMember()) renderPoolEdge(); else psGateRequest(); }); }
   if(DB){
     DB.ref("users/" + uid).once("value", function(sn){
       SC.currentUser = sn.val() || { uid: uid };
