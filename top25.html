@@ -252,6 +252,14 @@ table.trk td.c i.d{border-top:5px solid var(--red)}
 .wk-pick button.cur{background:var(--gold)}
 .wk-pick button i{position:absolute;top:1px;right:4px;font-size:9px;font-style:normal;color:var(--green-dark)}
 .wk-pick button:active{transform:translate(2px,2px);box-shadow:none}
+.wk-switch{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin:0 0 12px;padding:9px 12px;border:2px solid var(--border);border-radius:11px;background:#fff;box-shadow:2px 2px 0 var(--border);font-size:12px;font-weight:900;text-align:left}
+.wk-switch small{font-size:10px;font-weight:700;color:var(--muted)}
+.wk-switch:active{transform:translate(2px,2px);box-shadow:none}
+.app-sub[data-act]{cursor:pointer}
+.sv-list{display:flex;flex-direction:column;gap:6px}
+.sv-row{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 12px;border:2px solid var(--border);border-radius:10px;background:#fff}
+.sv-row .sv-nm{flex:1;min-width:0;font-size:12.5px;font-weight:900}
+.sv-row .sv-nm small{display:block;font-size:9.5px;font-weight:700;color:var(--muted)}
 /* ── Committee ── */
 .tab{font-size:11.5px;padding:10px 4px}
 .c-chip{flex:none;padding:8px 12px;border:2px solid var(--border);border-radius:20px;background:#fff;font-size:11.5px;font-weight:900;box-shadow:2px 2px 0 var(--border);white-space:nowrap}
@@ -308,7 +316,7 @@ table.trk td.c i.d{border-top:5px solid var(--red)}
     <a href="index.html" class="hub-btn" title="Back to Scorecery hub" aria-label="Back to Scorecery hub"><span class="hub-arrow">&#8592;</span><span class="hub-word">Hub</span></a>
     <div class="topbar-center">
       <div class="app-name"><span class="scorecery-logo">Scorecery</span></div>
-      <span class="app-sub" id="app-sub">CFB Top 25</span>
+      <span class="app-sub" id="app-sub" data-act="_setweek">CFB Top 25</span>
     </div>
     <div class="topbar-row" id="topbar-right"></div>
   </div>
@@ -1193,7 +1201,9 @@ function deleteWeek(key){
   delete ST.weeks[key];
   if(ST.edit && ST.edit.key===key){ ST.editDirty=false; stopEditing(true); }
   if(canCloud()) DB.ref(BASE()+"/weeks/"+key).remove().catch(function(){ toast("Could not delete from your account"); });
-  writeLocal(); persist(); closeSheet(); draw();
+  writeLocal(); persist();
+  if(ST.sheet && ST.sheet.type==="setweek"){ renderSheet(); draw(); } else closeSheet();   // stay in the picker so you can delete more
+  draw();
   toast("Deleted "+x(w.label));
 }
 // Before the ballot moves on to a new poll, file the old one away if it never was.
@@ -1363,7 +1373,8 @@ function renderTop(){
     {k:"_share",ico:"📤",t:"Share"}];
   var menuItems=[];
   if(pfUid()) menuItems.push({k:"_profile",ico:"👤",t:"Profile & colors"});
-  menuItems.push({k:"_pickweek",ico:"🗓️",t:"Save as a different week"});
+  menuItems.push({k:"_setweek",ico:"🗓️",t:"Choose week / delete saved weeks"});
+  menuItems.push({k:"_pickweek",ico:"📌",t:"Save as a different week"});
   menuItems.push({k:"_copy",ico:"📋",t:"Copy as text"});
   menuItems.push({k:"_refresh",ico:"↻",t:"Refresh AP poll"});
   menuItems.push({k:"_clear",ico:"✕",t:"Clear ballot",danger:true});
@@ -1380,7 +1391,7 @@ function renderTop(){
   var wk=curWeekLabel();
   // One-row header: the week lives in the subtitle. "CFB Top 25 ·" hides on phones (CSS).
   document.getElementById("app-sub").innerHTML = ST.edit ? ("✏️ Editing "+x(wk))
-    : ('<span class="sub-pre">CFB Top 25 · </span>'+(wk?x(wk)+" Ballot":"Top 25"));
+    : ('<span class="sub-pre">CFB Top 25 · </span>'+(wk?x(wk)+" Ballot":"Top 25")+" ▾");
 }
 
 function draw(){
@@ -1415,6 +1426,12 @@ function ballotHTML(){
          '<div class="row-btns"><button class="btn btn-gold" data-act="_newweek">Start from new AP</button><button class="btn btn-ghost" data-act="_carry">Carry mine forward</button></div></div>';
     }
   }
+
+  // Week switcher: choose which week this ballot is for (and manage saved weeks)
+  (function(){
+    var wl=curWeekLabel(), sv=Object.keys(ST.weeks).length;
+    h+='<button class="wk-switch" data-act="_setweek"><span>🗓️ '+(wl?x(wl):"Choose week")+'</span><small>'+(sv?sv+' saved · ':'')+'Change week ▾</small></button>';
+  })();
 
   // Movement: always against your own previous saved week
   var ctx=curCtx();
@@ -1622,6 +1639,7 @@ function renderSheet(){
   else if(s.type==="profile") h+=profileHTML();
   else if(s.type==="week") h+=weekSheetHTML(s.key);
   else if(s.type==="saveweek") h+=saveWeekHTML();
+  else if(s.type==="setweek") h+=setWeekHTML();
   else if(s.type==="cnew") h+=cnewHTML(s.mode);
   else if(s.type==="cinvite") h+=cinviteHTML(s.code, s.fresh);
   else if(s.type==="cmanage") h+=cmanageHTML(s.code);
@@ -1758,6 +1776,45 @@ function saveWeekHTML(){
   });
   h+='</div><div class="sh-note">✓ = already saved. Saving over a week replaces it.</div></div>';
   return h;
+}
+// Choose which week this ballot is for, and review / delete saved weeks.
+function setWeekHTML(){
+  var t=defaultSaveTarget(), curKey=ST.edit?ST.edit.key:(ST.meta&&ST.meta.weekKey);
+  var h='<div class="sh-head"><div class="sh-title">Choose week<small>Which week of the poll are you doing?</small></div><button class="sh-x" data-act="_close">✕</button></div><div class="sh-body">';
+  h+='<div class="pf-sec" style="margin-top:0">'+t.season+' season</div><div class="wk-pick">';
+  var opts=[0]; for(var n=1;n<=16;n++) opts.push(n); opts.push(99);
+  opts.forEach(function(n){
+    var k=makeKey(t.season,n), has=!!ST.weeks[k];
+    h+='<button class="'+(k===curKey?"cur ":"")+(has?"has":"")+'" data-act="setweekpick" data-k="'+k+'">'+x(weekShort(n))+(has?'<i>✓</i>':'')+'</button>';
+  });
+  h+='</div><div class="sh-note">✓ = saved. Tap a saved week to edit it; tap an empty week to make your current ballot that week.</div>';
+  var keys=weekKeysSorted(null).reverse();
+  h+='<div class="pf-sec">Saved weeks</div>';
+  if(!keys.length) h+='<div class="hint-card">Nothing saved yet.</div>';
+  else {
+    h+='<div class="sv-list">';
+    keys.forEach(function(k){
+      var w=ST.weeks[k], d=new Date(w.savedAt||Date.now());
+      h+='<div class="sv-row"><div class="sv-nm">'+x(w.label)+' · '+w.season+'<small>saved '+d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+' · '+filledCount(slotsToBallot(w.slots))+' teams</small></div>'+
+         '<button class="btn btn-blue" data-act="weekedit" data-k="'+k+'">✏️ Edit</button>'+
+         '<button class="btn btn-red" data-act="weekdel" data-k="'+k+'" aria-label="Delete '+x(w.label)+'">🗑️ Delete</button></div>';
+    });
+    h+='</div>';
+  }
+  h+='</div>';
+  return h;
+}
+// Point the ballot on screen at a different week (without saving it).
+function setBallotWeek(key){
+  var p=keyParts(key); if(!p) return;
+  if(ST.edit && !stopEditing()) return;
+  if(ST.weeks[key]){ startEditing(key); return; }
+  var ap=apForKey(key);
+  ST.meta=ST.meta||{};
+  ST.meta.season=p.season; ST.meta.weekKey=key; ST.meta.week=(ap&&ap.key===key&&ap.week)||weekLabel(p.n); ST.meta.ap=ap||null;
+  if(ST.ap) ST.dismissedWeek=ST.ap.key;   // you chose this week on purpose — hide the "new AP poll" banner
+  closeSheet(); changed();
+  toast("This is now your "+x(ST.meta.week)+" ballot — tap 📌 to save it");
 }
 function profileHTML(){
   var P=ST.profile, curEm=P.emoji||"🎯";
@@ -2453,6 +2510,8 @@ document.addEventListener("click", function(e){
     case "_refresh": ST.menuOpen=false; loadAP(); loadRecords(true); return;
     case "_share": ST.menuOpen=false; openShare(); return;
     case "_saveweek": ST.menuOpen=false; renderTop(); quickSaveWeek(); return;
+    case "_setweek": ST.menuOpen=false; renderTop(); openSheet({type:"setweek"}); return;
+    case "setweekpick": setBallotWeek(k); return;
     case "_pickweek": ST.menuOpen=false; if(ST.edit){ renderTop(); toast("You’re editing "+x(ST.edit.label)); return; } openSheet({type:"saveweek"}); return;
     case "savepick":
       if(ST.weeks[k] && !confirm("Replace your saved "+ST.weeks[k].label+" ballot with this one?")) return;
