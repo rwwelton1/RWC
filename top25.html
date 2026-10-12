@@ -1485,6 +1485,7 @@ function draw(){
   drawFoot();
 }
 
+function _lsDismissed(){ try{ return localStorage.getItem("t25_dismissed_ap"); }catch(e){ return null; } }
 function ballotHTML(){
   var h="", ap=ST.ap, ws=weekSaveStatus();
   if(ST.edit){
@@ -1496,7 +1497,7 @@ function ballotHTML(){
     // (No intro card: AP Poll, Save Week and Share all live in the top bar.)
 
     // A new poll since this ballot's week
-    if(ap && !ap.stale && ST.meta && ST.meta.weekKey && ST.meta.weekKey!==ap.key && ap.key>ST.meta.weekKey && filledCount() && ST.dismissedWeek!==ap.key){
+    if(ap && !ap.stale && ST.meta && ST.meta.weekKey && ST.meta.weekKey!==ap.key && ap.key>ST.meta.weekKey && filledCount() && ST.dismissedWeek!==ap.key && _lsDismissed()!==ap.key){
       var willArchive=!ST.weeks[ST.meta.weekKey];
       h+='<div class="banner"><b>🗞️ The '+x(ap.week)+' AP poll is out</b><span>Your ballot is from '+x(ST.meta.week||"an earlier week")+'. '+
          (willArchive?'It’ll be saved to your season first, so you won’t lose it.':'That week is already saved to your season.')+'</span>'+
@@ -1822,7 +1823,7 @@ function weekSheetHTML(key){
   var h='<div class="sh-head"><div class="sh-title">Your '+x(w.label)+' ballot<small>'+w.season+' · saved '+d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+' · '+filledCount(b)+' teams</small></div><button class="sh-x" data-act="_close">✕</button></div>';
   h+='<div class="sh-body">';
   h+='<div class="sh-actions three"><button class="btn btn-gold" data-act="weekshare" data-k="'+key+'">📤 Share</button>'+
-     '<button class="btn btn-blue" data-act="weekedit" data-k="'+key+'">✏️ Edit</button>'+
+     '<button class="btn btn-blue" data-act="weekedit" data-k="'+key+'">✏️ Open &amp; edit</button>'+
      '<button class="btn btn-red" data-act="weekdel" data-k="'+key+'">🗑️ Delete</button></div>';
   h+= ctx.prev ? '<div class="cmp-note" style="margin:12px 2px 6px;text-align:left">Arrows show moves from your '+x(ctx.prev.label)+' ballot</div>'
                : '<div class="hint-card" style="margin-top:12px">This is your first saved week of '+w.season+', so there are no moves to show.</div>';
@@ -1864,7 +1865,7 @@ function setWeekHTML(){
     var k=makeKey(t.season,n), has=!!ST.weeks[k];
     h+='<button class="'+(k===curKey?"cur ":"")+(has?"has":"")+'" data-act="setweekpick" data-k="'+k+'">'+x(weekShort(n))+(has?'<i>✓</i>':'')+'</button>';
   });
-  h+='</div><div class="sh-note">✓ = saved. Tap a saved week to edit it; tap an empty week to make your current ballot that week.</div>';
+  h+='</div><div class="sh-note">✓ = saved. Tap a saved week to switch to it; tap an empty week to start that week (your current ballot carries over).</div>';
   var keys=weekKeysSorted(null).reverse();
   h+='<div class="pf-sec">Saved weeks</div>';
   if(!keys.length) h+='<div class="hint-card">Nothing saved yet.</div>';
@@ -1873,7 +1874,7 @@ function setWeekHTML(){
     keys.forEach(function(k){
       var w=ST.weeks[k], d=new Date(w.savedAt||Date.now());
       h+='<div class="sv-row"><div class="sv-nm">'+x(w.label)+' · '+w.season+'<small>saved '+d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+' · '+filledCount(slotsToBallot(w.slots))+' teams</small></div>'+
-         '<button class="btn btn-blue" data-act="weekedit" data-k="'+k+'">✏️ Edit</button>'+
+         '<button class="btn btn-blue" data-act="setweekpick" data-k="'+k+'">Open</button>'+
          '<button class="btn btn-red" data-act="weekdel" data-k="'+k+'" aria-label="Delete '+x(w.label)+'">🗑️ Delete</button></div>';
     });
     h+='</div>';
@@ -1881,17 +1882,30 @@ function setWeekHTML(){
   h+='</div>';
   return h;
 }
-// Point the ballot on screen at a different week (without saving it).
+// Switch the ballot you're working on to a different week. The week sticks: it is
+// remembered, and 📌 Save always saves into it (no temporary "editing" mode to fall out of).
 function setBallotWeek(key){
   var p=keyParts(key); if(!p) return;
   if(ST.edit && !stopEditing()) return;
-  if(ST.weeks[key]){ startEditing(key); return; }
-  var ap=apForKey(key);
+  var cur=ST.meta&&ST.meta.weekKey;
+  if(cur===key){ closeSheet(); return; }
+  // Don't lose work on the week you're leaving.
+  var ws=weekSaveStatus();
+  if(cur && keyParts(cur) && filledCount() && (ws.state==="unsaved"||ws.state==="changed")){
+    var from=(ST.meta&&ST.meta.week)||weekLabel(keyParts(cur).n);
+    if(!confirm("Save your "+from+" ballot before switching weeks?\n\nOK = save it, Cancel = stay on "+from)) return;
+    saveWeek(cur);
+  }
+  var w=ST.weeks[key], ap=(w&&w.ap)||apForKey(key);
   ST.meta=ST.meta||{};
-  ST.meta.season=p.season; ST.meta.weekKey=key; ST.meta.week=(ap&&ap.key===key&&ap.week)||weekLabel(p.n); ST.meta.ap=ap||null;
-  if(ST.ap) ST.dismissedWeek=ST.ap.key;   // you chose this week on purpose — hide the "new AP poll" banner
+  if(w) ST.ballot=slotsToBallot(w.slots);
+  ST.meta.season=p.season; ST.meta.weekKey=key;
+  ST.meta.week=w?w.label:((ap&&ap.key===key&&ap.week)||weekLabel(p.n));
+  ST.meta.ap=ap||null;
+  if(ST.ap){ ST.dismissedWeek=ST.ap.key; try{ localStorage.setItem("t25_dismissed_ap", ST.ap.key); }catch(e){} }   // you chose this week on purpose — hide the "new AP poll" banner
   closeSheet(); changed();
-  toast("This is now your "+x(ST.meta.week)+" ballot — tap 📌 to save it");
+  toast(w ? "Switched to your "+x(ST.meta.week)+" ballot"
+          : x(ST.meta.week)+" ballot started — tap AP Poll to load its poll, 📌 to save");
 }
 function profileHTML(){
   var P=ST.profile, curEm=P.emoji||"🎯";
@@ -2632,7 +2646,7 @@ document.addEventListener("click", function(e){
       draw(); return; }
     case "week": openSheet({type:"week", key:k}); return;
     case "weekshare": openShare(weekG(k)); return;
-    case "weekedit": startEditing(k); return;
+    case "weekedit": closeSheet(); setBallotWeek(k); return;
     case "weekdel": deleteWeek(k); return;
     case "up": moveSlot(i,i-1); return;
     case "dn": moveSlot(i,i+1); return;
