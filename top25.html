@@ -945,6 +945,52 @@ function afterAP(opts){
   if(opts.fill){ fillFromAP(); return; }
   if(ST.loaded && !ST.hadSave && filledCount()===0) fillFromAP(true);
 }
+// ── AP poll for the week you've selected ────────────────────
+// ESPN's week numbering can be offset from the poll's label, so try a few
+// candidates and keep the one whose poll is actually the week asked for.
+function fetchAPForKey(key){
+  var p=keyParts(key); if(!p) return Promise.resolve(null);
+  if(ST.ap && !ST.ap.stale && ST.ap.key===key) return Promise.resolve(ST.ap);
+  try{ var c=JSON.parse(localStorage.getItem("t25_ap_"+key)||"null"); if(c&&c.ranks&&c.ranks.length) return Promise.resolve(c); }catch(e){}
+  var cands = p.n===0 ? ["weeks=1","weeks=0","seasontype=1&weeks=1"]
+            : p.n===99 ? ["seasontype=3&weeks=1","weeks=17","weeks=16"]
+            : ["weeks="+p.n, "weeks="+(p.n+1), "weeks="+(p.n-1)];
+  var i=0;
+  function next(){
+    if(i>=cands.length) return Promise.resolve(null);
+    var q=cands[i++];
+    return fetch(ESPN+"rankings?seasons="+p.season+"&"+q, {cache:"no-store"})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(data){
+        var ap=data?parseRankings(data):null;
+        if(ap && ap.ranks.length && ap.key===key){
+          try{ localStorage.setItem("t25_ap_"+key, JSON.stringify(apSnap(ap))); }catch(e){}
+          return ap;
+        }
+        return next();
+      })
+      .catch(function(){ return next(); });
+  }
+  return next();
+}
+// Replace the ballot on screen with a given week's AP poll.
+function fillBallotFromAP(ap){
+  var b=emptyBallot();
+  ap.ranks.forEach(function(r,i){ if(i<N) b[i]=compactTeam(r.team); });
+  ST.ballot=b;
+  var snap=apSnap(ap);
+  if(ST.edit){ ST.edit.ap=snap; }
+  else { ST.meta=ST.meta||{}; ST.meta.season=snap.season; ST.meta.week=snap.week; ST.meta.weekKey=snap.key; ST.meta.ap=snap; }
+  changed();
+}
+function importAPForWeek(key, label){
+  toast("Loading the "+x(label)+" AP poll…");
+  fetchAPForKey(key).then(function(ap){
+    if(!ap){ toast("Couldn’t find an AP poll for "+x(label)); return; }
+    fillBallotFromAP(ap);
+    toast("✓ Loaded the "+x(label)+" AP Top 25");
+  });
+}
 function tagCurrentWeek(){
   if(!ST.ap) return;
   ST.meta=ST.meta||{};
@@ -2499,8 +2545,17 @@ document.addEventListener("click", function(e){
     case "_season": ST.menuOpen=false; ST.tab=ST.tab==="season"?"ballot":"season"; window.scrollTo(0,0); draw(); return;
     case "_ap":
       ST.menuOpen=false;
+      // A week is selected (or being edited) and it isn't the live poll → import that week's AP poll.
+      var _selKey=ST.edit?ST.edit.key:(ST.meta&&ST.meta.weekKey);
+      var _selLbl=ST.edit?ST.edit.label:((ST.meta&&ST.meta.week)||"");
+      if(_selKey && keyParts(_selKey) && !(ST.ap && !ST.ap.stale && ST.ap.key===_selKey)){
+        if(filledCount() && !confirm("Replace your ballot with the AP Top 25 for "+(_selLbl||weekLabel(keyParts(_selKey).n))+"?")){ renderTop(); return; }
+        ST.tab="ballot";
+        importAPForWeek(_selKey, _selLbl||weekLabel(keyParts(_selKey).n));
+        return;
+      }
       if(ST.edit){ renderTop(); toast("Finish editing "+x(ST.edit.label)+" first"); return; }
-      if(filledCount() && ST.hadSave && !confirm("Replace your ballot with the current AP Top 25?")) { renderTop(); return; }
+      if(filledCount() && ST.hadSave && !confirm("Replace your ballot with the current AP Top 25"+(ST.ap&&ST.ap.week?" ("+ST.ap.week+")":"")+"?")) { renderTop(); return; }
       // Moving to a newer poll: file the old week away first so it isn't lost.
       var arch=(ST.ap && ST.meta && ST.meta.weekKey && ST.meta.weekKey!==ST.ap.key) ? archiveIfUnsaved() : null;
       if(arch) toast("Saved your "+x(arch)+" ballot to your season");
