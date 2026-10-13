@@ -10637,15 +10637,17 @@ function ssimRun(P, cfg, single, n){
       if(single) log.games.push({ w: w, M: M, lock: wasLocked, sc: ssScore(M, e.tot) });
     }
     confList.forEach(function(c){
-      var fx = P.ccgFixed[c.name], a, h, M, cw, cl;
-      if(fx){ a = fx.a; h = fx.h; if(fx.done){ cw = fx.winner; M = cw === h ? 4 : -4; } else { M = mar(a, h, fx.m); cw = M > 0 ? h : a; if(single) M = ssScore(M, fx.tot || 56) && M; W[cw]++; L[cw === a ? h : a]++; } }
+      var fx = P.ccgFixed[c.name], a, h, M, cw, mm, tt = 56, ff = forced["ccg|" + c.name];
+      if(fx){ a = fx.a; h = fx.h; if(fx.done){ cw = fx.winner; M = cw === h ? 4 : -4; mm = 0; } else { mm = fx.m; tt = fx.tot || 56; M = mar(a, h, mm); } }
       else {
         var pair = c.divs ? Object.keys(c.divs).slice(0, 2).map(function(d){ return standings(c.divs[d])[0]; }) : standings(c.members).slice(0, 2);
         if(pair.length < 2){ if(pair[0] != null){ champ[pair[0]] = 1; T.conf[pair[0]]++; } return; }
-        a = pair[1]; h = pair[0]; M = mar(a, h, P.base[h] - P.base[a]); cw = M > 0 ? h : a; W[cw]++; L[cw === a ? h : a]++;
+        a = pair[1]; h = pair[0]; mm = P.base[h] - P.base[a]; M = mar(a, h, mm);
       }
+      if(ff && !(fx && fx.done)) M = (ff === "h" ? 1 : -1) * Math.max(Math.abs(M), 1);
+      if(!(fx && fx.done)){ cw = M > 0 ? h : a; W[cw]++; L[cw === a ? h : a]++; }
       T.ccg[a]++; T.ccg[h]++; champ[cw] = 1; T.conf[cw]++;
-      if(single){ var scc = ssScore(M, 56); log.confs.push({ name: c.name, kind: c.kind, champ: cw, other: cw === a ? h : a, a: a, h: h, sc: scc, set: !!(fx && fx.done) }); }
+      if(single){ log.confs.push({ name: c.name, kind: c.kind, champ: cw, other: cw === a ? h : a, a: a, h: h, sc: ssScore(M, tt), m: mm, set: !!fx, done: !!(fx && fx.done), lock: !!(ff && !(fx && fx.done)) }); }
     });
     for(var q = 0; q < N; q++) score[q] = bs[q] + sh[q] - PEAR_CFP_LOSS * L[q] + (champ[q] ? PEAR_CFP_CHAMP : 0);
     order.sort(function(x, y){ return score[y] - score[x]; });
@@ -10782,17 +10784,33 @@ function ssConfShort(n){
   if(/atlantic coast/i.test(n)) return "ACC"; if(/southeastern/i.test(n)) return "SEC"; if(/conference usa|c-usa/i.test(n)) return "C-USA"; if(/mid-american/i.test(n)) return "MAC";
   if(/independent/i.test(n)) return "Ind"; return n;
 }
+function ssCcgHtml(R){
+  var s = PEAR.ss, L = R.log, P = R.P, id = function(i){ return P.ids[i]; };
+  var cs = L.confs.slice().sort(function(a, b){ return (a.kind === "p4" ? 0 : 1) - (b.kind === "p4" ? 0 : 1) || ssConfShort(a.name).localeCompare(ssConfShort(b.name)); });
+  var h = '<div class="ss-hint" style="margin:2px 2px 8px">Conference championship week. Where ESPN has the game set it is used; otherwise the two division winners (or the top two in the standings) meet. Tap a team to pick the champion.</div>';
+  h += cs.map(function(c){
+    var f = s.forced["ccg|" + c.name], ph = c.m != null ? pearNormCdf(c.m / P.sd) : pearNormCdf((P.base[c.h] - P.base[c.a]) / P.sd);
+    var side = function(t, pr, sc, key){ var win = c.champ === t, lk = f === key && c.lock; var lockable = !c.done;
+      return '<button class="ss-s' + (win ? ' win' : '') + (lk ? ' lock' : '') + '"' + (lockable ? ' data-ss="force" data-g="ccg|' + x(c.name) + '" data-v="' + key + '"' : ' disabled') + '>' + pearImg(id(t), "ss-lg") + '<span><b>' + x(pearAbbr(id(t))) + '</b><small>' + (c.done ? 'final' : Math.round(pr * 100) + '%') + (lk ? ' · locked' : '') + '</small></span><em>' + sc + '</em></button>'; };
+    return '<div class="ss-rh">' + x(ssConfShort(c.name)) + ' <small>' + (c.done ? 'already played' : c.set ? 'game set' : 'projected matchup') + '</small></div><div class="ss-gm">' + side(c.a, 1 - ph, c.sc[0], 'a') + '<span class="ss-at">vs</span>' + side(c.h, ph, c.sc[1], 'h') + '</div>';
+  }).join('') || '<div class="pr-empty">No conference title games.</div>';
+  var nf = Object.keys(s.forced).length;
+  if(nf) h += '<div class="pr-tools" style="margin-top:8px"><button class="pr-btn" data-ss="unlock">Unlock all ' + nf + ' result' + (nf === 1 ? '' : 's') + '</button></div>';
+  return h;
+}
 function ssGamesHtml(R){
   var s = PEAR.ss, L = R.log, P = R.P, G = R.G, id = function(i){ return i >= 0 ? P.ids[i] : null; };
   var wks = []; G.forEach(function(e){ if(wks.indexOf(e.wk) < 0) wks.push(e.wk); }); wks.sort(function(a, b){ return a - b; });
-  if(!wks.length) return '<div class="pr-empty">No regular-season games left to simulate.</div>';
-  if(wks.indexOf(s.wk) < 0) s.wk = wks[0];
+  if(!wks.length && !L.confs.length) return '<div class="pr-empty">No regular-season games left to simulate.</div>';
+  if(!wks.length) s.wk = "ccg";
+  if(s.wk !== "ccg" && wks.indexOf(s.wk) < 0) s.wk = wks[0];
   var top = {}; P.ids.map(function(_, i){ return i; }).sort(function(a, b){ return P.base[b] - P.base[a]; }).slice(0, 25).forEach(function(i){ top[i] = 1; });
   var cOf = function(i){ return pearConfOf(P.ids[i]) || "Other"; };
   var confs = {}; G.forEach(function(e){ if(e.fcs) return; confs[cOf(e.h)] = 1; confs[cOf(e.a)] = 1; });
   var cl = Object.keys(confs).sort(function(a, b){ var ka = pearConfKind(a) === "p4" ? 0 : 1, kb = pearConfKind(b) === "p4" ? 0 : 1; return (ka - kb) || ssConfShort(a).localeCompare(ssConfShort(b)); });
   if(s.gconf && s.gconf !== "*" && !confs[s.gconf]) s.gconf = "";
-  var h = '<div class="pr-tools"><div class="pr-seg ss-wks">' + wks.map(function(w){ return '<button class="' + (w === s.wk ? 'on' : '') + '" data-ss="wk" data-v="' + w + '">Wk ' + w + '</button>'; }).join('') + '</div></div>';
+  var h = '<div class="pr-tools"><div class="pr-seg ss-wks">' + wks.map(function(w){ return '<button class="' + (w === s.wk ? 'on' : '') + '" data-ss="wk" data-v="' + w + '">Wk ' + w + '</button>'; }).join('') + (L.confs.length ? '<button class="' + (s.wk === "ccg" ? 'on' : '') + '" data-ss="wk" data-v="ccg">🏆 Title games</button>' : '') + '</div></div>';
+  if(s.wk === "ccg") return h + ssCcgHtml(R);
   h += '<div class="pr-tools"><div class="pr-seg ss-wks"><button class="' + (!s.gconf ? 'on' : '') + '" data-ss="gconf" data-v="">Top games</button><button class="' + (s.gconf === "*" ? 'on' : '') + '" data-ss="gconf" data-v="*">By conference</button>' +
        cl.map(function(c){ return '<button class="' + (s.gconf === c ? 'on' : '') + '" data-ss="gconf" data-v="' + x(c) + '">' + x(ssConfShort(c)) + '</button>'; }).join('') + '</div></div>';
   var one = s.gconf && s.gconf !== "*";
@@ -10804,6 +10822,8 @@ function ssGamesHtml(R){
     else if(!s.gAll && !(top[e.a] || top[e.h])) return;
     rows.push([k, e]);
   });
+  var fellBack = false;
+  if(!rows.length && !one && !s.gAll){ G.forEach(function(e, k){ if(e.wk === s.wk && !e.fcs) rows.push([k, e]); }); fellBack = rows.length > 0; }
   var strength = function(r){ return P.base[r[1].a] + P.base[r[1].h]; };
   rows.sort(function(a, b){ return strength(b) - strength(a); });
   var gconfOf = function(e){ return (one ? s.gconf : (cOf(e.a) === cOf(e.h) ? cOf(e.h) : cOf(e.h))); };
@@ -10820,6 +10840,7 @@ function ssGamesHtml(R){
   } else {
     h += rows.slice(0, one || s.gAll ? 80 : 60).map(rowHtml).join('') || '<div class="pr-empty">No games to show this week.</div>';
   }
+  if(fellBack) h = h.replace('Tap a team to lock it as the winner', 'No ranked teams play this week — showing every game');
   var nf = Object.keys(s.forced).length;
   if(nf) h += '<div class="pr-tools" style="margin-top:8px"><button class="pr-btn" data-ss="unlock">Unlock all ' + nf + ' result' + (nf === 1 ? '' : 's') + '</button></div>';
   return h;
@@ -10892,7 +10913,7 @@ document.addEventListener("click", function(e){
   if(a === "reload"){ PEAR.seasonData = null; s.res = null; renderPoolEdge(); return; }
   if(a === "shock"){ s.shock = +v; ssChanged(); ssRepaint(); return; }
   if(a === "fmt"){ s.fmt = v; ssChanged(); ssRepaint(); return; }
-  if(a === "wk"){ s.wk = +v; ssRepaint(); return; }
+  if(a === "wk"){ s.wk = v === "ccg" ? "ccg" : +v; ssRepaint(); return; }
   if(a === "gall"){ s.gAll = v === "1"; ssRepaint(); return; }
   if(a === "force"){ var g = t.getAttribute("data-g"); if(s.forced[g] === v) delete s.forced[g]; else s.forced[g] = v; ssChanged(); ssRepaint(); return; }
   if(a === "unlock"){ s.forced = {}; ssChanged(); ssRepaint(); return; }
