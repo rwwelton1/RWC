@@ -761,6 +761,16 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 /* Sub-tabs: one row under the main tabs that stays on screen while you scroll */
 .pe-sub{position:sticky;top:var(--pe-tb,64px);z-index:40;display:flex;gap:4px;margin:-6px -14px 14px;padding:8px 14px;background:var(--bg);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .pe-sub::-webkit-scrollbar{display:none}
+.bf-rec{background:#fffdf6;border:2px solid var(--border);border-radius:14px;box-shadow:3px 3px 0 var(--border);padding:8px 12px;margin:0 0 12px}
+.bf-rhd,.bf-rr{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:6px;align-items:center}
+.bf-rhd{font:900 10px 'Nunito',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding-bottom:4px;border-bottom:2px solid var(--border)}
+.bf-rhd span:nth-child(n+2),.bf-rr>span:nth-child(n+2){text-align:right}
+.bf-rr{padding:6px 0;border-bottom:1.5px dashed #d8d2c4;font:800 13px 'Nunito',sans-serif}.bf-rr:last-of-type{border-bottom:none}
+.bf-rl{display:flex;flex-direction:column;font:900 12px 'Nunito',sans-serif}.bf-rl small{font:800 10px 'Nunito',sans-serif;color:var(--muted)}
+.bf-rr small{font:800 10px 'Nunito',sans-serif;color:var(--muted)}
+.bf-up{color:#1f7a3a}.bf-dn{color:#c0392b}.bf-na{color:var(--muted)}
+.bf-raw{font:800 11.5px 'Nunito',sans-serif;padding:6px 0 2px;border-top:2px solid var(--border);margin-top:2px}
+.bf-rfoot{font:700 10.5px/1.35 'Nunito',sans-serif;color:var(--muted);margin-top:4px}
 .bf{margin:0 0 10px}
 .bf-top{display:flex;gap:8px;justify-content:stretch}.bf-top .pr-btn{flex:1;margin-left:0;white-space:nowrap}
 .bf-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -9529,6 +9539,65 @@ function bfApply(list){
   }
   return list;
 }
+// ── Records: this week's model record, and the record of whatever the line filters pick out ──
+function bfHistMatch(G, b){
+  var vh = G.vh, a = Math.abs(vh), neutral = !!(G.g && G.g.neutral), vt = G.vt, pickHome = G.pred > vh, pickLine = pickHome ? -vh : vh, over = (vt !== null && vt !== undefined) ? G.pt > vt : null;
+  var any = function(k, f){ return !b[k].length || b[k].some(f); };
+  if(!any("role", function(v){ if(v === "nt") return neutral; if(v === "pk") return vh === 0; if(neutral) return false; return v === "hd" ? vh < 0 : v === "rd" ? vh > 0 : v === "hf" ? vh > 0 : v === "rf" ? vh < 0 : false; })) return false;
+  if(!any("line", function(v){ return v === "s3" ? a <= 3 : v === "s7" ? a > 3 && a <= 7 : v === "s10" ? a > 7 && a <= 10 : v === "s14" ? a > 10 && a <= 14 : v === "s21" ? a > 14 && a <= 21 : v === "s22" ? a > 21 : v === "key" ? [2.5, 3, 3.5, 6.5, 7, 7.5].indexOf(a) >= 0 : false; })) return false;
+  if(!any("total", function(v){ if(vt === null || vt === undefined) return false; return v === "t45" ? vt < 45 : v === "t52" ? vt >= 45 && vt <= 52 : v === "t58" ? vt > 52 && vt <= 58 : v === "t65" ? vt > 58 && vt <= 65 : vt > 65; })) return false;
+  if(!any("model", function(v){ if(v === "over") return over === true; if(v === "under") return over === false; if(Math.abs(G.pred - vh) < 0.05) return false;
+      return v === "dog" ? pickLine > 0 : v === "fav" ? pickLine < 0 : v === "home" ? pickHome : v === "road" ? !pickHome : false; })) return false;
+  if(!any("move", function(v){ if(G.vo === undefined || G.vo === null) return false; return v === "tw" ? G.mvS === 1 : v === "aw" ? G.mvS === -1 : Math.abs(vh - G.vo) >= 1; })) return false;
+  if(!any("time", function(v){ if(!(G.g && G.g.date)) return false; var hr = new Date(G.g.date).getHours(); if(isNaN(hr)) return false; return v === "am" ? hr <= 12 : v === "pm" ? (hr >= 13 && hr < 19) : hr >= 19; })) return false;
+  if(b.conf && !(pearConfOf(String(G.g.homeId)) === b.conf || pearConfOf(String(G.g.awayId)) === b.conf)) return false;
+  if(b.edge && !(Math.abs(G.pred - vh) >= b.edge - 1e-9)) return false;
+  return true;
+}
+function bfBump(o, r){ if(r === "W" || r === "win") o.w++; else if(r === "L" || r === "loss") o.l++; else if(r === "P" || r === "push") o.p++; }
+function bfTxt(o){ return o.w + "-" + o.l + (o.p ? "-" + o.p : ""); }
+function bfCell(o){
+  if(!(o.w + o.l)) return '<span class="bf-na">–</span>';
+  var pc = o.w / (o.w + o.l);
+  return '<b class="' + (pc >= 0.524 ? 'bf-up' : 'bf-dn') + '">' + bfTxt(o) + '</b> <small>' + Math.round(pc * 100) + '%</small>';
+}
+// The model's finished games for the week on this page, from the same picks the cards show.
+function bfWeekRec(list){
+  var s = { w: 0, l: 0, p: 0 }, t = { w: 0, l: 0, p: 0 };
+  list.forEach(function(o){ var g = o.g, p = o.p; if(!p || g.state !== "post" || !pearFbsGame(g)) return;
+    var mp = pearModelPick(g, p.margin); if(mp && mp.res) bfBump(s, mp.res);
+    var T = pearModelTotal(g, p.total); if(T && T.res) bfBump(t, T.res); });
+  return { s: s, t: t };
+}
+function bfSeasonRec(b, filtered){
+  var r = pemAts(); if(!r || !r.games) return null;
+  var o = { s: { w: 0, l: 0, p: 0 }, t: { w: 0, l: 0, p: 0 }, hc: { w: 0, l: 0, p: 0 }, ov: { w: 0, l: 0, p: 0 }, n: 0 };
+  r.games.forEach(function(G){
+    if(filtered && !bfHistMatch(G, b)) return;
+    o.n++; bfBump(o.s, G.res); bfBump(o.t, G.tres);
+    if(filtered){ var c = G.act - G.vh; bfBump(o.hc, c > 0 ? "W" : c < 0 ? "L" : "P"); if(G.vt !== null && G.vt !== undefined){ var d = G.at - G.vt; bfBump(o.ov, d > 0 ? "W" : d < 0 ? "L" : "P"); } }
+  });
+  return o;
+}
+function bfRecCardHtml(list0){
+  var b = bfGet(), on = bfCount() > 0, wk = PEAR.week, rows = '', hasAny = false;
+  var row = function(lab, sub, S, T){ hasAny = true; return '<div class="bf-rr"><span class="bf-rl">' + lab + (sub ? '<small>' + sub + '</small>' : '') + '</span><span>' + bfCell(S) + '</span><span>' + bfCell(T) + '</span></div>'; };
+  var W = bfWeekRec(list0), season = bfSeasonRec(b, false);
+  rows += row('Week ' + wk, 'all games', W.s, W.t);
+  if(season) rows += row('Season', season.n + ' graded', season.s, season.t);
+  var extra = '';
+  if(on){
+    var Wf = bfWeekRec(bfApply(list0.slice())), Sf = bfSeasonRec(b, true);
+    rows += row('Week ' + wk + ' · filtered', 'your filters', Wf.s, Wf.t);
+    if(Sf){ rows += row('Season · filtered', Sf.n + ' graded game' + (Sf.n === 1 ? '' : 's'), Sf.s, Sf.t);
+      extra = '<div class="bf-raw">Same games, no model: home side covered <b>' + bfTxt(Sf.hc) + '</b> · overs hit <b>' + bfTxt(Sf.ov) + '</b></div>'; }
+    else extra = '<div class="bf-raw">Season record by filter needs the play-by-play model.</div>';
+  }
+  if(!hasAny) return '';
+  return '<div class="bf-rec"><div class="bf-rhd"><span>Model record</span><span>Spread</span><span>O/U</span></div>' + rows + extra +
+    '<div class="bf-rfoot">Picks the model made against Vegas’ closing line' + (on ? '; filters use the closing line too.' : '.') + '</div></div>';
+}
+
 function bfToggleHtml(){
   var b = bfGet(), n = bfCount();
   return '<button class="pr-btn ghost bf-tog" data-bf="open">⚙ Line filters' + (n ? ' <span class="bf-n">' + n + '</span>' : '') + ' <span class="bf-car">' + (b.open ? '▴' : '▾') + '</span></button>';
@@ -9599,6 +9668,7 @@ function pearGamesHtml(){
     if(!PEPOOL.list && !PEPOOL.finding) setTimeout(function(){ pePoolDiscover(function(){ pearRepaint(); }); }, 0);
     else if(PEPOOL.loadedKey !== pePoolKeyNow() && !PEPOOL.busy && (pePoolSrc().key || pePoolSrc().group || (PEPOOL.list && !PEPOOL.list.length))) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
   }
+  h += '<!--bfwk-->';
   var ddName = { all: "All games", fav: "★ Starred" };
   h += '<div class="pe-sub pe-subdd"><label class="pe-ddl" for="pear-filter-dd">Show</label><select class="pe-dd" id="pear-filter-dd" aria-label="Filter games">' + PEAR_SUBS.map(function(t){
          var n = t[0] === "pool" ? poolN : t[0] === "live" ? stN.in : t[0] === "final" ? stN.post : 0;
@@ -9615,6 +9685,7 @@ function pearGamesHtml(){
     var p = pearFbsGame(g) ? pearProject(g.away.id, g.home.id, g.neutral, pastFit || null, g) : null;
     return { g: g, p: p, e: pastFit === false ? null : pearEdge(g, p) };
   });
+  var list0 = list.slice(); try{ h = h.replace('<!--bfwk-->', bfRecCardHtml(list0)); }catch(e){ h = h.replace('<!--bfwk-->', ''); }
   if(pastFit) h += '<div class="pr-pastnote">\uD83D\uDD70\uFE0F Pre-game projections \u2014 the model fitted only on weeks before week ' + PEAR.week + ', the way the record vs Vegas is graded.</div>';
   else if(pastFit === false && PEM.ratings) h += '<div class="pr-pastnote">Week ' + PEAR.week + ' has no earlier weeks to fit on, so these projections use the full season (they\u2019ve seen the results) and edges aren\u2019t shown.</div>';
   if(PEAR.filter === "edge"){
