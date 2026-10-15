@@ -761,6 +761,20 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 /* Sub-tabs: one row under the main tabs that stays on screen while you scroll */
 .pe-sub{position:sticky;top:var(--pe-tb,64px);z-index:40;display:flex;gap:4px;margin:-6px -14px 14px;padding:8px 14px;background:var(--bg);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .pe-sub::-webkit-scrollbar{display:none}
+.bf{margin:0 0 10px}
+.bf-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.bf-n{display:inline-block;background:#111;color:#fff;border-radius:99px;padding:0 6px;font-size:10px;margin-left:2px}
+.bf-car{color:var(--muted);margin-left:2px}
+.bf-sortnote{font:800 11px 'Nunito',sans-serif;color:var(--muted)}
+.bf-panel{margin-top:8px;background:#fffdf6;border:2px solid var(--border);border-radius:14px;box-shadow:3px 3px 0 var(--border);padding:10px 12px}
+.bf-g{margin-bottom:10px}
+.bf-l{font:900 10px 'Nunito',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.bf-chips{display:flex;flex-wrap:wrap;gap:6px}
+.bf-chip{border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:999px;padding:6px 10px;font:900 12px 'Nunito',sans-serif;cursor:pointer;box-shadow:2px 2px 0 var(--border)}
+.bf-chip.on{background:#111;color:#fff;box-shadow:none;transform:translate(2px,2px)}
+.bf-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}.bf-row .bf-l{margin:0;width:84px;flex:none}
+.bf-note{font:700 11px/1.4 'Nunito',sans-serif;color:var(--muted)}
+.bf-sum{font:800 12px 'Nunito',sans-serif;color:var(--muted);margin:2px 2px 8px}.bf-sum b{color:var(--text)}
 .pe-subdd{align-items:center;gap:8px;overflow:visible}
 .pe-ddl{font:900 10px 'Nunito',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .pe-dd{flex:1;min-width:0;padding:9px 30px 9px 12px;font:800 14px 'Nunito',sans-serif;border:2px solid var(--border);background:#ffffff;color:var(--text);border-radius:8px;box-shadow:2px 2px 0 var(--border);appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23777'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
@@ -9461,6 +9475,92 @@ function pePoolRecordHtml(){
   return h + '</div>';
 }
 // Games tab sub-tabs. "Pool" lists your pool's games; it loads them from the pool on first open each week.
+// ── Bettor filters: find games by side, line size, total, model lean, line move, kickoff ──
+// Within a group a game can match any chip picked; across groups it has to match all of them.
+var BF_GROUPS = [
+  ["role", "Side", [["hd", "Home dog"], ["rd", "Road dog"], ["hf", "Home fav"], ["rf", "Road fav"], ["pk", "Pick’em"], ["nt", "Neutral site"]]],
+  ["line", "Spread size", [["s3", "PK–3"], ["s7", "3.5–7"], ["s10", "7.5–10"], ["s14", "10.5–14"], ["s21", "14.5–21"], ["s22", "21.5+"], ["key", "Key numbers 3 & 7"]]],
+  ["total", "Total", [["t45", "Under 45"], ["t52", "45–52"], ["t58", "52.5–58"], ["t65", "58.5–65"], ["t66", "65+"]]],
+  ["model", "Model plays", [["dog", "The dog"], ["fav", "The favorite"], ["home", "Home side"], ["road", "Road side"], ["over", "Over"], ["under", "Under"]]],
+  ["move", "Line move", [["tw", "Toward model"], ["aw", "Away from model"], ["m1", "Moved 1+ pt"]]],
+  ["time", "Kickoff", [["am", "Noon or earlier"], ["pm", "Afternoon"], ["nt", "Night (7pm+)"]]]
+];
+var BF_SORTS = [["time", "Kickoff time"], ["edge", "Biggest model edge"], ["spr", "Biggest spread"], ["spl", "Smallest spread"], ["tot", "Highest total"], ["tol", "Lowest total"], ["gqi", "Best games (GQI)"]];
+var BF_EDGES = [[0, "Any"], [1, "1+ pts"], [2, "2+ pts"], [3, "3+ pts"], [5, "5+ pts"]];
+function bfDefault(){ return { role: [], line: [], total: [], model: [], move: [], time: [], conf: "", edge: 0, sort: "time", open: false }; }
+function bfGet(){
+  if(!PEAR.bf){ PEAR.bf = bfDefault(); try{ var j = JSON.parse(localStorage.getItem("ps_bf2") || "null"); if(j) Object.keys(PEAR.bf).forEach(function(k){ if(j[k] !== undefined && k !== "open") PEAR.bf[k] = j[k]; }); }catch(_){} }
+  return PEAR.bf;
+}
+function bfSave(){ try{ var b = bfGet(), o = Object.assign({}, b); delete o.open; localStorage.setItem("ps_bf2", JSON.stringify(o)); }catch(_){} }
+function bfCount(){ var b = bfGet(); return b.role.length + b.line.length + b.total.length + b.model.length + b.move.length + b.time.length + (b.conf ? 1 : 0) + (b.edge ? 1 : 0); }
+function bfInfo(o){
+  if(o._bf) return o._bf;
+  var g = o.g, p = o.p, vh = pearVegasHome(g), sl = pearSavedLine(g), vou = g.vegasOU != null ? +g.vegasOU : ((sl || [])[1] != null ? +sl[1] : null);
+  if(vh !== null && !isFinite(vh)) vh = null;
+  var mp = (p && vh !== null) ? pearModelPick(g, p.margin) : null, OU = (p && vou !== null && pearFbsGame(g)) ? pearModelTotal(g, p.total) : null;
+  var op = PE.opens && PE.opens[g.id], vo = op && typeof op.h === "number" ? -op.h : null, mv = (vo !== null && vh !== null) ? vh - vo : null, tw = null;
+  if(mv !== null && p){ var dir = p.margin > vo ? 1 : p.margin < vo ? -1 : 0; if(dir) tw = mv * dir; }
+  var hr = new Date(g.date).getHours();
+  return (o._bf = { vh: vh, abs: vh === null ? null : Math.abs(vh), vou: vou, mp: mp, OU: OU, mv: mv, tw: tw, hr: hr, edge: (p && vh !== null) ? Math.abs(p.margin - vh) : null });
+}
+function bfMatch(o, b){
+  var g = o.g, I = bfInfo(o), has = function(k, v){ return b[k].indexOf(v) >= 0; }, any = function(k, f){ return !b[k].length || b[k].some(f); };
+  if(!any("role", function(v){ if(v === "nt") return !!g.neutral; if(I.vh === null) return false; if(v === "pk") return I.vh === 0; if(g.neutral) return false;
+      return v === "hd" ? I.vh < 0 : v === "rd" ? I.vh > 0 : v === "hf" ? I.vh > 0 : v === "rf" ? I.vh < 0 : false; })) return false;
+  if(!any("line", function(v){ var a = I.abs; if(a === null) return false;
+      return v === "s3" ? a <= 3 : v === "s7" ? a > 3 && a <= 7 : v === "s10" ? a > 7 && a <= 10 : v === "s14" ? a > 10 && a <= 14 : v === "s21" ? a > 14 && a <= 21 : v === "s22" ? a > 21 : v === "key" ? [2.5, 3, 3.5, 6.5, 7, 7.5].indexOf(a) >= 0 : false; })) return false;
+  if(!any("total", function(v){ var t = I.vou; if(t === null) return false; return v === "t45" ? t < 45 : v === "t52" ? t >= 45 && t <= 52 : v === "t58" ? t > 52 && t <= 58 : v === "t65" ? t > 58 && t <= 65 : v === "t66" ? t > 65 : false; })) return false;
+  if(!any("model", function(v){ if(v === "over") return !!(I.OU && I.OU.over); if(v === "under") return !!(I.OU && !I.OU.over); if(!I.mp) return false;
+      return v === "dog" ? I.mp.line > 0 : v === "fav" ? I.mp.line < 0 : v === "home" ? I.mp.team === g.home.id : v === "road" ? I.mp.team === g.away.id : false; })) return false;
+  if(!any("move", function(v){ if(I.mv === null) return false; return v === "tw" ? (I.tw !== null && I.tw > 0) : v === "aw" ? (I.tw !== null && I.tw < 0) : Math.abs(I.mv) >= 1; })) return false;
+  if(!any("time", function(v){ return v === "am" ? I.hr <= 12 : v === "pm" ? (I.hr >= 13 && I.hr < 19) : I.hr >= 19; })) return false;
+  if(b.conf && !(pearConfOf(g.away.id) === b.conf || pearConfOf(g.home.id) === b.conf)) return false;
+  if(b.edge && !(I.edge !== null && I.edge >= b.edge - 1e-9)) return false;
+  return true;
+}
+function bfApply(list){
+  var b = bfGet(); if(bfCount()) list = list.filter(function(o){ return bfMatch(o, b); });
+  if(b.sort !== "time"){
+    var key = function(o){ var I = bfInfo(o); return b.sort === "edge" ? (I.edge === null ? -1 : I.edge) : (b.sort === "spr" || b.sort === "spl") ? (I.abs === null ? (b.sort === "spr" ? -1 : 99) : I.abs) :
+      (b.sort === "tot" || b.sort === "tol") ? (I.vou === null ? (b.sort === "tot" ? -1 : 999) : I.vou) : (o.p ? o.p.gqi : -1); };
+    var asc = b.sort === "spl" || b.sort === "tol"; list = list.slice().sort(function(x, y){ return asc ? key(x) - key(y) : key(y) - key(x); });
+  }
+  return list;
+}
+function bfPanelHtml(){
+  var b = bfGet(), n = bfCount();
+  var h = '<div class="bf"><div class="bf-bar"><button class="pr-btn ghost bf-tog" data-bf="open">⚙ Line filters' + (n ? ' <span class="bf-n">' + n + '</span>' : '') + ' <span class="bf-car">' + (b.open ? '▴' : '▾') + '</span></button>' +
+    (b.sort !== "time" ? '<span class="bf-sortnote">Sorted: ' + x((BF_SORTS.filter(function(z){ return z[0] === b.sort; })[0] || [])[1] || '') + '</span>' : '') + (n ? '<button class="pr-link" data-bf="clear">Clear</button>' : '') + '</div>';
+  if(b.open){
+    h += '<div class="bf-panel">';
+    BF_GROUPS.forEach(function(gr){
+      h += '<div class="bf-g"><div class="bf-l">' + gr[1] + '</div><div class="bf-chips">' + gr[2].map(function(c){ return '<button class="bf-chip' + (b[gr[0]].indexOf(c[0]) >= 0 ? ' on' : '') + '" data-bf="chip" data-g="' + gr[0] + '" data-v="' + c[0] + '">' + c[1] + '</button>'; }).join('') + '</div></div>';
+    });
+    var confs = {}; (PEAR.games || []).forEach(function(g){ [g.away.id, g.home.id].forEach(function(t){ var c = pearConfOf(t); if(c) confs[c] = 1; }); });
+    var cl = Object.keys(confs).sort(function(a, c){ return ssConfShort(a).localeCompare(ssConfShort(c)); });
+    h += '<div class="bf-row"><label class="bf-l" for="bf-conf">Conference</label><select class="pe-dd" id="bf-conf"><option value="">Any</option>' + cl.map(function(c){ return '<option value="' + x(c) + '"' + (b.conf === c ? ' selected' : '') + '>' + x(ssConfShort(c)) + '</option>'; }).join('') + '</select></div>';
+    h += '<div class="bf-row"><label class="bf-l" for="bf-edge">Model edge</label><select class="pe-dd" id="bf-edge">' + BF_EDGES.map(function(c){ return '<option value="' + c[0] + '"' + (b.edge === c[0] ? ' selected' : '') + '>' + c[1] + '</option>'; }).join('') + '</select></div>';
+    h += '<div class="bf-row"><label class="bf-l" for="bf-sort">Sort by</label><select class="pe-dd" id="bf-sort">' + BF_SORTS.map(function(c){ return '<option value="' + c[0] + '"' + (b.sort === c[0] ? ' selected' : '') + '>' + c[1] + '</option>'; }).join('') + '</select></div>';
+    h += '<div class="bf-note">Home dog = the home team is the underdog. Lines are the current Vegas line (the close once a game is final). Edge is points between the model and the line.</div></div>';
+  }
+  return h + '</div>';
+}
+document.addEventListener("click", function(e){
+  var t = e.target && e.target.closest ? e.target.closest("[data-bf]") : null; if(!t) return;
+  e.preventDefault(); e.stopPropagation();
+  var b = bfGet(), a = t.getAttribute("data-bf");
+  if(a === "open") b.open = !b.open;
+  else if(a === "clear"){ var d = bfDefault(); Object.keys(d).forEach(function(k){ if(k !== "open" && k !== "sort") b[k] = d[k]; }); }
+  else if(a === "chip"){ var g = t.getAttribute("data-g"), v = t.getAttribute("data-v"), i = b[g].indexOf(v); if(i >= 0) b[g].splice(i, 1); else b[g].push(v); }
+  bfSave(); pearRepaint();
+}, true);
+document.addEventListener("change", function(e){
+  var t = e.target; if(!t || !/^bf-(conf|edge|sort)$/.test(t.id || "")) return;
+  var b = bfGet(); if(t.id === "bf-conf") b.conf = t.value; else if(t.id === "bf-edge") b.edge = +t.value; else b.sort = t.value;
+  bfSave(); pearRepaint();
+}, true);
+
 var PEAR_SUBS = [["all", "All"], ["live", "Live"], ["final", "Final"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
 function pearPoolIds(){
   var o = { n: 0, k: {} };
@@ -9503,6 +9603,7 @@ function pearGamesHtml(){
        '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
        '<div style="position:relative;margin:0 0 10px"><input id="pear-q" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="\ud83d\udd0d Search teams" value="' + x(PEAR.q || '') + '" ' +
        'style="width:100%;box-sizing:border-box;padding:10px 12px;border:2px solid var(--border);border-radius:10px;font:800 16px Nunito,sans-serif;background:#fff;color:inherit"></div>';
+  h += bfPanelHtml();
   if(PEAR.loading) return h + '<div class="pr-empty">Loading week ' + (PEAR.week||"") + '…</div></div>';
   if(PEAR.err) return h + '<div class="pr-empty">' + x(PEAR.err) + ' <button class="pr-link" data-pear-week="' + (PEAR.week||"") + '">Retry</button></div></div>';
   var pastFit = pearFitFor(PEAR.week);          // object: pre-game fit · false: week 1 · null: live
@@ -9616,6 +9717,8 @@ function pearGamesHtml(){
     list.sort(function(a, b){ return b.p.gqi - a.p.gqi; });
     list = list.slice(0, 15);
   }
+  var bfN0 = list.length; list = bfApply(list); var bfOn = bfCount() > 0;
+  if(bfOn && !list.length && !(PEAR.q && PEAR.q.trim())) return h + '<div class="pr-empty">No game matches these line filters' + (bfN0 ? ' (' + bfN0 + ' in this view)' : '') + '. <button class="pr-link" data-bf="clear">Clear filters</button></div></div>';
   if(PEAR.q && PEAR.q.trim()){
     var qn = pearSearchNorm(PEAR.q);
     list = list.filter(function(o){ return pearTeamMatches(o.g.away.id, qn) || pearTeamMatches(o.g.home.id, qn); });
@@ -9627,13 +9730,14 @@ function pearGamesHtml(){
          : pastFit === false ? 'Week ' + PEAR.week + ' can\u2019t be graded \u2014 there are no earlier weeks to fit the model on.'
          : 'No posted lines to compare with yet this week.')
       : PEAR.filter === "live" ? 'No games are live right now.' : PEAR.filter === "final" ? 'No games have finished this week yet.' : (nFin && nFin === nAllG && /^(all|fav|top|close)$/.test(PEAR.filter)) ? 'Every game this week has finished \u2014 see the Final tab.' : PEAR.filter === "fav" ? 'No favorites this week. Tap \u2606 on a game to keep it here.' : 'No games' + (PEAR.filter !== "all" ? ' match that filter' : ' this week') + '.') + '</div></div>';
+  if(bfOn) h += '<div class="bf-sum"><b>' + list.length + '</b> of ' + bfN0 + ' game' + (bfN0 === 1 ? '' : 's') + ' match your line filters</div>';
   var lastDay = "", VM = pearVolMap(PEAR.week);
   var isRad = function(g){ return !!VM && VM[g.away.id] !== undefined && VM[g.home.id] !== undefined && (Math.abs(VM[g.away.id]) >= PEAR_VOL_AT || Math.abs(VM[g.home.id]) >= PEAR_VOL_AT); };
   if(VM && list.some(function(o){ return isRad(o.g); })) h += '<div style="font:800 11px Nunito,sans-serif;color:var(--muted);margin:2px 2px 8px">\u2622\ufe0f = a team in the game has moved ' + PEAR_VOL_AT + '+ rating points in the last 3 weeks \u2014 harder to price.</div>';
   list.forEach(function(o){
     var g = o.g, p = o.p, d = new Date(g.date);
     var day = d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
-    if(PEAR.filter !== "close" && PEAR.filter !== "edge" && PEAR.filter !== "pool" && day !== lastDay){ h += '<div class="pr-day">' + x(day) + '</div>'; lastDay = day; }
+    if(PEAR.filter !== "close" && PEAR.filter !== "edge" && PEAR.filter !== "pool" && bfGet().sort === "time" && day !== lastDay){ h += '<div class="pr-day">' + x(day) + '</div>'; lastDay = day; }
     var when = g.state === "post" ? "Final" : g.state === "in" ? ('<span class="pr-live">● LIVE</span> ' + x(g.detail))
              : d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
     h += '<button class="pr-game" data-pear-game="' + x(g.id) + '">';
