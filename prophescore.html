@@ -761,6 +761,10 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 /* Sub-tabs: one row under the main tabs that stays on screen while you scroll */
 .pe-sub{position:sticky;top:var(--pe-tb,64px);z-index:40;display:flex;gap:4px;margin:-6px -14px 14px;padding:8px 14px;background:var(--bg);overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .pe-sub::-webkit-scrollbar{display:none}
+.pe-subdd{align-items:center;gap:8px;overflow:visible}
+.pe-ddl{font:900 10px 'Nunito',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.pe-dd{flex:1;min-width:0;padding:9px 30px 9px 12px;font:800 14px 'Nunito',sans-serif;border:2px solid var(--border);background:#ffffff;color:var(--text);border-radius:8px;box-shadow:2px 2px 0 var(--border);appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23777'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+.pe-dd:focus-visible{outline:3px solid var(--ps-bead,#f2c230);outline-offset:1px}
 .pe-sub button{flex:1 0 auto;position:relative;border:2px solid var(--border);background:#fff;color:var(--muted);border-radius:999px;padding:7px 9px;font:900 12px 'Nunito',sans-serif;cursor:pointer;white-space:nowrap;box-shadow:2px 2px 0 var(--border)}
 .pe-sub button.on{background:#111;color:#fff;box-shadow:none;transform:translate(2px,2px)}
 .pe-sub button .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red2);margin-left:5px;vertical-align:1px}
@@ -9491,8 +9495,10 @@ function pearGamesHtml(){
     if(!PEPOOL.list && !PEPOOL.finding) setTimeout(function(){ pePoolDiscover(function(){ pearRepaint(); }); }, 0);
     else if(PEPOOL.loadedKey !== pePoolKeyNow() && !PEPOOL.busy && (pePoolSrc().key || pePoolSrc().group || (PEPOOL.list && !PEPOOL.list.length))) setTimeout(function(){ pePoolLoad(PEAR.week, function(){ pearRepaint(); }); }, 0);
   }
-  h += '<div class="pe-sub" role="tablist">' + PEAR_SUBS.map(function(t){
-         return '<button role="tab" class="' + (PEAR.filter === t[0] ? "on" : "") + '" data-pear-filter="' + t[0] + '">' + t[1] + (t[0] === "pool" && poolN ? ' <small>' + poolN + '</small>' : '') + (t[0] === "live" && stN.in ? ' <small class="lv">' + stN.in + '</small>' : '') + (t[0] === "final" && stN.post ? ' <small>' + stN.post + '</small>' : '') + '</button>'; }).join('') + '</div>';
+  var ddName = { all: "All games", fav: "★ Starred" };
+  h += '<div class="pe-sub pe-subdd"><label class="pe-ddl" for="pear-filter-dd">Show</label><select class="pe-dd" id="pear-filter-dd" aria-label="Filter games">' + PEAR_SUBS.map(function(t){
+         var n = t[0] === "pool" ? poolN : t[0] === "live" ? stN.in : t[0] === "final" ? stN.post : 0;
+         return '<option value="' + t[0] + '"' + (PEAR.filter === t[0] ? ' selected' : '') + '>' + x(ddName[t[0]] || t[1]) + (n ? ' (' + n + ')' : '') + '</option>'; }).join('') + '</select></div>';
   h += '<div class="pr-tools">' +
        '<button class="pr-btn ghost" id="pear-custom">↔ Build a matchup</button></div>' +
        '<div style="position:relative;margin:0 0 10px"><input id="pear-q" type="search" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="\ud83d\udd0d Search teams" value="' + x(PEAR.q || '') + '" ' +
@@ -10741,6 +10747,7 @@ function ssPlay(kind){
     if(A.i >= n){
       clearInterval(tk); clearInterval(fl); s.anim = null; s.reveal = true;
       if(kind === "week") s.played++; else if(kind === "new") s.played = 0;
+      if(kind === "week" || kind === "new") s.wk = null;
       if(PE.ui && PE.ui.view === "rank" && SC.screen === "prophescore"){ window.scrollTo(0, 0); renderPoolEdge(); }
     }
   }, step);
@@ -10820,6 +10827,16 @@ function ssConfShort(n){
 // One game, drawn the same everywhere (Games, recaps): tap a team to make it the winner, tap the winner to lock/unlock it,
 // or use ⇄ to flip. Scores swap on the spot so the change shows before the next re-sim.
 function ssSc(sc, eff){ if(!sc) return [null, null]; var a = sc[0], h = sc[1]; if(eff === "a" && a < h) return [h, a]; if(eff === "h" && h < a) return [h, a]; return [a, h]; }
+// Which week the Games chips open on: the current week (or the next one with games left); in week-by-week, the step you're on.
+function ssDefaultWk(R, wks){
+  var s = PEAR.ss;
+  if(s.mode === "weekly"){ var st = ssSteps(R), cur = st[Math.min(s.played, st.length - 1)];
+    if(cur === "ccg") return "ccg"; if(typeof cur === "number" && wks.indexOf(cur) >= 0) return cur;
+    var n = wks.filter(function(w){ return w <= (typeof cur === "number" ? cur : 99); }); return n.length ? n[n.length - 1] : wks[0]; }
+  var cw = (PEAR.seasonData && PEAR.seasonData.week) || 0, nx = wks.filter(function(w){ return w >= cw; });
+  return nx.length ? nx[0] : wks[wks.length - 1];
+}
+function ssScrollChips(){ try{ document.querySelectorAll(".ss-wks .on").forEach(function(b){ var p = b.parentNode; if(p && p.scrollWidth > p.clientWidth) p.scrollLeft = Math.max(0, b.offsetLeft - p.clientWidth / 2 + b.offsetWidth / 2); }); }catch(_){} }
 function ssGameRow(R, k, hide){
   var s = PEAR.ss, P = R.P, e = R.G[k], lg = R.log.games[k], f = s.forced[e.id], nat = lg.nat || (lg.w === e.a ? "a" : "h"), eff = f || nat;
   var ph = pearNormCdf(e.m / P.sd), sc = ssSc(lg.sc, eff);
@@ -10896,7 +10913,7 @@ function ssGamesHtml(R){
   var wks = []; G.forEach(function(e){ if(wks.indexOf(e.wk) < 0) wks.push(e.wk); }); wks.sort(function(a, b){ return a - b; });
   if(!wks.length && !L.confs.length) return '<div class="pr-empty">No regular-season games left to simulate.</div>';
   if(!wks.length) s.wk = "ccg";
-  if(s.wk !== "ccg" && wks.indexOf(s.wk) < 0) s.wk = wks[0];
+  if(s.wk == null || (s.wk !== "ccg" && wks.indexOf(s.wk) < 0)) s.wk = ssDefaultWk(R, wks);
   var top = {}; P.ids.map(function(_, i){ return i; }).sort(function(a, b){ return P.base[b] - P.base[a]; }).slice(0, 25).forEach(function(i){ top[i] = 1; });
   var cOf = function(i){ return pearConfOf(P.ids[i]) || "Other"; };
   var confs = {}; G.forEach(function(e){ if(e.fcs) return; confs[cOf(e.h)] = 1; confs[cOf(e.a)] = 1; });
@@ -10981,7 +10998,7 @@ function ssimHtml(){
   var stp = ssSteps(R), cfpDone = s.played >= stp.length, ccgI = stp.indexOf("ccg"), ccgDone = ccgI < 0 ? cfpDone : s.played > ccgI;
   var body = wkMode && s.seg === "recap" ? ssRecapHtml(R) : wkMode && s.seg === "bracket" && !cfpDone ? ssLockedNote(R, "The playoff bracket") : wkMode && s.seg === "champs" && !ccgDone ? ssLockedNote(R, "Conference champions") : wkMode && s.seg === "top" && !cfpDone ? ssPollHtml(R, 25) :
     s.seg === "odds" ? ssOddsHtml() : s.seg === "champs" ? ssChampsHtml(R) : s.seg === "top" ? ssTop25Html(R) : s.seg === "games" ? ssGamesHtml(R) : s.seg === "teams" ? ssAdjHtml(R) : ssBracketHtml(R);
-  h += '<div class="ss-body' + (s.reveal ? ' ss-in' : '') + '">' + body + '</div>'; s.reveal = false;
+  h += '<div class="ss-body' + (s.reveal ? ' ss-in' : '') + '">' + body + '</div>'; s.reveal = false; setTimeout(ssScrollChips, 0);
   h += '<div class="pr-foot">One simulated season: every remaining game is played from the model’s margin for that matchup plus each team’s season-long noise, then conference title games and a 12-team playoff (seeded by an approximate committee ranking). The same seed replays the same way until you change a lock or a team. Odds repeat it thousands of times.</div>';
   return h;
 }
@@ -11012,10 +11029,10 @@ document.addEventListener("click", function(e){
   if(a === "wk"){ s.wk = v === "ccg" ? "ccg" : +v; ssRepaint(); return; }
   if(a === "gall"){ s.gAll = v === "1"; ssRepaint(); return; }
   if(a === "pick" || a === "flip"){ ssSetPick(t.getAttribute("data-g"), v, t.getAttribute("data-n"), a === "flip"); return; }
-  if(a === "mode"){ s.mode = v; s.played = 0; s.seg = v === "weekly" ? "recap" : (s.seg === "recap" ? "bracket" : s.seg); s.reveal = true; ssRepaint(); return; }
+  if(a === "mode"){ s.mode = v; s.played = 0; s.seg = v === "weekly" ? "recap" : (s.seg === "recap" ? "bracket" : s.seg); s.wk = null; s.reveal = true; ssRepaint(); return; }
   if(a === "step"){ ssPlay("week"); return; }
-  if(a === "skipall"){ if(s.res && !s.res.err){ if(s.dirty) ssimDo(); s.played = ssSteps(s.res).length; s.seg = "bracket"; s.reveal = true; ssRepaint(); } return; }
-  if(a === "restart"){ s.played = 0; s.seg = "recap"; s.reveal = true; ssRepaint(); return; }
+  if(a === "skipall"){ if(s.res && !s.res.err){ if(s.dirty) ssimDo(); s.played = ssSteps(s.res).length; s.wk = null; s.seg = "bracket"; s.reveal = true; ssRepaint(); } return; }
+  if(a === "restart"){ s.played = 0; s.wk = null; s.seg = "recap"; s.reveal = true; ssRepaint(); return; }
   if(a === "unlock"){ s.forced = {}; ssChanged(); ssRepaint(); return; }
   if(a === "reset"){ s.forced = {}; s.adj = {}; ssChanged(); ssRepaint(); return; }
   if(a === "adjadd"){ s.adj[id] = 0; s.q = ""; ssChanged(); ssRepaint(); return; }
@@ -11333,6 +11350,11 @@ function pearRenderCard(){
 }
 function pearRepaint(){ if(PE.ui && (PE.ui.view === "games" || PE.ui.view === "home" || PE.ui.view === "me") && SC.screen === "prophescore") renderPoolEdge(); }
 
+document.addEventListener("change", function(e){
+  var t = e.target; if(!t || t.id !== "pear-filter-dd") return;
+  PEAR.filter = t.value; try{ localStorage.setItem("ps_gsub", PEAR.filter); }catch(_){}
+  pearRepaint();
+});
 // One delegated handler for the list and the card.
 document.addEventListener("click", function(e){
   var t = e.target.closest("[data-pear-week],[data-pear-filter],[data-pear-game],#pear-custom,#pear-build,[data-pear-close],[data-pear-swap],[data-pear-flip],[data-pear-box],[data-pear-neutral],[data-pear-pickclose],[data-pear-pickid],[data-pe-view],[data-pear-team],[data-pear-teamvs],[data-pear-rankall],#pear-fbsretry,[data-pear-sgame],[data-pear-cardteam],[data-pear-backteam],[data-pear-backcard],[data-pear-more],[data-pear-share],[data-pear-shareclose],[data-pear-sharego],[data-pear-qb],[data-pe-msub],[data-pear-ekind],[data-pear-rkchg],[data-pear-novol],[data-pear-p10],[data-pem-recshare]");
