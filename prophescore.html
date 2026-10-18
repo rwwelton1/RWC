@@ -5434,6 +5434,39 @@ function pxSync(force){
     if(SC.screen === "prophescore") renderPoolEdge();
   });
 }
+// Resume: fetch only what is new. Weeks already finished and saved are left alone, and so are the teams list, the roster
+// prior and the schedule/weather extras for old weeks. That leaves the weeks still in progress (or never downloaded):
+// about three CFBD calls per week, and it continues from where a stopped download left off.
+function pxPendingWeeks(){
+  var S = pxState(), y = pxYear(), cur = (PE.meta && PE.meta.espnWeek) || 0, out = [];
+  for(var w = 1; w <= cur; w++){ var h = S.wk[y + "-" + w]; if(!(h && h.done && h.v === PX_AGG_V)) out.push(w); }
+  return out;
+}
+function pxResume(){
+  if(PX.busy || !pxCanFetch()) return;
+  var S = pxState();
+  if(!S.prior || !Object.keys(S.wk).length){ pxSync(false); return; }            // first-time setup needs the full load
+  PX.busy = true; PX.err = ""; PX.msg = "Checking what’s new…"; PX.step = ""; pxStatus();
+  var weeks = [], n = 0;
+  psNow().then(function(){ weeks = pxPendingWeeks(); return pxLoadTeams(); }).then(function(){
+    var chain = Promise.resolve();
+    weeks.forEach(function(w){
+      chain = chain.then(function(){
+        PX.msg = "Loading week " + w + " plays…"; PX.step = "Week " + w; pxStatus();
+        return pxLoadWeek(w, false).then(function(W){ n++; return pxLoadWx(W); }).then(function(){ peSave(); });
+      });
+    });
+    return chain;
+  }).then(function(){
+    PX.busy = false; PX.msg = ""; PX.step = ""; S.syncedAt = Date.now(); PX.resumed = { n: n, weeks: weeks.slice(), at: Date.now() };
+    pxRebuild(); peSave(); toast(n ? "Loaded " + n + " week" + (n === 1 ? "" : "s") + " of new data" : "Already up to date", "ok");
+    if(SC.screen === "prophescore") renderPoolEdge();
+  }).catch(function(e){
+    PX.busy = false; PX.msg = ""; PX.err = (PX.step ? PX.step + ": " : "") + (e.message || String(e)); PX.step = ""; pxStatus();
+    try{ pxRebuild(); }catch(e2){}
+    if(SC.screen === "prophescore") renderPoolEdge();
+  });
+}
 
 // ── Past seasons for backtesting ────────────────────────────────────────────
 // 2023–2025 (post-COVID, NIL era), each saved to prophescore/<uid>/hist/y<year> a week
@@ -7532,7 +7565,7 @@ function pxStatus(){ var el = document.getElementById("px-data"); if(el){ el.out
 function pxDataCardHtml(){
   var S = pxState(), ws = pxWeeks(), g = pxGames().filter(function(x){ return x.g.c; }).length;
   var h = '<div class="pem-ats" id="px-data"><div class="pem-autotop"><b>🏈 Play-by-play data (CFBD)</b>' +
-          (pxCanFetch() ? '<button class="btn btn-sm btn-ghost" id="px-sync">' + (PX.busy ? 'Loading…' : 'Refresh') + '</button>' : '') + '</div>';
+          (pxCanFetch() ? '<span style="display:flex;gap:6px">' + (pxState().prior && ws.length ? '<button class="btn btn-sm btn-gold" id="px-resume"' + (PX.busy ? ' disabled' : '') + ' title="Only fetches the weeks still in progress or missing">' + (PX.busy ? 'Loading…' : (pxPendingWeeks().length || !(PE.meta && PE.meta.espnWeek) ? 'Resume' : 'Up to date \u2713')) + '</button>' : '') + '<button class="btn btn-sm btn-ghost" id="px-sync"' + (PX.busy ? ' disabled' : '') + '>' + (PX.busy ? '…' : 'Refresh') + '</button></span>' : '') + '</div>';
   if(!psEditor()){
     h += '<div class="pem-autosub">' + (ws.length ? '<b>' + g + '</b> FBS games from weeks ' + ws[0] + '–' + ws[ws.length - 1] + ' · shared data' : 'No shared data yet.') + (S.syncedAt ? ' · refreshed ' + new Date(S.syncedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : '') + '</div>' +
          '<div class="pem-autonote">Everyone\u2019s model runs on one shared copy of the CFBD data, kept up to date by the editors, so you don\u2019t need a key. Your settings, tunes, favorites and picks are yours alone.</div>';
@@ -7544,6 +7577,8 @@ function pxDataCardHtml(){
   } else {
     h += '<div class="pem-autosub">' + (PX.busy ? x(PX.msg || 'Loading…') : (ws.length ? ('<b>' + g + '</b> FBS games from weeks ' + ws[0] + '–' + ws[ws.length - 1] + ' · ' + (S.prior ? Object.keys(S.prior.t).length + ' roster priors' : 'no roster prior yet')) : 'No weeks loaded yet.')) + '</div>';
     if(PX.err) h += '<div class="pem-autosub" style="color:var(--red2)">' + x(PX.err) + (/reach CFBD/.test(PX.err) ? ' Weeks already downloaded are kept, so tapping Refresh picks up where it stopped. Keep this tab in front while it loads — iPhone pauses downloads in background tabs.' : '') + '</div>';
+    if(!PX.busy && pxState().prior && ws.length){ var pw = pxPendingWeeks();
+      h += '<div class="pem-autonote"><b>Resume</b> ' + (pw.length ? 'fetches only ' + (pw.length === 1 ? 'week ' + pw[0] : 'weeks ' + pw.join(', ')) + ' (still in progress or not downloaded) \u2014 about ' + 3 * pw.length + ' CFBD calls. ' : 'has nothing to fetch: every week through ' + ((PE.meta && PE.meta.espnWeek) || ws[ws.length - 1]) + ' is saved and complete. ') + '<b>Refresh</b> also re-checks the roster prior and schedule extras.' + (PX.resumed ? ' Last resume loaded ' + PX.resumed.n + ' week' + (PX.resumed.n === 1 ? '' : 's') + '.' : '') + '</div>'; }
     if(S.calls) h += '<div class="pem-autonote">' + S.calls.n + ' CFBD calls this month.' + (S.syncedAt ? ' Last refresh ' + new Date(S.syncedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + '.' : '') + '</div>';
   }
   h += '<div style="display:flex;gap:6px;margin-top:8px"><input id="px-key" type="password" autocomplete="off" placeholder="' + (pxKey() ? 'Key saved — paste to replace' : 'CFBD API key') + '" style="flex:1;padding:8px 10px;border:2px solid var(--border);border-radius:9px;font:800 13px \'Nunito\',sans-serif;background:var(--cream)">' +
@@ -7696,6 +7731,8 @@ function pxBind(){
     pxState().key = v; peSave(); PX.synced = false; toast("CFBD key saved · loading data");
     pxMaybe(); renderPoolEdge();
   };
+  var rs = document.getElementById("px-resume");
+  if(rs) rs.onclick = function(){ PX.err = ""; pxResume(); };
   var sy = document.getElementById("px-sync");
   if(sy) sy.onclick = function(){ PX.err = ""; pxSync(false); };            // finished weeks are kept; this week and anything missing are fetched
   var fd = document.getElementById("px-fade");
