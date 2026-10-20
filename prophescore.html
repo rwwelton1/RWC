@@ -1610,6 +1610,18 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .ss-hit{display:flex;align-items:center;gap:8px;width:100%;background:#fffdf6;border:2px dashed var(--border);border-radius:11px;padding:6px 8px;margin-top:6px;font:900 13px 'Nunito',sans-serif;cursor:pointer;text-align:left;color:inherit}
 .ss-hit em{margin-left:auto;font:800 11px 'Nunito',sans-serif;font-style:normal;color:var(--muted)}
 .ss-find{width:100%;box-sizing:border-box}
+.ss-pteam{display:flex;align-items:center;gap:8px;margin:10px 0 6px;font:800 14px Nunito,sans-serif}.ss-pteam span{color:var(--muted);font-size:12px;margin-left:auto}
+.ss-lab{font:900 10px Nunito,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:8px 0 4px}
+.ss-pchips{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;scrollbar-width:none}
+.ss-pc{flex:0 0 auto;min-width:58px;border:2px solid var(--border);background:#fff;border-radius:10px;box-shadow:2px 2px 0 var(--border);padding:6px 8px;font:900 13px Nunito,sans-serif;color:var(--text);cursor:pointer;text-align:center}
+.ss-pc small{display:block;font:800 10px Nunito,sans-serif;color:var(--muted)}.ss-pc.on{background:#111;color:#fff;box-shadow:none}.ss-pc.on small{color:#f2c230}
+.ss-pv{background:#fffdf6;border:2px solid var(--border);border-radius:12px;padding:8px 12px;margin:4px 0 10px;font:700 13px/1.4 Nunito,sans-serif}
+.ss-pbig{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}.ss-pbig>div{border:2px solid var(--border);border-radius:12px;background:#fff;box-shadow:2px 2px 0 var(--border);padding:8px 10px}
+.ss-pbig small{display:block;font:800 10px Nunito,sans-serif;color:var(--muted)}.ss-pbig b{font:900 24px Nunito,sans-serif}
+.ss-pnote{font:700 12px/1.45 Nunito,sans-serif;color:var(--muted);margin:0 2px 8px}.ss-pnote b{color:var(--text)}
+.ss-pg,.ss-ph{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid #0001;font:800 12px Nunito,sans-serif}
+.ss-pw{flex:0 0 36px;color:var(--muted);font-size:11px}.ss-po{flex:1;min-width:0}.ss-pp{color:var(--muted);white-space:nowrap}
+.ss-pt{flex:0 0 66px;text-align:center;border-radius:99px;padding:2px 0;background:#eee;font-size:11px}.ss-pt.must{background:#d93a2b;color:#fff}.ss-pt.free{background:#cfe9d3}
 .ss-hint{font:700 12px/1.4 'Nunito',sans-serif;color:var(--muted);margin-top:8px}
 .ss-oh,.ss-or{display:grid;grid-template-columns:22px 1fr 44px 44px 44px 48px;gap:4px;align-items:center}
 .ss-oh{font:900 9.5px 'Nunito',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 8px 4px;text-align:right}
@@ -10862,11 +10874,39 @@ function ssimRun(P, cfg, single, n){
   // margin for the home side: model margin + the two teams' season-long noise + one game's noise
   var mar = function(a, h, m){ return m + (sh[h] + bs[h]) - (sh[a] + bs[a]) - (P.base[h] - P.base[a]) + sdG * gauss(); };
   var confList = Object.keys(confs).map(function(k){ return confs[k]; });
+  // Path mode: force one team's remaining results so it ends on exactly cfg.focus.need more wins,
+  // sampling WHICH games it wins in proportion to how likely each is (exact conditional, by DP).
+  var FO = cfg.focus || null, fk = [], fp = [], fD = null, fl = [], FT = null;
+  if(FO){
+    var ft = FO.t;
+    G.forEach(function(e, k){ if(e.a === ft || e.h === ft) fk.push(k); });
+    fk.forEach(function(k){
+      var e = G[k], f0 = forced[e.id], pw;
+      if(f0) pw = ((f0 === "h" ? e.h : e.a) === ft) ? 1 : 0;
+      else if(e.fcs) pw = e.p;
+      else { var mm0 = e.m + (bs[e.h] - P.base[e.h]) - (bs[e.a] - P.base[e.a]), ph = pearNormCdf(mm0 / P.sd); pw = e.h === ft ? ph : 1 - ph; }
+      fp.push(pw);
+    });
+    var m0 = fk.length; fD = [];
+    for(var jj = 0; jj <= m0; jj++) fD.push(new Float64Array(m0 + 2));
+    fD[m0][0] = 1;
+    for(var j2 = m0 - 1; j2 >= 0; j2--) for(var r0 = 0; r0 <= m0 - j2; r0++) fD[j2][r0] = fp[j2] * (r0 > 0 ? fD[j2 + 1][r0 - 1] : 0) + (1 - fp[j2]) * fD[j2 + 1][r0];
+    if(FO.need < 0 || FO.need > m0 || !(fD[0][FO.need] > 0)) return { err: "That record isn\u2019t reachable with the games left (or with your locks)." };
+    FT = { n: 0, inn: 0, bye: 0, conf: 0, win: 0, champN: 0, champIn: 0, rank: 0, rankOut: 0, fwIn: new Float64Array(m0), gH: new Float64Array(G.length), gHin: new Float64Array(G.length), gA: new Float64Array(G.length), gAin: new Float64Array(G.length), fp: fp, fk: fk };
+  }
   for(var s = 0; s < nS; s++){
     for(var i = 0; i < N; i++){ W[i] = P.W0[i]; L[i] = P.L0[i]; CW[i] = P.CW0[i]; CL[i] = P.CL0[i]; sh[i] = shock * gauss(); champ[i] = 0; }
     if(single) log = { games: [], confs: [], r1: [], qf: [], sf: [], fin: null, field: [], place: {} };
+    if(FO){
+      var rN = FO.need;
+      for(var jf = 0; jf < fk.length; jf++){
+        var ek = G[fk[jf]], pwin = fD[jf][rN] > 0 ? fp[jf] * (rN > 0 ? fD[jf + 1][rN - 1] : 0) / fD[jf][rN] : 0, wn = rnd() < pwin;
+        if(wn) rN--;
+        fl[fk[jf]] = (wn === (ek.h === FO.t)) ? "h" : "a";
+      }
+    }
     for(var k = 0; k < G.length; k++){
-      var e = G[k], f = forced[e.id], rr = rnd();
+      var e = G[k], f = forced[e.id] || (FO ? fl[k] : undefined), rr = rnd();
       if(e.fcs){ var t = e.a >= 0 ? e.a : e.h, fbsWin = rr < e.p;
         if(f) fbsWin = (f === "a" ? e.a : e.h) === t;
         if(fbsWin) W[t]++; else L[t]++; gW[k] = -1;
@@ -10905,6 +10945,14 @@ function ssimRun(P, cfg, single, n){
     field.sort(function(x, y){ return rankOf[x] - rankOf[y]; });
     // Playoff: seeds 1-4 get byes; 5-12 play at the higher seed; then neutral sites.
     var sd1 = {}; field.forEach(function(t, si){ sd1[si + 1] = t; T.cfp[t]++; if(si < 4) T.bye[t]++; });
+    if(FT){
+      var tt0 = FO.t, inT = inF[tt0] ? 1 : 0; FT.n++; FT.inn += inT; FT.rank += rankOf[tt0]; if(!inT) FT.rankOut += rankOf[tt0];
+      if(inT && field.indexOf(tt0) < 4) FT.bye++;
+      if(champ[tt0]){ FT.conf++; FT.champN++; FT.champIn += inT; }
+      fk.forEach(function(k, jf){ if(inT && ((G[k].h === tt0) === (fl[k] === "h"))) FT.fwIn[jf]++; });
+      for(var kg = 0; kg < G.length; kg++){ var ge = G[kg]; if(ge.fcs || gW[kg] < 0 || ge.a === tt0 || ge.h === tt0) continue;
+        if(gW[kg] === ge.h){ FT.gH[kg]++; FT.gHin[kg] += inT; } else { FT.gA[kg]++; FT.gAin[kg] += inT; } }
+    }
     var pg = function(aS, hS, neutral){ var a = sd1[aS], h = sd1[hS]; return mar(a, h, neutral ? 0 : hfa); };
     var play = function(a, h, neutral, tag){ var M = mar(a, h, (P.base[h] - P.base[a]) + (neutral ? 0 : hfa)), w = M > 0 ? h : a; if(single){ var o = { a: a, h: h, w: w, sc: ssScore(M, 56), neutral: neutral }; tag.push(o); } return w; };
     var r1w = {}, rnds = single ? log : { r1: [], qf: [], sf: [] };
@@ -10915,6 +10963,7 @@ function ssimRun(P, cfg, single, n){
     [[0, 1], [3, 2]].forEach(function(pr){ T.sf[qw[pr[0]]]++; T.sf[qw[pr[1]]]++; sw.push(play(qw[pr[1]], qw[pr[0]], true, rnds.sf)); });
     T.fin[sw[0]]++; T.fin[sw[1]]++;
     var fm = mar(sw[1], sw[0], P.base[sw[0]] - P.base[sw[1]]), cp = fm > 0 ? sw[0] : sw[1]; T.win[cp]++;
+    if(FT && cp === FO.t) FT.win++;
     for(var z = 0; z < N; z++) T.wins[z] += W[z];
     if(single){
       log.fin = { a: sw[1], h: sw[0], w: cp, sc: ssScore(fm, 56) };
@@ -10929,6 +10978,7 @@ function ssimRun(P, cfg, single, n){
   if(single) return { err: null, log: log, G: G, P: { ids: ids, ix: ix, base: P.base, sd: P.sd, W0: P.W0, L0: P.L0 }, cfg: { seed: cfg.seed } };
   var o = { n: n, conf: {}, ccg: {}, cfp: {}, bye: {}, qf: {}, sf: {}, fin: {}, win: {}, w: {}, base: {} };
   ids.forEach(function(id, i){ ["conf", "ccg", "cfp", "bye", "qf", "sf", "fin", "win"].forEach(function(k){ o[k][id] = T[k][i] / n; }); o.w[id] = T.wins[i] / n; });
+  if(FT) o.focus = FT;
   return o;
 }
 function ssimDo(){
@@ -11001,7 +11051,7 @@ function ssSetPick(g, v, nat, flip){
 }
 function ssRepaint(){ var y = window.scrollY; renderPoolEdge(); try{ window.scrollTo(0, y); }catch(_){} }
 // A tweak only marks the run out of date; nothing re-simulates until the user taps Apply, New sim or Run.
-function ssChanged(){ var s = PEAR.ss; s.odds = null; s.dirty = true; }
+function ssChanged(){ var s = PEAR.ss; s.odds = null; s.dirty = true; if(s.path){ s.path.ladder = null; s.path.det = null; } }
 function ssPct(v){ if(v == null) return "–"; if(v >= 0.995) return "100%"; if(v < 0.0005) return "0%"; if(v < 0.01) return "<1%"; return (v >= 0.1 ? Math.round(v * 100) : (v * 100).toFixed(1)) + "%"; }
 function ssTeam(id, extra){ return '<button class="ss-tm" data-pear-team="' + x(id) + '">' + pearImg(id, "ss-lg") + '<b>' + x(pearName(id)) + '</b>' + (extra || '') + '</button>'; }
 function ssGameRow(g){
@@ -11214,15 +11264,123 @@ function ssimHtml(){
   var wkMode = s.mode === "weekly";
   if(!wkMode && s.seg === "recap") s.seg = "bracket";
   if(wkMode && R && !R.err && !s.anim) h += ssWeeklyCard(R);
-  h += '<div class="pr-tools"><div class="pr-seg ss-segs">' + (wkMode ? [["recap", "Recap"]] : []).concat([["bracket", "Bracket"], ["champs", "Champs"], ["top", "Top 25"], ["games", "Games"], ["teams", "Teams"], ["odds", "Odds"]]).map(function(o){ return '<button class="' + (s.seg === o[0] ? 'on' : '') + '" data-ss="seg" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>';
+  h += '<div class="pr-tools"><div class="pr-seg ss-segs">' + (wkMode ? [["recap", "Recap"]] : []).concat([["bracket", "Bracket"], ["champs", "Champs"], ["top", "Top 25"], ["games", "Games"], ["teams", "Teams"], ["path", "Path"], ["odds", "Odds"]]).map(function(o){ return '<button class="' + (s.seg === o[0] ? 'on' : '') + '" data-ss="seg" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>';
   if(s.anim) return h + ssLoaderHtml();
   if(!R || R.err) return h + '<div class="pr-note">' + x((R && R.err) || "Couldn’t run the simulation.") + '</div>';
   var stp = ssSteps(R), cfpDone = s.played >= stp.length, ccgI = stp.indexOf("ccg"), ccgDone = ccgI < 0 ? cfpDone : s.played > ccgI;
   var body = wkMode && s.seg === "recap" ? ssRecapHtml(R) : wkMode && s.seg === "bracket" && !cfpDone ? ssLockedNote(R, "The playoff bracket") : wkMode && s.seg === "champs" && !ccgDone ? ssLockedNote(R, "Conference champions") : wkMode && s.seg === "top" && !cfpDone ? ssPollHtml(R, 25) :
-    s.seg === "odds" ? ssOddsHtml() : s.seg === "champs" ? ssChampsHtml(R) : s.seg === "top" ? ssTop25Html(R) : s.seg === "games" ? ssGamesHtml(R) : s.seg === "teams" ? ssAdjHtml(R) : ssBracketHtml(R);
+    s.seg === "path" ? ssPathHtml() : s.seg === "odds" ? ssOddsHtml() : s.seg === "champs" ? ssChampsHtml(R) : s.seg === "top" ? ssTop25Html(R) : s.seg === "games" ? ssGamesHtml(R) : s.seg === "teams" ? ssAdjHtml(R) : ssBracketHtml(R);
   h += '<div class="ss-body' + (s.reveal ? ' ss-in' : '') + '">' + body + '</div>'; s.reveal = false; setTimeout(ssScrollChips, 0);
   h += '<div class="pr-foot">One simulated season: every remaining game is played from the model’s margin for that matchup plus each team’s season-long noise, then conference title games and a 12-team playoff (seeded by an approximate committee ranking). The same seed replays the same way until you change a lock or a team. Odds repeat it thousands of times.</div>';
   return h;
+}
+// ── Path to the playoff ─────────────────────────────────────────────────────
+// Pick a team and the record it finishes the regular season with; the sim plays the season thousands of
+// times with that team's results forced to land on exactly that record (which games it wins is drawn in
+// proportion to how likely each is) and reports how often it gets in, which of its games matter most,
+// and which other results it needs.
+PEAR.ss.path = { t: null, need: null, q: "", info: null, ladder: null, det: null, busy: false, err: "" };
+function ssPathInfo(t){
+  var out = null;
+  ssimWithBuild(function(){
+    var P = ssimPrep(); if(P.err){ out = { err: P.err }; return; }
+    var i = P.ix[t]; if(i == null){ out = { err: "Team not found." }; return; }
+    var gs = []; P.G.forEach(function(e){ if(e.a === i || e.h === i){ var home = e.h === i, o = home ? e.a : e.h; gs.push({ id: e.id, wk: e.wk, opp: o >= 0 ? P.ids[o] : null, home: home, neutral: !!e.neutral, fcs: !!e.fcs, conf: !!e.conf }); } });
+    gs.sort(function(a, b){ return (a.wk || 0) - (b.wk || 0); });
+    out = { w0: P.W0[i], l0: P.L0[i], m: gs.length, games: gs };
+  });
+  return out;
+}
+function ssPathCfg(t, need, n){ var s = PEAR.ss; return Object.assign({}, s, { seed: (Math.random() * 4294967296) >>> 0, focus: { t: t, need: need } }); }
+function ssPathCompute(){
+  var s = PEAR.ss, pa = s.path, inf = pa.info; pa.err = "";
+  try{
+    ssimWithBuild(function(){
+      var P = ssimPrep(); if(P.err){ pa.err = P.err; return; }
+      var ti = P.ix[pa.t];
+      if(!pa.ladder){
+        pa.ladder = {};
+        var dead = false;
+        for(var k = inf.m; k >= 0; k--){
+          if(dead){ pa.ladder[k] = { inn: 0, bye: 0, win: 0 }; continue; }
+          var r = ssimRun(P, ssPathCfg(ti, k), false, 600); if(r.err || !r.focus) continue;
+          var F = r.focus; pa.ladder[k] = { inn: F.inn / F.n, bye: F.bye / F.n, win: F.win / F.n };
+          if(F.inn === 0) dead = true;
+        }
+      }
+      if(pa.need != null && pa.ladder[pa.need]){
+        var r2 = ssimRun(P, ssPathCfg(ti, pa.need), false, 3000);
+        if(r2.err){ pa.err = r2.err; pa.det = null; return; }
+        var F2 = r2.focus, n = F2.n, det = { need: pa.need, n: n, inn: F2.inn / n, bye: F2.bye / n, conf: F2.conf / n, win: F2.win / n, rank: F2.rank / n,
+          rankOut: (n - F2.inn) ? F2.rankOut / (n - F2.inn) : null, champIn: F2.champN ? F2.champIn / F2.champN : null, champN: F2.champN / n,
+          notChampIn: (n - F2.champN) ? (F2.inn - F2.champIn) / (n - F2.champN) : null, own: [], help: [] };
+        F2.fk.forEach(function(k, j){ var g = inf.games[0] && P.G[k]; det.own.push({ gid: P.G[k].id, pw: F2.fp[j], inWin: F2.inn ? F2.fwIn[j] / F2.inn : null }); });
+        if(F2.inn >= 40 && n - F2.inn >= 40){
+          P.G.forEach(function(e, k){
+            var nh = F2.gH[k], na = F2.gA[k]; if(e.fcs || nh < 40 || na < 40) return;
+            var ph = F2.gHin[k] / nh, pa2 = F2.gAin[k] / na, d = ph - pa2;
+            det.help.push({ gid: e.id, a: P.ids[e.a], h: P.ids[e.h], wk: e.wk, ph: ph, pa: pa2, d: d });
+          });
+          det.help.sort(function(a, b){ return Math.abs(b.d) - Math.abs(a.d); }); det.help = det.help.slice(0, 8);
+        }
+        pa.det = det;
+      }
+    });
+  }catch(e){ pa.err = "Path simulation failed: " + e.message; }
+}
+function ssPathRun(){
+  var pa = PEAR.ss.path; if(pa.busy || pa.t == null) return;
+  pa.busy = true; ssRepaint();
+  setTimeout(function(){ ssPathCompute(); pa.busy = false; PEAR.ss.reveal = true; ssRepaint(); }, 80);
+}
+function ssPathHtml(){
+  var s = PEAR.ss, pa = s.path, h = '';
+  h += '<div class="ss-rh">Path to the playoff <small>pick a team and the record you want it to finish with</small></div>';
+  h += '<input class="rk-search ss-find" id="ss-pfind" placeholder="Find a team…" autocomplete="off" autocorrect="off" value="' + x(pa.q || "") + '"><div id="ss-phits">' + ssPathHits() + '</div>';
+  if(pa.t == null) return h + '<div class="ss-hint">Choose a team. You’ll pick a final regular-season record and the model plays the season thousands of times to see what has to happen for that team to get in.</div>';
+  var inf = pa.info; if(!inf) return h;
+  if(inf.err) return h + '<div class="pr-note">' + x(inf.err) + '</div>';
+  var nm = x(pearName(pa.t));
+  h += '<div class="ss-pteam">' + pearImg(pa.t, "ss-lg") + '<b>' + nm + '</b><span>' + inf.w0 + '–' + inf.l0 + ' now · ' + inf.m + ' game' + (inf.m === 1 ? '' : 's') + ' left</span></div>';
+  h += '<div class="ss-lab">Finish the regular season at…</div><div class="ss-pchips">';
+  for(var k = inf.m; k >= 0; k--){
+    var fw = inf.w0 + k, fl = inf.l0 + (inf.m - k), L = pa.ladder && pa.ladder[k];
+    h += '<button class="ss-pc' + (pa.need === k ? ' on' : '') + '" data-ss="pneed" data-v="' + k + '"><b>' + fw + '–' + fl + '</b>' + (L ? '<small>' + ssPct(L.inn) + '</small>' : '') + '</button>';
+  }
+  h += '</div>';
+  if(pa.busy) return h + '<div class="ss-load"><div class="ss-ball">🏈</div><b>Playing out thousands of seasons…</b></div>';
+  if(pa.err) h += '<div class="pr-note">' + x(pa.err) + '</div>';
+  if(pa.need == null){ return h + '<div class="pr-tools"><button class="pr-btn" data-ss="prun">Find the path</button></div><div class="ss-hint">Tap a record, then Find the path. Every record also gets its playoff odds shown on its chip.</div>'; }
+  if(!pa.ladder) return h + '<div class="pr-tools"><button class="pr-btn" data-ss="prun">Find the path</button></div>';
+  // the cheapest record that gets in at least half the time
+  var best = null; for(var k2 = 0; k2 <= inf.m; k2++){ var L2 = pa.ladder[k2]; if(L2 && L2.inn >= 0.5){ best = k2; break; } }
+  h += '<div class="ss-pv">' + (best == null ? '<b>' + nm + '</b> doesn’t get in at even odds with any record the model can build here.' :
+       'Fewest wins that gets <b>' + nm + '</b> in at least half the time: <b>' + (inf.w0 + best) + '–' + (inf.l0 + inf.m - best) + '</b>' + (pa.ladder[best] ? ' (' + ssPct(pa.ladder[best].inn) + ')' : '') + '.') + '</div>';
+  var D = pa.det; if(!D) return h + '<div class="pr-tools"><button class="pr-btn" data-ss="prun">Find the path</button></div>';
+  var fw2 = inf.w0 + D.need, fl2 = inf.l0 + inf.m - D.need;
+  h += '<div class="ss-pbig"><div><small>At ' + fw2 + '–' + fl2 + ', makes the playoff</small><b>' + ssPct(D.inn) + '</b></div><div><small>First-round bye</small><b>' + ssPct(D.bye) + '</b></div><div><small>Wins conference</small><b>' + ssPct(D.conf) + '</b></div><div><small>National title</small><b>' + ssPct(D.win) + '</b></div></div>';
+  var tx = [];
+  tx.push('Average committee ranking at this record: <b>#' + D.rank.toFixed(0) + '</b>' + (D.rankOut ? ' (#' + D.rankOut.toFixed(0) + ' in the scenarios where they miss out)' : '') + '.');
+  if(D.champIn != null && D.notChampIn != null) tx.push('With a conference title they get in <b>' + ssPct(D.champIn) + '</b> of the time; without one, <b>' + ssPct(D.notChampIn) + '</b>.');
+  h += '<div class="ss-pnote">' + tx.map(function(t){ return '<div>' + t + '</div>'; }).join('') + '</div>';
+  h += '<div class="ss-rh">Their own games <small>how likely the win is, and how often it happens when they get in</small></div>';
+  h += D.own.map(function(o, j){ var g = inf.games[j]; if(!g) return '';
+    var opp = g.opp ? x(pearName(g.opp)) : 'an FCS team', must = o.inWin != null && o.inWin >= 0.9 && o.inWin - o.pw >= 0.08, free = o.inWin != null && o.inWin < 0.5 && o.pw - o.inWin >= 0.05;
+    return '<div class="ss-pg"><span class="ss-pw">' + (g.wk ? 'Wk ' + g.wk : '') + '</span><span class="ss-po">' + (g.neutral ? 'vs ' : g.home ? 'vs ' : 'at ') + opp + '</span><span class="ss-pp">' + ssPct(o.pw) + ' win</span>' +
+      '<span class="ss-pt ' + (must ? 'must' : free ? 'free' : '') + '">' + (o.inWin == null ? '' : must ? 'Must win' : free ? 'Can lose' : 'Wins ' + ssPct(o.inWin)) + '</span></div>'; }).join('');
+  if(D.help.length){
+    h += '<div class="ss-rh">Who to root for <small>other games that move their playoff odds most</small></div>';
+    h += D.help.map(function(o){ var good = o.d > 0 ? o.h : o.a, bad = o.d > 0 ? o.a : o.h, pg = o.d > 0 ? o.ph : o.pa, pb = o.d > 0 ? o.pa : o.ph;
+      return '<div class="ss-ph"><span class="ss-pw">' + (o.wk ? 'Wk ' + o.wk : '') + '</span><span class="ss-po">Root for <b>' + x(pearName(good)) + '</b> over ' + x(pearName(bad)) + '</span><span class="ss-pp">' + ssPct(pg) + ' vs ' + ssPct(pb) + '</span></div>'; }).join('');
+  }
+  h += '<div class="pr-tools" style="margin-top:10px"><button class="pr-btn" data-ss="plock">Lock this path into the sim</button><button class="pr-btn ghost" data-ss="prun">Re-run</button></div>';
+  h += '<div class="ss-hint">Odds are for finishing the regular season at this record, before the conference title game. Locking sets their most-needed wins and losses in the Games tab so you can watch the rest of the season play out.</div>';
+  return h;
+}
+function ssPathHits(){
+  var s = PEAR.ss, q = (s.path.q || "").trim().toLowerCase(); if(!q || !PEAR.fbs) return '';
+  return Object.keys(PEAR.fbs).filter(function(t){ return (pearName(t) + " " + pearAbbr(t)).toLowerCase().indexOf(q) >= 0; }).slice(0, 6).map(function(t){
+    return '<button class="ss-hit" data-ss="ppick" data-id="' + x(t) + '">' + pearImg(t, "ss-lg") + x(pearName(t)) + '<em>choose</em></button>'; }).join('');
 }
 // Teams tab: add a Rankings | Season sim switch on top of the rankings page.
 (function(){
@@ -11257,12 +11415,23 @@ document.addEventListener("click", function(e){
   if(a === "restart"){ s.played = 0; s.wk = null; s.seg = "recap"; s.reveal = true; ssRepaint(); return; }
   if(a === "unlock"){ s.forced = {}; ssChanged(); ssRepaint(); return; }
   if(a === "reset"){ s.forced = {}; s.adj = {}; ssChanged(); ssRepaint(); return; }
+  if(a === "ppick"){ var pa = s.path; pa.t = id; pa.q = ""; pa.need = null; pa.ladder = null; pa.det = null; pa.err = "";
+    try{ pa.info = ssPathInfo(id); }catch(er){ pa.info = { err: "Couldn\u2019t read their schedule: " + er.message }; }
+    ssRepaint(); if(pa.info && !pa.info.err) ssPathRun(); return; }
+  if(a === "pneed"){ var pb = s.path; pb.need = +v; pb.det = null; if(pb.ladder) ssPathRun(); else ssPathRun(); return; }
+  if(a === "prun"){ s.path.ladder = a === "prun" && s.path.det ? s.path.ladder : s.path.ladder; ssPathRun(); return; }
+  if(a === "plock"){ var pl = s.path, D = pl.det, inf = pl.info; if(!D || !inf) return;
+    var ord = D.own.map(function(o, j){ return { j: j, v: o.inWin == null ? o.pw : o.inWin }; }).sort(function(x1, y1){ return y1.v - x1.v; });
+    var winSet = {}; ord.slice(0, D.need).forEach(function(o){ winSet[o.j] = 1; });
+    D.own.forEach(function(o, j){ var g = inf.games[j]; if(!g || g.fcs) return; s.forced[o.gid] = (winSet[j] ? g.home : !g.home) ? "h" : "a"; });
+    ssChanged(); s.seg = "games"; s.wk = null; ssRepaint(); return; }
   if(a === "adjadd"){ s.adj[id] = 0; s.q = ""; ssChanged(); ssRepaint(); return; }
   if(a === "adj"){ s.adj[id] = Math.max(-15, Math.min(15, (s.adj[id] || 0) + (+v))); ssChanged(); ssRepaint(); return; }
   if(a === "adjx"){ delete s.adj[id]; ssChanged(); ssRepaint(); return; }
 }, true);
 document.addEventListener("input", function(e){
-  var t = e.target; if(!t || t.id !== "ss-find") return;
+  var t = e.target; if(t && t.id === "ss-pfind"){ PEAR.ss.path.q = t.value; var el2 = document.getElementById("ss-phits"); if(el2) el2.innerHTML = ssPathHits(); return; }
+  if(!t || t.id !== "ss-find") return;
   PEAR.ss.q = t.value; var el = document.getElementById("ss-hits"); if(el) el.innerHTML = ssHits();
 }, true);
 
