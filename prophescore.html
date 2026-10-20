@@ -1612,6 +1612,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .ss-find{width:100%;box-sizing:border-box}
 .ss-step{display:flex;align-items:center;gap:10px;margin:18px 0 8px}.ss-step i{flex:0 0 34px;height:34px;border-radius:50%;background:#111;color:#f2c230;display:flex;align-items:center;justify-content:center;font:900 18px Nunito,sans-serif;font-style:normal}
 .ss-step b{display:block;font:900 17px Nunito,sans-serif}.ss-step small{display:block;font:700 11px Nunito,sans-serif;color:var(--muted)}
+.ss-onm2{flex:1;min-width:0;display:flex;flex-direction:column;font:800 13px Nunito,sans-serif}.ss-onm2 small{font:700 11px Nunito,sans-serif;color:var(--muted)}
 .ss-pgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:6px 0}.ss-ptm{border:2px solid var(--border);background:#fff;border-radius:10px;padding:6px 2px 4px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;box-shadow:2px 2px 0 var(--border)}.ss-ptm small{font:900 9px Nunito,sans-serif;color:var(--muted)}.ss-ptm.on{background:#fff4c9}
 .ss-pteam{display:flex;align-items:center;gap:8px;margin:6px 0;font:800 14px Nunito,sans-serif}.ss-pteam span{color:var(--muted);font-size:12px;margin-left:auto}
 .ss-pg2{border:2px solid var(--border);border-radius:12px;background:#fff;padding:8px 10px;margin-bottom:8px;box-shadow:2px 2px 0 var(--border)}
@@ -10087,7 +10088,7 @@ function pearLoadSched(id, cb){
 // The committee's ranking is approximated from team strength and losses.
 var PEAR_SIMS = 4000;
 var PEAR_SIM_SHOCK = 3;       // pts of season-long rating uncertainty per team, per sim
-var PEAR_CFP_LOSS = 7;        // committee-ranking cost of each loss, in rating points
+var PEAR_CFP_LOSS = 7; var PEAR_CFP_RES = 6;        // committee-ranking cost of each loss, in rating points
 var PEAR_CFP_CHAMP = 3;       // bump for winning a conference
 var PEAR_ND = "87";
 function pearConfOf(id){ return (PEAR.confTop && PEAR.confTop[id]) || (PEAR.conf && PEAR.conf[id]) || ""; }
@@ -10778,7 +10779,7 @@ function pearShareCard(){
 // game; Odds repeats it thousands of times. A given seed always plays out the same way, so
 // locking a result or nudging a team changes only what that change touches. "New sim" re-rolls.
 PEAR.ss = { sub: (function(){ try{ return localStorage.getItem("ps_rksub") === "sim" ? "sim" : "rank"; }catch(_){ return "rank"; } })(),
-            seg: "bracket", shock: 3, fmt: "auto", n: 5000, seed: (Math.random() * 4294967296) >>> 0, forced: {}, adj: {}, wk: null, gf: "top", q: "", res: null, odds: null, running: false, oddsAll: false, gAll: false, gconf: "", anim: null, reveal: false, dirty: false, mode: "full", played: 0 };
+            seg: "bracket", shock: 3, fmt: "auto", rank: "resume", n: 5000, seed: (Math.random() * 4294967296) >>> 0, forced: {}, adj: {}, wk: null, gf: "top", q: "", res: null, odds: null, running: false, oddsAll: false, gAll: false, gconf: "", anim: null, reveal: false, dirty: false, mode: "full", played: 0 };
 function ssRng(seed){ var a = seed >>> 0; return function(){ a = (a + 0x6D2B79F5) >>> 0; var t = a; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function ssimWithBuild(fn){
   if(!psRkOn()) return fn();
@@ -10849,7 +10850,10 @@ function ssimPrep(){
     if(!pearConfOf(g.awayId) || pearConfOf(g.awayId) !== pearConfOf(g.homeId)) return;
     var win = g.hs > g.as ? h : a, lose = win === h ? a : h; h2h[win + "|" + lose] = (h2h[win + "|" + lose] || 0) + 1;
   });
-  return { ids: ids, N: N, ix: ix, base: base, W0: W0, L0: L0, CW0: CW0, CL0: CL0, confs: confs, G: G, ccgFixed: ccgFixed, h2h: h2h, sd: sd, hfa: hfa };
+  var past = [];
+  (PEM._games || []).forEach(function(g){ var a = ix[g.awayId], h = ix[g.homeId]; if(a == null || h == null || g.as === g.hs) return; past.push({ a: a, h: h, wH: g.hs > g.as, n: !!g.neutral }); });
+  var sb = Array.prototype.slice.call(base).sort(function(u, v){ return v - u; }), rref = sb[Math.min(24, sb.length - 1)];
+  return { past: past, rref: rref, ids: ids, N: N, ix: ix, base: base, W0: W0, L0: L0, CW0: CW0, CL0: CL0, confs: confs, G: G, ccgFixed: ccgFixed, h2h: h2h, sd: sd, hfa: hfa };
 }
 // One run (single = true keeps every game's result) or n runs (odds).
 function ssimRun(P, cfg, single, n){
@@ -10858,6 +10862,11 @@ function ssimRun(P, cfg, single, n){
   var gauss = function(){ var u = rnd() || 1e-12, v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
   var bs = new Float64Array(N); for(var i0 = 0; i0 < N; i0++) bs[i0] = P.base[i0] + (cfg.adj[ids[i0]] || 0);
   var W = new Int32Array(N), L = new Int32Array(N), CW = new Int32Array(N), CL = new Int32Array(N), sh = new Float64Array(N), champ = new Uint8Array(N), gW = new Int32Array(G.length);
+  var RS = new Float64Array(N), resume = cfg.rank !== "power";
+  // Resume credit, the way strength-of-record works: each game earns (result \u2212 the chance a top-25-caliber team would win it).
+  // Beating a strong team earns a lot, losing to a weak one costs a lot, so schedule strength is built in.
+  var pRef = function(opp, venue){ return pearNormCdf((P.rref - (bs[opp] + sh[opp]) + venue * hfa) / P.sd); };
+  var addRes = function(a, h, neutral, wH){ RS[a] += (wH ? 0 : 1) - pRef(h, neutral ? 0 : -1); RS[h] += (wH ? 1 : 0) - pRef(a, neutral ? 0 : 1); };
   var inCcg = new Uint8Array(N), score = new Float64Array(N), order = ids.map(function(_, i){ return i; });
   var T = { conf: new Float64Array(N), ccg: new Float64Array(N), cfp: new Float64Array(N), bye: new Float64Array(N), qf: new Float64Array(N), sf: new Float64Array(N), fin: new Float64Array(N), win: new Float64Array(N), wins: new Float64Array(N) };
   var log = null;
@@ -10883,47 +10892,63 @@ function ssimRun(P, cfg, single, n){
   var confList = Object.keys(confs).map(function(k){ return confs[k]; });
   // Path mode: force one team's remaining results so it ends on exactly cfg.focus.need more wins,
   // sampling WHICH games it wins in proportion to how likely each is (exact conditional, by DP).
-  var FO = cfg.focus || null, fk = [], fp = [], fD = null, fl = [], FT = null;
+  var FO = cfg.focus || null, fk = [], fp = [], fl = [], FT = null, CN = [];
+  // Record constraints: a team is made to finish its remaining games with exactly `need` more wins (the focus team in
+  // ladder mode, plus any other teams the user set). Which games it wins is sampled in proportion to each game's win
+  // chance (exact, by dynamic programming), so a game between two constrained teams is shared fairly.
+  var baseP = function(e, t){
+    if(e.fcs) return e.p;
+    var mm0 = e.m + (bs[e.h] - P.base[e.h]) - (bs[e.a] - P.base[e.a]), ph = pearNormCdf(mm0 / P.sd); return e.h === t ? ph : 1 - ph;
+  };
+  var mkCon = function(t, need){ var ks = []; G.forEach(function(e, k){ if(e.a === t || e.h === t) ks.push(k); }); return { t: t, need: need, ks: ks, p: ks.map(function(k){ return baseP(G[k], t); }) }; };
+  (cfg.recs || []).forEach(function(r){ if(r.t != null && r.need != null) CN.push(mkCon(r.t, r.need)); });
+  if(FO && FO.need != null) CN.unshift(mkCon(FO.t, FO.need));
+  CN.forEach(function(c){ if(c.need < 0 || c.need > c.ks.length) c.bad = true; });
+  if(CN.some(function(c){ return c.bad; })) return { err: "That record isn\u2019t reachable with the games left." };
   if(FO){
     var ft = FO.t;
     G.forEach(function(e, k){ if(e.a === ft || e.h === ft) fk.push(k); });
     fk.forEach(function(k){
       var e = G[k], f0 = forced[e.id], pw;
-      if(f0) pw = ((f0 === "h" ? e.h : e.a) === ft) ? 1 : 0;
-      else if(e.fcs) pw = e.p;
-      else { var mm0 = e.m + (bs[e.h] - P.base[e.h]) - (bs[e.a] - P.base[e.a]), ph = pearNormCdf(mm0 / P.sd); pw = e.h === ft ? ph : 1 - ph; }
+      if(f0) pw = ((f0 === "h" ? e.h : e.a) === ft) ? 1 : 0; else pw = baseP(e, ft);
       fp.push(pw);
     });
-    var m0 = fk.length; fD = [];
-    if(FO.need != null){
-      for(var jj = 0; jj <= m0; jj++) fD.push(new Float64Array(m0 + 2));
-      fD[m0][0] = 1;
-      for(var j2 = m0 - 1; j2 >= 0; j2--) for(var r0 = 0; r0 <= m0 - j2; r0++) fD[j2][r0] = fp[j2] * (r0 > 0 ? fD[j2 + 1][r0 - 1] : 0) + (1 - fp[j2]) * fD[j2 + 1][r0];
-      if(FO.need < 0 || FO.need > m0 || !(fD[0][FO.need] > 0)) return { err: "That record isn\u2019t reachable with the games left (or with your locks)." };
-    }
+    var m0 = fk.length;
     FT = { bn: new Float64Array(3), binn: new Float64Array(3), bbye: new Float64Array(3), bhost: new Float64Array(3), bwin: new Float64Array(3), n: 0, inn: 0, bye: 0, conf: 0, win: 0, champN: 0, champIn: 0, rank: 0, rankOut: 0, fwIn: new Float64Array(m0), gH: new Float64Array(G.length), gHin: new Float64Array(G.length), gA: new Float64Array(G.length), gAin: new Float64Array(G.length), fp: fp, fk: fk };
   }
   for(var s = 0; s < nS; s++){
-    for(var i = 0; i < N; i++){ W[i] = P.W0[i]; L[i] = P.L0[i]; CW[i] = P.CW0[i]; CL[i] = P.CL0[i]; sh[i] = shock * gauss(); champ[i] = 0; inCcg[i] = 0; }
+    for(var i = 0; i < N; i++){ W[i] = P.W0[i]; L[i] = P.L0[i]; CW[i] = P.CW0[i]; CL[i] = P.CL0[i]; sh[i] = shock * gauss(); champ[i] = 0; inCcg[i] = 0; RS[i] = 0; }
+    if(resume) for(var pq = 0; pq < P.past.length; pq++){ var pg0 = P.past[pq]; addRes(pg0.a, pg0.h, pg0.n, pg0.wH); }
     if(single) log = { games: [], confs: [], r1: [], qf: [], sf: [], fin: null, field: [], place: {} };
-    if(FO && FO.need != null){
-      var rN = FO.need;
-      for(var jf = 0; jf < fk.length; jf++){
-        var ek = G[fk[jf]], pwin = fD[jf][rN] > 0 ? fp[jf] * (rN > 0 ? fD[jf + 1][rN - 1] : 0) / fD[jf][rN] : 0, wn = rnd() < pwin;
-        if(wn) rN--;
-        fl[fk[jf]] = (wn === (ek.h === FO.t)) ? "h" : "a";
+    if(CN.length){
+      fl.length = 0;
+      for(var ci = 0; ci < CN.length; ci++){
+        var c = CN[ci], mC = c.ks.length, Dp = [];
+        for(var jj = 0; jj <= mC; jj++) Dp.push(new Float64Array(mC + 2));
+        var pj = c.ks.map(function(k, j){ var e = G[k], ff = forced[e.id] || fl[k]; return ff ? (((ff === "h" ? e.h : e.a) === c.t) ? 1 : 0) : c.p[j]; });
+        Dp[mC][0] = 1;
+        for(var j2 = mC - 1; j2 >= 0; j2--) for(var r0 = 0; r0 <= mC - j2; r0++) Dp[j2][r0] = pj[j2] * (r0 > 0 ? Dp[j2 + 1][r0 - 1] : 0) + (1 - pj[j2]) * Dp[j2 + 1][r0];
+        if(!(Dp[0][c.need] > 0)) return { err: "Those records can\u2019t all happen together with the games left (or with your locks)." };
+        var rN = c.need;
+        for(var jf = 0; jf < mC; jf++){
+          var kk = c.ks[jf], ek = G[kk], fx0 = forced[ek.id] || fl[kk], wn;
+          if(fx0) wn = ((fx0 === "h" ? ek.h : ek.a) === c.t);
+          else { var pwin = Dp[jf][rN] > 0 ? pj[jf] * (rN > 0 ? Dp[jf + 1][rN - 1] : 0) / Dp[jf][rN] : 0; wn = rnd() < pwin; fl[kk] = (wn === (ek.h === c.t)) ? "h" : "a"; }
+          if(wn) rN--;
+        }
       }
     }
     for(var k = 0; k < G.length; k++){
-      var e = G[k], f = forced[e.id] || ((FO && FO.need != null) ? fl[k] : undefined), rr = rnd();
+      var e = G[k], f = forced[e.id] || (CN.length ? fl[k] : undefined), rr = rnd();
       if(e.fcs){ var t = e.a >= 0 ? e.a : e.h, fbsWin = rr < e.p;
         if(f) fbsWin = (f === "a" ? e.a : e.h) === t;
-        if(fbsWin) W[t]++; else L[t]++; gW[k] = -1;
+        if(fbsWin) W[t]++; else L[t]++; gW[k] = fbsWin ? t : -2;
         if(single) log.games.push({ w: fbsWin ? t : -1, M: 0, lock: !!f }); continue; }
       var M = mar(e.a, e.h, e.m) + 0 * rr, wasLocked = false, nat0 = M > 0 ? "h" : "a";
       if(f){ wasLocked = true; var sg = f === "h" ? 1 : -1; M = sg * Math.max(Math.abs(M), 1); }
       var w = M > 0 ? e.h : e.a, l = w === e.a ? e.h : e.a;
       gW[k] = w; W[w]++; L[l]++; if(e.conf){ CW[w]++; CL[l]++; }
+      if(resume) addRes(e.a, e.h, e.neutral, w === e.h);
       if(single) log.games.push({ w: w, M: M, lock: wasLocked, nat: nat0, sc: ssScore(M, e.tot) });
     }
     confList.forEach(function(c){
@@ -10936,11 +10961,11 @@ function ssimRun(P, cfg, single, n){
       }
       var natC = M > 0 ? "h" : "a";
       if(ff && !(fx && fx.done)) M = (ff === "h" ? 1 : -1) * Math.max(Math.abs(M), 1);
-      if(!(fx && fx.done)){ cw = M > 0 ? h : a; W[cw]++; L[cw === a ? h : a]++; }
+      if(!(fx && fx.done)){ cw = M > 0 ? h : a; W[cw]++; L[cw === a ? h : a]++; if(resume) addRes(a, h, fx ? fx.neutral : false, cw === h); }
       T.ccg[a]++; T.ccg[h]++; champ[cw] = 1; T.conf[cw]++; inCcg[a] = 1; inCcg[h] = 1;
       if(single){ log.confs.push({ name: c.name, kind: c.kind, champ: cw, other: cw === a ? h : a, a: a, h: h, sc: ssScore(M, tt), m: mm, nat: natC, set: !!fx, done: !!(fx && fx.done), lock: !!(ff && !(fx && fx.done)) }); }
     });
-    for(var q = 0; q < N; q++) score[q] = bs[q] + sh[q] - PEAR_CFP_LOSS * L[q] + (champ[q] ? PEAR_CFP_CHAMP : 0);
+    for(var q = 0; q < N; q++) score[q] = bs[q] + sh[q] + (resume ? PEAR_CFP_RES * RS[q] : -PEAR_CFP_LOSS * L[q]) + (champ[q] ? PEAR_CFP_CHAMP : 0);
     order.sort(function(x, y){ return score[y] - score[x]; });
     var inF = {}, field = [], rankOf = {};
     order.forEach(function(t, r){ rankOf[t] = r + 1; });
@@ -10960,7 +10985,7 @@ function ssimRun(P, cfg, single, n){
       FT.bn[bk]++; if(inT){ FT.binn[bk]++; if(fi0 < 4) FT.bbye[bk]++; else if(fi0 < 8) FT.bhost[bk]++; }
       if(inT && fi0 < 4) FT.bye++;
       if(champ[tt0]){ FT.conf++; FT.champN++; FT.champIn += inT; }
-      fk.forEach(function(k, jf){ if(inT && ((G[k].h === tt0) === (fl[k] === "h"))) FT.fwIn[jf]++; });
+      fk.forEach(function(k, jf){ if(inT && gW[k] === tt0) FT.fwIn[jf]++; });
       for(var kg = 0; kg < G.length; kg++){ var ge = G[kg]; if(ge.fcs || gW[kg] < 0 || ge.a === tt0 || ge.h === tt0) continue;
         if(gW[kg] === ge.h){ FT.gH[kg]++; FT.gHin[kg] += inT; } else { FT.gA[kg]++; FT.gAin[kg] += inT; } }
     }
@@ -10983,7 +11008,7 @@ function ssimRun(P, cfg, single, n){
       log.r1.forEach(function(g){ place[g.w === g.a ? g.h : g.a] = 1; });
       log.qf.forEach(function(g){ place[g.w === g.a ? g.h : g.a] = 2; }); log.sf.forEach(function(g){ place[g.w === g.a ? g.h : g.a] = 3; });
       place[cp === sw[0] ? sw[1] : sw[0]] = 4; place[cp] = 5; log.place = place;
-      log.order = order.slice(0, 60); log.rankOf = rankOf; log.W = Array.prototype.slice.call(W); log.L = Array.prototype.slice.call(L);
+      log.order = order.slice(0, 60); log.rankOf = rankOf; log.rs = Array.prototype.slice.call(RS); log.W = Array.prototype.slice.call(W); log.L = Array.prototype.slice.call(L);
     }
   }
   if(single) return { err: null, log: log, G: G, P: { ids: ids, ix: ix, base: P.base, sd: P.sd, W0: P.W0, L0: P.L0 }, cfg: { seed: cfg.seed } };
@@ -11097,9 +11122,9 @@ function ssChampsHtml(R){
 function ssTop25Html(R){
   var L = R.log, P = R.P, id = function(i){ return P.ids[i]; }, ptxt = { 5: 'Champion', 4: 'Runner-up', 3: 'Lost semifinal', 2: 'Lost quarterfinal', 1: 'Lost first round' }, sd = {};
   L.field.forEach(function(f){ sd[f.t] = f.seed; });
-  return '<div class="ss-rh">Final ranking <small>after the playoff field is set</small></div>' + L.order.slice(0, 25).map(function(t, i){
+  return '<div class="ss-rh">Final ranking <small>' + (PEAR.ss.rank === "power" ? 'by team strength and losses' : 'resume + strength of schedule: wins above what a top-25 team would get against the same slate') + '</small></div>' + L.order.slice(0, 25).map(function(t, i){
     var pl = L.place[t];
-    return '<button class="ss-tr" data-pear-team="' + x(id(t)) + '"><span class="ss-n">' + (i + 1) + '</span>' + pearImg(id(t), "ss-lg") + '<span class="ss-nm"><b>' + x(pearName(id(t))) + '</b><small>' + L.W[t] + '-' + L.L[t] + (pl ? ' · #' + sd[t] + ' seed · ' + ptxt[pl] : '') + '</small></span></button>';
+    return '<button class="ss-tr" data-pear-team="' + x(id(t)) + '"><span class="ss-n">' + (i + 1) + '</span>' + pearImg(id(t), "ss-lg") + '<span class="ss-nm"><b>' + x(pearName(id(t))) + '</b><small>' + L.W[t] + '-' + L.L[t] + (pl ? ' · #' + sd[t] + ' seed · ' + ptxt[pl] : '') + (L.rs && PEAR.ss.rank !== "power" ? ' · resume ' + (L.rs[t] >= 0 ? '+' : '\u2212') + Math.abs(L.rs[t]).toFixed(1) : '') + '</small></span></button>';
   }).join('');
 }
 function ssConfShort(n){
@@ -11269,6 +11294,7 @@ function ssimHtml(){
   h += '<div class="pr-tools ss-top"><button class="pr-btn" data-ss="new">🎲 New sim</button><button class="pr-btn" data-ss="odds">Run ' + s.n.toLocaleString() + ' sims</button>' + ((nf || na) ? '<button class="pr-btn ss-rs" data-ss="reset">Reset tweaks</button>' : '') + '</div>';
   h += '<div class="ss-set"><span>Chaos</span><div class="pr-seg">' + [[1.5, "Low"], [3, "Normal"], [5, "Wild"]].map(function(o){ return '<button class="' + (s.shock === o[0] ? 'on' : '') + '" data-ss="shock" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
        '<span>Field</span><div class="pr-seg">' + [["auto", "Champs + at-large"], ["top12", "Top 12"]].map(function(o){ return '<button class="' + (s.fmt === o[0] ? 'on' : '') + '" data-ss="fmt" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
+       '<span>Rank by</span><div class="pr-seg">' + [["resume", "Resume + SOS"], ["power", "Power only"]].map(function(o){ return '<button class="' + (s.rank === o[0] ? 'on' : '') + '" data-ss="rank" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>' +
        '<span>Mode</span><div class="pr-seg">' + [["full", "Full season"], ["weekly", "Week by week"]].map(function(o){ return '<button class="' + (s.mode === o[0] ? 'on' : '') + '" data-ss="mode" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>';
   h += '<div class="ss-sub">' + (psRkOn() ? 'Using your Build ratings' : 'Using the model in use') + ' · ' + (R && R.G ? R.G.length : 0) + ' games left' + (nf ? ' · ' + nf + ' locked' : '') + (na ? ' · ' + na + ' team' + (na === 1 ? '' : 's') + ' adjusted' : '') + '</div>';
   if(s.dirty) h += '<div class="ss-dirty"><span>Settings changed — results below are from before.</span><button class="pr-btn" data-ss="apply">Apply &amp; re-sim</button></div>';
@@ -11289,7 +11315,7 @@ function ssimHtml(){
 // Three steps, like a playoff predictor: choose a team, pick results for its remaining games (or leave them to the
 // model), say whether it makes / wins its conference title game. The season is then played thousands of times with
 // those picks forced, and the odds of getting in, a bye, a home game, and the other results it needs come out of that.
-PEAR.ss.path = { t: null, q: "", change: false, info: null, picks: {}, ccg: "any", raw: null, ladder: null, stale: false, busy: false, err: "" };
+PEAR.ss.path = { others: {}, oinfo: {}, oq: "", t: null, q: "", change: false, info: null, picks: {}, ccg: "any", raw: null, ladder: null, stale: false, busy: false, err: "" };
 function ssPathInfo(t){
   var out = null;
   ssimWithBuild(function(){
@@ -11300,6 +11326,12 @@ function ssPathInfo(t){
     gs.sort(function(a, b){ return (a.wk || 0) - (b.wk || 0); });
     out = { w0: P.W0[i], l0: P.L0[i], m: gs.length, games: gs };
   });
+  return out;
+}
+function ssPathRecs(P){
+  var pa = PEAR.ss.path, out = [];
+  Object.keys(pa.others).forEach(function(t){ var inf = pa.oinfo[t], i = P.ix[t]; if(!inf || inf.err || i == null || t === pa.t) return;
+    out.push({ t: i, need: inf.m - (pa.others[t] - inf.l0) }); });
   return out;
 }
 function ssPathForced(){
@@ -11323,7 +11355,7 @@ function ssPathCompute(stage){
         }
         return;
       }
-      var r2 = ssimRun(P, Object.assign({}, s, { seed: seed(), forced: ssPathForced(), focus: { t: ti, need: null } }), false, 3000);
+      var r2 = ssimRun(P, Object.assign({}, s, { seed: seed(), forced: ssPathForced(), recs: ssPathRecs(P), focus: { t: ti, need: null } }), false, 3000);
       if(r2.err){ pa.err = r2.err; pa.raw = null; return; }
       var F = r2.focus, n = F.n, help = [];
       if(F.inn >= 40 && n - F.inn >= 40) P.G.forEach(function(e, k){
@@ -11383,6 +11415,11 @@ function ssPathHtml(){
       '<div class="ss-pbt"><button class="' + (pk === 'w' ? 'win' : '') + '" data-ss="ppick2" data-g="' + x(g.id) + '" data-v="w">' + x(pearAbbr(pa.t)) + ' wins</button><button class="' + (pk === 'l' ? 'loss' : '') + '" data-ss="ppick2" data-g="' + x(g.id) + '" data-v="l">' + (g.opp ? x(pearAbbr(g.opp)) : 'FCS') + ' wins</button></div></div>'; }).join('');
   h += ssPathStep(3, 'Their conference title game', S ? 'Chance they reach it: ' + ssPct(S.ccgPlay) + ' · win it: ' + ssPct(S.ccgWin) : 'Do they make it, and do they win?');
   h += '<div class="pr-seg ss-pccg">' + [["any", "Let the model decide"], ["win", "Win it"], ["lose", "Lose it"], ["out", "Don’t reach it"]].map(function(o){ return '<button class="' + (pa.ccg === o[0] ? 'on' : '') + '" data-ss="pccg" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div>';
+  h += ssPathStep(4, 'Set other teams\u2019 records', 'Optional \u2014 choose how many losses a rival or contender finishes with');
+  h += '<input class="rk-search ss-find" id="ss-ofind" placeholder="Add a team\u2026" autocomplete="off" autocorrect="off" value="' + x(pa.oq || "") + '"><div id="ss-ohits">' + ssPathOHits() + '</div>';
+  h += Object.keys(pa.others).map(function(t){ var oi = pa.oinfo[t], L = pa.others[t]; if(!oi || oi.err) return '';
+    return '<div class="ss-adj">' + pearImg(t, "ss-lg") + '<span class="ss-onm2"><b>' + x(pearName(t)) + '</b><small>' + oi.w0 + '\u2013' + oi.l0 + ' now \u00b7 ' + oi.m + ' to play</small></span><span class="ss-st"><button data-ss="oloss" data-id="' + x(t) + '" data-v="-1">\u2212</button><i>' + (oi.w0 + oi.m - (L - oi.l0)) + '\u2013' + L + '</i><button data-ss="oloss" data-id="' + x(t) + '" data-v="1">+</button></span><button class="ss-x" data-ss="ox" data-id="' + x(t) + '" aria-label="Remove">\u2715</button></div>'; }).join('');
+  if(!Object.keys(pa.others).length) h += '<div class="ss-hint">For example, make Ohio State finish 11\u20131 and see what that does to your team\u2019s odds.</div>';
   if(pa.busy) return h + '<div class="ss-load"><div class="ss-ball">🏈</div><b>Playing out thousands of seasons…</b></div>';
   if(pa.err) h += '<div class="pr-note">' + x(pa.err) + '</div>';
   if(!R) return h + '<div class="pr-tools"><button class="pr-btn" data-ss="prun">Calculate my odds</button></div>';
@@ -11407,6 +11444,11 @@ function ssPathHtml(){
   }
   h += '<div class="pr-tools" style="margin-top:10px"><button class="pr-btn" data-ss="plock">Lock these picks into the sim</button><button class="pr-btn ghost" data-ss="preplay">↻ Replay</button></div>';
   return h;
+}
+function ssPathOHits(){
+  var s = PEAR.ss, pa = s.path, q = (pa.oq || "").trim().toLowerCase(); if(!q || !PEAR.fbs) return '';
+  return Object.keys(PEAR.fbs).filter(function(t){ return t !== pa.t && !(t in pa.others) && (pearName(t) + " " + pearAbbr(t)).toLowerCase().indexOf(q) >= 0; }).slice(0, 6).map(function(t){
+    return '<button class="ss-hit" data-ss="oadd" data-id="' + x(t) + '">' + pearImg(t, "ss-lg") + x(pearName(t)) + '<em>+ set record</em></button>'; }).join('');
 }
 function ssPathHits(){
   var s = PEAR.ss, q = (s.path.q || "").trim().toLowerCase(); if(!q || !PEAR.fbs) return '';
@@ -11437,6 +11479,7 @@ document.addEventListener("click", function(e){
   if(a === "reload"){ PEAR.seasonData = null; s.res = null; renderPoolEdge(); return; }
   if(a === "shock"){ s.shock = +v; ssChanged(); ssRepaint(); return; }
   if(a === "fmt"){ s.fmt = v; ssChanged(); ssRepaint(); return; }
+  if(a === "rank"){ s.rank = v; ssChanged(); ssRepaint(); return; }
   if(a === "wk"){ s.wk = v === "ccg" ? "ccg" : +v; ssRepaint(); return; }
   if(a === "gall"){ s.gAll = v === "1"; ssRepaint(); return; }
   if(a === "pick" || a === "flip"){ ssSetPick(t.getAttribute("data-g"), v, t.getAttribute("data-n"), a === "flip"); return; }
@@ -11446,21 +11489,26 @@ document.addEventListener("click", function(e){
   if(a === "restart"){ s.played = 0; s.wk = null; s.seg = "recap"; s.reveal = true; ssRepaint(); return; }
   if(a === "unlock"){ s.forced = {}; ssChanged(); ssRepaint(); return; }
   if(a === "reset"){ s.forced = {}; s.adj = {}; ssChanged(); ssRepaint(); return; }
-  if(a === "ppick"){ var pa = s.path; pa.t = id; pa.q = ""; pa.change = false; pa.picks = {}; pa.ccg = "any"; pa.raw = null; pa.ladder = null; pa.stale = false; pa.err = "";
+  if(a === "ppick"){ var pa = s.path; pa.t = id; pa.q = ""; pa.change = false; pa.picks = {}; pa.others = {}; pa.ccg = "any"; pa.raw = null; pa.ladder = null; pa.stale = false; pa.err = "";
     try{ pa.info = ssPathInfo(id); }catch(er){ pa.info = { err: "Couldn\u2019t read their schedule: " + er.message }; }
     window.scrollTo(0, 0); ssRepaint(); if(pa.info && !pa.info.err) ssPathRun(); return; }
+  if(a === "oadd"){ var po = s.path, oi; try{ oi = ssPathInfo(id); }catch(er2){ oi = { err: er2.message }; }
+    if(oi && !oi.err){ po.oinfo[id] = oi; po.others[id] = oi.l0; po.oq = ""; if(po.raw) po.stale = true; } ssRepaint(); return; }
+  if(a === "oloss"){ var pq = s.path, oi2 = pq.oinfo[id]; if(!oi2) return; pq.others[id] = Math.max(oi2.l0, Math.min(oi2.l0 + oi2.m, pq.others[id] + (+v))); if(pq.raw) pq.stale = true; ssRepaint(); return; }
+  if(a === "ox"){ var pz = s.path; delete pz.others[id]; if(pz.raw) pz.stale = true; ssRepaint(); return; }
   if(a === "pchange"){ s.path.change = true; ssRepaint(); return; }
   if(a === "ppick2"){ var pb = s.path, gid = t.getAttribute("data-g"); if(pb.picks[gid] === v) delete pb.picks[gid]; else pb.picks[gid] = v; if(pb.raw) pb.stale = true; ssRepaint(); return; }
   if(a === "pccg"){ s.path.ccg = v; ssRepaint(); return; }
   if(a === "prun"){ ssPathRun(); return; }
-  if(a === "preplay"){ var pr = s.path; pr.picks = {}; pr.ccg = "any"; pr.stale = false; ssPathRun(); return; }
+  if(a === "preplay"){ var pr = s.path; pr.picks = {}; pr.others = {}; pr.ccg = "any"; pr.stale = false; ssPathRun(); return; }
   if(a === "plock"){ var pl = s.path; Object.assign(s.forced, ssPathForced()); ssChanged(); s.seg = "games"; s.wk = null; ssRepaint(); return; }
   if(a === "adjadd"){ s.adj[id] = 0; s.q = ""; ssChanged(); ssRepaint(); return; }
   if(a === "adj"){ s.adj[id] = Math.max(-15, Math.min(15, (s.adj[id] || 0) + (+v))); ssChanged(); ssRepaint(); return; }
   if(a === "adjx"){ delete s.adj[id]; ssChanged(); ssRepaint(); return; }
 }, true);
 document.addEventListener("input", function(e){
-  var t = e.target; if(t && t.id === "ss-pfind"){ PEAR.ss.path.q = t.value; var el2 = document.getElementById("ss-phits"); if(el2) el2.innerHTML = ssPathHits(); return; }
+  var t = e.target; if(t && t.id === "ss-ofind"){ PEAR.ss.path.oq = t.value; var el3 = document.getElementById("ss-ohits"); if(el3) el3.innerHTML = ssPathOHits(); return; }
+  if(t && t.id === "ss-pfind"){ PEAR.ss.path.q = t.value; var el2 = document.getElementById("ss-phits"); if(el2) el2.innerHTML = ssPathHits(); return; }
   if(!t || t.id !== "ss-find") return;
   PEAR.ss.q = t.value; var el = document.getElementById("ss-hits"); if(el) el.innerHTML = ssHits();
 }, true);
