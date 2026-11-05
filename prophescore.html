@@ -1619,6 +1619,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pp-c.pp-hit{background:#2e9e55;color:#fff}.pp-c.pp-miss{background:#d93a2b;color:#fff}.pp-c.pp-push{background:#9a9a9a;color:#fff}
 .pp-p{flex:1;min-width:0;display:flex;flex-direction:column;font:800 13px Nunito,sans-serif}.pp-p small{font:700 10.5px Nunito,sans-serif;color:var(--muted)}
 .pp-ch{text-align:right;display:flex;flex-direction:column;font:900 15px Nunito,sans-serif}.pp-ch small{font:700 10px Nunito,sans-serif;color:var(--muted)}
+.tk-sim{display:block;font:700 10px Nunito,sans-serif;color:var(--muted);font-weight:700}
 .pp-f{font:700 11px/1.4 Nunito,sans-serif;color:var(--muted);padding-top:6px}
 .ss-onm2{flex:1;min-width:0;display:flex;flex-direction:column;font:800 13px Nunito,sans-serif}.ss-onm2 small{font:700 11px Nunito,sans-serif;color:var(--muted)}
 .ss-pgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:6px 0}.ss-ptm{border:2px solid var(--border);background:#fff;border-radius:10px;padding:6px 2px 4px;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;box-shadow:2px 2px 0 var(--border)}.ss-ptm small{font:900 9px Nunito,sans-serif;color:var(--muted)}.ss-ptm.on{background:#fff4c9}
@@ -9200,6 +9201,31 @@ function pxEdgeRating(chance){ return Math.max(1, Math.min(10, 1 + Math.floor((c
 function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0, tierAdj: 0 })); return F._pbp; }
 // ref: the line you're picking against (home margin, + = home favoured); now: the market's
 // current line, same units (null if unknown). Returns the pick, its chance and the reasons.
+// How often a pick like this one covered. A "pick" is a side of the line your pool uses; it is described by how many points
+// the model sits on that side of the line (gapS, negative = the model disagrees) and how many points the market has moved
+// toward that side since the line was set (mvS). The graded history stands in for the pool: line set = the opener, now = the close,
+// model = the pre-game model, and cover is judged against the opener. Both sides of every game are used, so a side the model
+// likes and a side it doesn\u2019t are both counted. Neighbours are widened until there are enough of them.
+function pxSimilar(gapS, mvS, gid){
+  var A = pxAts(); if(!A || !A.games) return null;
+  var key = A.games.length + "|" + (A.w + A.l + A.p);
+  if(!A._sim || A._simKey !== key){
+    var rows = [];
+    A.games.forEach(function(G){ if(G.vo === undefined || G.vo === null || !isFinite(G.vo) || G.act === undefined) return;
+      var c = G.act - G.vo; if(c === 0) return;
+      [1, -1].forEach(function(d){ rows.push([(G.pred - G.vo) * d, (G.vh - G.vo) * d, c * d > 0 ? 1 : 0, G.id]); }); });
+    A._sim = rows; A._simKey = key;
+  }
+  var R = A._sim; if(R.length < 200) return null;
+  var tol = 1, w = 0, n = 0, ex = gid != null ? String(gid) : null;
+  for(; tol <= 8; tol *= 1.35){
+    w = 0; n = 0;
+    for(var i = 0; i < R.length; i++){ var r = R[i]; if(Math.abs(r[0] - gapS) <= tol && Math.abs(r[1] - mvS) <= tol && (ex === null || String(r[3]) !== ex)){ n++; w += r[2]; } }
+    if(n >= 80) break;
+  }
+  if(n < 20) return null;
+  return { p: (w + 4) / (n + 8), w: w, l: n - w, n: n, tol: Math.round(tol * 10) / 10 };
+}
 function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid, cur, game){
   if(ref === null || ref === undefined || !isFinite(ref)) return null;
   var clip = function(v, a){ return Math.max(-a, Math.min(a, v)); }, parts = { mv: 0, sp: 0, pbp: 0 }, z = 0;
@@ -9215,6 +9241,14 @@ function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid, cur, game
   else if(week >= K.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = K.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
   var QM = pxQbMarks(gid);
   if(QM){ var qv = function(v){ return v === 1 ? K.qb1 : v === 2 ? K.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; if(full === null) z += parts.qb; }
+  // Live picks: the chance is how picks in the same spot actually covered in the model\u2019s graded history.
+  if(full !== null){
+    var nowV = (now !== null && now !== undefined && isFinite(now)) ? now : ref, sH = pxSimilar(full - ref, nowV - ref, gid), sA = pxSimilar(ref - full, ref - nowV, gid);
+    if(sH && sA){
+      var pickH = sH.p >= sA.p, sm = pickH ? sH : sA;
+      return { pickHome: pickH, chance: sm.p, rating: pxEdgeRating(sm.p), parts: parts, ref: ref, now: now, cur: !!cur, sim: sm };
+    }
+  }
   if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
   var p = 1 / (1 + Math.exp(-Math.abs(z)));
   return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: !!cur };
@@ -9437,9 +9471,9 @@ function pePoolPicksHtml(list){
     var rs = '';
     if(g.state === "post"){ var hs = parseFloat(g.home.score), as = parseFloat(g.away.score);
       if(isFinite(hs) && isFinite(as)){ var cm = (k.pickHome ? hs - as : as - hs) + line; rs = cm > 1e-9 ? ' pp-hit' : cm < -1e-9 ? ' pp-miss' : ' pp-push'; } }
-    return '<div class="pp-r"><b class="pp-c' + rs + '">' + (n - i) + '</b><span class="pp-p"><b>' + x(pearName(team)) + ' ' + x(pearSpreadTxt(line)) + '</b><small>pool spread' + (ml !== null ? ' \u00b7 model ' + x(pearSpreadTxt(Math.round(ml * 10) / 10)) : '') + (o.now !== null && o.now !== undefined ? ' \u00b7 market ' + x(pearSpreadTxt(k.pickHome ? -o.now : o.now)) : '') + '</small></span><span class="pp-ch"><b>' + Math.round(k.chance * 100) + '%</b><small>to cover</small></span></div>';
+    return '<div class="pp-r"><b class="pp-c' + rs + '">' + (n - i) + '</b><span class="pp-p"><b>' + x(pearName(team)) + ' ' + x(pearSpreadTxt(line)) + '</b><small>pool spread' + (ml !== null ? ' \u00b7 model ' + x(pearSpreadTxt(Math.round(ml * 10) / 10)) : '') + (o.now !== null && o.now !== undefined ? ' \u00b7 market ' + x(pearSpreadTxt(k.pickHome ? -o.now : o.now)) : '') + '</small></span><span class="pp-ch"><b>' + Math.round(k.chance * 100) + '%</b><small>' + (k.sim ? k.sim.w + '\u2013' + k.sim.l + ' similar' : 'to cover') + '</small></span></div>';
   }).join('') + un.map(function(o){ var g = o.g; return '<div class="pp-r pp-n"><b class="pp-c">\u2013</b><span class="pp-p"><b>' + x(g ? pearName(g.away.id) + ' @ ' + pearName(g.home.id) : (o.pg && o.pg.fav ? o.pg.fav + ' vs ' + o.pg.dog : 'Game')) + '</b><small>no model signal yet</small></span><span class="pp-ch"><b>50%</b></span></div>'; }).join('');
-  return '<div class="pp-t"><div class="pp-h"><span>Conf</span><span>Pick vs your pool\u2019s spread</span><span>Chance</span></div>' + rows + '<div class="pp-f">Confidence points run from ' + n + ' (surest) down to 1, ranked by the chance each pick covers your pool\u2019s line.</div></div>';
+  return '<div class="pp-t"><div class="pp-h"><span>Conf</span><span>Pick vs your pool\u2019s spread</span><span>Chance</span></div>' + rows + '<div class="pp-f">Confidence points run from ' + n + ' (surest) down to 1, ranked by how often picks in the same spot (the model\u2019s gap to your line and the line movement) covered in the model\u2019s graded history.</div></div>';
 }
 function pePoolBarHtml(n){
   var w = PEAR.week, c = pePoolSrc(), key = pePoolKeyNow(), C = PEPOOL.cache[key], h = '<div class="pr-edgenote pool-src">';
@@ -9944,7 +9978,7 @@ function pearGamesHtml(){
       var K = o.k, pt = K.pickHome ? g.home.id : g.away.id, pl = K.pickHome ? -K.ref : K.ref, rs = null;
       if(g.state === "post" && g.home.score !== null && g.away.score !== null){ var cv = (g.home.score - g.away.score) - K.ref; rs = cv === 0 ? "push" : ((cv > 0) === K.pickHome ? "win" : "loss"); }
       h += '<div class="pr-take"><span><i class="tk-lab">' + (K.pool ? 'Pool pick' : 'Edge pick') + '</i> <b>' + x(pearName(pt) + ' ' + pearSpreadTxt(pl)) + '</b><small> \u00b7 ' + x(pxPickWhy(K, pearAbbr(g.home.id), pearAbbr(g.away.id))) + '</small></span>' +
-           (rs ? '<span class="pr-res ' + rs + '">' + (rs === "win" ? "\u2713 Covered" : rs === "loss" ? "\u2717 Missed" : "Push") + '</span>' : '<span class="tk-pct">' + Math.round(K.chance * 100) + '% to cover</span>') + '</div>';
+           (rs ? '<span class="pr-res ' + rs + '">' + (rs === "win" ? "\u2713 Covered" : rs === "loss" ? "\u2717 Missed" : "Push") + '</span>' : '<span class="tk-pct">' + Math.round(K.chance * 100) + '% to cover' + (K.sim ? '<small class="tk-sim">' + K.sim.w + '\u2013' + K.sim.l + ' on ' + K.sim.n + ' similar picks</small>' : '') + '</span>') + '</div>';
     }
     h += '</button>';
   });
