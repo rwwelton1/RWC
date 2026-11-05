@@ -9192,16 +9192,21 @@ function pxEdgeRating(chance){ return Math.max(1, Math.min(10, 1 + Math.floor((c
 function pxPbpFit(base){ var F = base || PX.live; if(!F) return null; if(!F._pbp) F._pbp = pxFit(F.upto, Object.assign({}, F.o, { sp: 0, spLate: 0, tierAdj: 0 })); return F._pbp; }
 // ref: the line you're picking against (home margin, + = home favoured); now: the market's
 // current line, same units (null if unknown). Returns the pick, its chance and the reasons.
-function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid, cur){
+function pxPickSide(awayId, homeId, neutral, ref, now, week, fit, gid, cur, game){
   if(ref === null || ref === undefined || !isFinite(ref)) return null;
   var clip = function(v, a){ return Math.max(-a, Math.min(a, v)); }, parts = { mv: 0, sp: 0, pbp: 0 }, z = 0;
   var K = cur ? PX_PICK_CUR : PX_PICK;
   if(!cur && now !== null && now !== undefined && isFinite(now)){ parts.mvPts = now - ref; parts.mv = PX_PICK.mv * clip(now - ref, 4); z += parts.mv; }
-  var SPS = (!cur && typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
+  // Live picks (a game is passed) read the SAME projection the game card shows \u2014 SP+ blend, tier adjustment and QB situation
+  // already inside it \u2014 so the pick can\u2019t contradict the card, and SP+ / QB aren\u2019t counted a second time.
+  var full = null;
+  if(game && week >= K.late && PX.active){ try{ var pp = pearProject(awayId, homeId, !!neutral, fit || null, game); if(pp && isFinite(pp.margin)) full = pp.margin; }catch(_){ full = null; } }
+  var SPS = (!cur && full === null && typeof pemPriorAt === "function") ? pemPriorAt(week) : null;
   if(SPS && SPS[homeId] && SPS[awayId]){ var spm = SPS[homeId].fpi - SPS[awayId].fpi + (neutral ? 0 : PX_PICK.hfa); parts.spPts = spm - ref; parts.sp = PX_PICK.sp * clip(spm - ref, 10); z += parts.sp; }
-  if(week >= K.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = K.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
+  if(full !== null){ parts.pbpPts = full - ref; parts.pbp = K.pbp * clip(parts.pbpPts, 10); z += parts.pbp; parts.full = true; }
+  else if(week >= K.late && PX.active){ var f = pxPbpFit(fit); if(f){ var q = pxPredict(f, awayId, homeId, !!neutral); parts.pbpPts = (q.home - q.away) - ref; parts.pbp = K.pbp * clip(parts.pbpPts, 10); z += parts.pbp; } }
   var QM = pxQbMarks(gid);
-  if(QM){ var qv = function(v){ return v === 1 ? K.qb1 : v === 2 ? K.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; z += parts.qb; }
+  if(QM){ var qv = function(v){ return v === 1 ? K.qb1 : v === 2 ? K.qb2 : 0; }; parts.qb = qv(QM[awayId]) - qv(QM[homeId]); parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; if(full === null) z += parts.qb; }
   if(Math.abs(z) < 1e-6) return { none: true, parts: parts };
   var p = 1 / (1 + Math.exp(-Math.abs(z)));
   return { pickHome: z > 0, chance: p, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: !!cur };
@@ -9239,13 +9244,13 @@ function pxGameEdge(g, mode){   // mode "market": always the current line, even 
   if(mode !== "market") (PE.games || []).forEach(function(pg){ if(pg && String(pg.homeId) === g.home.id && String(pg.awayId) === g.away.id && typeof pg.pool === "number" && (!pg.w || +pg.w === +week)) pool = (pg.favIsHome ? 1 : -1) * pg.pool; });
   var now = g.state === "pre" ? (g.vegas ? pearVegasHome(g) : null) : (pearSavedLine(g) ? -pearSavedLine(g)[0] : (g.vegas ? pearVegasHome(g) : null));
   var ref = pool !== null ? pool : now;
-  var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null, String(g.id), pool === null); if(k) k.pool = pool !== null;
+  var k = pxPickSide(g.away.id, g.home.id, g.neutral, ref, now, week, pearFitFor(week) || null, String(g.id), pool === null, g); if(k) k.pool = pool !== null;
   return k;
 }
 function pxPoolCardHtml(){
   var list = pxPoolGames(); if(!list.length) return "";
   var week = (PE.meta && PE.meta.espnWeek) || PEAR.curWeek || 1;
-  list.forEach(function(o){ o.k = pxPickSide(o.pg.awayId, o.pg.homeId, o.neutral, o.ref, o.now, week); });
+  list.forEach(function(o){ o.k = pxPickSide(o.pg.awayId, o.pg.homeId, o.neutral, o.ref, o.now, week, pearFitFor(week) || null, o.g ? String(o.g.id) : null, false, o.g || null); });
   var rated = list.filter(function(o){ return o.k && !o.k.none; }).sort(function(a, b){ return b.k.chance - a.k.chance; });
   var n = list.length, h = '<div class="pem-ats" style="margin-bottom:12px"><div class="pem-autotop"><b>🎯 Your pool — week ' + week + '</b>' + (PEAR.loading ? '<span style="font-size:12px;opacity:.7">updating lines…</span>' : '') + '</div>';
   h += '<div class="pem-bk"><div class="pem-bkhd"><span>Conf · pick</span><span>Chance</span><span>Edge</span></div>';
