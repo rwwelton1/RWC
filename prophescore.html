@@ -1631,6 +1631,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .cb-rkr{padding:6px 0;border-bottom:1px dashed #0002;font:800 12px Nunito,sans-serif}.cb-rkr>span:nth-child(n+3){text-align:right}.cb-rkh>span:nth-child(n+3){text-align:right}
 .cb-rkn{color:var(--muted)}.cb-rkt{display:flex;align-items:center;gap:6px;min-width:0}.cb-rkt b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cb-lg{width:22px;height:22px;object-fit:contain;flex:none}
 .cb-game{cursor:default}
+.cb-recw .cb-rech{font:900 12px Nunito,sans-serif;margin-bottom:2px}
 .ps-bback{display:inline-block;margin:0 0 10px;font:900 13px Nunito,sans-serif}
 .tm-tabs{margin:0 0 12px}.tm-tabs button{font-size:12.5px;padding:9px 4px}
 .rk-bar{display:flex;gap:8px;align-items:center;margin:0 0 10px}.rk-bar .rk-search{flex:1;min-width:0;margin:0}.rk-bar .rk-chg{flex:0 0 auto;width:auto;max-width:48%}
@@ -11668,8 +11669,9 @@ function cbSave(){
 }
 function cbName(id){ var t = CB.teams[id]; return t ? (t.short || t.name || t.abbr) : "Team " + id; }
 function cbAbbr(id){ var t = CB.teams[id]; return t ? (t.abbr || t.short || "") : ""; }
-function cbLogo(id){ var t = CB.teams[id]; return (t && t.logo) || ("https://a.espncdn.com/i/teamlogos/ncaa/500/" + id + ".png"); }
-function cbImg(id, cls){ return '<img class="' + (cls || "") + '" src="' + x(cbLogo(id)) + '" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">'; }
+function cbLogo(id){ var t = CB.teams[id], u = (t && t.logo) || ""; return u ? u.replace(/^http:/, "https:") : ("https://a.espncdn.com/i/teamlogos/ncaa/500/" + id + ".png"); }
+function cbImg(id, cls){ var fb = "https://a.espncdn.com/i/teamlogos/ncaa/500/" + id + ".png";
+  return '<img class="' + (cls || "") + '" src="' + x(cbLogo(id)) + '" alt="" onerror="if(this.src.indexOf(\'' + fb + '\')<0){this.src=\'' + fb + '\'}else{this.style.visibility=\'hidden\'}">'; }
 
 // ── ESPN parsing ──
 function cbParseEvent(ev){
@@ -11712,20 +11714,48 @@ function cbFetchDay(ymd, cb){
 }
 function cbLog(ymd, games){
   var S = cbStore(); if(cbSeasonOf(ymd) !== S.season) return;
-  var done = games.every(function(g){ return g.done || /postpon|cancel/i.test(g.detail); });
+  var done = games.every(function(g){ return g.done || /postpon|cancel|forfeit|suspend/i.test(g.detail); }) || ymd < cbAddDays(cbToday(), -1);
+  var old = S.days[ymd]; if(old && old.g) old.g.forEach(function(r){ if(r[8]) games.forEach(function(g){ if(g.id === r[0] && g.vh === null && g.vt === null){ g.vh = r[6]; g.vt = r[7]; g.lf = 1; } }); });
   var rows = games.filter(function(g){ return g.done && g.home.score !== null && g.away.score !== null; }).map(function(g){
-    return [g.id, g.home.id, g.away.id, g.home.score, g.away.score, g.neutral ? 1 : 0, g.vh, g.vt]; });
+    return [g.id, g.home.id, g.away.id, g.home.score, g.away.score, g.neutral ? 1 : 0, g.vh, g.vt, g.lf ? 1 : 0]; });
   S.days[ymd] = { done: done, g: rows }; CB.fit = null; cbSave();
 }
 // Season so far: fetch any day before today that isn't logged as finished, a few at a time.
 function cbSyncSeason(){
   if(CB.sync && CB.sync.busy) return;
   var S = cbStore(), today = cbToday(), start = cbSeasonStart(S.season), end = cbSeasonEnd(S.season), need = [];
-  for(var d = start; d < today && d <= end; d = cbAddDays(d, 1)) if(!(S.days[d] && S.days[d].done)) need.push(d);
-  if(!need.length){ CB.sync = { busy: false, n: 0, of: 0 }; return; }
+  CB.tried = CB.tried || {};
+  for(var d = start; d < today && d <= end; d = cbAddDays(d, 1)) if(!(S.days[d] && S.days[d].done) && !(CB.tried[d] && Date.now() - CB.tried[d] < 600000)) need.push(d);
+  if(!need.length){ CB.sync = { busy: false, n: 0, of: 0 }; cbLineBackfill(); return; }
+  need.forEach(function(d){ CB.tried[d] = Date.now(); });
   CB.sync = { busy: true, n: 0, of: need.length, err: 0 };
   var i = 0, live = 0, next = function(){
-    while(live < 4 && i < need.length){ (function(ymd){ live++; cbFetchDay(ymd, function(err){ live--; CB.sync.n++; if(err) CB.sync.err++; cbProgress(); if(i < need.length) next(); else if(!live){ CB.sync.busy = false; CB.fit = null; cbRepaint(); } }); })(need[i++]); }
+    while(live < 4 && i < need.length){ (function(ymd){ live++; cbFetchDay(ymd, function(err){ live--; CB.sync.n++; if(err) CB.sync.err++; cbProgress(); if(i < need.length) next(); else if(!live){ CB.sync.busy = false; CB.fit = null; cbRepaint(); cbLineBackfill(); } }); })(need[i++]); }
+  };
+  next();
+}
+// Closing lines for finished games: ESPN drops odds from the scoreboard after tip, but each game's summary keeps the
+// pick center line. Fetched once per game (a few at a time) so the record vs Vegas has something to grade.
+var CB_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=";
+function cbLineBackfill(){
+  if(CB.lf && CB.lf.busy) return;
+  var S = cbStore(), todo = [];
+  Object.keys(S.days).sort().reverse().forEach(function(d){ (S.days[d].g || []).forEach(function(r){ if(r[6] === null && r[7] === null && !r[8]) todo.push(r); }); });
+  todo = todo.slice(0, 400); if(!todo.length) return;
+  CB.lf = { busy: true, n: 0, of: todo.length, got: 0 };
+  var i = 0, live = 0, next = function(){
+    while(live < 4 && i < todo.length){ (function(r){ live++;
+      fetch(CB_SUMMARY + r[0]).then(function(x1){ if(!x1.ok) throw 0; return x1.json(); }).then(function(d){
+        var pc = (d && (d.pickcenter || d.odds)) || [], o = pc[0]; if(!o) return;
+        var vh = null, a = typeof o.spread === "number" ? Math.abs(o.spread) : null, det = String(o.details || "").trim();
+        if(/^(EVEN|PK|PICK)/i.test(det)) vh = 0;
+        else if(a !== null && o.homeTeamOdds && o.homeTeamOdds.favorite) vh = a;
+        else if(a !== null && o.awayTeamOdds && o.awayTeamOdds.favorite) vh = -a;
+        else if(det){ var m = det.match(/^\s*([A-Za-z&.'-]+)\s+(-?\d+(?:\.\d+)?)/); if(m){ var ab = m[1].toUpperCase(), v = Math.abs(parseFloat(m[2])); if(ab === cbAbbr(r[1]).toUpperCase()) vh = v; else if(ab === cbAbbr(r[2]).toUpperCase()) vh = -v; } }
+        if(vh === null && typeof o.spread === "number") vh = -o.spread;
+        r[6] = vh; r[7] = typeof o.overUnder === "number" ? o.overUnder : null; if(vh !== null || r[7] !== null){ CB.lines[r[0]] = [r[6], r[7]]; CB.lf.got++; }
+      }).catch(function(){}).then(function(){ r[8] = 1; live--; CB.lf.n++; cbProgress(); if(i < todo.length) next(); else if(!live){ CB.lf.busy = false; cbSave(); CB.wfPrev = CB.wf || CB.wfPrev; CB.wf = null; cbRepaint(); } });
+    })(todo[i++]); }
   };
   next();
 }
@@ -11835,7 +11865,7 @@ function cbWalkForward(){
       });
     }
     if(i < days.length) setTimeout(step, 0);
-    else { CB.wf = R; CB.wfBusy = false; cbRepaint(); }
+    else { CB.wf = R; CB.wfPrev = R; CB.wfBusy = false; cbRepaint(); }
   };
   setTimeout(step, 0);
 }
@@ -11871,6 +11901,7 @@ function cbLoadDay(ymd, force){
 function cbSyncHtml(){
   var P = CB.priorBusy, Sy = CB.sync, out = [];
   if(P) out.push('<b>Building preseason ratings from last season…</b> ' + P.n + ' of ' + P.of + ' days<div class="cb-pb"><i style="width:' + Math.round(100 * P.n / Math.max(1, P.of)) + '%"></i></div>');
+  if(CB.lf && CB.lf.busy) out.push('<b>Fetching closing lines for finished games\u2026</b> ' + CB.lf.n + ' of ' + CB.lf.of + '<div class="cb-pb"><i style="width:' + Math.round(100 * CB.lf.n / Math.max(1, CB.lf.of)) + '%"></i></div>');
   if(Sy && Sy.busy) out.push('<b>Loading this season’s results…</b> ' + Sy.n + ' of ' + Sy.of + ' days<div class="cb-pb"><i style="width:' + Math.round(100 * Sy.n / Math.max(1, Sy.of)) + '%"></i></div>');
   return out.join('');
 }
@@ -11880,8 +11911,10 @@ function cbDayLabel(ymd){
   return cbParseYmd(ymd).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 function cbRecHtml(){
-  var W = CB.wf; if(!W){ cbWalkForward(); return '<div class="bf-rec"><div class="bf-rfoot">Grading the model against Vegas, day by day…</div></div>'; }
-  if(!(W.s[0] + W.s[1] + W.t[0] + W.t[1])) return '';
+  var shell = function(msg){ return '<div class="bf-rec cb-recw"><div class="cb-rech">Model record vs Vegas</div><div class="bf-rfoot">' + msg + '</div></div>'; };
+  if(CB.priorBusy && !CB.prior) return shell('Waiting for last season\u2019s ratings to finish \u2014 then every finished game this season is graded.');
+  var W = CB.wf; if(!W){ cbWalkForward(); W = CB.wfPrev; if(!W) return shell('Grading the model against Vegas, day by day\u2026'); }
+  if(!(W.s[0] + W.s[1] + W.t[0] + W.t[1])) return shell(CB.lf && CB.lf.busy ? 'Fetching closing lines so finished games can be graded\u2026' : 'No graded games yet \u2014 none of this season\u2019s finished games have a line from ESPN.');
   var cell = function(a){ return bfCell({ w: a[0], l: a[1], p: a[2] }); }, Dy = W.byDay[CB.date];
   var row = function(lab, sub, s, t){ return '<div class="bf-rr"><span class="bf-rl">' + lab + (sub ? '<small>' + sub + '</small>' : '') + '</span><span>' + cell(s) + '</span><span>' + (t ? cell(t) : '<span class="bf-na">–</span>') + '</span></div>'; };
   var rows = (Dy ? row(cbDayLabel(CB.date), 'this day', Dy.s, Dy.t) : '') + row('Season', W.n + ' graded', W.s, W.t) +
@@ -11936,7 +11969,8 @@ function cbListHtml(f){
   var D = CB.day[CB.date];
   if(!D || (D.loading && !D.games)) return '<div class="pr-empty">Loading ' + x(cbDayLabel(CB.date).toLowerCase()) + '’s games…</div>';
   if(D.err && !D.games) return '<div class="pr-empty">Couldn’t reach ESPN (' + x(D.err) + '). <button class="pr-link" data-cb="reload">Retry</button></div>';
-  var list = (D.games || []).map(function(g){ var p = cbPredict(f, g.away.id, g.home.id, g.neutral), o = { g: g, p: p }; o.k = cbPick(g, p); o.T = cbTot(g, p); return o; });
+  var prelim = !!(CB.priorBusy && !CB.prior);
+  var list = (D.games || []).map(function(g){ var p = cbPredict(f, g.away.id, g.home.id, g.neutral), o = { g: g, p: p }; if(!prelim){ o.k = cbPick(g, p); o.T = cbTot(g, p); } return o; });
   if(!list.length) return '<div class="pr-empty">No D-I games ' + (CB.date === cbToday() ? 'today' : 'on this day') + '.</div>';
   var n0 = list.length;
   if(CB.filter === "live") list = list.filter(function(o){ return o.g.state === "in"; });
@@ -11953,7 +11987,7 @@ function cbListHtml(f){
   if(CB.q && CB.q.trim()){ var q = pearSearchNorm(CB.q); list = list.filter(function(o){ return [o.g.home.id, o.g.away.id].some(function(id){ var t = CB.teams[id] || {}; return pearSearchNorm(cbName(id) + " " + cbAbbr(id) + " " + (t.name || "")).indexOf(q) >= 0; }); }); }
   // This day's record for the filtered set.
   var rec = { s: { w: 0, l: 0, p: 0 }, t: { w: 0, l: 0, p: 0 } }; list.forEach(function(o){ if(o.k && o.k.res) bfBump(rec.s, o.k.res); if(o.T && o.T.res) bfBump(rec.t, o.T.res); });
-  var h = '';
+  var h = prelim ? '<div class="pr-pastnote">\u23F3 Projections are rough until last season\u2019s ratings finish loading (see the bar above), so picks and edges are hidden for now.</div>' : '';
   if(nF || CB.filter !== "all") h += '<div class="bf-sum"><b>' + list.length + '</b> of ' + n0 + ' games' + ((rec.s.w + rec.s.l + rec.t.w + rec.t.l) ? ' · model here: spread ' + bfTxt(rec.s) + ', O/U ' + bfTxt(rec.t) : '') + (nF ? ' · <button class="pr-link" data-cb="fclear">Clear filters</button>' : '') + '</div>';
   if(!list.length) return h + '<div class="pr-empty">' + (CB.filter === "live" ? 'No games are live right now.' : 'No games match.') + '</div>';
   var lastHr = "";
