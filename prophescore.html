@@ -1688,6 +1688,13 @@ details[open]>*:not(summary){animation:psxFold .22s ease both}
 .sk-row i,.sk-l{background:linear-gradient(90deg,#eee9df 0%,#f7f3ec 40%,#eee9df 80%);background-size:300% 100%;animation:psxShim 1.3s linear infinite}
 @keyframes psxShim{from{background-position:100% 0}to{background-position:0 0}}
 @media (prefers-reduced-motion:reduce){.main[class*=pv-],.main[class*=pv-] *,.ps-tabbar.pv-tab button.on i,.sk-row i,.sk-l,details[open]>*{animation:none!important}}
+.cb-data{border:2px solid var(--border);border-radius:12px;background:#fff;padding:8px 12px;margin:0 0 10px}.cb-data>summary{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font:900 13px Nunito,sans-serif}.cb-data>summary::-webkit-details-marker{display:none}
+.cb-data>summary small{font:700 11px Nunito,sans-serif;color:var(--muted)}.cb-data[open]>summary{margin-bottom:6px}
+.cb-dr{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed #0002;font:700 12px Nunito,sans-serif}.cb-dr b{font-weight:900;text-align:right}
+.cb-note{font:700 11.5px/1.45 Nunito,sans-serif;color:var(--muted);margin:8px 0 4px}.cb-note a{color:var(--text);font-weight:900}
+.cb-tvp{width:100%;min-height:90px;box-sizing:border-box;border:2px solid var(--border);border-radius:10px;padding:8px;font:600 11px ui-monospace,Menlo,monospace;margin:4px 0}
+.cb-pace{font:700 11px Nunito,sans-serif;color:var(--muted)}
+.cb-rkh,.cb-rkr{grid-template-columns:26px 1fr 46px 42px 42px 40px!important}
 .pp-t{border:2px solid var(--border);border-radius:14px;background:#fffdf6;box-shadow:3px 3px 0 var(--border);padding:6px 12px;margin:0 0 12px}
 .pp-h{display:flex;gap:10px;font:900 10px Nunito,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:4px 0 6px;border-bottom:2px solid var(--border)}.pp-h span:nth-child(1){flex:0 0 34px}.pp-h span:nth-child(2){flex:1}
 .pp-r{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed #0002}.pp-r.pp-n{opacity:.6}
@@ -11716,6 +11723,11 @@ document.addEventListener("input", function(e){
 // localStorage, so later visits only fetch the days that are new.
 var CB_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard";
 var CB_HCA = 3.2, CB_SD = 11, CB_LAMBDA = 5, CB_REGRESS = 0.65;
+// Tempo-free model (v2): points per 100 possessions and possessions per game, the way Torvik and KenPom rate teams.
+var CB_HCAE = 4.6;            // home court in points per 100 possessions (about 3.2 points at a 69-possession pace)
+var CB_LAM_TV = 6, CB_LAM_LAST = 5, CB_LAM_T = 4;   // prior weight, in games: Torvik, last season, tempo
+var CB_BLOW = 30;             // efficiency gaps beyond 30 points per 100 count only half
+
 var CB = {
   on: (function(){ try{ return localStorage.getItem("ps_sport") === "cbb"; }catch(_){ return false; } })(),
   date: null, day: {}, teams: {}, store: null, lines: null, prior: null, priorBusy: null, sync: null,
@@ -11738,7 +11750,7 @@ function cbStore(){
   if(!CB.store || CB.store.season !== season){
     CB.store = cbLsGet("ps_cbb_s" + season) || { season: season, days: {}, teams: {} };
     CB.store.season = season;
-    Object.keys(CB.store.teams || {}).forEach(function(id){ var t = CB.store.teams[id]; if(!CB.teams[id]) CB.teams[id] = { name: t[0], abbr: t[1], logo: t[2], short: t[3] || t[0] }; });
+    Object.keys(CB.store.teams || {}).forEach(function(id){ var t = CB.store.teams[id]; if(!CB.teams[id]) CB.teams[id] = { name: t[0], abbr: t[1], logo: t[2], short: t[3] || t[0], loc: t[4] || "" }; });
   }
   if(!CB.lines) CB.lines = cbLsGet("ps_cbb_lines") || {};
   return CB.store;
@@ -11748,7 +11760,7 @@ function cbSave(){
   clearTimeout(_cbSaveT);
   _cbSaveT = setTimeout(function(){
     var S = CB.store; if(!S) return;
-    S.teams = {}; Object.keys(CB.teams).forEach(function(id){ var t = CB.teams[id]; S.teams[id] = [t.name, t.abbr, t.logo, t.short]; });
+    S.teams = {}; Object.keys(CB.teams).forEach(function(id){ var t = CB.teams[id]; S.teams[id] = [t.name, t.abbr, t.logo, t.short, t.loc || ""]; });
     if(!cbLsSet("ps_cbb_s" + S.season, S)){ S.teams = {}; cbLsSet("ps_cbb_s" + S.season, S); }
     // keep only lines for games in the last ~200 days of ids we still care about
     var L = CB.lines || {}, ks = Object.keys(L); if(ks.length > 9000) ks.slice(0, ks.length - 9000).forEach(function(k){ delete L[k]; });
@@ -11767,7 +11779,7 @@ function cbParseEvent(ev){
   var st = (c.status || ev.status || {}).type || {}, side = {};
   (c.competitors || []).forEach(function(t){
     var tm = t.team || {}, id = String(tm.id || ""); if(!id) return;
-    CB.teams[id] = { name: tm.displayName || tm.location || tm.shortDisplayName || id, abbr: tm.abbreviation || "", short: tm.shortDisplayName || tm.location || tm.displayName || "",
+    CB.teams[id] = { name: tm.displayName || tm.location || tm.shortDisplayName || id, abbr: tm.abbreviation || "", short: tm.shortDisplayName || tm.location || tm.displayName || "", loc: tm.location || (CB.teams[id] || {}).loc || "",
       logo: tm.logo || (tm.logos && tm.logos[0] && tm.logos[0].href) || (CB.teams[id] && CB.teams[id].logo) || "", conf: tm.conferenceId != null ? String(tm.conferenceId) : ((CB.teams[id] || {}).conf || "") };
     var tot = ""; (t.records || []).forEach(function(r){ if(!tot && (r.type === "total" || r.name === "overall")) tot = r.summary || ""; });
     var rk = t.curatedRank && t.curatedRank.current;
@@ -11803,10 +11815,13 @@ function cbFetchDay(ymd, cb){
 function cbLog(ymd, games){
   var S = cbStore(); if(cbSeasonOf(ymd) !== S.season) return;
   var done = games.every(function(g){ return g.done || /postpon|cancel|forfeit|suspend/i.test(g.detail); }) || ymd < cbAddDays(cbToday(), -1);
-  var old = S.days[ymd]; if(old && old.g) old.g.forEach(function(r){ if(r[8]) games.forEach(function(g){ if(g.id === r[0] && g.vh === null && g.vt === null){ g.vh = r[6]; g.vt = r[7]; g.lf = 1; } }); });
+  var old = {}; ((S.days[ymd] || {}).g || []).forEach(function(r){ old[r[0]] = r; });
   var rows = games.filter(function(g){ return g.done && g.home.score !== null && g.away.score !== null; }).map(function(g){
-    return [g.id, g.home.id, g.away.id, g.home.score, g.away.score, g.neutral ? 1 : 0, g.vh, g.vt, g.lf ? 1 : 0]; });
-  S.days[ymd] = { done: done, g: rows }; CB.fit = null; cbSave();
+    var o = old[g.id] || [], vh = g.vh !== null ? g.vh : (o[6] === undefined ? null : o[6]), vt = g.vt !== null ? g.vt : (o[7] === undefined ? null : o[7]);
+    return [g.id, g.home.id, g.away.id, g.home.score, g.away.score, g.neutral ? 1 : 0, vh, vt, o[8] ? 1 : 0, o[9] || null, o[10] ? 1 : 0]; });
+  // keep finished games ESPN no longer lists on that date
+  Object.keys(old).forEach(function(id){ if(!rows.some(function(r){ return r[0] === id; })) rows.push(old[id]); });
+  S.days[ymd] = { done: done, g: rows }; CB.fit = null; cbSave(); cbDirty(ymd);
 }
 // Season so far: fetch any day before today that isn't logged as finished, a few at a time.
 function cbSyncSeason(){
@@ -11828,13 +11843,15 @@ var CB_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-
 function cbLineBackfill(){
   if(CB.lf && CB.lf.busy) return;
   var S = cbStore(), todo = [];
-  Object.keys(S.days).sort().reverse().forEach(function(d){ (S.days[d].g || []).forEach(function(r){ if(r[6] === null && r[7] === null && !r[8]) todo.push(r); }); });
-  todo = todo.slice(0, 400); if(!todo.length) return;
-  CB.lf = { busy: true, n: 0, of: todo.length, got: 0 };
+  var dayOf = {};
+  Object.keys(S.days).sort().reverse().forEach(function(d){ (S.days[d].g || []).forEach(function(r){ if((r[6] === null && r[7] === null && !r[8]) || !r[10]){ todo.push(r); dayOf[r[0]] = d; } }); });
+  todo = todo.slice(0, 600); if(!todo.length) return;
+  CB.lf = { busy: true, n: 0, of: todo.length, got: 0, box: 0 };
   var i = 0, live = 0, next = function(){
     while(live < 4 && i < todo.length){ (function(r){ live++;
       fetch(CB_SUMMARY + r[0]).then(function(x1){ if(!x1.ok) throw 0; return x1.json(); }).then(function(d){
-        var pc = (d && (d.pickcenter || d.odds)) || [], o = pc[0]; if(!o) return;
+        var ps = cbPossFromBox(d); if(ps){ r[9] = ps; CB.lf.box++; }
+        var pc = (d && (d.pickcenter || d.odds)) || [], o = pc[0]; if(!o || r[8]) return;
         var vh = null, a = typeof o.spread === "number" ? Math.abs(o.spread) : null, det = String(o.details || "").trim();
         if(/^(EVEN|PK|PICK)/i.test(det)) vh = 0;
         else if(a !== null && o.homeTeamOdds && o.homeTeamOdds.favorite) vh = a;
@@ -11842,24 +11859,40 @@ function cbLineBackfill(){
         else if(det){ var m = det.match(/^\s*([A-Za-z&.'-]+)\s+(-?\d+(?:\.\d+)?)/); if(m){ var ab = m[1].toUpperCase(), v = Math.abs(parseFloat(m[2])); if(ab === cbAbbr(r[1]).toUpperCase()) vh = v; else if(ab === cbAbbr(r[2]).toUpperCase()) vh = -v; } }
         if(vh === null && typeof o.spread === "number") vh = -o.spread;
         r[6] = vh; r[7] = typeof o.overUnder === "number" ? o.overUnder : null; if(vh !== null || r[7] !== null){ CB.lines[r[0]] = [r[6], r[7]]; CB.lf.got++; }
-      }).catch(function(){}).then(function(){ r[8] = 1; live--; CB.lf.n++; cbProgress(); if(i < todo.length) next(); else if(!live){ CB.lf.busy = false; cbSave(); CB.wfPrev = CB.wf || CB.wfPrev; CB.wf = null; cbRepaint(); } });
+      }).catch(function(){}).then(function(){ r[8] = 1; r[10] = 1; cbDirty(dayOf[r[0]]); live--; CB.lf.n++; cbProgress(); if(i < todo.length) next(); else if(!live){ CB.lf.busy = false; cbSave(); CB.wfPrev = CB.wf || CB.wfPrev; CB.wf = null; cbRepaint(); } });
     })(todo[i++]); }
   };
   next();
 }
+// Possessions from a game summary's team box score: FGA - offensive rebounds + turnovers + 0.475 x FTA, averaged
+// over the two teams (the standard estimate Torvik and KenPom use).
+function cbPossFromBox(d){
+  var T = d && d.boxscore && d.boxscore.teams; if(!T || T.length !== 2) return null;
+  var one = function(t){
+    var st = {}; (t.statistics || []).forEach(function(z){ st[z.name] = z.displayValue != null ? String(z.displayValue) : String(z.value); });
+    var pair = function(re){ var k = Object.keys(st).filter(function(n){ return re.test(n); })[0]; if(!k) return null; var m = st[k].match(/(\d+)\s*-\s*(\d+)/); return m ? [+m[1], +m[2]] : null; };
+    var num = function(re){ var k = Object.keys(st).filter(function(n){ return re.test(n); })[0]; if(!k) return null; var v = parseFloat(st[k]); return isFinite(v) ? v : null; };
+    var fg = pair(/^fieldGoalsMade-fieldGoalsAttempted$|^fieldGoals$/i), ft = pair(/^freeThrowsMade-freeThrowsAttempted$|^freeThrows$/i);
+    var orb = num(/^offensiveRebounds$/i), to = num(/^totalTurnovers$/i); if(to === null) to = num(/^turnovers$/i);
+    if(!fg || !ft || orb === null || to === null) return null;
+    return fg[1] - orb + to + 0.475 * ft[1];
+  };
+  var a = one(T[0]), b = one(T[1]); if(a === null || b === null) return null;
+  var p = (a + b) / 2; return p > 45 && p < 110 ? Math.round(p * 10) / 10 : null;
+}
 // Last season's results, fitted once, become this season's starting point.
 function cbEnsurePrior(){
   var S = cbStore(), key = "ps_cbb_prior" + S.season;
-  if(!CB.prior) CB.prior = cbLsGet(key);
+  if(!CB.prior){ var lp = cbLsGet(key); if(lp && lp.v === 2) CB.prior = lp; }
   if(CB.prior || CB.priorBusy) return;
   var last = S.season - 1, d0 = cbSeasonStart(last), d1 = cbSeasonEnd(last), days = [];
   for(var d = d0; d <= d1; d = cbAddDays(d, 1)) days.push(d);
   var games = [], i = 0, live = 0; CB.priorBusy = { n: 0, of: days.length, err: 0 };
   var fin = function(){
-    var f = cbFitRaw(games, null);
-    var O = {}, D = {}; Object.keys(f.O).forEach(function(id){ O[id] = Math.round(f.O[id] * CB_REGRESS * 100) / 100; D[id] = Math.round(f.D[id] * CB_REGRESS * 100) / 100; });
-    CB.prior = { season: S.season, mu: f.mu, O: O, D: D, n: games.length, ts: Date.now() };
-    if(games.length > 500) cbLsSet(key, CB.prior);
+    var f = cbFitPts(games, null), sc = 100 / 69;          // points per game -> per 100 possessions at an average pace
+    var O = {}, D = {}; Object.keys(f.O).forEach(function(id){ O[id] = Math.round(f.O[id] * CB_REGRESS * sc * 100) / 100; D[id] = Math.round(f.D[id] * CB_REGRESS * sc * 100) / 100; });
+    CB.prior = { v: 2, season: S.season, mu: f.mu * sc, O: O, D: D, n: games.length, ts: Date.now() };
+    if(games.length > 500){ cbLsSet(key, CB.prior); cbShareUp("prior", CB.prior); }
     CB.priorBusy = null; CB.fit = null; cbRepaint();
   };
   var next = function(){
@@ -11877,8 +11910,8 @@ var _cbProgT = null;
 function cbProgress(){ var el = document.getElementById("cb-sync"); if(el){ el.innerHTML = cbSyncHtml(); return; } clearTimeout(_cbProgT); _cbProgT = setTimeout(cbRepaint, 1500); }
 
 // ── The model ──
-// Least squares with a pull toward each team's prior (worth CB_LAMBDA games), solved by sweeping offense then defense.
-function cbFitRaw(games, prior){
+// Points per game, used only to turn last season's scores into a starting point.
+function cbFitPts(games, prior){
   var ix = {}, ids = [], add = function(id){ if(ix[id] === undefined){ ix[id] = ids.length; ids.push(id); } };
   games.forEach(function(g){ add(g.h); add(g.a); });
   if(prior) Object.keys(prior.O).forEach(add);
@@ -11905,23 +11938,80 @@ function cbFitRaw(games, prior){
   ids.forEach(function(id, i){ out.O[id] = O[i]; out.D[id] = D[i]; out.n[id] = cnt[i]; });
   return out;
 }
+// Tempo-free: each team's offense and defense in points per 100 possessions against an average opponent, and its pace
+// in possessions per game, fitted together to this season's box scores with a pull toward the starting ratings.
+// Recent games count fully; games over a month old fade to 60%. Efficiency gaps beyond 30 per 100 count half.
+function cbFitRaw(games, prior){
+  var ix = {}, ids = [], add = function(id){ if(ix[id] === undefined){ ix[id] = ids.length; ids.push(id); } };
+  games.forEach(function(g){ add(g.h); add(g.a); });
+  if(prior) Object.keys(prior.O).forEach(add);
+  var N = ids.length, O = new Float64Array(N), D = new Float64Array(N), T = new Float64Array(N), O0 = new Float64Array(N), D0 = new Float64Array(N), T0 = new Float64Array(N);
+  var lam = new Float64Array(N), lamT = new Float64Array(N), cnt = new Float64Array(N), cntT = new Float64Array(N), raw = new Float64Array(N);
+  var sp = 0, sq = 0, nb = 0, sT = 0; games.forEach(function(g){ if(g.poss){ sp += g.hs + g.as; sq += 2 * g.poss; sT += g.poss; nb++; } });
+  var muE = nb >= 60 ? 100 * sp / sq : (prior && prior.muE ? prior.muE : (prior && prior.mu ? prior.mu : 104));
+  var muT = nb >= 60 ? sT / nb : (prior && prior.muT ? prior.muT : 68.5);
+  var last = games.reduce(function(m, g){ return g.d && g.d > m ? g.d : m; }, "");
+  ids.forEach(function(id, i){
+    if(prior && prior.O[id] !== undefined){ O0[i] = prior.O[id]; D0[i] = prior.D[id]; lam[i] = prior.lam || CB_LAMBDA; }
+    else if(prior){ O0[i] = -6; D0[i] = 6; lam[i] = 2; }        // not rated anywhere: usually a new or non-D-I team
+    else lam[i] = 1;
+    if(prior && prior.T && prior.T[id] !== undefined){ T0[i] = prior.T[id]; lamT[i] = CB_LAM_T; } else lamT[i] = 2;
+    O[i] = O0[i]; D[i] = D0[i]; T[i] = T0[i];
+  });
+  var G = games.map(function(g){
+    var age = last && g.d ? Math.max(0, (cbParseYmd(last) - cbParseYmd(g.d)) / 864e5) : 0, w = age <= 30 ? 1 : Math.max(0.6, 1 - (age - 30) / 100);
+    var P = g.poss || ((g.hs + g.as) / (2 * muE / 100)), eh = 100 * g.hs / P, ea = 100 * g.as / P, df = eh - ea;
+    if(Math.abs(df) > CB_BLOW){ var ex = (Math.abs(df) - CB_BLOW) / 4 * (df > 0 ? 1 : -1); eh -= ex; ea += ex; }
+    var h = ix[g.h], a = ix[g.a]; cnt[h] += w; cnt[a] += w; if(g.poss){ cntT[h] += w; cntT[a] += w; }
+    return [h, a, eh, ea, g.n ? 0 : CB_HCAE / 2, w, g.poss || 0];
+  });
+  var sO = new Float64Array(N), sD = new Float64Array(N), sTT = new Float64Array(N);
+  for(var it = 0; it < 30; it++){
+    sO.fill(0);
+    for(var k = 0; k < G.length; k++){ var r = G[k]; sO[r[0]] += r[5] * (r[2] - muE - D[r[1]] - r[4]); sO[r[1]] += r[5] * (r[3] - muE - D[r[0]] + r[4]); }
+    for(var i = 0; i < N; i++) O[i] = (sO[i] + lam[i] * O0[i]) / (cnt[i] + lam[i]);
+    sD.fill(0);
+    for(var k2 = 0; k2 < G.length; k2++){ var q = G[k2]; sD[q[1]] += q[5] * (q[2] - muE - O[q[0]] - q[4]); sD[q[0]] += q[5] * (q[3] - muE - O[q[1]] + q[4]); }
+    for(var j = 0; j < N; j++) D[j] = (sD[j] + lam[j] * D0[j]) / (cnt[j] + lam[j]);
+    if(it % 3 === 0){
+      sTT.fill(0);
+      for(var k3 = 0; k3 < G.length; k3++){ var z = G[k3]; if(!z[6]) continue; sTT[z[0]] += z[5] * (z[6] - muT - T[z[1]]); sTT[z[1]] += z[5] * (z[6] - muT - T[z[0]]); }
+      for(var m2 = 0; m2 < N; m2++) T[m2] = (sTT[m2] + lamT[m2] * T0[m2]) / (cntT[m2] + lamT[m2]);
+    }
+  }
+  var out = { v: 2, mu: muE, muE: muE, muT: muT, O: {}, D: {}, T: {}, n: {}, games: games.length, box: nb };
+  ids.forEach(function(id, i){ out.O[id] = O[i]; out.D[id] = D[i]; out.T[id] = T[i]; out.n[id] = cnt[i]; });
+  return out;
+}
+// The starting point for this season: Torvik's ratings where we have them, last season's (regressed) for the rest.
+// Walk-forward grading leaves Torvik out, since his current numbers already know later results.
+function cbPriorAll(noTorvik){
+  var L = CB.prior, V = !noTorvik && CB.tv && CB.tv.r && Object.keys(CB.tv.r).length > 100 ? CB.tv : null;
+  if(!L && !V) return null;
+  var P = { O: {}, D: {}, T: {}, lam: CB_LAM_LAST, mu: L ? L.mu : null, muE: V ? V.muE : (L ? L.mu : null), muT: V ? V.muT : null };
+  if(L) Object.keys(L.O).forEach(function(id){ P.O[id] = L.O[id]; P.D[id] = L.D[id]; });
+  if(V) Object.keys(V.r).forEach(function(id){ var z = V.r[id]; P.O[id] = z[0] - V.muE; P.D[id] = z[1] - V.muE; if(z[2]) P.T[id] = z[2] - V.muT; });
+  if(V) P.lam = CB_LAM_TV;
+  return P;
+}
 function cbSeasonGames(before){
   var S = cbStore(), out = [];
-  Object.keys(S.days).forEach(function(d){ if(before && d >= before) return; (S.days[d].g || []).forEach(function(r){ out.push({ id: r[0], h: r[1], a: r[2], hs: r[3], as: r[4], n: !!r[5], vh: r[6], vt: r[7], d: d }); }); });
+  Object.keys(S.days).forEach(function(d){ if(before && d >= before) return; (S.days[d].g || []).forEach(function(r){ out.push({ id: r[0], h: r[1], a: r[2], hs: r[3], as: r[4], n: !!r[5], vh: r[6], vt: r[7], poss: r[9] || null, d: d }); }); });
   return out;
 }
 function cbModel(){
-  var S = cbStore(), key = Object.keys(S.days).length + "|" + (CB.prior ? CB.prior.ts : 0) + "|" + Object.keys(S.days).reduce(function(t, d){ return t + (S.days[d].g || []).length; }, 0);
-  if(!CB.fit || CB.fitKey !== key){ CB.fit = cbFitRaw(cbSeasonGames(null), CB.prior); CB.fitKey = key; CB.wf = null; }
+  var S = cbStore(), key = Object.keys(S.days).length + "|" + (CB.prior ? CB.prior.ts : 0) + "|" + (CB.tv ? CB.tv.ts : 0) + "|" + Object.keys(S.days).reduce(function(t, d){ return t + (S.days[d].g || []).length + (S.days[d].g || []).filter(function(r){ return r[9]; }).length * 1000; }, 0);
+  if(!CB.fit || CB.fitKey !== key){ CB.fit = cbFitRaw(cbSeasonGames(null), cbPriorAll(false)); CB.fitKey = key; CB.wf = null; }
   return CB.fit;
 }
 function cbPredict(f, aId, hId, neutral){
   if(!f) return null;
-  var oa = f.O[aId], da = f.D[aId], oh = f.O[hId], dh = f.D[hId], unk = CB.prior ? -4 : 0;
+  var oa = f.O[aId], da = f.D[aId], oh = f.O[hId], dh = f.D[hId], unk = CB.prior || CB.tv ? -6 : 0;
   if(oa === undefined){ oa = unk; da = -unk; } if(oh === undefined){ oh = unk; dh = -unk; }
-  var hb = neutral ? 0 : CB_HCA / 2, hs = f.mu + oh + da + hb, as = f.mu + oa + dh - hb, m = hs - as;
+  var poss = (f.muT || 68.5) + ((f.T && f.T[aId]) || 0) + ((f.T && f.T[hId]) || 0), hb = neutral ? 0 : CB_HCAE / 2;
+  var hs = poss * (f.muE + oh + da + hb) / 100, as = poss * (f.muE + oa + dh - hb) / 100, m = hs - as;
   var hw = pearNormCdf(m / CB_SD), thin = ((f.n[aId] || 0) < 3 && !(CB.prior && CB.prior.O[aId] !== undefined)) || ((f.n[hId] || 0) < 3 && !(CB.prior && CB.prior.O[hId] !== undefined));
-  return { home: hs, away: as, margin: m, total: hs + as, homeWin: hw, awayWin: 1 - hw, thin: thin };
+  return { home: hs, away: as, margin: m, total: hs + as, poss: poss, homeWin: hw, awayWin: 1 - hw, thin: thin };
 }
 // The model's side against a line (vh: home margin, + = home favored).
 function cbPick(g, p){
@@ -11945,7 +12035,7 @@ function cbWalkForward(){
   var step = function(){
     var t0 = Date.now();
     while(i < days.length && Date.now() - t0 < 40){
-      var d = days[i++], f = cbFitRaw(cbSeasonGames(d), CB.prior), Dy = R.byDay[d] = { s: [0, 0, 0], t: [0, 0, 0] };
+      var d = days[i++], f = cbFitRaw(cbSeasonGames(d), cbPriorAll(true)), Dy = R.byDay[d] = { s: [0, 0, 0], t: [0, 0, 0] };
       (S.days[d].g || []).forEach(function(r){
         var g = { home: { id: r[1], score: r[3] }, away: { id: r[2], score: r[4] }, state: "post", vh: r[6], vt: r[7] }, p = cbPredict(f, r[2], r[1], !!r[5]);
         var k = cbPick(g, p); if(k){ bump(R.s, k.res); bump(Dy.s, k.res); bump(R.bk[k.edge < 3 ? 0 : k.edge < 6 ? 1 : 2], k.res); if(k.vdog) bump(R.vdog, k.res); R.n++; }
@@ -11956,6 +12046,132 @@ function cbWalkForward(){
     else { CB.wf = R; CB.wfPrev = R; CB.wfBusy = false; cbRepaint(); }
   };
   setTimeout(step, 0);
+}
+
+// ── Torvik ──
+// Bart Torvik publishes every team's adjusted offense, defense and tempo as a free CSV. The app tries to read it
+// directly; if his site won't serve it to an app, an editor can open the file in Safari, copy it and paste it in.
+// Either way the parsed ratings are shared with the group.
+function cbTvUrl(season){ return "https://barttorvik.com/" + season + "_team_results.csv"; }
+function cbCsv(text){
+  var rows = [], row = [], f = "", q = false;
+  for(var i = 0; i < text.length; i++){ var c = text[i];
+    if(q){ if(c === '"'){ if(text[i + 1] === '"'){ f += '"'; i++; } else q = false; } else f += c; }
+    else if(c === '"') q = true; else if(c === ","){ row.push(f); f = ""; } else if(c === "\n" || c === "\r"){ if(c === "\r" && text[i + 1] === "\n") i++; row.push(f); rows.push(row); row = []; f = ""; } else f += c; }
+  if(f || row.length){ row.push(f); rows.push(row); }
+  return rows.filter(function(r){ return r.length > 3; });
+}
+function cbNorm(n){
+  n = String(n || "").toLowerCase().replace(/&/g, " and ").replace(/[.'\u2019()]/g, "").replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  n = n.replace(/^st /, "saint ").replace(/ st$/, " state").replace(/ st /, " state ");
+  return n;
+}
+var CB_TV_ALIAS = { "connecticut": "uconn", "miami fl": "miami", "miami oh": "miami oh", "nc state": "nc state", "mississippi": "ole miss", "louisiana lafayette": "louisiana", "ut rio grande valley": "ut rio grande valley",
+  "texas a and m corpus chris": "texas a and m corpus christi", "umkc": "kansas city", "nebraska omaha": "omaha", "detroit": "detroit mercy", "liu": "long island university", "liu brooklyn": "long island university",
+  "southern miss": "southern miss", "cal state bakersfield": "cal state bakersfield", "fiu": "fiu", "fau": "florida atlantic", "uncw": "unc wilmington", "unc greensboro": "unc greensboro", "usc upstate": "south carolina upstate",
+  "ut martin": "ut martin", "ul monroe": "ul monroe", "louisiana monroe": "ul monroe", "umass lowell": "umass lowell", "massachusetts": "umass", "penn": "pennsylvania", "pittsburgh": "pitt", "loyola chicago": "loyola chicago",
+  "loyola md": "loyola maryland", "saint marys": "saint marys", "saint johns": "st johns", "mount saint marys": "mount st marys", "cal baptist": "california baptist", "seattle": "seattle u", "sam houston state": "sam houston",
+  "texas a and m commerce": "east texas a and m", "southeastern louisiana": "se louisiana", "tennessee martin": "ut martin", "arkansas pine bluff": "arkansas pine bluff", "grambling state": "grambling", "the citadel": "the citadel",
+  "illinois chicago": "uic", "purdue fort wayne": "purdue fort wayne", "iu indy": "iu indianapolis", "iupui": "iu indianapolis", "queens": "queens university", "saint francis pa": "saint francis", "st francis pa": "saint francis",
+  "bethune cookman": "bethune cookman", "southern": "southern", "nicholls state": "nicholls", "mcneese state": "mcneese", "fairleigh dickinson": "fairleigh dickinson", "central connecticut": "central connecticut", "central conn": "central connecticut" };
+function cbMatchIndex(){
+  var ix = {};
+  Object.keys(CB.teams).forEach(function(id){ var t = CB.teams[id]; [t.loc, t.short, t.name, t.abbr].forEach(function(n){ var k = cbNorm(n); if(k && !ix[k]) ix[k] = id; }); });
+  return ix;
+}
+function cbTvParse(text){
+  var R = cbCsv(String(text || "")); if(R.length < 50) return { err: "That doesn\u2019t look like Torvik\u2019s team results file." };
+  var hd = R[0].map(function(h){ return String(h).toLowerCase().replace(/[^a-z]/g, ""); }), body = R.slice(1);
+  var col = function(re){ for(var i = 0; i < hd.length; i++) if(re.test(hd[i])) return i; return -1; };
+  var ct = col(/^team$/), co = col(/^adjoe$/), cd = col(/^adjde$/), cT = col(/^adjt$|^adjtempo$|^tempo$/), cb = col(/^barthag$/);
+  if(ct < 0 || co < 0 || cd < 0){ ct = 1; co = 4; cd = 6; cb = 8; cT = -1; body = R; }      // no header row: Torvik's usual column order
+  var ix = cbMatchIndex(), r = {}, un = [], so = 0, sd = 0, st = 0, n = 0, nt = 0;
+  body.forEach(function(row){
+    var nm = row[ct], o = parseFloat(row[co]), d = parseFloat(row[cd]), t = cT >= 0 ? parseFloat(row[cT]) : NaN; if(!nm || !isFinite(o) || !isFinite(d)) return;
+    var k = cbNorm(nm); k = CB_TV_ALIAS[k] || k; var id = ix[k] || ix[cbNorm(k + " state")] || null;
+    if(!id){ un.push(nm); return; }
+    r[id] = [Math.round(o * 10) / 10, Math.round(d * 10) / 10, isFinite(t) ? Math.round(t * 10) / 10 : 0, cb >= 0 ? parseFloat(row[cb]) || 0 : 0];
+    so += o; sd += d; n++; if(isFinite(t)){ st += t; nt++; }
+  });
+  if(n < 100) return { err: "Only matched " + n + " teams to ESPN\u2019s list \u2014 open Basketball once so the team list loads, then try again." };
+  return { ts: Date.now(), src: "torvik", r: r, muE: (so + sd) / (2 * n), muT: nt ? st / nt : 68.5, n: n, un: un.slice(0, 40), nUn: un.length };
+}
+function cbTorvik(force){
+  if(CB.tvBusy || (!force && CB.tvTried)) return; CB.tvTried = true; CB.tvBusy = true;
+  var season = cbStore().season;
+  fetch(cbTvUrl(season)).then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.text(); }).then(function(t){
+    var V = cbTvParse(t); if(V.err) throw new Error(V.err);
+    CB.tv = V; CB.tvErr = ""; cbLsSet("ps_cbb_tv" + season, V); cbShareUp("tv", V); CB.fit = null;
+  }).catch(function(e){ CB.tvErr = (e && e.message) || "blocked"; }).then(function(){ CB.tvBusy = false; cbRepaint(); });
+}
+
+// ── Shared with the group ──
+// Editors' phones do the fetching and save a compact copy under ps/data/cbb; everyone else reads that one copy
+// (a few hundred KB for a whole season) instead of thousands of ESPN calls.
+function cbShareKey(){ return "data/cbb/s" + cbStore().season; }
+function cbEnc(r){ return r.map(function(v){ return v === null || v === undefined ? "" : v; }).join(","); }
+function cbDec(s){ var a = String(s).split(","), n = function(v){ return v === "" ? null : +v; };
+  return [a[0], a[1], a[2], +a[3], +a[4], +a[5] || 0, n(a[6]), n(a[7]), +a[8] || 0, n(a[9]), +a[10] || 0]; }
+function cbCanShare(){ try{ return typeof DB !== "undefined" && DB && psMember(); }catch(_){ return false; } }
+function cbIsEditor(){ try{ return cbCanShare() && psEditor(); }catch(_){ return false; } }
+CB.dirty = {};
+function cbDirty(ymd){ if(!ymd || !cbIsEditor()) return; CB.dirty[ymd] = 1; clearTimeout(CB._upT); CB._upT = setTimeout(cbShareDays, 4000); }
+function cbShareDays(){
+  if(!cbIsEditor()) return; var S = cbStore(), key = cbShareKey(), up = {};
+  Object.keys(CB.dirty).forEach(function(d){ var D = S.days[d]; if(D) up["days/" + d] = { d: D.done ? 1 : 0, g: (D.g || []).map(cbEnc).join("|") }; });
+  CB.dirty = {}; if(!Object.keys(up).length) return;
+  var tm = {}; Object.keys(CB.teams).forEach(function(id){ var t = CB.teams[id]; tm[id] = [t.name, t.abbr, t.logo, t.short, t.loc || ""].join("|"); });
+  up.teams = tm; up.ts = Date.now();
+  psRef(key).update(up, function(err){ if(err) CB.shareErr = err.code || err.message; else { CB.shareErr = ""; CB.sharedAt = Date.now(); } });
+}
+function cbShareUp(part, v){ if(!cbIsEditor()) return; psRef(cbShareKey() + "/" + part).set(JSON.parse(JSON.stringify(v)), function(err){ if(err) CB.shareErr = err.code || err.message; }); }
+function cbLoadShared(){
+  if(CB.shState) return; if(!cbCanShare()){ CB.shState = "none"; return; }
+  CB.shState = "loading";
+  psRef(cbShareKey()).once("value").then(function(sn){
+    var v = sn.val(); if(!v){ CB.shState = "none"; cbRepaint(); return; }
+    var S = cbStore(), nd = 0;
+    Object.keys(v.teams || {}).forEach(function(id){ var t = String(v.teams[id]).split("|"); if(!CB.teams[id] || !CB.teams[id].loc) CB.teams[id] = { name: t[0], abbr: t[1], logo: t[2], short: t[3] || t[0], loc: t[4] || "" }; });
+    Object.keys(v.days || {}).forEach(function(d){
+      var sd = v.days[d], rows = String(sd.g || "").split("|").filter(Boolean).map(cbDec), L = S.days[d] || { done: false, g: [] }, by = {};
+      L.g.forEach(function(r){ by[r[0]] = r; });
+      rows.forEach(function(r){ var o = by[r[0]]; if(!o){ L.g.push(r); by[r[0]] = r; return; } for(var i = 6; i <= 10; i++) if((o[i] === null || o[i] === undefined || o[i] === 0) && r[i] !== null && r[i] !== 0) o[i] = r[i]; });
+      L.done = L.done || !!sd.d; S.days[d] = L; nd++;
+    });
+    if(v.prior && v.prior.v === 2 && !CB.prior){ CB.prior = v.prior; cbLsSet("ps_cbb_prior" + S.season, v.prior); }
+    if(v.tv && v.tv.r && (!CB.tv || (v.tv.ts || 0) > (CB.tv.ts || 0))){ CB.tv = v.tv; cbLsSet("ps_cbb_tv" + S.season, v.tv); }
+    CB.shState = nd ? "ok" : "none"; CB.sharedAt = v.ts || null; CB.fit = null; cbSave(); cbRepaint();
+  }).catch(function(e){ CB.shState = "err"; CB.shareErr = e && (e.code || e.message); cbRepaint(); });
+}
+// Who fetches from ESPN: editors always (and they share it), members only when the group has no shared copy yet.
+function cbFetchPlan(){
+  var S = cbStore();
+  if(!CB.tv){ var lt = cbLsGet("ps_cbb_tv" + S.season); if(lt && lt.r) CB.tv = lt; }
+  cbLoadShared();
+  var ed = cbIsEditor(), solo = !cbCanShare() || CB.shState === "none" || CB.shState === "err";
+  if(ed || solo){ cbEnsurePrior(); cbSyncSeason(); }
+  if(ed || solo || !CB.tv) cbTorvik(false);
+}
+function cbDataHtml(){
+  var S = cbStore(), n = 0, nb = 0, nl = 0;
+  Object.keys(S.days).forEach(function(d){ (S.days[d].g || []).forEach(function(r){ n++; if(r[9]) nb++; if(r[6] !== null || r[7] !== null) nl++; }); });
+  var pc = function(a){ return n ? Math.round(100 * a / n) + "%" : "\u2013"; }, ago = function(t){ return t ? psAgo(t) : "never"; };
+  var rows = [
+    ["Games this season", n.toLocaleString()],
+    ["Box scores (pace)", nb.toLocaleString() + " \u00b7 " + pc(nb)],
+    ["Closing lines", nl.toLocaleString() + " \u00b7 " + pc(nl)],
+    ["Torvik ratings", CB.tv ? CB.tv.n + " teams \u00b7 " + ago(CB.tv.ts) : CB.tvBusy ? "loading\u2026" : CB.tvErr ? "couldn\u2019t load" : "not loaded"],
+    ["Last season start", CB.prior ? (CB.prior.n || 0).toLocaleString() + " games" : CB.priorBusy ? "building\u2026" : "\u2013"],
+    ["Group copy", !cbCanShare() ? "this phone only" : CB.shState === "ok" ? "loaded \u00b7 updated " + ago(CB.sharedAt) : CB.shState === "loading" ? "loading\u2026" : cbIsEditor() ? "you\u2019re building it" : "none yet"]
+  ];
+  var h = '<details class="cb-data" id="cb-datad"' + (CB.dataOpen ? ' open' : '') + '><summary><span>Data</span><small>' + nb.toLocaleString() + ' box scores' + (CB.tv ? ' \u00b7 Torvik' : '') + '</small></summary>';
+  h += rows.map(function(r){ return '<div class="cb-dr"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>'; }).join('');
+  if(cbIsEditor()) h += '<div class="cb-note">You\u2019re an editor, so your phone fetches new games, box scores and lines and shares them with the group.</div>';
+  if(CB.tvErr && !CB.tv) h += '<div class="cb-note">Torvik\u2019s site didn\u2019t let the app read his ratings (' + x(CB.tvErr) + '). Open <a href="' + cbTvUrl(S.season) + '" target="_blank" rel="noopener">his team results file</a>, copy everything, and paste it here:</div>';
+  if(CB.tvErr || CB.tvPaste) h += '<textarea id="cb-tvpaste" class="cb-tvp" placeholder="Paste Torvik\u2019s team results CSV"></textarea><div class="pr-tools"><button class="pr-btn" data-cb="tvpaste">Use these ratings</button></div>';
+  h += '<div class="pr-tools"><button class="pr-btn ghost" data-cb="tvload">Reload Torvik</button>' + (!CB.tvErr && !CB.tvPaste ? '<button class="pr-btn ghost" data-cb="tvshow">Paste Torvik</button>' : '') + '</div>';
+  if(CB.tv && CB.tv.nUn) h += '<div class="cb-note">' + CB.tv.nUn + ' Torvik teams didn\u2019t match an ESPN name' + (CB.tv.un && CB.tv.un.length ? ' (' + x(CB.tv.un.slice(0, 8).join(", ")) + (CB.tv.nUn > 8 ? '\u2026' : '') + ')' : '') + '; they start from last season instead.</div>';
+  return h + '</details>';
 }
 
 // ── Filters ──
@@ -11989,7 +12205,7 @@ function cbLoadDay(ymd, force){
 function cbSyncHtml(){
   var P = CB.priorBusy, Sy = CB.sync, out = [];
   if(P) out.push('<b>Building preseason ratings from last season…</b> ' + P.n + ' of ' + P.of + ' days<div class="cb-pb"><i style="width:' + Math.round(100 * P.n / Math.max(1, P.of)) + '%"></i></div>');
-  if(CB.lf && CB.lf.busy) out.push('<b>Fetching closing lines for finished games\u2026</b> ' + CB.lf.n + ' of ' + CB.lf.of + '<div class="cb-pb"><i style="width:' + Math.round(100 * CB.lf.n / Math.max(1, CB.lf.of)) + '%"></i></div>');
+  if(CB.lf && CB.lf.busy) out.push('<b>Fetching box scores and closing lines\u2026</b> ' + CB.lf.n + ' of ' + CB.lf.of + '<div class="cb-pb"><i style="width:' + Math.round(100 * CB.lf.n / Math.max(1, CB.lf.of)) + '%"></i></div>');
   if(Sy && Sy.busy) out.push('<b>Loading this season’s results…</b> ' + Sy.n + ' of ' + Sy.of + ' days<div class="cb-pb"><i style="width:' + Math.round(100 * Sy.n / Math.max(1, Sy.of)) + '%"></i></div>');
   return out.join('');
 }
@@ -12000,7 +12216,7 @@ function cbDayLabel(ymd){
 }
 function cbRecHtml(){
   var shell = function(msg){ return '<div class="bf-rec cb-recw"><div class="cb-rech">Model record vs Vegas</div><div class="bf-rfoot">' + msg + '</div></div>'; };
-  if(CB.priorBusy && !CB.prior) return shell('Waiting for last season\u2019s ratings to finish \u2014 then every finished game this season is graded.');
+  if(CB.priorBusy && !CB.prior && !CB.tv) return shell('Waiting for last season\u2019s ratings to finish \u2014 then every finished game this season is graded.');
   var W = CB.wf; if(!W){ cbWalkForward(); W = CB.wfPrev; if(!W) return shell('Grading the model against Vegas, day by day\u2026'); }
   if(!(W.s[0] + W.s[1] + W.t[0] + W.t[1])) return shell(CB.lf && CB.lf.busy ? 'Fetching closing lines so finished games can be graded\u2026' : 'No graded games yet \u2014 none of this season\u2019s finished games have a line from ESPN.');
   var cell = function(a){ return bfCell({ w: a[0], l: a[1], p: a[2] }); }, Dy = W.byDay[CB.date];
@@ -12011,14 +12227,15 @@ function cbRecHtml(){
     '<div class="bf-rhd"><span>Model record</span><span>Spread</span><span>O/U</span></div>' + rows + '<div class="bf-rfoot">Each day graded with a model fitted only on the days before it, against the last line seen before tip.</div></details>';
 }
 function cbRankHtml(f){
-  var ids = Object.keys(f.O).filter(function(id){ return (f.n[id] || 0) >= 1 || (CB.prior && CB.prior.O[id] !== undefined); });
-  ids.sort(function(a, b){ return (f.O[b] - f.D[b]) - (f.O[a] - f.D[a]); });
+  var net = function(id){ return f.O[id] - f.D[id]; };
+  var ids = Object.keys(f.O).filter(function(id){ return (f.n[id] || 0) >= 1 || (CB.prior && CB.prior.O[id] !== undefined) || (CB.tv && CB.tv.r[id]); });
+  ids.sort(function(a, b){ return net(b) - net(a); });
+  var rkOf = {}; ids.forEach(function(id, i){ rkOf[id] = i + 1; });
   var q = pearSearchNorm(CB.q || ""); if(q) ids = ids.filter(function(id){ return pearSearchNorm(cbName(id) + " " + cbAbbr(id) + " " + ((CB.teams[id] || {}).name || "")).indexOf(q) >= 0; });
-  var rkOf = {}; Object.keys(f.O).sort(function(a, b){ return (f.O[b] - f.D[b]) - (f.O[a] - f.D[a]); }).forEach(function(id, i){ rkOf[id] = i + 1; });
-  return '<div class="cb-rk"><div class="cb-rkh"><span>#</span><span>Team</span><span>Net</span><span>Off</span><span>Def</span></div>' + ids.slice(0, q ? 40 : 100).map(function(id){
-    var rk = rkOf[id], net = f.O[id] - f.D[id];
-    return '<div class="cb-rkr"><span class="cb-rkn">' + rk + '</span><span class="cb-rkt">' + cbImg(id, "cb-lg") + '<b>' + x(cbName(id)) + '</b></span><span><b>' + (net >= 0 ? '+' : '') + net.toFixed(1) + '</b></span><span>' + (f.O[id] >= 0 ? '+' : '') + f.O[id].toFixed(1) + '</span><span>' + (-f.D[id] >= 0 ? '+' : '') + (-f.D[id]).toFixed(1) + '</span></div>'; }).join('') +
-    '<div class="bf-rfoot">Points per game above an average D-I team against an average schedule, at a neutral site. Off = points scored, Def = points held below average. Net is the margin over an average team.</div></div>';
+  var sg = function(v){ return (v >= 0 ? '+' : '') + v.toFixed(1); };
+  return '<div class="cb-rk"><div class="cb-rkh"><span>#</span><span>Team</span><span>Net</span><span>Off</span><span>Def</span><span>Pace</span></div>' + ids.slice(0, q ? 40 : 100).map(function(id){
+    return '<div class="cb-rkr"><span class="cb-rkn">' + rkOf[id] + '</span><span class="cb-rkt">' + cbImg(id, "cb-lg") + '<b>' + x(cbName(id)) + '</b></span><span><b>' + sg(net(id)) + '</b></span><span>' + (f.muE + f.O[id]).toFixed(1) + '</span><span>' + (f.muE + f.D[id]).toFixed(1) + '</span><span>' + ((f.muT || 68.5) + (f.T[id] || 0)).toFixed(1) + '</span></div>'; }).join('') +
+    '<div class="bf-rfoot">Adjusted for opponent and venue. Off and Def are points scored and allowed per 100 possessions against an average D-I team (lower Def is better); Net is the difference; Pace is possessions per 40 minutes.</div></div>';
 }
 function cbFilterPanel(){
   var f = cbF(), h = '<div class="bf-panel">';
@@ -12030,7 +12247,7 @@ function cbFilterPanel(){
 }
 function cbGamesHtml(){
   var S = cbStore(); if(!CB.date) CB.date = cbToday();
-  cbEnsurePrior(); cbSyncSeason();
+  cbFetchPlan();
   var D = CB.day[CB.date]; if(!D || (!D.loading && !D.done && Date.now() - D.ts > 60000)) setTimeout(function(){ cbLoadDay(CB.date); }, 0);
   var f = cbModel(), h = '<div class="pear">';
   h += '<div class="pr-h1">' + x(cbDayLabel(CB.date) === "Today" ? "Today’s Games" : cbDayLabel(CB.date)) + '</div>';
@@ -12038,7 +12255,7 @@ function cbGamesHtml(){
   // Day strip: three days back, three ahead.
   h += '<div class="pr-weeks cb-days">' + [-3, -2, -1, 0, 1, 2, 3].map(function(k){ var d = cbAddDays(CB.date, k), dt = cbParseYmd(d);
     return '<button class="pr-wk cb-day' + (k === 0 ? ' on' : '') + (d === cbToday() ? ' cb-today' : '') + '" data-cb="day" data-v="' + d + '"><small>' + dt.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 2) + '</small>' + dt.getDate() + '</button>'; }).join('') + '</div>';
-  h += '<div id="cb-sync" class="cb-sync">' + cbSyncHtml() + '</div>';
+  h += '<div id="cb-sync" class="cb-sync">' + cbSyncHtml() + '</div>' + cbDataHtml();
   h += cbRecHtml();
   var games = (D && D.games) || [], stN = { in: 0, post: 0 }; games.forEach(function(g){ if(g.state === "in") stN.in++; else if(g.state === "post") stN.post++; });
   h += '<div class="pe-sub pe-subdd"><button class="pe-wa" data-cb="day" data-v="' + cbAddDays(CB.date, -1) + '" aria-label="Previous day">‹</button><select class="pe-dd" id="cb-filter-dd" aria-label="Filter games">' +
@@ -12050,14 +12267,14 @@ function cbGamesHtml(){
   if(CB.fOpen) h += cbFilterPanel();
   if(CB.filter === "rank") return h + '<div id="cb-list">' + cbRankHtml(f) + '</div></div>';
   h += '<div id="cb-list">' + cbListHtml(f) + '</div>';
-  h += '<div class="pr-foot">College basketball model: adjusted points for and against for every D-I team, fitted to this season’s scores and started from last season’s ratings (pulled ' + Math.round((1 - CB_REGRESS) * 100) + '% toward average for roster turnover). Home court is worth ' + CB_HCA + ' points; win chances assume an ' + CB_SD + '-point spread of results. Lines are ESPN’s; the last line seen before tip is kept to grade finished games.</div>';
+  h += '<div class="pr-foot">Tempo-free model: each team\u2019s offense and defense in points per 100 possessions and its pace, adjusted for opponent and venue, fitted to this season\u2019s ESPN box scores (possessions = FGA \u2212 offensive rebounds + turnovers + 0.475\u00d7FTA). Teams start from Bart Torvik\u2019s ratings when available, otherwise last season\u2019s, and this season\u2019s games take over as they pile up. Games over a month old fade to 60%; blowouts beyond 30 points per 100 count half. Home court is worth ' + CB_HCAE + ' per 100 (about 3 points). Win chances assume an ' + CB_SD + '-point spread of results.</div>';
   return h + '</div>';
 }
 function cbListHtml(f){
   var D = CB.day[CB.date];
   if(!D || (D.loading && !D.games)) return '<div class="pr-empty">Loading ' + x(cbDayLabel(CB.date).toLowerCase()) + '’s games…</div>';
   if(D.err && !D.games) return '<div class="pr-empty">Couldn’t reach ESPN (' + x(D.err) + '). <button class="pr-link" data-cb="reload">Retry</button></div>';
-  var prelim = !!(CB.priorBusy && !CB.prior);
+  var prelim = !!(CB.priorBusy && !CB.prior && !CB.tv);
   var list = (D.games || []).map(function(g){ var p = cbPredict(f, g.away.id, g.home.id, g.neutral), o = { g: g, p: p }; if(!prelim){ o.k = cbPick(g, p); o.T = cbTot(g, p); } return o; });
   if(!list.length) return '<div class="pr-empty">No D-I games ' + (CB.date === cbToday() ? 'today' : 'on this day') + '.</div>';
   var n0 = list.length;
@@ -12096,7 +12313,7 @@ function cbListHtml(f){
     h += '<div class="pr-gfoot2">' +
       '<div class="gf-row"><span class="gf-lab">Model</span><span class="gf-val">' + (p ? x((Math.abs(p.margin) < 0.05 ? 'Pick’em' : cbName(p.margin > 0 ? g.home.id : g.away.id) + ' -' + Math.abs(p.margin).toFixed(1))) + (o.k ? ' <span class="gf-edge">edge ' + o.k.edge.toFixed(1) + '</span>' : '') : '—') + '</span>' + pearPickPillHtml(o.k) + '</div>' +
       '<div class="gf-row"><span class="gf-lab">Vegas</span><span class="gf-val mut">' + vtxt + '</span></div>' +
-      (p ? '<div class="gf-row"><span class="gf-lab">Total</span><span class="gf-val mut"><b class="gf-strong">' + p.total.toFixed(1) + '</b>' + (o.T ? ' vs ' + o.T.line + ' <span class="gf-edge">edge ' + o.T.gap.toFixed(1) + '</span>' : '') + '</span>' + pearOuPillHtml(o.T) + '</div>' : '') +
+      (p ? '<div class="gf-row"><span class="gf-lab">Total</span><span class="gf-val mut"><b class="gf-strong">' + p.total.toFixed(1) + '</b>' + (o.T ? ' vs ' + o.T.line + ' <span class="gf-edge">edge ' + o.T.gap.toFixed(1) + '</span>' : '') + ' <small class="cb-pace">\u00b7 ' + Math.round(p.poss) + ' poss</small></span>' + pearOuPillHtml(o.T) + '</div>' : '') +
       '</div></div>';
   });
   return h;
@@ -12119,6 +12336,10 @@ document.addEventListener("click", function(e){
   if(a === "today"){ CB.date = cbToday(); cbLoadDay(CB.date, true); cbRepaint(); return; }
   if(a === "reload"){ cbLoadDay(CB.date, true); return; }
   if(a === "fopen"){ CB.fOpen = !CB.fOpen; cbRepaint(); return; }
+  if(a === "tvload"){ cbTorvik(true); cbRepaint(); return; }
+  if(a === "tvshow"){ CB.tvPaste = true; CB.dataOpen = true; cbRepaint(); return; }
+  if(a === "tvpaste"){ var ta = document.getElementById("cb-tvpaste"), V = cbTvParse(ta ? ta.value : ""); if(V.err){ toast(V.err, "err"); return; }
+    var ssn = cbStore().season; CB.tv = V; CB.tvErr = ""; CB.tvPaste = false; cbLsSet("ps_cbb_tv" + ssn, V); cbShareUp("tv", V); CB.fit = null; toast("Torvik ratings loaded for " + V.n + " teams", "ok"); cbRepaint(); return; }
   if(a === "fclear"){ CB.f = { role: [], line: [], model: [], sort: "time", edge: 0 }; cbLsSet("ps_cbf", CB.f); cbRepaint(); return; }
 }, true);
 document.addEventListener("change", function(e){
@@ -12132,6 +12353,7 @@ document.addEventListener("input", function(e){
   CB.q = t.value; var el = document.getElementById("cb-list"); if(el) el.innerHTML = CB.filter === "rank" ? cbRankHtml(cbModel()) : cbListHtml(cbModel());
 });
 document.addEventListener("toggle", function(e){ var t = e.target; if(t && t.id === "ss-setd"){ PEAR.ss.setOpen = t.open; } }, true);
+document.addEventListener("toggle", function(e){ var t = e.target; if(t && t.id === "cb-datad") CB.dataOpen = t.open; }, true);
 document.addEventListener("toggle", function(e){ var t = e.target; if(t && t.id === "cb-recd"){ CB.recOpen = t.open; var b = t.querySelector("summary b"); if(b) b.textContent = t.open ? "hide ▴" : "show ▾"; } }, true);
 
 // ── The Prophescore 10 ──────────────────────────────────────────────────────
