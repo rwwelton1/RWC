@@ -440,7 +440,7 @@ a{color:inherit;text-decoration:none;touch-action:manipulation}
   width:min(340px,calc(100vw - 32px));background:#fff;border:3px solid var(--border);
   border-radius:16px;box-shadow:5px 5px 0 var(--border);padding:16px;
   /* The sheet outgrew the screen once the extra stats landed. */
-  max-height:calc(100vh - 48px);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  max-height:calc(100vh - 48px);max-height:calc(100dvh - 32px);overflow-y:auto;-webkit-overflow-scrolling:touch}
 /* Full-width rows for splits that need two numbers next to each other. */
 .ms-rows{margin-top:10px;border:2px solid var(--border);border-radius:9px;
   box-shadow:2px 2px 0 var(--border);background:var(--cream);overflow:hidden}
@@ -763,7 +763,7 @@ button:focus-visible,select:focus-visible,input:focus-visible,[tabindex]:focus-v
 
 /* ── Share picks sheet ── */
 .ps-back{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.4)}
-.ps-sheet{position:fixed;z-index:9001;left:50%;bottom:0;transform:translateX(-50%);width:min(520px,100vw);max-height:90vh;background:#fff;border:3px solid var(--border);border-bottom:none;border-radius:18px 18px 0 0;box-shadow:0 -4px 0 var(--border);display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)}
+.ps-sheet{position:fixed;z-index:9001;left:50%;bottom:0;transform:translateX(-50%);width:min(520px,100vw);max-height:calc(100vh - 24px);max-height:calc(100dvh - 12px - env(safe-area-inset-top,0px));background:#fff;border:3px solid var(--border);border-bottom:none;border-radius:18px 18px 0 0;box-shadow:0 -4px 0 var(--border);display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px)}
 .ps-head{padding:14px 16px 8px;display:flex;align-items:center;gap:10px;border-bottom:2px solid var(--border2)}
 .ps-title{font-size:15px;font-weight:900;flex:1;min-width:0}
 .ps-title small{display:block;font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:1px}
@@ -876,6 +876,21 @@ input,select,textarea{font-size:16px}
 .gp-pick.wrong .gp-pick-conf::after{content:" \2717";text-decoration:none;display:inline-block}
 .gp-pick.correct .gp-pick-conf::after{content:" \2713"}
 .gp-table th:focus-visible,.team-pick:focus-visible{outline:3px solid var(--border);outline-offset:-3px}
+
+/* Sheets: header and buttons stay on screen; only the middle scrolls. A flex child
+   won't shrink below its content without min-height:0, which is what pushed the
+   pick-sheet's title up under Safari's address bar. */
+.ps-head{flex-shrink:0}
+.ps-body{flex:1 1 auto;min-height:0;overscroll-behavior:contain}
+.ps-actions{position:sticky;bottom:-16px;background:#fff;padding:10px 0 4px;margin-bottom:-4px;z-index:1}
+.ps-btn{color:var(--text);font-family:'Nunito',sans-serif;-webkit-appearance:none;appearance:none}
+button{color:var(--text)}
+/* Standings, phone-dense */
+.st-table td{line-height:1.15}
+.st-table th{padding:6px 4px}
+.yw-card{margin:8px 10px;padding:7px 10px;border-radius:10px;box-shadow:2px 2px 0 var(--border)}
+.yw-t{font-size:13px}.yw-s{font-size:11px;margin-top:1px}
+.yw-btn{min-height:34px;padding:4px 12px}
 </style>
 </head>
 <body>
@@ -7161,6 +7176,21 @@ function ensureHistoricPicks(){
   });
 }
 
+// Long names become "William A." in the narrow Standings column; full name is in the title.
+function _shortName(n){
+  n=String(n||"").trim();
+  if(n.length<=11) return n;
+  var p=n.split(/\s+/);
+  return p.length>1 ? p[0]+" "+p[p.length-1].charAt(0).toUpperCase()+"." : n;
+}
+// "Week 10" -> "Wk 10", "Conf Championships" -> "Conf Ch". Full label stays in the title.
+function _shortWk(lbl){
+  lbl=String(lbl||"");
+  var m=lbl.match(/^Week\s*(\d+)$/i); if(m) return "Wk "+m[1];
+  if(/^conf/i.test(lbl)) return "Conf Ch";
+  return lbl.length>9?lbl.slice(0,8)+"\u2026":lbl;
+}
+
 // ── "Your week" card on Standings ──
 function _myWeekCardHtml(rows, leaderTotal){
   if(!ST.user||PUBLIC_VIEW) return '';
@@ -7185,8 +7215,8 @@ function _myWeekCardHtml(rows, leaderTotal){
     var ws=weekScore(w,ST.user);
     h+='<div class="yw-main"><div class="yw-t">'+lbl+' &middot; '+ws.total+' pt'+(ws.total===1?'':'s')+
        (ws.correct||ws.wrong?' <span class="yw-rec">'+ws.correct+'-'+ws.wrong+'</span>':'')+'</div>'+
-       '<div class="yw-s">'+(me?'#'+rank+' of '+rows.length+' overall'+(leaderTotal-me.total>0?' &middot; '+(leaderTotal-me.total)+' behind the lead':' &middot; leading'):'')+
-       (graded<active.length?' &middot; '+(active.length-graded)+' game'+((active.length-graded)===1?'':'s')+' left':'')+'</div></div>'+
+       '<div class="yw-s">'+(me?'#'+rank+' of '+rows.length+(leaderTotal-me.total>0?' &middot; '+(leaderTotal-me.total)+' pts back':' &middot; leading'):'')+
+       (graded<active.length?' &middot; '+(active.length-graded)+' to play':'')+'</div></div>'+
        '<button class="btn btn-ghost yw-btn" data-go="picks">My picks</button>';
   }
   return h+'</div>';
@@ -7343,15 +7373,25 @@ function renderStandings(){
   }
   h+='</div>';
 
-  h+='<div class="gp-wrap"><table class="gp-table"><thead><tr>';
-  h+='<th style="position:sticky;left:0;z-index:6;background:var(--cream);width:28px;min-width:28px;text-align:center;font-size:11px;padding:6px 4px;border-right:1px solid var(--border2)">#</th>';
-  h+='<th data-sort-name="1" style="position:sticky;left:28px;z-index:6;background:var(--cream);min-width:100px;cursor:pointer;text-align:left;padding:6px 8px;border-right:2px solid var(--border)">Players</th>';
-  h+='<th data-sort-total="1" style="cursor:pointer;min-width:44px;text-align:center;font-size:11px">Pts</th>';
-  h+='<th data-sort-possible="1" title="Highest season total still reachable" style="cursor:pointer;min-width:48px;text-align:center;font-size:11px;color:var(--blue)">Poss<div style="font-size:11px;font-weight:700;color:var(--dim);letter-spacing:.03em">season</div></th>';
-
-  // Money column sits between Poss and the first week, so winnings read next to
-  // the points that produced them.
   var _money = moneyOn() ? moneyWinnings() : null;
+  h+='<div class="gp-wrap"><table class="gp-table st-table"><thead><tr>';
+  h+='<th style="position:sticky;left:0;z-index:6;background:var(--cream);width:28px;min-width:28px;text-align:center;font-size:11px;padding:6px 4px;border-right:1px solid var(--border2)">#</th>';
+  h+='<th data-sort-name="1" style="position:sticky;left:28px;z-index:6;background:var(--cream);min-width:84px;cursor:pointer;text-align:left;padding:6px 6px;border-right:2px solid var(--border)">Players</th>';
+  h+='<th data-sort-total="1" style="cursor:pointer;min-width:40px;text-align:center;font-size:11px">Pts</th>';
+  h+='<th data-sort-possible="1" title="Highest season total still reachable" style="cursor:pointer;min-width:40px;text-align:center;font-size:11px;color:var(--blue)">Poss<div style="font-size:11px;font-weight:700;color:var(--dim);letter-spacing:.03em">season</div></th>';
+
+  if(curWeekId&&!curLocked){
+    h+='<th data-sort-week="'+curWeekId+'" title="'+x(ST.weekLabels[curWeekId]||curWeekId)+'" style="cursor:pointer;min-width:50px;text-align:center;font-size:11px;color:'+(curScoring?'var(--red2)':'var(--green)')+'">'+
+       (curScoring?'&#128308; ':'&#9998; ')+x(_shortWk(ST.weekLabels[curWeekId]||curWeekId))+
+       '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">'+
+       (curScoring?'live':'picks')+'</div></th>';
+  }
+
+  visibleWeeks.forEach(function(w){
+    h+='<th data-sort-week="'+w+'" title="'+x(ST.weekLabels[w]||w)+'" style="cursor:pointer;min-width:46px;text-align:center;font-size:11px">'+x(_shortWk(ST.weekLabels[w]||w))+'</th>';
+  });
+
+  // Money sits after the weeks so phones see more week columns up front.
   if(_money){
     var _wk=moneyPerWeek(), _sn=moneySeasonPrize();
     // Stacked rather than run together on one line: nowrap was forcing the whole
@@ -7367,17 +7407,6 @@ function renderStandings(){
        '<div style="font-size:11px;font-weight:700;color:var(--muted);line-height:1.25">'+
        _sub+'</div></th>';
   }
-
-  if(curWeekId&&!curLocked){
-    h+='<th data-sort-week="'+curWeekId+'" style="cursor:pointer;min-width:62px;text-align:center;font-size:11px;color:'+(curScoring?'var(--red2)':'var(--green)')+'">'+
-       (curScoring?'&#128308; ':'&#9998; ')+x(ST.weekLabels[curWeekId]||curWeekId)+
-       '<div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">'+
-       (curScoring?'live':'picks')+'</div></th>';
-  }
-
-  visibleWeeks.forEach(function(w){
-    h+='<th data-sort-week="'+w+'" style="cursor:pointer;min-width:58px;text-align:center;font-size:11px">'+x(ST.weekLabels[w]||w)+'</th>';
-  });
 
   h+='</tr></thead><tbody>';
 
@@ -7410,9 +7439,9 @@ function renderStandings(){
     var _sf=playerForm(r.name);
     // Any row opens that player's stats. No affordance shown — it's a quiet extra.
     var _tap=(!PUBLIC_VIEW);
-    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:7px 8px;border-right:2px solid var(--border);text-align:left;min-width:100px;max-width:128px;overflow:hidden;text-overflow:ellipsis'+(_tap?';cursor:pointer':'')+'"'+(_tap?' data-stats-uid="'+x(r.name)+'"':'')+' title="'+x(nameOf(r.name))+'">'+pem(r.name)+'<span class="st-nm">'+x(nameOf(r.name))+'</span>'+(_sf?' '+formIcon(_sf,10):'')+'</td>';
+    h+='<td style="position:sticky;left:28px;z-index:2;background:'+(isMe?'var(--gold-bg)':'#ffffff')+';font-size:12px;font-weight:900;padding:5px 6px;border-right:2px solid var(--border);text-align:left;min-width:84px;max-width:108px;overflow:hidden;text-overflow:ellipsis'+(_tap?';cursor:pointer':'')+'"'+(_tap?' data-stats-uid="'+x(r.name)+'"':'')+' title="'+x(nameOf(r.name))+'">'+pem(r.name)+'<span class="st-nm">'+x(_shortName(nameOf(r.name)))+'</span>'+(_sf?' '+formIcon(_sf,10):'')+'</td>';
 
-    h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
+    h+='<td style="text-align:center;padding:5px 3px'+(isMe?';background:var(--gold-bg)':'')+'">';
     // A dash means "nothing graded yet", not "zero". Once a player has a result
     // on the board a real 0 is information — and it's what the Group tab shows.
     var _graded=(r.seasonCorrect>0||r.seasonWrong>0);
@@ -7423,7 +7452,7 @@ function renderStandings(){
     h+='</td>';
 
     var isEliminated=weeksRemaining>0&&r.possible<leaderTotal&&rank>1;
-    h+='<td style="text-align:center;padding:7px 6px">';
+    h+='<td style="text-align:center;padding:5px 3px">';
     if(isEliminated){
       h+='<div style="font-size:11px;font-weight:900;color:var(--red2)">&#10007; &ndash;</div>';
     } else {
@@ -7431,18 +7460,10 @@ function renderStandings(){
     }
     h+='</td>';
 
-    if(_money){
-      var _won=_money[r.name]||0;
-      h+='<td style="text-align:center;padding:7px 6px'+(isMe?';background:var(--gold-bg)':'')+'">';
-      h+='<div style="font-size:12px;font-weight:900;color:'+(_won>0?'var(--green)':'var(--dim)')+'">'+
-         (_won>0?moneyFmt(_won):'&ndash;')+'</div>';
-      h+='</td>';
-    }
-
     if(curWeekId&&!curLocked){
       var active=activeGames(curWeekId);
       var picks=((ST.picks[curWeekId]||{})[r.name])||{};
-      h+='<td style="text-align:center;padding:7px 6px">';
+      h+='<td style="text-align:center;padding:5px 3px">';
       if(curScoring){
         // Scoring has started — show the running total and record, as a finished
         // week does, so the column reads the same way all week.
@@ -7477,7 +7498,7 @@ function renderStandings(){
       var tbW=ST.tiebreaker[w]||{};
       var tiedForBest=ws.total>0&&ws.total===weekBest[w]&&PARTS.filter(function(p){return weekScore(w,p).total===weekBest[w];}).length>1;
       var showAsterisk=isBest&&tiedForBest&&tbW.actual!=null;
-      h+='<td style="text-align:center;padding:7px 6px'+(bg?';background:'+bg:'')+'">';
+      h+='<td style="text-align:center;padding:5px 3px'+(bg?';background:'+bg:'')+'">';
       if(ws.total>0||ws.correct>0||ws.wrong>0){
         h+='<div style="font-size:13px;font-weight:'+weight+';color:'+col+'">'+ws.total+(showAsterisk?'<span style="font-size:11px;color:var(--purple);vertical-align:super">*</span>':'')+'</div>';
         h+='<div style="font-size:11px;font-weight:700;color:var(--muted)">'+ws.correct+'-'+ws.wrong+'</div>';
@@ -7486,6 +7507,14 @@ function renderStandings(){
       }
       h+='</td>';
     });
+
+    if(_money){
+      var _won=_money[r.name]||0;
+      h+='<td style="text-align:center;padding:5px 3px'+(isMe?';background:var(--gold-bg)':'')+'">';
+      h+='<div style="font-size:12px;font-weight:900;color:'+(_won>0?'var(--green)':'var(--dim)')+'">'+
+         (_won>0?moneyFmt(_won):'&ndash;')+'</div>';
+      h+='</td>';
+    }
 
     h+='</tr>';
   });
