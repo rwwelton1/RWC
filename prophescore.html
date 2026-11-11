@@ -10393,14 +10393,22 @@ function pePoolRecLoad(done){
     });
   }).then(function(){ PEPOOL.recBusy = false; if(done) done(); }, function(e){ PEPOOL.recBusy = false; PEPOOL.recErr = (e && e.code === "PERMISSION_DENIED") ? "Your picks aren’t readable from here (Firebase rules)." : ((e && e.message) || String(e)); if(done) done(); });
 }
-// The model's side for one past pool game: saved before kickoff, else estimated afterwards.
+// Graded with the active model (combined or single), walk-forward like the Record tab: each week from
+// the games before it, against the closing line. The pick saved at kickoff is only a fallback when the
+// game can't be matched in the model's data.
 function pePoolModelPick(row){
   var L = pxState().poolLog || {}, lg = L[pePoolKey(row.w, row.gid)];
-  if(lg) return { side: lg[0], chance: lg[1], est: false };
+  var sig = "", C = PEPOOL._mpc; try{ sig = pmESig(pmEntry("cur")) + "|" + ((PEPOOL.rec && PEPOOL.rec.at) || 0); }catch(_){ sig = ""; }
+  if(!C || C.sig !== sig) C = PEPOOL._mpc = { sig: sig, m: {} };
+  var key = pePoolKey(row.w, row.gid), live = (key in C.m) ? C.m[key] : (C.m[key] = pePoolModelPickLive(row)); if(live) return live;
+  if(lg) return { side: lg[0], chance: lg[1], est: false, saved: true };
+  return null;
+}
+function pePoolModelPickLive(row){
   var g = row.g, hid = String(g.homeId || pxTeamId(g.home) || ""), aid = String(g.awayId || pxTeamId(g.away) || ""); if(!hid || !aid || !row.ew || !PX.active) return null;
   var ref = (g.favSide === "away" ? -1 : 1) * Math.abs(+g.spread || 0), hit = pePoolFindGame(row.ew, hid, aid), L2 = hit && hit.W.lines[hit.g.id];
   var close = L2 && isFinite(L2.c) ? -L2.c : null, fit = pearFitFor(row.ew);
-  var k = pxPickSide(aid, hid, hit ? hit.g.n : false, ref, close, row.ew, fit || null, hit ? hit.g.id : null);
+  var k = pxPickSide(aid, hid, hit ? hit.g.n : false, ref, close, row.ew, fit || null, hit ? hit.g.id : null, false, hit ? hit.g : null);
   if(!k || k.none) return null;
   return { side: k.pickHome ? "home" : "away", chance: k.chance, est: true };
 }
@@ -10417,7 +10425,7 @@ function pePoolRecord(){
     mp.forEach(function(o){
       var r = o.r; if(r.res === "push") return;
       if(r.side){ if(r.side === r.res){ wk.me.w++; wk.me.pts += r.conf; } else wk.me.l++; }
-      if(o.m){ if(o.m.est) T.est++; if(o.m.side === r.res){ wk.md.w++; wk.md.pts += o.mc || 0; } else wk.md.l++; }
+      if(o.m){ if(o.m.saved) T.est++; if(o.m.side === r.res){ wk.md.w++; wk.md.pts += o.mc || 0; } else wk.md.l++; }
       if(r.side && o.m && r.side !== o.m.side){ wk.dis++; if(r.side === r.res) wk.disMe++; else wk.disMd++; }
     });
     ["me", "md"].forEach(function(k){ T[k].w += wk[k].w; T[k].l += wk[k].l; T[k].pts += wk[k].pts; });
@@ -10444,7 +10452,8 @@ function pePoolRecordHtml(){
   T.weeks.slice().reverse().forEach(function(wk){
     h += '<div class="pem-bkrow"><span>' + x(String(wk.label)) + '</span><span><b class="' + cls(wk.me.pts, wk.md.pts) + '">' + wk.me.w + '-' + wk.me.l + ' · ' + wk.me.pts + '</b> <small>vs</small> ' + wk.md.w + '-' + wk.md.l + ' · ' + wk.md.pts + '</span><span>' + (wk.dis ? 'you ' + wk.disMe + '–' + wk.disMd : '—') + '</span></div>'; });
   h += '</div><div class="pem-autonote" style="margin-top:4px">Against your pool’s lines, as your pool graded them. The model’s pick is the edge rating’s side; its points hand out your confidence values in order of its chance to cover. ' +
-       (T.est ? T.est + ' of its picks were worked out after the fact (the model before that week, with the closing line) because the app hadn’t saved them before kickoff — those lean slightly in the model’s favour. From now on it saves its pick for each pool game while you have the Pool tab open before kickoff.' : 'Every model pick here was saved before kickoff.') + '</div>';
+       'Graded with the model in use now' + (pxState().combo && pxState().combo.on ? ' (combined by spread)' : '') + ', the same way as its Record: each week picked from only the games before it, with the closing line — so it changes when you switch models.' +
+       (T.est ? ' ' + T.est + ' game' + (T.est === 1 ? '' : 's') + ' couldn’t be matched in the model’s data, so ' + (T.est === 1 ? 'it uses' : 'they use') + ' the pick saved at kickoff.' : '') + '</div>';
   return h + '</div>';
 }
 // Games tab sub-tabs. "Pool" lists your pool's games; it loads them from the pool on first open each week.
