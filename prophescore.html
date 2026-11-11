@@ -7418,8 +7418,16 @@ function pxTuneSig(){ return pxDataSig() + "|" + pxWeeks().length + "|m19|" + px
 // only on the weeks before it. Spreads and totals, errors against the result
 // for the model and for the closing line, and closing line value.
 function pxAts(){
-  var S = pxState(), key = pxDataSig() + "|" + JSON.stringify(S.opts) + "|" + JSON.stringify(S.wf || {});
+  var S = pxState(), CB = (S.combo && S.combo.on && S.combo.bands) ? S.combo : null, key = pxDataSig() + "|" + JSON.stringify(S.opts) + "|" + JSON.stringify(S.wf || {}) + (CB ? "|C" + CB.at + JSON.stringify(CB.bands) : "");
   if(PX._ats && PX._ats.key === key) return PX._ats.v;
+  // Combined model: each game is predicted by the fit for its own spread band (same walk-forward weeks, same
+  // closing line that picks the band), exactly as the cards and pool picks route it.
+  var bandFits = {}, fitFor = function(fit, L){
+    if(!CB || !L || !isFinite(L.c)) return fit;
+    var b = pbcBand(-L.c), bo = CB.bands[b]; if(!bo) return fit;
+    var k = fit.upto + "|" + b; if(!bandFits[k]) bandFits[k] = pxFit(fit.upto, Object.assign({}, fit.o, bo));
+    return bandFits[k];
+  };
   var r = { w:0, l:0, p:0, sw:0, sl:0, sp:0, lined:0, weeks:0, su:0, suN:0, noplay:0, total:0, early:0, earlyWeeks:[], noLine:0, pending:0, wfWeeks:0, wfMissing:0,
             bk: [{ lo:0, hi:3, w:0, l:0, p:0 }, { lo:3, hi:6, w:0, l:0, p:0 }, { lo:6, hi:99, w:0, l:0, p:0 }], byWeek: [], games: [],
             ou: { w:0, l:0, p:0, sw:0, sl:0, n:0 },
@@ -7437,7 +7445,7 @@ function pxAts(){
     var fit = pxFit(w, ow), W = { wk: w, w:0, l:0, p:0, sw:0, sl:0, su:0, suN:0, err:0, n:0, ow:0, ol:0, own: !!pxOptsForWeek(w), sheet: fit.pw > 0 }, any = false;
     r.byWeek.push(W);
     list.forEach(function(x){
-      var g = x.g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), pred = p.home - p.away, act = g.hs - g.as, pt = p.home + p.away, at = g.hs + g.as;
+      var g = x.g, fg = fitFor(fit, x.W.lines[g.id]), p = pxPredict(fg, g.a, g.h, g.n, pxCtx(g)), pred = p.home - p.away, act = g.hs - g.as, pt = p.home + p.away, at = g.hs + g.as;
       W.err += Math.abs(pred - act); W.n++; sd.push([act - pred, w]);
       var L = x.W.lines[g.id]; if(!L || !isFinite(L.c)){ r.noLine++; return; }
       var vHome = -L.c; r.lined++; any = true; r.cal.push([pred, act, vHome]);
@@ -7445,7 +7453,7 @@ function pxAts(){
       var G = { id: g.id, g: { eventId: g.id, awayId: g.a, homeId: g.h, week: w, neutral: g.n, as: g.as, hs: g.hs, date: g.d || null }, w: w, pred: pred, vh: vHome, act: act, res: null,
                 pt: pt, vt: (L.t !== null && isFinite(L.t)) ? L.t : null, at: at, tres: null, sit: p.sit, tier: p.tier || 0 };
 
-      if(p.sit){ var p0 = pxPredict(fit, g.a, g.h, g.n); G.pns = p0.home - p0.away; G.tns = p0.home + p0.away; }     // the same pick without the spot
+      if(p.sit){ var p0 = pxPredict(fg, g.a, g.h, g.n); G.pns = p0.home - p0.away; G.tns = p0.home + p0.away; }     // the same pick without the spot
       r.games.push(G);
       // Closing line value: did the line move from the opener toward the model?
       var C = r.clv;
