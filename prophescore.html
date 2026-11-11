@@ -943,6 +943,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pc-one .pc-thd .pc-val{font-size:.9em;color:var(--muted)}
 .pc-one .pc-chd{margin-top:.8em}
 .pc-one .pc-chd:first-child{margin-top:0}
+.gr-body{padding:4px 2px 2px}.gr-body p{margin:0 0 10px;font:600 14px/1.5 'Nunito',sans-serif;color:var(--ink,#111)}.gr-body .gr-copy{margin:4px 0 2px}
 .pc-more{display:block;margin:10px auto 2px;border:2px solid var(--border);background:#fff;border-radius:9px;padding:6px 14px;font:900 12px 'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);cursor:pointer;color:var(--text)}
 .pc-ctrls button.pc-share{background:var(--gold)}
 #pear-shareov{position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.85);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
@@ -4128,6 +4129,7 @@ pearCardHtml = function(){
   h += '<div class="pc-ctrls">' + (p.box ? '<button class="' + (PEAR.boxMode ? 'on' : '') + '" data-pear-box>▦ Box score</button>' : '') + '<button data-pear-flip>⇆ Flip</button>' +
        '<button class="' + (c.neutral ? "on" : "") + '" data-pear-neutral>Neutral: ' + (c.neutral ? "on" : "off") + '</button><button class="pc-share" data-pear-share>📤 Share image</button></div>';
   if(!PEAR.boxMode && PEM.ratings && (ra || rh)){
+    h += pearReportHtml(ra, rh, A, H, ranks, { p: p, g: same ? g : null, mp: mp, KR: KR, vt: vt });
     h += psAccOpen("gc_stats", "All stats", "tale of the tape", false) + '<div class="pc-grid pc-one">' + pearTapeHtml(ra, rh, A, H, ranks) + pearCenter(ra, rh, A, H, ranks, !!PEAR.cardMore) +
          '<button class="pc-more" data-pear-more>' + (PEAR.cardMore ? 'Fewer stats ▴' : 'More stats ▾') + '</button></div>' + psAccClose();
   }
@@ -13380,6 +13382,89 @@ var PX_PAIRS = [
 // ── Game card: tale of the tape + key matchups (full width) ──
 var PEAR_TAPE = [["RECORD", null], ["RATING", "rating"], ["OFFENSE", "off"], ["DEFENSE", "def"], ["SCHEDULE", "sos"], ["MARGIN", "margin"], ["RUN %", "runRate"]];
 var PEAR_KEY = { "PTS/DRIVE": 1, "PTS/TRIP": 1, "RUSH SUCC": 1, "PASS SUCC": 1, "RUSH EPA": 1, "PASS EPA": 1, "PASSES 20+": 1, "HAVOC": 1, "AVG START": 1 };
+// ── Game report: a written read of the game built from the tale of the tape ──
+// Everything it says comes from the same ranks and numbers in the tape (rating, offense/defense, and each offense-vs-defense
+// matchup), plus the model's projection and pick. It never adds anything the tape doesn't show.
+var PX_REP_NOUN = { "POINTS/GM": "scoring", "PTS/DRIVE": "points per drive", "TRIPS/DRIVE": "trips into scoring range", "PTS/TRIP": "points per scoring trip",
+  "RUSH EPA": "rushing efficiency", "PASS EPA": "passing efficiency", "RUSH SUCC": "rushing success rate", "PASS SUCC": "passing success rate", "HAVOC": "negative plays (havoc)",
+  "RUSH ISOEPA": "rushing explosiveness", "PASS ISOEPA": "passing explosiveness", "RUNS 12+": "big runs", "PASSES 20+": "big passes",
+  "START EP": "field position", "AVG START": "starting field position", "KO RETURN": "kick returns", "PUNT NET": "punting" };
+function pearOrd(n){ var s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function pearReport(ra, rh, A, H, ranks, ctx){
+  ctx = ctx || {};
+  var rk = function(id, k){ return ranks.rank[id] && ranks.rank[id][k]; }, nm = function(id){ return pearName(id); };
+  var top = function(id, k){ var r = rk(id, k), n = ranks.n[k]; return r && n && r <= Math.max(10, n * 0.12); }, bad = function(id, k){ var r = rk(id, k), n = ranks.n[k]; return r && n && r > n * 0.7; };
+  var P = [], rows = { a: ra, h: rh };
+  var rA = ra && ra.rating, rH = rh && rh.rating;
+  // 1. The two teams on paper.
+  if(rA != null && rH != null){
+    var best = rA >= rH ? A : H, other = best === A ? H : A, rb = best === A ? ra : rh, ro = best === A ? rh : ra, gapR = Math.abs(rA - rH);
+    var s1 = nm(best) + ' (' + (rb.n ? rb.w + '-' + rb.l + ', ' : '') + pearOrd(rk(best, "rating") || 0) + ' in rating at ' + pearFmt("rating", rb.rating) + ') is the ' + (gapR < 2 ? 'slightly ' : gapR >= 8 ? 'clearly ' : '') + 'better team on paper against ' + nm(other) + ' (' + (ro.n ? ro.w + '-' + ro.l + ', ' : '') + pearOrd(rk(other, "rating") || 0) + ', ' + pearFmt("rating", ro.rating) + ').';
+    var oS = [], pairs = [["off", "offense"], ["def", "defense"], ["sos", "schedule"], ["margin", "scoring margin"]];
+    pairs.forEach(function(q){ var a = rk(A, q[0]), h = rk(H, q[0]); if(!a || !h || Math.abs(a - h) < 25) return; oS.push((a < h ? nm(A) : nm(H)) + ' has the stronger ' + (q[0] === "sos" ? 'schedule' : q[1]) + ' (' + pearOrd(Math.min(a, h)) + ' vs ' + pearOrd(Math.max(a, h)) + ')'); });
+    P.push(s1 + (oS.length ? ' ' + oS.slice(0, 2).join('; ') + '.' : ''));
+  } else if(ra || rh){ P.push('Not enough rated games yet to compare these two teams on the whole.'); }
+  // 2. Each offense against the other's defense.
+  var seen = {};
+  var matchups = function(L, Lid, R, Rid, offLeft){
+    var out = [], hd = null, nOff = 0, nTot = 0;
+    PX_PAIRS.forEach(function(pr){
+      if(pr.length === 1) return;
+      var lk = offLeft ? pr[1] : pr[2], rk2 = offLeft ? pr[2] : pr[1]; if(!L || !R || L[lk] == null || R[rk2] == null || !isFinite(L[lk]) || !isFinite(R[rk2])) return;
+      var a = rk(Lid, lk), b = rk(Rid, rk2); if(!a || !b) return;
+      // pr[1]/pr[2]: the offense stat and the defense stat. Here left = the offense (offLeft) or the defense.
+      var offId = offLeft ? Lid : Rid, defId = offLeft ? Rid : Lid, ok = offLeft ? lk : rk2, dk = offLeft ? rk2 : lk;
+      var ro = rk(offId, ok), rd = rk(defId, dk); if(!ro || !rd) return;
+      var offV = pearFmt(ok, (offLeft ? L : R)[ok]), defV = pearFmt(dk, (offLeft ? R : L)[dk]);
+      nTot++; if(rd > ro) nOff++;
+      out.push({ lab: pr[0], diff: rd - ro, ro: ro, rd: rd, offV: offV, defV: defV, n: ranks.n[ok] || 130 });
+    });
+    return { list: out, nOff: nOff, nTot: nTot };
+  };
+  var side = function(offId, defId, offRow, defRow, offIsLeft){
+    var M = offIsLeft ? matchups(offRow, offId, defRow, defId, true) : matchups(defRow, defId, offRow, offId, false);
+    if(!M.nTot) return;
+    var wins = M.list.filter(function(m){ return m.diff >= 25; }).sort(function(a, b){ return b.diff - a.diff; }).slice(0, 2),
+        walls = M.list.filter(function(m){ return m.diff <= -25; }).sort(function(a, b){ return a.diff - b.diff; }).slice(0, 1);
+    var ph = function(m){ return (PX_REP_NOUN[m.lab] || m.lab.toLowerCase()) + ' (' + nm(offId) + ' ' + pearOrd(m.ro) + ' at ' + m.offV + ', ' + nm(defId) + '\u2019s defense ' + pearOrd(m.rd) + ' at ' + m.defV + ')'; };
+    var t = nm(offId) + '\u2019s offense ' + (M.nOff >= M.nTot * 0.6 ? 'has the better of most of the matchup' : M.nOff <= M.nTot * 0.4 ? 'is up against a defense that rates better in most areas' : 'meets this defense about even') + ' (' + M.nOff + ' of ' + M.nTot + ' compared stats).';
+    if(wins.length) t += ' The best chance to attack: ' + wins.map(ph).join(' and ') + '.';
+    if(walls.length) t += ' The tough spot: ' + ph(walls[0]) + '.';
+    P.push(t);
+  };
+  if(ra && rh){ side(A, H, ra, rh, true); side(H, A, rh, ra, false); }
+  // 3. What stands out about each team on its own.
+  [[A, ra], [H, rh]].forEach(function(z){
+    var id = z[0], r = z[1]; if(!r) return;
+    var s = [], w = [], keys = [["ppg", "scoring"], ["papg", "points allowed"], ["xPpd", "points per drive"], ["xRush", "rushing efficiency"], ["xPass", "passing efficiency"], ["xHav", "ball security"], ["xHavC", "havoc creation"], ["xIsoP", "explosive passing"], ["xRushD", "run defense"], ["xPassD", "pass defense"]];
+    keys.forEach(function(q){ if(r[q[0]] == null) return; if(top(id, q[0])) s.push(q[1] + ' (' + pearOrd(rk(id, q[0])) + ')'); else if(bad(id, q[0])) w.push(q[1] + ' (' + pearOrd(rk(id, q[0])) + ')'); });
+    if(s.length || w.length) P.push(nm(id) + (s.length ? ' is elite in ' + s.slice(0, 3).join(', ') : '') + (s.length && w.length ? ';' : '') + (w.length ? (s.length ? ' but weak in ' : ' is weak in ') + w.slice(0, 3).join(', ') : '') + '.');
+  });
+  // 4. The model.
+  var p = ctx.p, g = ctx.g;
+  if(p){
+    var fav = p.margin > 0 ? H : A, dog = fav === H ? A : H, fs = Math.max(p.away, p.home), ds = Math.min(p.away, p.home);
+    var s4 = 'The model has ' + nm(fav) + ' winning ' + fs.toFixed(0) + '\u2013' + ds.toFixed(0) + ' (' + Math.round(Math.max(p.awayWin, p.homeWin) * 100) + '%), a total of ' + p.total.toFixed(1) + '.';
+    if(ctx.vt) s4 += ' Vegas has ' + ctx.vt + '.';
+    if(ctx.mp){ var KR = ctx.KR; s4 += ' The play is ' + ctx.mp.txt + (KR && !KR.none ? ', rated ' + KR.rating + '/10 at ' + Math.round(KR.chance * 100) + '% to cover' + (KR.parts && KR.parts.fade ? ' \u2014 a fade of the model, since it loses in that spot' : '') : '') + '.'; }
+    var fin = g && g.state === "post" && g.away.score !== null && g.home.score !== null;
+    if(fin){ var fa = g.away.id === A ? g.away.score : g.home.score, fh = g.home.id === H ? g.home.score : g.away.score; s4 += ' Final: ' + pearAbbr(A) + ' ' + fa + ', ' + pearAbbr(H) + ' ' + fh + ' (the model had ' + p.away.toFixed(0) + '\u2013' + p.home.toFixed(0) + ').'; }
+    P.push(s4);
+  }
+  return P;
+}
+function pearReportHtml(ra, rh, A, H, ranks, ctx){
+  var P = []; try{ P = pearReport(ra, rh, A, H, ranks, ctx); }catch(e){ P = []; } if(!P.length) return '';
+  PEAR._reportText = pearName(A) + ' vs ' + pearName(H) + '\n\n' + P.join('\n\n') + '\n\n\u2014 Scorecery \u00b7 Prophescore';
+  return psAccOpen("gc_report", "Game report", "written from the tape", true) + '<div class="gr-body">' + P.map(function(t){ return '<p>' + x(t) + '</p>'; }).join('') +
+         '<button class="pc-more gr-copy" data-pear-copyrep>\ud83d\udccb Copy report</button></div>' + psAccClose();
+}
+document.addEventListener("click", function(e){
+  var t = e.target && e.target.closest ? e.target.closest("[data-pear-copyrep]") : null; if(!t) return;
+  e.stopPropagation(); e.preventDefault();
+  var txt = PEAR._reportText || "", done = function(){ toast("Report copied"); }, fb = function(){ try{ var ta = document.createElement("textarea"); ta.value = txt; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); done(); }catch(_){ toast("Couldn\u2019t copy"); } };
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fb); else fb();
+}, true);
 function pearTapeHtml(ra, rh, A, H, ranks){
   var s = '<div class="pc-chd">Tale of the tape</div>';
   s += '<div class="pc-crow pc-thd"><span class="pc-val">' + x(pearAbbr(A)) + '</span><span></span><span class="pc-clab"></span><span></span><span class="pc-val">' + x(pearAbbr(H)) + '</span></div>';
