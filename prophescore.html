@@ -2011,6 +2011,21 @@ b.hb-pp.none{background:#fff;color:var(--muted);border-style:dashed}
 .hb-ed i{display:inline-block;width:24px;height:4px;border-radius:2px;background:var(--border2);overflow:hidden;flex:none}
 .hb-ed u{display:block;height:100%;background:var(--ps-acc,#7c4ddb);text-decoration:none}
 .hb-pick{align-self:center}
+
+/* ── Optimize for ── */
+.pt-box{background:#fff;border:2px solid var(--border);border-radius:14px;padding:9px 10px 10px;box-shadow:3px 3px 0 var(--border)}
+.pt-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
+.pt-top b{font:900 14px 'Nunito',sans-serif}
+.pt-top span{font:700 11px 'Nunito',sans-serif;color:var(--muted);text-align:right}
+.pt-guard{display:flex;align-items:center;gap:5px;font:800 12px 'Nunito',sans-serif;color:var(--muted);cursor:pointer}
+.pt-guard input{width:18px;height:18px;accent-color:var(--ps-acc,#7c4ddb)}
+.pt-chips{display:flex;gap:6px;overflow-x:auto;margin:0 -10px;padding:0 10px 2px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.pt-chips::-webkit-scrollbar{display:none}
+.pt-chips button{flex:none;min-height:34px;padding:0 12px;border:2px solid var(--border);border-radius:999px;background:var(--cream);font:900 12px 'Nunito',sans-serif;cursor:pointer;white-space:nowrap}
+.pt-chips button.on{background:var(--ps-acc,#7c4ddb);color:#fff}
+.pt-now{font:800 12px 'Nunito',sans-serif;color:var(--muted);margin-top:7px}
+.pt-now b{color:var(--text)}
+.pt-now i{font-style:normal;color:var(--red2)}
 </style>
 </head>
 <body>
@@ -4167,6 +4182,100 @@ function pbRowHtml(){
   return h;
 }
 function pbRender(){ var el = document.getElementById("pg-row"); if(el) el.innerHTML = pbRowHtml(); }
+
+// ── Optimize for: aim "Build the best model" at one kind of game ─────────────
+// A target is a slice of graded games (by the closing line, the teams, or the week).
+// The build is scored only on that slice; by default each change also has to keep the
+// whole-season record within 2 net wins, so a slice win doesn't quietly wreck everything else.
+var PB_TG = {
+  s: [
+    { id: "all",   lab: "All games" },
+    { id: "lt3",   lab: "Spread under 3",   f: function(q){ return Math.abs(q.vh) < 3; } },
+    { id: "s37",   lab: "Spread 3–7",  f: function(q){ return Math.abs(q.vh) >= 3 && Math.abs(q.vh) <= 7; } },
+    { id: "s714",  lab: "Spread 7.5–14", f: function(q){ return Math.abs(q.vh) > 7 && Math.abs(q.vh) <= 14; } },
+    { id: "gt14",  lab: "Spread 14+",       f: function(q){ return Math.abs(q.vh) > 14; } },
+    { id: "hfav",  lab: "Home favorites",   f: function(q, m){ return !m.n && q.vh > 0; } },
+    { id: "rfav",  lab: "Road favorites",   f: function(q, m){ return !m.n && q.vh < 0; } },
+    { id: "conf",  lab: "Conference games", f: function(q, m){ return pxConfGroup(m.a) === pxConfGroup(m.h); } },
+    { id: "nonc",  lab: "Non-conference",   f: function(q, m){ return pxConfGroup(m.a) !== pxConfGroup(m.h); } },
+    { id: "p4",    lab: "Power 4 vs Power 4", f: function(q, m){ return pxIsP4(m.a) && pxIsP4(m.h); } },
+    { id: "g5",    lab: "Group of 5 only",  f: function(q, m){ return !pxIsP4(m.a) && !pxIsP4(m.h); } },
+    { id: "late",  lab: "Week 8 on",        f: function(q){ return q.w >= 8; } },
+    { id: "big",   lab: "Strong picks (3+ edge)", strong: true }
+  ],
+  t: [
+    { id: "all",   lab: "All games" },
+    { id: "tlo",   lab: "Total under 45",   f: function(q){ return q.vt < 45; } },
+    { id: "tmid",  lab: "Total 45–58", f: function(q){ return q.vt >= 45 && q.vt <= 58; } },
+    { id: "thi",   lab: "Total over 58",    f: function(q){ return q.vt > 58; } },
+    { id: "conf",  lab: "Conference games", f: function(q, m){ return pxConfGroup(m.a) === pxConfGroup(m.h); } },
+    { id: "p4",    lab: "Power 4 vs Power 4", f: function(q, m){ return pxIsP4(m.a) && pxIsP4(m.h); } },
+    { id: "g5",    lab: "Group of 5 only",  f: function(q, m){ return !pxIsP4(m.a) && !pxIsP4(m.h); } },
+    { id: "late",  lab: "Week 8 on",        f: function(q){ return q.w >= 8; } }
+  ]
+};
+PB.tgt = PB.tgt || { s: "all", t: "all" };
+if(PB.guard === undefined) PB.guard = true;
+function pbTgt(V){ var L = PB_TG[V === "t" ? "t" : "s"], id = PB.tgt[V === "t" ? "t" : "s"], hit = L[0]; L.forEach(function(t){ if(t.id === id) hit = t; }); return hit; }
+var PB_META = { n: -1, m: {} };
+function pbMeta(){
+  var gl = pxGames(); if(PB_META.n === gl.length) return PB_META.m;
+  var m = {}; gl.forEach(function(x){ m[x.g.id] = { a: x.g.a, h: x.g.h, n: !!x.g.n }; }); PB_META = { n: gl.length, m: m }; return m;
+}
+function pbSlice(G, T, tot){
+  if(!G || !T || !T.f) return G;
+  var M = pbMeta(), out = {};
+  Object.keys(G).forEach(function(id){ var q = G[id], m = M[id]; if(!m) return;
+    if(tot ? (q.vt === null || q.vt === undefined || !isFinite(q.vt)) : (q.vh === null || q.vh === undefined)) return;
+    try{ if(T.f(q, m)) out[id] = q; }catch(_){} });
+  return out;
+}
+function pbScoreT(G, tot, part, T){
+  if(T && T.strong){
+    var ids = Object.keys(G).sort(function(a, b){ return G[a].w - G[b].w || (a < b ? -1 : 1); }), h = Math.floor(ids.length / 2);
+    if(part === 1) ids = ids.slice(0, h); else if(part === 2) ids = ids.slice(h);
+    var sub = {}; ids.forEach(function(id){ sub[id] = G[id]; }); var S = pxUTSummary(sub);
+    return S.n ? (S.sw - S.sl) - 6 * S.e / S.n : 0;
+  }
+  return pbScore(pbSlice(G, T, tot), tot, part);
+}
+// The slice's record right now, from the last test of your build.
+function pbTgtNow(V, T){
+  var R = PX.ut && PX.ut.res && PX.ut.res.games; if(!R) return null;
+  var tot = V === "t", S = pxUTSummary(T.strong ? R : pbSlice(R, T, tot));
+  if(T.strong) return { w: S.sw, l: S.sl, n: S.sw + S.sl };
+  return tot ? { w: S.ow, l: S.ol, n: S.tn } : { w: S.w, l: S.l, n: S.n };
+}
+function pbTgtHtml(){
+  var V = psView(), tv = V === "t", T = pbTgt(V), L = PB_TG[tv ? "t" : "s"], now = T.id !== "all" ? pbTgtNow(V, T) : null;
+  var h = '<div class="pt-box"><div class="pt-top"><b>Optimize for</b>' +
+    (T.id !== "all" ? '<label class="pt-guard"><input type="checkbox" data-ps-act="pbguard"' + (PB.guard ? ' checked' : '') + '> protect overall record</label>' : '<span>pick a kind of game to aim the build at it</span>') + '</div>' +
+    '<div class="pt-chips">' + L.map(function(t){ return '<button class="' + (t.id === T.id ? 'on' : '') + '" data-ps-act="pbtgt" data-id="' + t.id + '">' + x(t.lab) + '</button>'; }).join('') + '</div>';
+  if(now) h += '<div class="pt-now">' + (now.n ? 'Right now: <b>' + now.w + '-' + now.l + '</b>' + (now.w + now.l ? ' (' + (now.w / (now.w + now.l) * 100).toFixed(1) + '%)' : '') + ' in ' + now.n + (T.strong ? ' strong picks' : ' games') : 'No graded games in this slice yet') +
+    (now.n && now.n < 40 ? ' · <i>too few to tune on (needs 40)</i>' : '') + '</div>';
+  return h + '</div>';
+}
+(function(){
+  var base = pbRowHtml;
+  pbRowHtml = function(){
+    var h = base.apply(this, arguments); if(PB.run) return h;
+    var V = psView(), tv = V === "t", T = pbTgt(V);
+    h = pbTgtHtml() + h;
+    if(T.id !== "all") h = h.replace('Build the best ' + (tv ? 'over/under' : 'spread') + ' model<em>', 'Best ' + (tv ? 'over/under' : 'spread') + ' model for ' + x(T.lab.toLowerCase()) + '<em>');
+    var L = PB.last;
+    if(L && L.tgt && L.tgt.id !== "all" && L.view === V){
+      var i = h.indexOf('<div class="pb-res">'); if(i >= 0) h = h.slice(0, i);
+      var rec = function(A){ return A.w + '-' + A.l; };
+      h += '<div class="pb-res"><b>' + (L.changes.length ? 'Best build for ' + x(L.tgt.lab.toLowerCase()) : 'Nothing beat your build for ' + x(L.tgt.lab.toLowerCase())) + '</b>' +
+        (L.changes.length ? '<span>' + rec(L.sAfter) + ' in those ' + (L.tgt.strong ? 'picks' : 'games') + ' (was ' + rec(L.sBefore) + ') · overall ' + rec(L.after) + ' (was ' + rec(L.before) + ')</span>' +
+          '<div class="pb-ch">' + L.changes.slice(0, 10).map(function(c){ return '<i>' + x(c) + '</i>'; }).join('') + '</div>' : '') +
+        '<small>Tuned and graded on the same ' + L.sN + ' ' + (L.tgt.strong ? 'picks' : 'games') + ', so read it as a best case. Each change had to help both halves of the season' + (L.guard ? ' and keep the overall record within 2 net wins' : '') + '.' +
+        (L.saved ? ' Saved as “' + x(L.saved) + '” under Models, so you can switch back and forth.' : '') + '</small></div>';
+    }
+    return h;
+  };
+})();
+
 function pbGo(mode){
   if(PB.run) return;
   if(PX.ut.busy || PXP.busy){ toast("Hang on, a test is still running"); return; }
@@ -4176,7 +4285,9 @@ function pbGo(mode){
   if(pool && pmap.length < 30){ toast("Needs at least 30 graded pool games (found " + pmap.length + "). Open the Games tab to load your pool."); return; }
   clearTimeout(PX.ut.timer); psPSnap();
   var V = pool ? "s" : psView(), tv = V === "t", need = pool ? 8 : tv ? 2.5 : 1.5, halfMin = pool ? -2 : tv ? -1 : -1.5;
-  var SC = function(G, part){ return pool ? pbPoolScore(G, pmap, part) : pbScore(G, tv, part); };
+  var TG = pool ? null : pbTgt(V), sliced = !!(TG && TG.id !== "all"), guard = sliced && PB.guard;
+  if(sliced && PX.ut.res && PX.ut.res.games){ var _n0 = pbTgtNow(V, TG); if(_n0 && _n0.n < 40){ toast("Needs at least 40 " + (TG.strong ? "strong picks" : "graded games") + " in \u201c" + TG.lab + "\u201d (found " + _n0.n + ")"); return; } }
+  var SC = function(G, part){ return pool ? pbPoolScore(G, pmap, part) : sliced ? pbScoreT(G, tv, part, TG) : pbScore(G, tv, part); };
   PB.run = true; PB.view = pool ? "pool" : V; PB.stop = false; PB.last = null; PB.pct = 0; PB.txt = "Starting…"; PXP.busy = "pb"; PXP.prog = ""; PB.cache = PB.cache || {};
   var poolG0 = null, cur = Object.assign({}, pxUTInit()), curG = null, before = null, changes = {}, order = psViewPanels(V), total = order.length * 2, done = 0, pass = 0;
   function apply(o){ var w = pxUTInit(); pmKeys().forEach(function(k){ w[k] = o[k]; }); }
@@ -4185,8 +4296,14 @@ function pbGo(mode){
     var names = Object.keys(changes).map(function(id){ var p = psPById(id); return p.name + " " + pmPanelVal(p, cur); });
     var after = pxUTSummary(curG), bef = before, pk = function(A){ return tv ? { w: A.ow, l: A.ol, e: A.tn ? A.te / A.tn : 0 } : { w: A.w, l: A.l, e: A.e / A.n }; };
     PB.last = { view: pool ? "pool" : V, changes: names, before: pool ? pbPoolSum(poolG0, pmap) : pk(bef), after: pool ? pbPoolSum(curG, pmap) : pk(after) };
+    if(sliced){
+      var sk = function(G){ if(TG.strong){ var A = pxUTSummary(G); return { w: A.sw, l: A.sl, n: A.sw + A.sl }; } var B = pxUTSummary(pbSlice(G, TG, tv)); return tv ? { w: B.ow, l: B.ol, n: B.tn } : { w: B.w, l: B.l, n: B.n }; };
+      var sb = sk(poolG0), sa = sk(curG);
+      PB.last.tgt = TG; PB.last.guard = guard; PB.last.sBefore = sb; PB.last.sAfter = sa; PB.last.sN = sa.n;
+    }
     apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false;
     psFeel("win"); psPanelsRefresh(); pxUTStatus(); pbRender();
+    if(names.length && sliced){ try{ var _nm = (tv ? "O/U · " : "") + TG.lab; pxTuneSave(_nm); PB.last.saved = _nm; pbRender(); }catch(_){} }
     if(names.length){ psPUndoShow("Best model built · " + names.length + " panel" + (names.length === 1 ? "" : "s") + " changed"); if((pool ? PB.last.after.pts - PB.last.before.pts > 10 : PB.last.after.w - PB.last.after.l > PB.last.before.w - PB.last.before.l + 2)) pgConfetti(40); }
     else toast("Nothing beat your current build", "info");
   }
@@ -4196,7 +4313,7 @@ function pbGo(mode){
     (function panel(){
       if(PB.stop || i >= order.length){ if(!changedThis || PB.stop) finish(); else pass1(); return; }
       var p = order[i++]; done++; PB.pct = Math.min(99, done / total * 100); PB.txt = (pool ? "Your pool · " : "") + "Pass " + pass + " of 2 · " + p.name + " (" + i + " of " + order.length + ")"; pbRender();
-      var cands = pbCands(p, cur), j = 0, best = null, s0 = SC(curG), a0 = SC(curG, 1), b0 = SC(curG, 2);
+      var cands = pbCands(p, cur), j = 0, best = null, s0 = SC(curG), a0 = SC(curG, 1), b0 = SC(curG, 2), o0 = guard ? pbScore(curG, tv) : 0;
       (function tryc(){
         if(PB.stop || j >= cands.length){
           if(best){ cur = best.o; curG = best.G; changes[p.id] = 1; changedThis = true; apply(cur); PX.ut.res = { o: Object.assign({}, cur), games: curG, at: Date.now() }; PX.ut.stale = false; psFeel("tap"); psPanelsRefresh(); }
@@ -4205,7 +4322,7 @@ function pbGo(mode){
         var o = cands[j++];
         pbEval(o, function(G){
           if(G){ var s1 = SC(G), a1 = SC(G, 1), b1 = SC(G, 2);
-            if(s1 - s0 >= need && a1 - a0 >= halfMin && b1 - b0 >= halfMin && (!best || s1 > best.s)) best = { o: o, G: G, s: s1 }; }
+            if(s1 - s0 >= need && a1 - a0 >= halfMin && b1 - b0 >= halfMin && (!guard || pbScore(G, tv) - o0 >= -2) && (!best || s1 > best.s)) best = { o: o, G: G, s: s1 }; }
           setTimeout(tryc, 0);
         });
       })();
@@ -4221,8 +4338,10 @@ function pbGo(mode){
 })();
 document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
-  var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop") return;
+  var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop" && act !== "pbtgt" && act !== "pbguard") return;
+  if(act === "pbguard"){ PB.guard = !!t.checked; return; }
   ev.stopImmediatePropagation();
+  if(act === "pbtgt"){ if(PB.run) return; PB.tgt[psView() === "t" ? "t" : "s"] = t.getAttribute("data-id"); psFeel("tap"); pbRender(); return; }
   if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(t.getAttribute("data-id")); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
 }, true);
 
