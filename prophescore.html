@@ -2052,6 +2052,12 @@ b.hb-pp.none{background:#fff;color:var(--muted);border-style:dashed}
 .pg-b.cm-go{background:var(--cream);color:var(--text);padding:8px 12px}
 .cm-note{display:block;font:700 11px/1.4 'Nunito',sans-serif;color:var(--muted);margin-top:7px}
 .gm-cm{display:inline-block;background:var(--ps-acc,#7c4ddb);color:#fff;border-radius:999px;padding:1px 8px;font-size:11px;cursor:pointer}
+.ut-cm{display:inline-block;font:900 11px 'Nunito',sans-serif;letter-spacing:.04em;background:var(--ps-acc,#7c4ddb);color:#fff;border-radius:6px;padding:1px 6px;vertical-align:1px}
+.cm-save{display:flex;gap:6px;margin-bottom:8px}
+.cm-save input{flex:1;min-width:0;height:38px;padding:0 10px;border:2px solid var(--border);border-radius:9px;font:800 16px 'Nunito',sans-serif;background:#fff}
+.cm-save .btn{height:38px}
+.pm-inuse{color:#15803d;font-weight:900;font-size:11px}
+.pm-btn[disabled]{opacity:.55}
 </style>
 </head>
 <body>
@@ -3770,24 +3776,34 @@ function pmModels(){
   return out;
 }
 // Everything that can sit in a comparison column.
+function pmBands(src, base){
+  if(!src || typeof src !== "object") return null; var out = {}, n = 0;
+  PBC_BANDS.forEach(function(b){ if(src[b] && typeof src[b] === "object"){ out[b] = pmClean(Object.assign({}, base, src[b])); n++; } });
+  return n ? out : null;
+}
+function pmESig(e){ return pmSig(e.o) + (e.bands ? "|B" + JSON.stringify(e.bands) : ""); }
 function pmEntry(id){
-  if(id === "cur") return { id: id, t: "In use now", sub: "this week", o: pmClean(pxState().opts), live: true };
+  if(id === "cur"){ var C = pxState().combo, cb = (C && C.on) ? pmBands(C.bands, pmClean(pxState().opts)) : null;
+    return { id: id, t: "In use now", sub: cb ? "combined" : "this week", o: pmClean(pxState().opts), bands: cb, live: !cb }; }
+  if(String(id).indexOf("s:") === 0){ var tid = id.slice(2), t = null; pxTuneList().forEach(function(z){ if(z.id === tid) t = z; }); if(!t) return null;
+    var o0 = pmClean(t.o); return { id: id, t: t.n.slice(0, 40), sub: t.bands ? "combined \u00B7 yours" : "saved \u00B7 yours", o: o0, bands: pmBands(t.bands, o0), tune: t }; }
   if(id === "mine") return { id: id, t: "Your build", sub: "from Build", o: pmClean(pxUTInit()) };
   var m = PM.list && PM.list[id]; if(!m || !m.o) return null;
-  return { id: id, t: String(m.t || "Model").slice(0, 40), sub: "by " + String(m.n || "member").slice(0, 24), o: pmClean(m.o), m: m };
+  var mo = pmClean(m.o); return { id: id, t: String(m.t || "Model").slice(0, 40), sub: (m.b ? "combined \u00B7 " : "") + "by " + String(m.n || "member").slice(0, 24), o: mo, bands: pmBands(m.b, mo), m: m };
 }
 // Test a model on every graded game of the season so far, same loop as the Build tab's test. Cached by settings + data.
 function pmRunOne(e, cb){
   if(e.live){ cb(pxUTSummary(pxUTCurrent())); return; }
-  var sig = pmSig(e.o), hit = PM.res[sig]; if(hit){ cb(hit); return; }
+  var sig = pmESig(e), hit = PM.res[sig]; if(hit){ cb(hit); return; }
   var weeks = pxWeeks().filter(function(w){ return w >= PX_FIRST_GRADED; }), G = {}, i = 0;
   (function step(){
     if(i >= weeks.length){ var S = pxUTSummary(G); PM.res[sig] = S; cb(S); return; }
     var w = weeks[i++]; PM.prog = e.t + " · week " + w + " (" + i + " of " + weeks.length + ")"; pmRefresh();
     setTimeout(function(){
       try{
-        var fit = pxFit(w, e.o);
-        pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return; var g = x.g, L = x.W.lines[g.id], p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g));
+        var fit = pxFit(w, e.o), bf = {};
+        var fitFor = function(L){ if(!e.bands || !L || !isFinite(L.c)) return fit; var b = pbcBand(-L.c), bo = e.bands[b]; if(!bo) return fit; return bf[b] || (bf[b] = pxFit(w, Object.assign({}, e.o, bo))); };
+        pxGames().forEach(function(x){ if(x.W.w !== w || !x.g.c) return; var g = x.g, L = x.W.lines[g.id], p = pxPredict(fitFor(L), g.a, g.h, g.n, pxCtx(g));
           G[g.id] = { pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as, w: w, vh: (L && isFinite(L.c)) ? -L.c : null, vt: (L && L.t !== null && isFinite(L.t)) ? L.t : null }; });
       }catch(err){ PM.err = "Test failed: " + (err.message || err); PM.busy = false; PM.prog = ""; pmRefresh(); return; }
       step();
@@ -3814,6 +3830,12 @@ function pmShare(){
 }
 function pmTry(id){
   var e = pmEntry(id); if(!e) return;
+  if(e.bands){
+    var T = pxTunes(), nm = e.t, tid = null; pxTuneList().forEach(function(z){ if(z.n === nm && z.bands) tid = z.id; }); if(!tid) tid = "t" + Date.now().toString(36);
+    var keep = {}, base = Object.assign({}, pxState().opts, e.o); for(var k in PX_DEFAULTS) keep[k] = typeof base[k] === "number" ? base[k] : PX_DEFAULTS[k];
+    var at = Date.now(); T[tid] = { n: nm, o: keep, bands: JSON.parse(JSON.stringify(e.bands)), cat: at, res: null, at: (T[tid] && T[tid].at) || at };
+    peSave(); pxTuneLoad(tid); pmRefresh(); return;
+  }
   var u = pxUTInit(); pmKeys().forEach(function(k){ u[k] = e.o[k]; });
   if(PX.ut.res) PX.ut.stale = true;
   PE.ui.msub = "tune"; try{ localStorage.setItem("ps_msub", "tune"); }catch(_){}
@@ -3836,7 +3858,7 @@ function pmToggle(id){
 function pmEnsure(){
   if(PM.busy || PM.sel.length < 2) return;
   var todo = null;
-  PM.sel.forEach(function(id){ if(todo) return; var e = pmEntry(id); if(e && !e.live && !PM.res[pmSig(e.o)]) todo = e; });
+  PM.sel.forEach(function(id){ if(todo) return; var e = pmEntry(id); if(e && !e.live && !PM.res[pmESig(e)]) todo = e; });
   if(!todo){ PM.prog = ""; pmRefresh(); return; }
   PM.busy = true; PM.err = "";
   pmRunOne(todo, function(){ PM.busy = false; pmEnsure(); });
@@ -3865,7 +3887,7 @@ function pmCmpInner(){
     return '<button class="pm-chip' + (PM.sel.indexOf(c[0]) >= 0 ? ' on' : '') + '" data-ps-act="pmcmp" data-id="' + c[0] + '">' + c[1] + '</button>'; }).join('') + '</div>';
   var ents = PM.sel.map(pmEntry).filter(Boolean);
   if(ents.length < 2) return h + '<div class="pem-autosub">Pick two or three models. Tap <b>Compare</b> on any model below, or use the chips above.</div>';
-  var S = ents.map(function(e){ return e.live ? pxUTSummary(pxUTCurrent()) : PM.res[pmSig(e.o)] || null; });
+  var S = ents.map(function(e){ return e.live ? pxUTSummary(pxUTCurrent()) : PM.res[pmESig(e)] || null; });
   var cols = 'grid-template-columns:minmax(0,1.15fr) repeat(' + ents.length + ',minmax(0,1fr))';
   h += '<div class="pm-tbl"><div class="pm-tr hd" style="' + cols + '"><span></span>' + ents.map(function(e){ return '<span><b>' + x(e.t) + '</b><small>' + x(e.sub) + '</small></span>'; }).join('') + '</div>';
   if(S.some(function(s){ return !s; })) {
@@ -3884,7 +3906,9 @@ function pmCmpInner(){
       h += '<div class="pm-tr" style="' + cols + '"><span class="pm-k">' + r[0] + '</span>' + S.map(function(s, i){ return '<span class="' + (i === best && !tie ? 'best' : '') + '">' + r[2](s) + '</span>'; }).join('') + '</div>'; });
     h += '<div class="pem-autosub" style="margin-top:6px">' + (S[0].n || 0) + ' graded games, weeks ' + PX_FIRST_GRADED + '+. Vegas missed the spread by ' + f2(S[0].ev, S[0].n) + (S[0].tn ? ' and the total by ' + f2(S[0].tv, S[0].tn) : '') + ' on the same games. Gaps under about a quarter point are noise.</div>';
     // settings that differ
-    var diff = PS_PANELS.map(function(p){ var v = ents.map(function(e){ return pmPanelVal(p, e.o); }); return v.every(function(q){ return q === v[0]; }) ? null : [(p.src ? "O/U: " : "") + p.name, v]; }).filter(Boolean);
+    var _cmb = ents.map(function(e){ return e.bands ? "own build for " + Object.keys(e.bands).length + " of 4 bands" : "one build"; });
+    var diff0 = _cmb.every(function(q){ return q === _cmb[0]; }) ? [] : [["Spread bands", _cmb]];
+    var diff = diff0.concat(PS_PANELS.map(function(p){ var v = ents.map(function(e){ return pmPanelVal(p, e.o); }); return v.every(function(q){ return q === v[0]; }) ? null : [(p.src ? "O/U: " : "") + p.name, v]; }).filter(Boolean));
     h += psAccOpen("pm_set", "Settings that differ", diff.length + ' panel' + (diff.length === 1 ? '' : 's'), true, 1) +
       (diff.length ? diff.map(function(d){ return '<div class="pm-tr" style="' + cols + '"><span class="pm-k">' + x(d[0]) + '</span>' + d[1].map(function(v){ return '<span class="' + (v === 'off' ? 'dim' : '') + '">' + x(v) + '</span>'; }).join('') + '</div>'; }).join('') : '<div class="pem-autosub">These models use the same settings.</div>') + psAccClose();
     // by week
@@ -3905,10 +3929,10 @@ function pmListInner(){
   if(!ms.length) return h + '<div class="pem-autosub">Nothing shared yet. Build a model and be the first.</div>';
   return h + ms.map(function(q){
     var m = q.m, s = m.s, mine = m.u === ME(), sel = PM.sel.indexOf(q.id) >= 0, o = pmClean(m.o);
-    return '<div class="pm-card' + (sel ? ' sel' : '') + '"><div class="pm-top"><span class="pm-av">' + x(String(m.n || '?').charAt(0).toUpperCase()) + '</span><div style="min-width:0"><b class="pm-ti">' + x(m.t) + '</b><div class="ps-sm">' + x(String(m.n || 'member').slice(0, 24)) + (mine ? ' (you)' : '') + ' · ' + pmAgo(m.at || 0) + ' · ' + pmOnCount(o) + ' panels</div></div></div>' +
+    return '<div class="pm-card' + (sel ? ' sel' : '') + '"><div class="pm-top"><span class="pm-av">' + x(String(m.n || '?').charAt(0).toUpperCase()) + '</span><div style="min-width:0"><b class="pm-ti">' + (m.b ? '<span class="ut-cm">COMBINED</span> ' : '') + x(m.t) + '</b><div class="ps-sm">' + x(String(m.n || 'member').slice(0, 24)) + (mine ? ' (you)' : '') + ' · ' + pmAgo(m.at || 0) + ' · ' + pmOnCount(o) + ' panels</div></div></div>' +
       (m.d ? '<div class="pm-note">' + x(String(m.d).slice(0, 200)) + '</div>' : '') +
       (s && s.n ? pmNumsHtml(s, o) : '') +
-      '<div class="pm-row"><button class="pm-btn' + (sel ? ' pri' : '') + '" data-ps-act="pmcmp" data-id="' + x(q.id) + '">' + (sel ? '✓ Comparing' : 'Compare') + '</button><button class="pm-btn" data-ps-act="pmtry" data-id="' + x(q.id) + '">Try it</button><button class="pm-btn" data-ps-act="pmlink" data-id="' + x(q.id) + '">Link</button>' + ((mine || psAdmin()) ? '<button class="pm-btn del" data-ps-act="pmdel" data-id="' + x(q.id) + '">Delete</button>' : '') + '</div></div>'; }).join('');
+      '<div class="pm-row"><button class="pm-btn' + (sel ? ' pri' : '') + '" data-ps-act="pmcmp" data-id="' + x(q.id) + '">' + (sel ? '✓ Comparing' : 'Compare') + '</button><button class="pm-btn" data-ps-act="pmtry" data-id="' + x(q.id) + '">' + (m.b ? 'Use it' : 'Try it') + '</button><button class="pm-btn" data-ps-act="pmlink" data-id="' + x(q.id) + '">Link</button>' + ((mine || psAdmin()) ? '<button class="pm-btn del" data-ps-act="pmdel" data-id="' + x(q.id) + '">Delete</button>' : '') + '</div></div>'; }).join('');
 }
 // A card's record: ATS and O/U. Models shared before the O/U record was saved get it tested here, one at a time.
 function pmRec(w, l){ var n = (w || 0) + (l || 0); return n ? '<b>' + (100 * w / n).toFixed(1) + '%</b> <em>' + w + '-' + l + '</em>' : '<b>—</b>'; }
@@ -3926,9 +3950,40 @@ function pmBackfillSoon(){
     pbEval(q, function(G){ if(G) PM.res[pmSig(q)] = pxUTSummary(G); PM.bf = false; if(G) pmRefresh(); });
   }, 300);
 }
+function pmMineInner(){
+  var L = pxTuneList(), S = pxState(), cOn = !!(S.combo && S.combo.on);
+  if(!L.length) return '<div class="pem-autosub">Nothing saved yet. Targeted builds and combined models save here on their own; you can also name your Build under Advanced \u2192 All sliders.</div>';
+  return L.slice().reverse().map(function(t){
+    var id = "s:" + t.id, e = pmEntry(id), sel = PM.sel.indexOf(id) >= 0, R = e ? PM.res[pmESig(e)] : null;
+    var inUse = t.bands ? (cOn && S.combo.tid === t.id) : (!cOn && pxTuneSame(t.o, S.opts));
+    return '<div class="pm-card' + (sel ? ' sel' : '') + '"><div class="pm-top"><div style="min-width:0"><b class="pm-ti">' + (t.bands ? '<span class="ut-cm">COMBINED</span> ' : '') + x(t.n) + (inUse ? ' <small class="pm-inuse">in use</small>' : '') + '</b>' +
+      '<div class="ps-sm">' + x(t.bands ? pxComboDiff(t) : pxTuneDiff(t.o)) + '</div></div></div>' +
+      (R && R.n ? pmNumsHtml({ w: R.w, l: R.l, ow: R.ow, ol: R.ol, e: R.e / R.n, te: R.tn ? R.te / R.tn : 0, n: R.n, wk: Math.max.apply(null, Object.keys(R.wk).map(Number)) }, e.o).replace(' when shared', '') : '') +
+      '<div class="pm-row"><button class="pm-btn' + (inUse ? '' : ' pri') + '" data-ps-act="pmuse" data-id="' + x(t.id) + '"' + (inUse ? ' disabled' : '') + '>' + (inUse ? 'In use' : t.bands ? 'Use it' : 'Load into Build') + '</button>' +
+      '<button class="pm-btn' + (sel ? ' pri' : '') + '" data-ps-act="pmcmp" data-id="' + x(id) + '">' + (sel ? '\u2713 Comparing' : 'Compare') + '</button>' +
+      (psMember() ? '<button class="pm-btn" data-ps-act="pmshares" data-id="' + x(t.id) + '">Share</button>' : '') +
+      '<button class="pm-btn" data-ps-act="pmdels" data-id="' + x(t.id) + '" title="Delete" aria-label="Delete">\u2715</button></div></div>';
+  }).join('');
+}
+// Share one of your saved models (a combined one keeps its bands).
+function pmShareSaved(tid){
+  if(PM.posting) return;
+  var e = pmEntry("s:" + tid); if(!e) return;
+  PM.posting = true; PM.err = ""; pmRefresh(); toast("Scoring \u201c" + e.t + "\u201d before sharing\u2026");
+  pmRunOne(e, function(S){
+    var rec = { u: ME(), n: psName(), t: e.t, d: e.bands ? "Combined model: its own build for each spread band." : "", o: e.o, at: Date.now(), s: pmScore(S) };
+    if(e.bands) rec.b = e.bands;
+    psRef("models").push(peClean(rec), function(err){
+      PM.posting = false; PM.prog = "";
+      if(err){ PM.err = "Couldn\u2019t share: " + (err.code || err.message); pmRefresh(); return; }
+      toast("Shared \u201c" + e.t + "\u201d", "ok"); pmRefresh();
+    });
+  });
+}
 function psModelsHtml(){
   pmWatch();
-  return '<div id="pm-root"><section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Share your model</h2></div><div id="pm-share">' + pmShareInner() + '</div><div class="pem-autosub" id="pm-err" style="color:var(--red2)">' + x(PM.err) + '</div></section>' +
+  return '<div id="pm-root"><section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Your saved models</h2></div><div id="pm-mine">' + pmMineInner() + '</div></section>' +
+    '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Share your model</h2></div><div id="pm-share">' + pmShareInner() + '</div><div class="pem-autosub" id="pm-err" style="color:var(--red2)">' + x(PM.err) + '</div></section>' +
     '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Compare</h2></div><div id="pm-cmp">' + pmCmpInner() + '</div></section>' +
     '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Shared models</h2></div><div id="pm-list">' + pmListInner() + '</div></section></div>';
 }
@@ -3936,6 +3991,7 @@ function pmRefresh(){
   var a = document.getElementById("pm-cmp"); if(!a) return;
   a.innerHTML = pmCmpInner();
   var l = document.getElementById("pm-list"); if(l) l.innerHTML = pmListInner();
+  var mn = document.getElementById("pm-mine"); if(mn) mn.innerHTML = pmMineInner();
   var s = document.getElementById("pm-share"); if(s && document.activeElement && !/^pm-/.test(document.activeElement.id || "")) { /* keep the typed text untouched */ }
   var b = s && s.querySelector('[data-ps-act="pmshare"]'); if(b){ b.disabled = PM.posting; b.textContent = PM.posting ? "Scoring it…" : "Share this model"; }
   var e = document.getElementById("pm-err"); if(e) e.textContent = PM.err || "";
@@ -3943,8 +3999,16 @@ function pmRefresh(){
 document.addEventListener("input", function(ev){ var t = ev.target; if(!t || !t.id) return; if(t.id === "pm-t") PM.dt = t.value; else if(t.id === "pm-d") PM.dd = t.value; });
 document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
-  var act = t.getAttribute("data-ps-act"); if(!/^(pm(share|cmp|try|link|del|sort)|rkbuild)$/.test(act)) return;
+  var act = t.getAttribute("data-ps-act"); if(!/^(pm(share|cmp|try|link|del|sort|use|shares|dels)|rkbuild)$/.test(act)) return;
   ev.stopImmediatePropagation(); var id = t.getAttribute("data-id");
+  if(act === "pmuse"){ var tl = null; pxTuneList().forEach(function(z){ if(z.id === id) tl = z; });
+    if(tl && tl.bands){ pxTuneLoad(id); pmRefresh(); }
+    else if(tl){ pxTuneLoad(id); PE.ui.msub = "tune"; try{ localStorage.setItem("ps_msub", "tune"); }catch(_){} renderPoolEdge(); window.scrollTo(0, 0); toast("Loaded into Build \u00B7 tap Use this model to adopt it", "ok"); }
+    return; }
+  if(act === "pmshares"){ pmShareSaved(id); return; }
+  if(act === "pmdels"){ var T0 = pxTunes(); if(!T0[id] || !confirm("Delete \u201c" + (T0[id].n || "model") + "\u201d?")) return;
+    var C1 = pxState().combo; if(C1 && C1.tid === id){ C1.on = false; C1.tid = null; PBC.fits = {}; PX.sims = {}; }
+    delete T0[id]; if(PXB.sel) delete PXB.sel["s:" + id]; PM.sel = PM.sel.filter(function(q){ return q !== "s:" + id; }); peSave(); pmRefresh(); toast("Deleted"); return; }
   if(act === "pmshare") pmShare();
   else if(act === "pmcmp") pmToggle(id);
   else if(act === "pmtry") pmTry(id);
@@ -4390,8 +4454,13 @@ function pbComboGo(){
     S.combo = { on: !!(S.combo && S.combo.on), at: Date.now(), bands: bands,
                 res: { rows: rows, bT: pbcRec(G0, false), bH: pbcRec(G0, true), cT: pbcRec(C, false), cH: pbcRec(C, true) } };
     PX.ut.res = { o: Object.assign({}, pxUTInit()), games: G0, at: Date.now() }; PX.ut.stale = false;
+    var T = pxTunes(), nm = "Combined by spread", tid = null;
+    pxTuneList().forEach(function(t){ if(t.n === nm) tid = t.id; }); if(!tid) tid = "t" + Date.now().toString(36);
+    var keepO = {}; for(var k in PX_DEFAULTS) keepO[k] = typeof base[k] === "number" ? base[k] : (typeof S.opts[k] === "number" ? S.opts[k] : PX_DEFAULTS[k]);
+    T[tid] = { n: nm, o: keepO, bands: JSON.parse(JSON.stringify(bands)), cat: S.combo.at, res: S.combo.res, at: (T[tid] && T[tid].at) || Date.now() };
+    S.combo.tid = tid; pxBtSel()["s:" + tid] = 1;
     PBC.fits = {}; PX.sims = {}; peSave(); psPanelsRefresh(); pxUTStatus(); pbRender(); psFeel("win");
-    toast("Combined model built · check the held-out record before turning it on", "ok");
+    toast("Combined model built \u00B7 saved under Models as \u201c" + nm + "\u201d", "ok");
   }
   function next(){
     if(i >= PBC_BANDS.length || PB.stopAll){ done(); return; }
@@ -4451,6 +4520,7 @@ function pbComboHtml(){
        : 'No real difference on held-out games (' + sg(dH) + '). Whatever it gained on tuned games (' + sg(dT) + ') is mostly fit to noise.') + '</div>';
     h += '<button class="cm-on' + (S.on ? ' on' : '') + '" data-ps-act="pbcomboon"><i></i>' + (S.on ? 'On · picks with a Vegas line use their band’s build' : 'Off · picks use the single model') + '</button>';
   }
+  if(R) h += '<div class="cm-save"><input id="cm-name" type="text" maxlength="40" autocomplete="off" placeholder="Save as\u2026 e.g. Combined v2"><button class="btn btn-sm btn-gold" data-ps-act="pbcombosave">Save</button></div>';
   h += '<button class="pg-b cm-go" data-ps-act="pbcombo"><span>' + (R ? 'Rebuild combined model' : 'Build combined model') + '<em>tunes under 3, 3–7, 7.5–14 and 14+ separately · about 4× as long</em></span></button>' +
        '<small class="cm-note">Starts each band from your current build. A third of games are kept out of the tuning so the held-out row is an honest read. Games with no line use the single model, and the record chip on Home stays the single model’s.</small></div>';
   return h;
@@ -4464,11 +4534,20 @@ function pbComboHtml(){
 })();
 document.addEventListener("click", function(ev){
   var t = ev.target && ev.target.closest ? ev.target.closest("[data-ps-act]") : null; if(!t) return;
-  var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop" && act !== "pbtgt" && act !== "pbguard" && act !== "pbcombo" && act !== "pbcomboon") return;
+  var act = t.getAttribute("data-ps-act"); if(act !== "pgdice" && act !== "pbgo" && act !== "pbstop" && act !== "pbtgt" && act !== "pbguard" && act !== "pbcombo" && act !== "pbcomboon" && act !== "pbcombosave") return;
   if(act === "pbguard"){ PB.guard = !!t.checked; return; }
   ev.stopImmediatePropagation();
   if(act === "pbcombo"){ pbComboGo(); return; }
-  if(act === "pbcomboon"){ var _c = pxState().combo; if(_c){ _c.on = !_c.on; PBC.fits = {}; PX.sims = {}; peSave(); pbRender(); toast(_c.on ? "Combined model on \u00B7 picks with a line now use it" : "Combined model off \u00B7 back to the single model", "ok"); } return; }
+  if(act === "pbcombosave"){
+    var C0 = pxState().combo, inp = document.getElementById("cm-name"), nm2 = String((inp && inp.value) || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if(!C0 || !C0.bands){ toast("Build a combined model first"); return; }
+    if(!nm2){ toast("Give it a name"); if(inp) inp.focus(); return; }
+    var T2 = pxTunes(), id2 = null; pxTuneList().forEach(function(z){ if(z.n.toLowerCase() === nm2.toLowerCase()) id2 = z.id; }); var upd = !!id2; if(!id2) id2 = "t" + Date.now().toString(36);
+    var src = (C0.tid && T2[C0.tid]) ? T2[C0.tid].o : pxState().opts, keep2 = {}; for(var k2 in PX_DEFAULTS) keep2[k2] = typeof src[k2] === "number" ? src[k2] : PX_DEFAULTS[k2];
+    T2[id2] = { n: nm2, o: keep2, bands: JSON.parse(JSON.stringify(C0.bands)), cat: C0.at, res: C0.res || null, at: upd ? (T2[id2].at || Date.now()) : Date.now() };
+    C0.tid = id2; pxBtSel()["s:" + id2] = 1; peSave(); pbRender(); try{ pxUTStatus(true); }catch(_){}
+    toast((upd ? "Updated \u201c" : "Saved \u201c") + nm2 + "\u201d under Models", "ok"); return; }
+  if(act === "pbcomboon"){ var _c = pxState().combo; if(_c){ _c.on = !_c.on; if(!_c.tid){ pxTuneList().forEach(function(z){ if(z.bands && z.cat === _c.at) _c.tid = z.id; }); } PBC.fits = {}; PX.sims = {}; peSave(); pbRender(); toast(_c.on ? "Combined model on \u00B7 picks with a line now use it" : "Combined model off \u00B7 back to the single model", "ok"); } return; }
   if(act === "pbstop" && PB.combo) PB.stopAll = true;
   if(act === "pbtgt"){ if(PB.run) return; PB.tgt[psView() === "t" ? "t" : "s"] = t.getAttribute("data-id"); psFeel("tap"); pbRender(); return; }
   if(act === "pgdice") pgDice(); else if(act === "pbgo") pbGo(t.getAttribute("data-id")); else { PB.stop = true; PB.txt = "Stopping…"; pbRender(); }
@@ -7708,7 +7787,7 @@ function pxTuneList(){
   var T = pxTunes();
   return Object.keys(T).filter(function(id){ return T[id] && T[id].o; }).map(function(id){
     var o = {}; for(var k in PX_DEFAULTS) o[k] = typeof T[id].o[k] === "number" ? T[id].o[k] : PX_DEFAULTS[k];   // tunes saved before a setting existed get its default
-    return { id: id, n: String(T[id].n || "Tune"), o: o, at: T[id].at || 0 };
+    return { id: id, n: String(T[id].n || "Tune"), o: o, at: T[id].at || 0, bands: T[id].bands || null, cat: T[id].cat || 0, res: T[id].res || null };
   }).sort(function(a, b){ return a.at - b.at; });
 }
 // What a set of settings changes from the defaults, in a few words.
@@ -7716,6 +7795,12 @@ function pxTuneDiff(o){
   var out = [];
   PX_KNOBS.forEach(function(k){ var v = o[k.key]; if(typeof v === "number" && Math.abs(v - PX_DEFAULTS[k.key]) > 1e-9) out.push(k.label.replace(/^Totals: /, "Totals ") + " " + k.fmt(v)); });
   return out.length ? out.join(" \u00b7 ") : "same as defaults";
+}
+// A combined model in a word: which bands have their own build, and how it did on held-out games.
+function pxComboDiff(t){
+  var lab = { lt3: "under 3", s37: "3\u20137", s714: "7.5\u201314", gt14: "14+" }, own = Object.keys(t.bands || {}).map(function(b){ return lab[b] || b; });
+  var R = t.res, ho = R ? (R.cH.w - R.cH.l) - (R.bH.w - R.bH.l) : null;
+  return (own.length ? 'Own build for ' + own.join(', ') : 'Every band uses the single model') + (ho !== null ? ' \u00b7 held-out ' + (ho > 0 ? '+' : '') + ho + ' net wins vs single' : '');
 }
 function pxTuneSame(a, b){ for(var k in PX_DEFAULTS) if(Math.abs((a[k] || 0) - (b[k] || 0)) > 1e-9) return false; return true; }
 function pxTuneSave(name){
@@ -7731,6 +7816,13 @@ function pxTuneSave(name){
 }
 function pxTuneLoad(id){
   var t = null; pxTuneList().forEach(function(z){ if(z.id === id) t = z; }); if(!t) return;
+  var S = pxState();
+  if(t.bands){
+    S.combo = { on: true, at: t.cat || t.at, bands: JSON.parse(JSON.stringify(t.bands)), res: t.res || null, tid: t.id };
+    PBC.fits = {}; PX.sims = {}; peSave(); pxUTStatus(true); try{ pbRender(); }catch(_){}
+    toast("\u201c" + t.n + "\u201d is in use \u00b7 games with a line use their band\u2019s build", "ok"); return;
+  }
+  if(S.combo && S.combo.on){ S.combo.on = false; PBC.fits = {}; PX.sims = {}; peSave(); }
   PX.ut.o = Object.assign({}, t.o); PX.ut.res = null; pxUTStatus(true); pxUTSoon();
   toast("Loaded \u201c" + t.n + "\u201d \u00b7 testing on this season", "ok");
 }
@@ -7747,9 +7839,12 @@ function pxTunesHtml(){
     '<button class="btn btn-sm btn-gold" id="px-ut-save">Save tune</button></div>';
   if(!list.length) return h + '<div class="pem-autonote" style="margin-top:6px">Save the sliders under a name to keep them, load them back later, and grade them in the backtest below. Same name again updates it.</div>';
   list.forEach(function(t){
-    var tag = pxTuneSame(t.o, S.opts) ? ' <small style="color:#15803d;font-weight:900">in use</small>' : (pxTuneSame(t.o, ut) ? ' <small style="color:var(--gold-dark);font-weight:900">in sliders</small>' : '');
-    h += '<div class="ut-r"><div class="ut-top"><span style="min-width:0">' + x(t.n) + tag + '<br><small style="font-weight:700;color:var(--muted)">' + x(pxTuneDiff(t.o)) + '</small></span>' +
-         '<span style="display:flex;gap:5px;flex:none"><button class="btn btn-sm btn-ghost" data-tune-load="' + t.id + '">Load</button><button class="btn btn-sm btn-ghost" data-tune-del="' + t.id + '" title="Delete">\u2715</button></span></div></div>';
+    var cOn = !!(S.combo && S.combo.on), tag;
+    if(t.bands) tag = (cOn && S.combo.tid === t.id) ? ' <small style="color:#15803d;font-weight:900">in use</small>' : '';
+    else tag = (!cOn && pxTuneSame(t.o, S.opts)) ? ' <small style="color:#15803d;font-weight:900">in use</small>' : (pxTuneSame(t.o, ut) ? ' <small style="color:var(--gold-dark);font-weight:900">in sliders</small>' : '');
+    var sub = t.bands ? pxComboDiff(t) : pxTuneDiff(t.o);
+    h += '<div class="ut-r"><div class="ut-top"><span style="min-width:0">' + (t.bands ? '<b class="ut-cm">COMBINED</b> ' : '') + x(t.n) + tag + '<br><small style="font-weight:700;color:var(--muted)">' + x(sub) + '</small></span>' +
+         '<span style="display:flex;gap:5px;flex:none"><button class="btn btn-sm btn-ghost" data-tune-load="' + t.id + '">' + (t.bands ? 'Use' : 'Load') + '</button><button class="btn btn-sm btn-ghost" data-tune-del="' + t.id + '" title="Delete">\u2715</button></span></div></div>';
   });
   return h;
 }
@@ -7799,7 +7894,7 @@ function pxBtConfigs(){
   out.push({ k: "noadj", name: "P4/G6 adjustment off", o: Object.assign({}, now, { tierAdj: 0 }) });
   out.push({ k: "c100", name: "Conference anchoring 100, P4/G6 off", o: Object.assign({}, now, { conf: 100, tierAdj: 0 }) });
   out.push({ k: "c300", name: "Conference anchoring 300, P4/G6 off", o: Object.assign({}, now, { conf: 300, tierAdj: 0 }) });
-  pxTuneList().forEach(function(t){ out.push({ k: "s:" + t.id, name: "\ud83d\udcbe " + t.n, o: t.o, sub: pxTuneDiff(t.o) }); });
+  pxTuneList().forEach(function(t){ out.push({ k: "s:" + t.id, name: (t.bands ? "\ud83e\udde9 " : "\ud83d\udcbe ") + t.n, o: t.bands ? Object.assign({}, now) : t.o, bands: t.bands || null, sub: t.bands ? pxComboDiff(t) : pxTuneDiff(t.o) }); });
   if(ut && pxUTChanged()) out.push({ k: "ut", name: "Your tune (sliders, unsaved)", o: Object.assign({}, now, ut), sub: pxTuneDiff(Object.assign({}, now, ut)) });
   return out;
 }
@@ -7916,8 +8011,10 @@ function pxBtWorker(){
           Object.keys(S.wk).map(function(k){ return S.wk[k].w; }).filter(function(w){ return w >= FIRST; }).sort(function(a, b){ return a - b; }).forEach(function(w){
             self.postMessage({ t: "prog", y: y, w: w, done: done, total: total });
             M.configs.forEach(function(c){
-              var o = Object.assign({}, PX_DEFAULTS, c.o), fit = pxFit(w, o);
-              (weeks[w] || []).forEach(function(x){ var g = x.g, p = pxPredict(fit, g.a, g.h, g.n, pxCtx(g)), L = (x.W.lines || {})[g.id] || null;
+              var o = Object.assign({}, PX_DEFAULTS, c.o), fit = pxFit(w, o), bf = {};
+              // A combined model: each game with a line is predicted by its spread band's build.
+              var fitFor = function(L){ if(!c.bands || !L || !isFinite(L.c)) return fit; var b = pbcBand(-L.c), bo = c.bands[b]; if(!bo) return fit; return bf[b] || (bf[b] = pxFit(w, Object.assign({}, o, bo))); };
+              (weeks[w] || []).forEach(function(x){ var g = x.g, L = (x.W.lines || {})[g.id] || null, p = pxPredict(fitFor(L), g.a, g.h, g.n, pxCtx(g));
                 preds.push({ c: c.k, y: y, w: w, id: g.id, pred: p.home - p.away, act: g.hs - g.as, pt: p.home + p.away, at: g.hs + g.as,
                   vh: L && isFinite(L.c) ? -L.c : null, vt: L && L.t !== null && L.t !== undefined && isFinite(L.t) ? +L.t : null, xT: (pxIsP4(g.h) ? 1 : 0) - (pxIsP4(g.a) ? 1 : 0),
                   vo: L && L.o !== null && L.o !== undefined && isFinite(L.o) ? -L.o : null, ph: pxIsP4(g.h) ? 1 : 0, pa: pxIsP4(g.a) ? 1 : 0, nu: g.n ? 1 : 0 }); });
@@ -7961,7 +8058,7 @@ function pxBtRun(){
       else if(d.t === "err"){ pxBtEnd(acc, "The backtest stopped: " + d.msg); }
     };
     w.onerror = function(ev){ pxBtEnd(acc, "The backtest stopped: " + ((ev && ev.message) || "worker error")); };
-    w.postMessage({ seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, configs: run.map(function(c){ return { k: c.k, o: c.o }; }) });
+    w.postMessage({ seasons: seasons, priors: PE.priors || {}, ownPriors: PXB.ownPriors || {}, contW: PXB.contW || {}, configs: run.map(function(c){ return { k: c.k, o: c.o, bands: c.bands || null }; }) });
   }).catch(function(e){ PXB.busy = false; PXB.msg = ""; PXB.err = (e && e.message) || String(e); pxBtStatus(); });
 }
 // The saved seasons, from Firebase (each downloaded once per run).
