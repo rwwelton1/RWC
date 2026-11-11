@@ -3284,8 +3284,11 @@ function psExpertCard(e, i){
 function psBetRow(o, tag){
   var g = o.g, mp = o.p ? pearModelPick(g, o.p.margin) : null, d = new Date(g.date), fin = g.state === "post", live = g.state === "in";
   var hasSc = g.state !== "pre" && g.away.score !== null && g.home.score !== null;
-  var edge = (o.e && isFinite(o.e.edge)) ? o.e.edge : null, cov = "";
-  var ed = edge !== null ? '<span class="hb-ed" title="Edge: points between the model and the line"><i><u style="width:' + Math.min(100, Math.round(edge / 15 * 100)) + '%"></u></i>' + edge.toFixed(1) + '</span>' : '';
+  var edge = (o.e && isFinite(o.e.edge)) ? o.e.edge : null, cov = "", K = o.pk && !o.pk.none ? o.pk : null;
+  if(K){ var _pt = K.pickHome ? g.home.id : g.away.id, _pl = K.pickHome ? -K.ref : K.ref, _rs = null;
+    if(fin){ var _cv = (g.home.score - g.away.score) - K.ref; _rs = _cv === 0 ? "push" : ((_cv > 0) === K.pickHome ? "win" : "loss"); }
+    mp = { team: _pt, line: _pl, res: _rs, txt: pearAbbr(_pt) + ' ' + (_pl === 0 ? 'PK' : (_pl > 0 ? '+' : '') + (Math.round(_pl * 10) / 10)) }; }
+  var ed = K ? '<span class="hb-ed" title="Chance to cover, from how the model has done on picks like this"><i><u style="width:' + Math.max(4, Math.min(100, Math.round((K.chance - 0.5) / 0.15 * 100))) + '%"></u></i>' + Math.round(K.chance * 100) + '%' + (K.parts && K.parts.fade ? ' fade' : '') + '</span>' : edge !== null ? '<span class="hb-ed" title="Edge: points between the model and the line"><i><u style="width:' + Math.min(100, Math.round(edge / 15 * 100)) + '%"></u></i>' + edge.toFixed(1) + '</span>' : '';
   // Line 2 is always one line: edge, then time and TV, or the score and clock.
   var l2, l3 = '';
   if(hasSc){
@@ -3315,14 +3318,18 @@ function psHomeHtml(){
   if(!PEM.ratings) h += '<div class="pr-note"><b>No projections yet.</b> ' + (pxCanFetch() ? 'Open Model to build the shared data.' : 'Ask an editor to refresh the shared data, or paste an SP+ sheet under Model.') + '</div>';
   if(PEAR.loading || !PEAR.games){ return h + '<div class="pr-empty">' + (PEAR.err ? x(PEAR.err) : 'Loading week ' + (PEAR.week || '') + '…') + '</div></div>'; }
   var L = psWeekGames();
-  var ed = L.filter(function(o){ return o.e && o.p && pearModelPick(o.g, o.p.margin); });
+  // Best plays: ranked by chance to cover from the model's own record by slice (faded where it loses); the old points-of-edge
+  // order only stands in until there are enough graded games.
+  var ed = L.filter(function(o){ return o.p && pearFbsGame(o.g); }); ed.forEach(function(o){ try{ o.pk = pxGameEdge(o.g, "market"); }catch(_){ o.pk = null; } });
+  var rt = ed.filter(function(o){ return o.pk && !o.pk.none && o.pk.parts && o.pk.parts.trk; }), plays = rt.length > 0;
+  if(plays) ed = rt; else ed = L.filter(function(o){ return o.e && o.p && pearModelPick(o.g, o.p.margin); });
   var pre = ed.filter(function(o){ return o.g.state === "pre"; }), graded = !pre.length; if(pre.length) ed = pre;
-  ed = ed.sort(function(a, b){ return b.e.edge - a.e.edge; }).slice(0, 5);
+  ed = ed.sort(plays ? function(a, b){ return b.pk.chance - a.pk.chance; } : function(a, b){ return b.e.edge - a.e.edge; }).slice(0, 5);
   // Best bets lead before kickoff; once games are on, live goes first.
   var live = L.filter(function(o){ return o.g.state === "in"; }).sort(function(a, b){ return ((b.e && b.e.edge) || 0) - ((a.e && a.e.edge) || 0); });
-  var secBets = ed.length ? '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">' + (graded ? 'Biggest edges' : 'Best bets') + '</h2><button class="ps-link" data-pear-filter="edge" data-pe-view="games">All edges</button></div>' +
+  var secBets = ed.length ? '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">' + (plays ? 'Best plays' : (graded ? 'Biggest edges' : 'Best bets')) + '</h2><button class="ps-link" data-pear-filter="edge" data-pe-view="games">' + (plays ? 'All plays' : 'All edges') + '</button></div>' +
        '<div class="hb-list">' + ed.map(function(o, i){ return psBetRow(o, String(i + 1)); }).join('') + '</div>' +
-       (graded ? '' : '<div class="hb-note">Tap a pick to add it to your slip. Purple = the edge, points between the model and the line.</div>') + '</section>' : '';
+       (graded ? '' : '<div class="hb-note">Tap a pick to add it to your slip. ' + (plays ? 'Purple = chance to cover, from how the model has done on picks like it. <b>Fade</b> = it loses there, so the play goes the other way.' : 'Purple = the edge, points between the model and the line.') + '</div>') + '</section>' : '';
   var secLive = live.length ? '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h"><i class="hb-dot in"></i>Live now <small>' + live.length + '</small></h2><button class="ps-link" data-pear-filter="live" data-pe-view="games">All live</button></div>' +
        '<div class="hb-list">' + live.slice(0, 3).map(function(o){ return psBetRow(o, '<i class="hb-dot"></i>'); }).join('') + '</div></section>' : '';
   h += live.length ? secLive + secBets : secBets;
@@ -4664,6 +4671,31 @@ function pxTrackFor(week, ref, gap){
     if(P.qbH) s.push(ha + ' QB out (' + qbt(P.qbH) + ')');
     if(P.qbA) s.push(aa + ' QB out (' + qbt(P.qbA) + ')');
     return s.join(' · ');
+  };
+})();
+
+// Best plays: picks against the CURRENT line (not the pool's) are rated the same way as pool picks \u2014 by what the model in
+// use has actually covered in that slice, faded where it clearly loses. Needs ~80 graded games; before that the old rating stays.
+(function(){
+  var prev = pxPickSide;
+  pxPickSide = function(awayId, homeId, neutral, ref, now, week, fit, gid, cur, game){
+    try{
+      if(cur && PX.active && ref !== null && ref !== undefined && isFinite(ref)){
+        var f = fit || PX.live || (typeof pearFitFor === "function" ? pearFitFor(week) : null), S = pxState().combo;
+        if(f && S && S.on){ var nf = pbcFit(f, pbcBand(ref)); if(nf) f = nf; }
+        if(f){
+          var q = pxPredict(f, awayId, homeId, !!neutral, game ? pxCtx(game) : null), gap = (q.home - q.away) - ref, TR = Math.abs(gap) >= 0.05 ? pxTrackFor(week, ref, gap) : null;
+          if(TR){
+            var mH = gap > 0, QM = pxQbMarks(gid), qv = function(v){ return v === 1 ? PX_PICK.qb1 : v === 2 ? PX_PICK.qb2 : 0; }, parts = { mv: 0, md: 0, pbpPts: gap, trk: TR, fade: !!TR.fade, agree: true };
+            var qb = QM ? qv(QM[awayId]) - qv(QM[homeId]) : 0; if(QM){ parts.qb = qb; parts.qbH = QM[homeId] || 0; parts.qbA = QM[awayId] || 0; }
+            var qS = mH ? qb : -qb, zt = Math.log(TR.p / (1 - TR.p)) + qS, pickHome = TR.fade ? !mH : mH, zf = Math.max(0.004, TR.fade ? -zt : zt), p = 1 / (1 + Math.exp(-zf));
+            return { pickHome: pickHome, chance: p + Math.min(Math.abs(gap), 10) * 1e-7, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: true, model: true,
+                     sim: TR.fade ? { w: TR.l, l: TR.w, n: TR.n } : { w: TR.w, l: TR.l, n: TR.n } };
+          }
+        }
+      }
+    }catch(_){}
+    return prev.apply(this, arguments);
   };
 })();
 
@@ -10665,7 +10697,7 @@ document.addEventListener("change", function(e){
   bfSave(); pearRepaint();
 }, true);
 
-var PEAR_SUBS = [["all", "All"], ["live", "Live"], ["final", "Final"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Edges"], ["pool", "Pool"]];
+var PEAR_SUBS = [["all", "All"], ["live", "Live"], ["final", "Final"], ["fav", "\u2605"], ["top", "Top 25"], ["close", "Best games"], ["edge", "Plays"], ["pool", "Pool"]];
 function pearPoolIds(){
   var o = { n: 0, k: {} };
   (PE.games || []).forEach(function(pg){ if(pg && pg.homeId && pg.awayId && typeof pg.pool === "number" && (!pg.w || !PEAR.week || +pg.w === +PEAR.week)){ o.k[pg.homeId + "|" + pg.awayId] = pg; } });
@@ -10687,7 +10719,7 @@ document.addEventListener("change", function(e){
   var t = e.target; if(!t || t.id !== "ps-wksel") return;
   var w = parseInt(t.value, 10); if(w) pearLoadWeek(PEAR.year || PEAR.curYear, w);
 });
-var PS_CHIPS = [["all", "All"], ["edge", "Best edges"], ["pool", "My pool"], ["top", "Top 25"], ["close", "Best games"], ["fav", "★ Starred"], ["live", "Live"], ["final", "Final"]];
+var PS_CHIPS = [["all", "All"], ["edge", "Best plays"], ["pool", "My pool"], ["top", "Top 25"], ["close", "Best games"], ["fav", "★ Starred"], ["live", "Live"], ["final", "Final"]];
 function psFilterChipsHtml(poolN, liveN, finN){
   return '<div class="gm-chips" role="tablist" aria-label="Filter games">' + PS_CHIPS.map(function(c){
     var n = c[0] === "pool" ? poolN : c[0] === "live" ? liveN : c[0] === "final" ? finN : 0;
@@ -10731,7 +10763,7 @@ function pearGamesHtml(){
   if(PEAR.filter === "edge"){
     if(!PEAR.edgeKind){ try{ PEAR.edgeKind = localStorage.getItem("ps_ekind") || "spread"; }catch(_){ PEAR.edgeKind = "spread"; } }
     h += '<button class="p10-btn" data-pear-p10>\ud83d\udce4 Week ' + (PEAR.week || '') + ' Prophescore 10' + (PEAR.edgeKind === "spread" ? ' \u00b7 spreads' : PEAR.edgeKind === "total" ? ' \u00b7 over/unders' : '') + '</button>';
-    h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind === "spread" ? 'on' : '') + '" data-pear-ekind="spread">Spread edges</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
+    h += '<div class="pe-kind" role="tablist"><button class="' + (PEAR.edgeKind === "spread" ? 'on' : '') + '" data-pear-ekind="spread">Spread plays</button><button class="' + (PEAR.edgeKind === "total" ? 'on' : '') + '" data-pear-ekind="total">Over/under edges</button></div>';
     var emin = pearEdgeRange().min, emax = pearEdgeRange().max;
     var erl = function(a, b){ return a <= 0 && b >= 15 ? 'Any' : a <= 0 ? '0\u2013' + b.toFixed(1) : b >= 15 ? a.toFixed(1) + '+' : a.toFixed(1) + '\u2013' + b.toFixed(1); };
     h += '<div class="pr-range"><div class="rh"><small>Edge size (points)</small><b id="pear-erl">' + erl(emin, emax) + '</b></div>' +
@@ -10779,7 +10811,7 @@ function pearGamesHtml(){
     if(!erOn) list = list.slice(0, 25);
     var hr = (PEM.ratings && typeof pemAts === "function") ? pemAts() : null, wk = { w: 0, l: 0, p: 0 }, nr = 0;
     list.forEach(function(o){ if(o.mp.res === "win") wk.w++; else if(o.mp.res === "loss") wk.l++; else if(o.mp.res === "push") wk.p++; if(rated(o)) nr++; });
-    h += '<div class="pr-edgenote">The 25 games with the biggest <b>edge</b> \u2014 points between the model and <b>the current line</b> (the closing line once played) \u2014 pool games included' + (nr ? '; the ' + nr + ' that also carry a 1\u201310 rating lead' : '') + '. ' +
+    h += (nr && list.some(function(o){ return o.k && o.k.parts && o.k.parts.trk; }) ? '<div class="pr-edgenote"><b>Best plays</b> \u2014 ranked by chance to cover <b>the current line</b> (the closing line once played), from how the model in use has actually done on picks like it this season: same line size, favourite or underdog, same size of edge. Where it clearly loses, the play <b>fades</b> it. Early in the season, before there are enough graded games, the ranking is by points of edge. Pool games included.</div>' : '') + '<div class="pr-edgenote">The 25 games with the biggest <b>edge</b> \u2014 points between the model and <b>the current line</b> (the closing line once played) \u2014 pool games included' + (nr ? '; the ' + nr + ' that also carry a 1\u201310 rating lead' : '') + '. ' +
          'Before week 9 a gap alone hasn’t beaten the closing line in past seasons (about 50% at 3+ points); from week 9 the model’s gaps have covered 54.6% at 3+ and 56.6% at 5+, and those games also show a 1\u201310 rating (EDGE 8.6 \u00b7 6/10). QB-out marks you set also rate. The Pool tab grades your pool’s games against your pool’s lines.' +
          (hr && (hr.sw + hr.sl) ? ' The model’s season record when it’s 3+ points off the close: <b class="' + (hr.spct >= 0.524 ? "up" : "dn") + '">' + hr.sw + '-' + hr.sl + (hr.sp ? '-' + hr.sp : '') + ' (' + (hr.spct*100).toFixed(1) + '%)</b>.' : '') +
          ((wk.w + wk.l + wk.p) ? ' These 25 this week: <b class="' + (wk.w/(wk.w + wk.l || 1) >= 0.524 ? "up" : "dn") + '">' + wk.w + '-' + wk.l + (wk.p ? '-' + wk.p : '') + '</b>.' : '') + '</div>';
@@ -10864,7 +10896,7 @@ function pearGamesHtml(){
          (PEAR.filter === "edge" && o.ou && PEAR.edgeKind !== "all" ? '<span class="pr-edgepill gap">O/U EDGE ' + o.ou.gap.toFixed(1) + '</span>' :
          (PEAR.filter === "edge" || PEAR.filter === "pool") && (o.mp || (o.k && !o.k.none)) ? (function(){
             var rt = o.k && !o.k.none, ln = rt ? o.k.ref : null, gp = (PEAR.filter === "pool" && rt && p) ? Math.abs(p.margin - ln) : o.gap;
-            var pill = '<span class="pr-edgepill' + (rt ? '' : ' gap') + '">EDGE ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' \u00b7 ' + o.k.rating + '/10' : '') + '</span>';
+            var pill = (rt && o.k.parts && o.k.parts.trk && PEAR.filter === "edge") ? '<span class="pr-edgepill">' + (o.k.parts.fade ? 'FADE' : 'PLAY') + ' \u00b7 ' + o.k.rating + '/10</span>' : '<span class="pr-edgepill' + (rt ? '' : ' gap') + '">EDGE ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' \u00b7 ' + o.k.rating + '/10' : '') + '</span>';
             if(PEAR.filter === "edge" && PEAR.edgeKind === "all"){
               // One pill, one line: SPREAD 3.5 \u00b7 O/U 7.0 (rating appended to the spread when the game has one)
               var sTxt = o.mp ? 'SPREAD ' + (gp != null && isFinite(gp) ? gp.toFixed(1) : '\u2014') + (rt ? ' (' + o.k.rating + '/10)' : '') : '', oTxt = o.ou ? 'O/U ' + o.ou.gap.toFixed(1) : '';
@@ -10888,7 +10920,7 @@ function pearGamesHtml(){
     h += '<div class="gc-foot">';
     if(p && (_mpk || _tot)){
       h += '<div class="gk-picks">' +
-           (_mpk ? '<span class="gk-pick">' + pearPickPillHtml(_mpk) + (isFinite(_sg) ? '<small>edge ' + _sg.toFixed(1) + '</small>' : '') + '</span>' : '') +
+           (_mpk ? '<span class="gk-pick">' + pearPickPillHtml(_mpk) + (o.k && o.k.parts && o.k.parts.fade && PEAR.filter === "edge" ? '<small>model side \u00b7 faded</small>' : (isFinite(_sg) ? '<small>edge ' + _sg.toFixed(1) + '</small>' : '')) + '</span>' : '') +
            (_tot ? '<span class="gk-pick">' + pearOuPillHtml(_tot) + '<small>edge ' + _tot.gap.toFixed(1) + '</small></span>' : '') + '</div>';
     }
     h += '<div class="gc-mkt">' +
