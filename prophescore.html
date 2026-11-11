@@ -943,6 +943,11 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .pc-one .pc-thd .pc-val{font-size:.9em;color:var(--muted)}
 .pc-one .pc-chd{margin-top:.8em}
 .pc-one .pc-chd:first-child{margin-top:0}
+.ld-row{display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:start;padding:.35em 0;border-bottom:1.5px solid var(--border2)}
+.ld-row .ld-l{font-size:.85em;color:#444;font-weight:800;text-align:center;min-width:4.6em;padding-top:.15em}
+.ld-row .ld-c{display:flex;flex-direction:column;min-width:0;text-align:center;line-height:1.2}
+.ld-row .ld-c b{font-weight:900;overflow-wrap:anywhere}.ld-row .ld-c small{color:var(--muted);font-weight:700;font-size:.82em;margin-bottom:.25em}
+.ld-hd .ld-c{font-weight:900;color:#666}
 .gr-body{padding:4px 2px 2px}.gr-body p{margin:0 0 10px;font:600 14px/1.5 'Nunito',sans-serif;color:var(--ink,#111)}.gr-body .gr-copy{margin:4px 0 2px}
 .pc-more{display:block;margin:10px auto 2px;border:2px solid var(--border);background:#fff;border-radius:9px;padding:6px 14px;font:900 12px 'Nunito',sans-serif;box-shadow:2px 2px 0 var(--border);cursor:pointer;color:var(--text)}
 .pc-ctrls button.pc-share{background:var(--gold)}
@@ -4130,7 +4135,7 @@ pearCardHtml = function(){
        '<button class="' + (c.neutral ? "on" : "") + '" data-pear-neutral>Neutral: ' + (c.neutral ? "on" : "off") + '</button><button class="pc-share" data-pear-share>📤 Share image</button></div>';
   if(!PEAR.boxMode && PEM.ratings && (ra || rh)){
     h += pearReportHtml(ra, rh, A, H, ranks, { p: p, g: same ? g : null, mp: mp, KR: KR, vt: vt });
-    h += psAccOpen("gc_stats", "All stats", "tale of the tape", false) + '<div class="pc-grid pc-one">' + pearTapeHtml(ra, rh, A, H, ranks) + pearCenter(ra, rh, A, H, ranks, !!PEAR.cardMore) +
+    h += psAccOpen("gc_stats", "All stats", "tale of the tape", false) + '<div class="pc-grid pc-one">' + pearLeadersHtml(A, H) + pearTapeHtml(ra, rh, A, H, ranks) + pearCenter(ra, rh, A, H, ranks, !!PEAR.cardMore) +
          '<button class="pc-more" data-pear-more>' + (PEAR.cardMore ? 'Fewer stats ▴' : 'More stats ▾') + '</button></div>' + psAccClose();
   }
   // Adjustments and notes: spots, QB marks, the old-model comparison, per-drive odds.
@@ -6668,6 +6673,95 @@ function pxQbCardHtml(){
 }
 function pxQbStatus(){ var el = document.getElementById("px-qb"); if(el){ el.outerHTML = pxQbCardHtml(); pxBind(); } }
 
+// ── Player leaders (names for the game report and the tape) ─────────────────
+// One /games/players call per finished week of this season (every category), boiled down per team to passers, the
+// main rushers and receivers, and defenders with sacks / tackles for loss / hurries / interceptions. Raw weeks go to
+// prophescore/data/pl/y<year>/w<week> when the database takes them; the season summary is S.ldr, saved with the model
+// so members get it. Never used by the ratings or the picks.
+var PXL = { busy: false, tried: false, err: "" };
+function pxLdrParse(box){
+  var out = {}, num = function(v){ v = parseFloat(v); return isFinite(v) ? v : 0; };
+  (box || []).forEach(function(gm){
+    (pxG(gm, "teams") || []).forEach(function(t){
+      var tid = String(pxG(t, "teamId", "team_id", "schoolId", "id") || pxTeamId(pxG(t, "team", "school")) || ""); if(!tid) return;
+      var T = out[tid] = out[tid] || { g: 0, p: [], r: [], c: [], d: [], i: [] }; T.g++;
+      (pxG(t, "categories") || []).forEach(function(c){
+        var cn = String(pxG(c, "name") || "").toLowerCase(), who = {};
+        (pxG(c, "types") || []).forEach(function(ty){ var nm = String(pxG(ty, "name") || "").toUpperCase();
+          (pxG(ty, "athletes") || []).forEach(function(a){ var id = String(pxG(a, "id") || ""), name = String(pxG(a, "name") || "");
+            if(!name || /^team$/i.test(name.trim()) || (+id < 0)) return;
+            var r = who[id || name] = who[id || name] || { id: id, n: name }; r[nm] = pxG(a, "stat"); }); });
+        var L = Object.keys(who).map(function(k){ return who[k]; });
+        if(/^passing/.test(cn)) L.forEach(function(r){ var ca = String(r["C/ATT"] || "").split("/"), att = num(ca[1]); if(att > 0) T.p.push([r.n, r.id, num(ca[0]), att, num(r.YDS), num(r.TD), num(r.INT)]); });
+        else if(/^rushing/.test(cn)) L.map(function(r){ return [r.n, r.id, num(r.CAR), num(r.YDS), num(r.TD)]; }).sort(function(a, b){ return b[2] - a[2]; }).slice(0, 4).forEach(function(r){ if(r[2] > 0) T.r.push(r); });
+        else if(/^receiving/.test(cn)) L.map(function(r){ return [r.n, r.id, num(r.REC), num(r.YDS), num(r.TD)]; }).sort(function(a, b){ return b[3] - a[3]; }).slice(0, 5).forEach(function(r){ if(r[2] > 0) T.c.push(r); });
+        else if(/^defens/.test(cn)) L.map(function(r){ return [r.n, r.id, num(r.TOT), num(r.SACKS !== undefined ? r.SACKS : r.SACK), num(r.TFL), num(r["QB HUR"] !== undefined ? r["QB HUR"] : r.QBH), num(r.PD)]; })
+          .sort(function(a, b){ return b[2] - a[2]; }).forEach(function(r, ix){ if(ix < 3 || r[3] > 0 || r[4] > 0 || r[5] > 0) T.d.push(r); });
+        else if(/^intercept/.test(cn)) L.forEach(function(r){ var n = num(r.INT); if(n > 0) T.i.push([r.n, r.id, n]); });
+      });
+    });
+  });
+  return out;
+}
+// Season summary from the saved weeks ({w3: {t: {teamId: {...}}}}).
+function pxLdrBuild(weeks){
+  var T = {};
+  Object.keys(weeks || {}).forEach(function(wk){ var W = (weeks[wk] || {}).t || {};
+    Object.keys(W).forEach(function(tid){ var src = W[tid] || {}, t = T[tid] = T[tid] || { g: 0, p: {}, r: {}, c: {}, d: {}, i: {} }; t.g += src.g || 0;
+      ["p", "r", "c", "d", "i"].forEach(function(k){ (src[k] || []).forEach(function(r){ if(!r) return; var key = r[1] || r[0], o = t[k][key];
+        if(!o){ t[k][key] = r.slice(); return; } for(var j = 2; j < r.length; j++) o[j] = (o[j] || 0) + (r[j] || 0); }); }); }); });
+  var out = {}, top = function(o, ix, n, min){ return Object.keys(o).map(function(k){ return o[k]; }).filter(function(r){ return (r[ix] || 0) >= (min || 1); }).sort(function(a, b){ return b[ix] - a[ix]; }).slice(0, n); };
+  var rd = function(v){ return Math.round(v * 10) / 10; };
+  Object.keys(T).forEach(function(tid){ var t = T[tid], o = { g: t.g };
+    var qb = top(t.p, 3, 2); if(qb.length) o.qb = qb.map(function(r){ return [r[0], r[2], r[3], r[4], r[5], r[6]]; });                 // name, cmp, att, yds, td, int
+    var ru = top(t.r, 3, 2); if(ru.length) o.ru = ru.map(function(r){ return [r[0], r[2], r[3], r[4]]; });                          // name, car, yds, td
+    var rc = top(t.c, 3, 2); if(rc.length) o.rc = rc.map(function(r){ return [r[0], r[2], r[3], r[4]]; });                          // name, rec, yds, td
+    var sk = top(t.d, 3, 2, 1); if(sk.length) o.sk = sk.map(function(r){ return [r[0], rd(r[3])]; });
+    var tf = top(t.d, 4, 2, 1); if(tf.length) o.tf = tf.map(function(r){ return [r[0], rd(r[4])]; });
+    var tk = top(t.d, 2, 2, 1); if(tk.length) o.tk = tk.map(function(r){ return [r[0], rd(r[2])]; });
+    var it = top(t.i, 2, 2, 1); if(it.length) o.it = it.map(function(r){ return [r[0], r[2]]; });
+    out[tid] = o; });
+  return out;
+}
+function pxLdr(id){ var S = pxState(); return (S.ldr && S.ldrY === pxYear() && S.ldr[id]) || null; }
+function pxLdrSync(){
+  if(PXL.busy || !pxCanFetch() || !DB || !ME()) return;
+  if(PX.busy || PXH.busy || PXQ.busy){ setTimeout(pxLdrSync, 20000); return; }
+  var S = pxState(), y = pxYear(), want = pxQbWeeks(y), have = (S.ldrY === y && S.ldrIdx) || {};
+  var need = Object.keys(want).some(function(w){ return have["w" + w] === undefined || (have["w" + w] === 0 && want[w] === 1); });
+  if(!need) return;
+  PXL.busy = true; PXL.err = "";
+  pxHistGet("pl/y" + y).catch(function(){ return null; }).then(function(raw){
+    raw = raw || {};
+    var chain = Promise.resolve();
+    Object.keys(want).forEach(function(w){
+      var h = raw["w" + w]; if(h && h.t && !(h.d === 0 && want[w] === 1)) return;
+      chain = chain.then(function(){
+        return pxCall("/games/players", { year: y, week: +w, seasonType: "regular", classification: "fbs" }).then(function(box){
+          var Q = { t: pxLdrParse(box), d: want[w], at: Date.now() }; raw["w" + w] = Q;
+          return pxHistPut("pl/y" + y + "/w" + w, Q).catch(function(){ return null; });       // kept in memory even if the database won't take it
+        });
+      });
+    });
+    return chain.then(function(){
+      var idx = {}; Object.keys(want).forEach(function(w){ if(raw["w" + w]) idx["w" + w] = want[w]; });
+      S.ldr = pxLdrBuild(raw); S.ldrY = y; S.ldrIdx = idx; S.ldrAt = Date.now();
+      PXL.busy = false; peSave(); try{ if(PEAR.card) pearRenderCard(); }catch(_){}
+    });
+  }).catch(function(e){ PXL.busy = false; PXL.err = (e && (e.message || e.code)) || String(e); });
+}
+// The leaders block at the top of the tape.
+function pearLeadersHtml(A, H){
+  var a = pxLdr(A), h = pxLdr(H); if(!a && !h) return '';
+  var cell = function(L, k, fmt){ var r = L && L[k]; if(!r || !r.length) return '<span class="ld-c">—</span>'; return '<span class="ld-c">' + r.slice(0, 2).map(function(p){ return '<b>' + x(p[0]) + '</b><small>' + x(fmt(p)) + '</small>'; }).join('') + '</span>'; };
+  var rows = [["PASSING", "qb", function(p){ return p[3] + ' yds · ' + p[4] + ' TD · ' + p[5] + ' INT'; }], ["RUSHING", "ru", function(p){ return p[2] + ' yds · ' + p[3] + ' TD'; }],
+              ["RECEIVING", "rc", function(p){ return p[1] + ' rec · ' + p[2] + ' yds · ' + p[3] + ' TD'; }], ["SACKS", "sk", function(p){ return String(p[1]); }],
+              ["TFL", "tf", function(p){ return String(p[1]); }], ["TACKLES", "tk", function(p){ return String(p[1]); }], ["INT", "it", function(p){ return String(p[1]); }]];
+  var s = '<div class="pc-chd">Leaders</div><div class="ld-row ld-hd"><span class="ld-c">' + x(pearAbbr(A)) + '</span><span class="ld-l"></span><span class="ld-c">' + x(pearAbbr(H)) + '</span></div>';
+  rows.forEach(function(r){ if(!((a && a[r[1]]) || (h && h[r[1]]))) return; s += '<div class="ld-row">' + cell(a, r[1], r[2]) + '<span class="ld-l">' + r[0] + '</span>' + cell(h, r[1], r[2]) + '</div>'; });
+  return s;
+}
+
 // ── Daily line snapshots (ESPN) ─────────────────────────────────────────────
 // Once per day (Eastern) while this page is open, every upcoming FBS game's spread and
 // total from ESPN go to prophescore/<uid>/snaps/<game id>:
@@ -8529,6 +8623,7 @@ document.addEventListener("visibilitychange", function(){
 // Auto-tune when the data changes.
 function pxMaybe(){
   var S = pxState();
+  if(!PXL.tried){ PXL.tried = true; setTimeout(function(){ try{ pxLdrSync(); }catch(_){} }, 9000); }
   var rbSig = pxDataSig() + "|" + JSON.stringify(S.opts);
   // peLoad has usually just rebuilt from this exact data and settings; don't do the whole model twice at startup.
   if(!PX.synced && PX.live && PX._rbSig === rbSig){ PX.synced = true; if(!pxCanFetch()) return pxMaybeTail(S); var old0 = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && (W.v !== PX_AGG_V || (W.done && !W.x)); }); if(S.prior && S.prior.v !== 3) old0 = true; if(!S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3 || old0) pxSync(false); return pxMaybeTail(S); }
@@ -13468,7 +13563,7 @@ function pearReport(ra, rh, A, H, ranks, ctx){
       if(!(og || ob) || !(dg || db)) return;
       var kind = (og && db) ? "adv" : (ob && dg) ? "dis" : og ? "sos" : "wow";
       var sc = Math.max(o.ext, d.ext) + 0.5 * Math.min(o.ext, d.ext) + (kind === "adv" || kind === "dis" ? 0.25 : 0) + (o.cls === "e" || d.cls === "e" ? 0.08 : 0);
-      out.push({ kind: kind, o: o.txt, d: d.txt, at: C.at, sc: sc, adv: kind === "adv" ? 1 : kind === "dis" ? -1 : 0 });
+      out.push({ id: C.id, kind: kind, o: o.txt, d: d.txt, at: C.at, sc: sc, adv: kind === "adv" ? 1 : kind === "dis" ? -1 : 0 });
     });
     out.sort(function(a, b){ return b.sc - a.sc; });
     return out.slice(0, 2);
@@ -13481,11 +13576,40 @@ function pearReport(ra, rh, A, H, ranks, ctx){
       : a.kind === "dis" ? (second ? O + " " + a.o + ", and that plays into the hands of " + an(D) + " defense that " + a.d + "." : O + " " + a.o + ", which could be a problem against " + an(D) + " defense that " + a.d + ".")
       : a.kind === "sos" ? O + " " + a.o + ", but it runs into " + an(D) + " defense that " + a.d + "."
       : O + " " + a.o + ", though it catches a break against " + an(D) + " defense that " + a.d + ".";
-    if(b) t += " " + (b.kind === "adv" ? (a.kind === "adv" ? "It also " : "The good news is that it ") + b.o + ", and " + D + " " + b.d + "."
-      : b.kind === "dis" ? (a.kind === "dis" ? "It also " + b.o + ", and " + D + " " + b.d + "." : "The concern is that " + O + " " + b.o + ", while " + D + " " + b.d + ".")
+    // "It also …" with the word in the right place: "It can also break…", "It has also struggled…", "It doesn't … either".
+    var also = function(tx){ if(/n\u2019t |^rarely |^almost never /.test(tx)) return "It " + tx + " either"; var m = /^(is|has|can) (.*)$/.exec(tx); return m ? "It " + m[1] + " also " + m[2] : "It also " + tx; };
+    if(b) t += " " + (b.kind === "adv" ? (a.kind === "adv" ? also(b.o) : "The good news is that it " + b.o) + ", and " + D + " " + b.d + "."
+      : b.kind === "dis" ? (a.kind === "dis" ? also(b.o) + ", and " + D + " " + b.d + "." : "The concern is that " + O + " " + b.o + ", while " + D + " " + b.d + ".")
       : b.kind === "sos" ? (second ? "It\u2019s strength against strength " + b.at + " too." : "The real test comes " + b.at + ", where both sides are among the best around.")
       : (second ? "And " + b.at + ", neither side has much to brag about." : "Neither side has been good " + b.at + ", so something has to give there."));
     return t;
+  };
+  // Names. One sentence per paragraph, tied to the paragraph's lead storyline: the players behind the number.
+  var plural = function(n, w){ return n + " " + w + (n === 1 ? "" : "s"); };
+  var nameLine = function(off, def, S){
+    var Lo = pxLdr(off), Ld = pxLdr(def); if(!Lo && !Ld) return "";
+    var qb = Lo && Lo.qb && Lo.qb[0], ru = Lo && Lo.ru && Lo.ru[0], rc = Lo && Lo.rc && Lo.rc[0], rc2 = Lo && Lo.rc && Lo.rc[1];
+    var sk = Ld && Ld.sk && Ld.sk[0], it = Ld && Ld.it && Ld.it[0], tf = Ld && Ld.tf && Ld.tf[0], W = null; try{ W = pxQbWatch(off); }catch(_){ W = null; }
+    var qbLine = function(){
+      if(!qb) return "";
+      if(W && W.backup) return nm(off) + "\u2019s " + W.backup + " has started the last " + (W.run === 1 ? "game" : W.run + " games") + " at quarterback in place of " + W.usual + ".";
+      var t = nm(off) + "\u2019s " + qb[0] + " has thrown for " + Math.round(qb[3]).toLocaleString() + " yards and " + plural(qb[4], "touchdown");
+      if(rc) t += ", with " + rc[0] + " his top target at " + plural(rc[1], "catch").replace("catchs", "catches") + " for " + Math.round(rc[2]) + " yards";
+      return t + ".";
+    };
+    var ruLine = function(){ if(!ru) return ""; var sh = Lo.ru[1] && Lo.ru[1][2] >= 0.6 * ru[2];
+      return sh ? nm(off) + "\u2019s " + ru[0] + " and " + Lo.ru[1][0] + " split the work on the ground, with " + Math.round(ru[2] + Lo.ru[1][2]).toLocaleString() + " yards between them."
+                : nm(off) + "\u2019s " + ru[0] + " does most of the damage on the ground, with " + Math.round(ru[2]).toLocaleString() + " yards and " + plural(ru[3], "touchdown") + "."; };
+    for(var i = 0; i < S.length; i++){
+      var s = S[i], good = s.kind === "adv" || s.kind === "sos", dgood = s.kind === "dis" || s.kind === "sos", t = "";
+      if(s.id === "pass") t = (s.kind === "dis" && qb && qb[5] >= 6) ? nm(off) + "\u2019s " + qb[0] + " has already thrown " + qb[5] + " interceptions." : qbLine();
+      else if(s.id === "run" || s.id === "stuff") t = (dgood && !good && tf && tf[1] >= 4) ? tf[0] + " leads " + nm(def) + " with " + tf[1] + " tackles for loss." : ruLine();
+      else if(s.id === "sack" || s.id === "havoc") t = (dgood && sk && sk[1] >= 2) ? sk[0] + " leads the " + nm(def) + " pass rush with " + plural(sk[1], "sack") + "." : (good ? qbLine() : "");
+      else if(s.id === "ball") t = (dgood && it && it[1] >= 2) ? it[0] + " has " + it[1] + " of " + nm(def) + "\u2019s interceptions." : (s.kind === "dis" && qb && qb[5] >= 6 ? nm(off) + "\u2019s " + qb[0] + " has thrown " + qb[5] + " interceptions." : "");
+      else t = qbLine();
+      if(t) return t;
+    }
+    return qbLine() || ruLine();
   };
   var P = [];
   // 1. Big picture.
@@ -13506,6 +13630,8 @@ function pearReport(ra, rh, A, H, ranks, ctx){
     sA.forEach(function(s){ net += s.adv; }); sH.forEach(function(s){ net -= s.adv; });
     var lead = (sH[0] ? sH[0].sc : 0) > (sA[0] ? sA[0].sc : 0) ? [H, A, sH, sA] : [A, H, sA, sH];
     var p1 = para(lead[0], lead[1], lead[2]), p2 = para(lead[1], lead[0], lead[3], true);
+    var n1 = "", n2 = ""; try{ n1 = nameLine(lead[0], lead[1], lead[2]); n2 = nameLine(lead[1], lead[0], lead[3]); }catch(_){ n1 = n2 = ""; }
+    if(p1 && n1) p1 += " " + n1; if(p2 && n2) p2 += " " + n2;
     if(p1) P.push(p1);
     if(p2) P.push((p1 ? "On the other side of the ball, " : "") + p2);
     if(!p1 && !p2) P.push("Nothing in the matchup jumps out. Neither offense has an obvious weakness to attack on the other side.");
