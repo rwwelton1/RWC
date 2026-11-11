@@ -4576,6 +4576,38 @@ function pxPoolK(){
   PX_POOLK = { n: cal.length, k: k, games: n };
   return k;
 }
+// ── Track record: how the model in use has actually done on picks like this one ──
+// Every graded game (walk-forward, vs the closing line) is filed by line size, whether the model took the favourite or
+// the underdog, and how far it sat from the line. A pick's chance is that slice's cover rate, pulled toward the wider
+// slices it belongs to when it has few games (so 4-1 doesn't read as 80%). A slice the model clearly loses in
+// (2 standard errors under a coin flip) is faded: the pool pick takes the other side.
+// Only games before `week` count, so grading a past week never sees its own result.
+var PX_TRK_BANDS = { lt3: "lines under 3", s37: "3\u20137 pt lines", s714: "7\u201314 pt lines", gt14: "lines of 14+" }, PX_TRK_EDGE = ["an edge under 3", "a 3\u20136 pt edge", "a 6+ pt edge"];
+function pxTrackEdge(e){ return e < 3 ? 0 : e < 6 ? 1 : 2; }
+function pxTrack(week){
+  var A = pxAts(); if(!A || !A.games) return null;
+  var wk = (week && isFinite(week)) ? +week : 999; A._trk = A._trk || {}; if(A._trk[wk]) return A._trk[wk];
+  var T = { all: { w: 0, l: 0 }, c: {} }, add = function(k, won){ var o = T.c[k] || (T.c[k] = { w: 0, l: 0 }); if(won) o.w++; else o.l++; };
+  A.games.forEach(function(G){ if(G.w >= wk || (G.res !== "W" && G.res !== "L")) return;
+    var won = G.res === "W", b = pbcBand(G.vh), fv = (G.vh !== 0 && ((G.vh > 0) === (G.pred > G.vh))) ? "f" : "d", e = pxTrackEdge(Math.abs(G.pred - G.vh));
+    if(won) T.all.w++; else T.all.l++; add(b, won); add(b + fv, won); add(b + fv + e, won); });
+  T.n = T.all.w + T.all.l;
+  return (A._trk[wk] = T);
+}
+// ref: the line (home margin); gap: model minus line (+ = the model is on the home side).
+function pxTrackFor(week, ref, gap){
+  var T = pxTrack(week); if(!T || T.n < 80) return null;
+  var b = pbcBand(ref), fv = (ref !== 0 && ((ref > 0) === (gap > 0))) ? "f" : "d", e = pxTrackEdge(Math.abs(gap)), Z = { w: 0, l: 0 };
+  var c1 = T.c[b] || Z, c2 = T.c[b + fv] || Z, c3 = T.c[b + fv + e] || Z;
+  var sh = function(o, m, par){ return (o.w + m * par) / (o.w + o.l + m); }, zs = function(o){ var n = o.w + o.l; return n >= 16 ? (o.w - n / 2) / Math.sqrt(n / 4) : 0; };
+  var p = sh(c3, 20, sh(c2, 30, sh(c1, 40, sh(T.all, 60, 0.51))));
+  p = Math.max(0.35, Math.min(0.65, p));
+  var who = fv === "f" ? "favourites" : "underdogs", show = c3, lab = who + " on " + PX_TRK_BANDS[b] + " with " + PX_TRK_EDGE[e];
+  if(c3.w + c3.l < 15){ show = c2; lab = who + " on " + PX_TRK_BANDS[b]; }
+  if(show.w + show.l < 15){ show = c1; lab = PX_TRK_BANDS[b]; }
+  if(show.w + show.l < 15){ show = T.all; lab = "all picks"; }
+  return { p: p, fade: p < 0.5 && Math.min(zs(c1), zs(c2), zs(c3)) <= -2, w: show.w, l: show.l, n: show.w + show.l, lab: lab };
+}
 (function(){
   var base = pxPickSide;
   pxPickSide = function(awayId, homeId, neutral, ref, now, week, fit, gid, cur){
@@ -4595,7 +4627,15 @@ function pxPoolK(){
     var zm = parts.md, zo = z - zm, pickHome, zf;
     if(Math.abs(parts.pbpPts) >= 0.05){ pickHome = zm > 0; zf = Math.max(0.004, Math.abs(zm) + (pickHome ? zo : -zo)); parts.agree = (pickHome ? zo : -zo) >= 0; }
     else { if(Math.abs(z) < 1e-6) return { none: true, parts: parts }; pickHome = z > 0; zf = Math.abs(z); parts.agree = true; }
+    // Track record replaces the size-of-the-gap term: confidence follows what the model has actually covered in this slice.
+    var TR = null, simR = null; try{ TR = Math.abs(parts.pbpPts) >= 0.05 ? pxTrackFor(week, ref, parts.pbpPts) : null; }catch(_){ TR = null; }
+    if(TR){
+      var mH = parts.pbpPts > 0, zoS = mH ? zo : -zo, zt = Math.log(TR.p / (1 - TR.p)) + zoS;
+      pickHome = TR.fade ? !mH : mH; zf = Math.max(0.004, TR.fade ? -zt : zt); parts.agree = (TR.fade ? -zoS : zoS) >= 0; parts.trk = TR; parts.fade = !!TR.fade;
+      simR = TR.fade ? { w: TR.l, l: TR.w, n: TR.n } : { w: TR.w, l: TR.l, n: TR.n };
+    }
     var p = 1 / (1 + Math.exp(-zf));
+    if(simR) return { pickHome: pickHome, chance: p + Math.min(Math.abs(parts.pbpPts), 10) * 1e-7, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: false, model: true, sim: simR };
     return { pickHome: pickHome, chance: p + Math.min(Math.abs(parts.pbpPts), 10) * 1e-7, rating: pxEdgeRating(p), parts: parts, ref: ref, now: now, cur: false, model: true };
   };
   var inner = pxPickSide;
@@ -4616,6 +4656,7 @@ function pxPoolK(){
     if(!k || !k.model) return why.apply(this, arguments);
     var s = [], side = function(v){ return v > 0 ? ha : aa; }, P = k.parts;
     if(P.pbpPts !== undefined) s.push(Math.abs(P.pbpPts) >= 0.5 ? 'your model ' + Math.abs(P.pbpPts).toFixed(1) + ' higher on ' + side(P.pbpPts) : 'your model is within ' + Math.abs(P.pbpPts).toFixed(1) + ' of the line');
+    if(P.trk) s.push((P.fade ? 'FADE: the model is ' : 'model is ') + P.trk.w + '\u2013' + P.trk.l + ' on ' + P.trk.lab + (P.fade ? ', so the pick goes the other way' : ''));
     var mine = k.pickHome ? 1 : -1;
     if(P.mvPts !== undefined && Math.abs(P.mvPts) >= 0.5) s.push('line moved ' + Math.abs(P.mvPts).toFixed(1) + ' toward ' + side(P.mvPts) + ((P.mvPts > 0 ? 1 : -1) === mine ? ' (with the pick)' : ' (against, lowers confidence)'));
     if(P.spPts !== undefined && Math.abs(P.spPts) >= 0.5 && P.sp) s.push('SP+ ' + Math.abs(P.spPts).toFixed(1) + ' higher on ' + side(P.spPts));
@@ -10161,7 +10202,7 @@ function pxPoolCardHtml(){
   list.filter(function(o){ return !o.k || o.k.none; }).forEach(function(o){
     h += '<div class="pem-bkrow"><span><b style="display:inline-block;min-width:22px">–</b> ' + x(o.pg.fav || '') + ' vs ' + x(o.pg.dog || '') + '<br><small style="opacity:.75">no signal yet (line unchanged, no SP+ sheet for this week)</small></span><span>50%</span><span>—</span></div>';
   });
-  h += '</div><div class="pem-autonote" style="margin-top:4px">Confidence points in order of chance to cover <b>your pool’s line</b>. The chance comes from how often picks like it covered on 2023–25 history (checked on seasons it wasn’t fitted to): the line moving since your pool set its line counts most, then SP+, then from week 9 the play-by-play model. <b>Nothing is a lock</b> — the strongest picks have covered about 60%. Edge rating: 1 is a coin flip, 10 is 60%+. Lines refresh from ESPN when this page loads; check again close to lock.</div>';
+  h += '</div><div class="pem-autonote" style="margin-top:4px">Confidence points in order of chance to cover <b>your pool’s line</b>. The chance starts from the model’s own record this season on picks like this one — same line size, favourite or underdog, same size of edge — pulled toward its wider record when a slice has few games. Where it clearly loses, the pick <b>fades</b> the model. The line moving since your pool set its line, SP+ and QB marks then nudge it. <b>Nothing is a lock</b>. Edge rating: 1 is a coin flip, 10 is 60%+. Lines refresh from ESPN when this page loads; check again close to lock.</div>';
   return h + '</div>';
 }
 
@@ -10442,6 +10483,16 @@ function pePoolRecord(){
   });
   return T;
 }
+// Where the model in use wins and loses, by line size and side: the table the cover chances are read from.
+function pxTrackHtml(){
+  var T = null; try{ T = pxTrack(999); }catch(_){ T = null; } if(!T || T.n < 80) return '';
+  var cell = function(o){ if(!o || !(o.w + o.l)) return '<span>\u2014</span>'; var n = o.w + o.l, pc = Math.round(100 * o.w / n), z = n >= 16 ? (o.w - n / 2) / Math.sqrt(n / 4) : 0;
+    return '<span><b class="' + (z >= 2 ? 'up' : z <= -2 ? 'dn' : '') + '">' + o.w + '-' + o.l + '</b> <small>' + pc + '%' + (z <= -2 ? ' \u00B7 fade' : z >= 2 ? ' \u00B7 trust' : '') + '</small></span>'; };
+  var h = '<div class="pem-autotop" style="margin-top:10px"><b>\uD83C\uDFAF Where the model is right</b><span style="font-size:11px;color:var(--muted);font-weight:800">' + T.all.w + '-' + T.all.l + ' overall</span></div>' +
+          '<div class="pem-bk"><div class="pem-bkhd"><span>Line</span><span>On favourite</span><span>On underdog</span></div>';
+  PBC_BANDS.forEach(function(b){ h += '<div class="pem-bkrow"><span>' + x(pbcLab(b)) + '</span>' + cell(T.c[b + "f"]) + cell(T.c[b + "d"]) + '</div>'; });
+  return h + '</div><div class="pem-autonote" style="margin-top:4px">The model in use, every graded game this season against the closing line. Pool confidence follows this: strong slices get the high numbers, weak ones the low numbers, and a slice marked <b>fade</b> is picked the other way.</div>';
+}
 function pePoolRecordHtml(){
   if(!pePoolSrc().key && !PEPOOL.list) return '';
   if(!PEPOOL.rec){
@@ -10459,7 +10510,7 @@ function pePoolRecordHtml(){
   h += '<div class="pem-bk" style="margin-top:8px"><div class="pem-bkhd"><span>Week</span><span>You · model</span><span>Split games</span></div>';
   T.weeks.slice().reverse().forEach(function(wk){
     h += '<div class="pem-bkrow"><span>' + x(String(wk.label)) + '</span><span><b class="' + cls(wk.me.pts, wk.md.pts) + '">' + wk.me.w + '-' + wk.me.l + ' · ' + wk.me.pts + '</b> <small>vs</small> ' + wk.md.w + '-' + wk.md.l + ' · ' + wk.md.pts + '</span><span>' + (wk.dis ? 'you ' + wk.disMe + '–' + wk.disMd : '—') + '</span></div>'; });
-  h += '</div><div class="pem-autonote" style="margin-top:4px">Against your pool’s lines, as your pool graded them. The model’s pick is the edge rating’s side; its points hand out your confidence values in order of its chance to cover. ' +
+  h += '</div>' + pxTrackHtml() + '<div class="pem-autonote" style="margin-top:4px">Against your pool’s lines, as your pool graded them. The model’s pick is the edge rating’s side; its points hand out your confidence values in order of its chance to cover. ' +
        'Graded with the model in use now' + (pxState().combo && pxState().combo.on ? ' (combined by spread)' : '') + ', the same way as its Record: each week picked from only the games before it, with the closing line — so it changes when you switch models.' +
        (T.est ? ' ' + T.est + ' game' + (T.est === 1 ? '' : 's') + ' couldn’t be matched in the model’s data, so ' + (T.est === 1 ? 'it uses' : 'they use') + ' the pick saved at kickoff.' : '') + '</div>';
   return h + '</div>';
