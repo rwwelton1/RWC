@@ -5157,7 +5157,12 @@ function pemCompareRows(){
                if(stt.op) o.xPpt = stt.opPts / stt.op;
                if(stt.oDr){ o.xPpdD = stt.oPts / stt.oDr; o.xTripD = stt.oOp / stt.oDr; }
                if(stt.oOp) o.xPptD = stt.oOpPts / stt.oOp;
-               if(stt.ds) o.xStart = 100 - stt.dY / stt.ds; if(stt.oDs) o.xStartD = 100 - stt.oDY / stt.oDs; }
+               if(stt.ds) o.xStart = 100 - stt.dY / stt.ds; if(stt.oDs) o.xStartD = 100 - stt.oDY / stt.oDs;
+               if(stt.xg >= 2){
+                 if(stt.db >= 30) o.xSk = stt.sk / stt.db; if(stt.oDb >= 30) o.xSkD = stt.oSk / stt.oDb;
+                 if(stt.ru >= 30) o.xStf = stt.stf / stt.ru; if(stt.oRu >= 30) o.xStfD = stt.oStf / stt.oRu;
+                 if(stt.d3 >= 15) o.x3rd = stt.c3 / stt.d3; if(stt.oD3 >= 15) o.x3rdD = stt.oC3 / stt.oD3;
+                 o.xTO = stt.to / stt.xg; o.xTOD = stt.oTo / stt.xg; } }
       o.runRate = PX.live.tm[id] ? pxRunRate(PX.live, id) : null;
     }
     out.push(o);
@@ -5210,6 +5215,14 @@ var PEM_STATS = {
   xExRD:   { lab:"Runs of 12+ allowed", dir:"low", dp:1, pct1:true },
   xExP:    { lab:"Passes of 20+", dir:"high", dp:1, pct1:true },
   xExPD:   { lab:"Passes of 20+ allowed", dir:"low", dp:1, pct1:true },
+  xSk:     { lab:"Sack rate allowed", dir:"low", dp:1, pct1:true },
+  xSkD:    { lab:"Sack rate", dir:"high", dp:1, pct1:true },
+  xStf:    { lab:"Runs stuffed", dir:"low", dp:0, pct:true },
+  xStfD:   { lab:"Run stuffs", dir:"high", dp:0, pct:true },
+  x3rd:    { lab:"3rd down", dir:"high", dp:0, pct:true },
+  x3rdD:   { lab:"3rd down allowed", dir:"low", dp:0, pct:true },
+  xTO:     { lab:"Giveaways/gm", dir:"low", dp:1 },
+  xTOD:    { lab:"Takeaways/gm", dir:"high", dp:1 },
   xDrv:    { lab:"Drives/gm", dir:"none", dp:1 },
   xPpd:    { lab:"Pts/drive", dir:"high", dp:2 },
   xPpdD:   { lab:"Pts/drive allowed", dir:"low", dp:2 },
@@ -5506,6 +5519,10 @@ function pxAggregate(games, plays){
       else { S2.pA += wt; if(succ){ S2.pS += wt; S2.pXL += wt * xl; if(epa !== null){ S2.pIN += wt; S2.pIE += wt * epa; } } }
     });
     if(isRush) T.rr++; else T.pp++;
+    // Line play and situations (raw counts): sacks taken, runs stopped for no gain, third downs and conversions.
+    if(/sack/i.test(type)) T.sk++;
+    if(isRush && yds <= 0 && !/touchdown/i.test(type)) T.stf++;
+    if(down === 3){ T.d3++; if(!lostFum && !pick && (yds >= dist || /touchdown/i.test(type))) T.c3++; }
     if(!lostFum && !pick){ if(isRush && yds >= 12) T.rEx++; else if(isPass && yds >= 20) T.pEx++; }
     // League shapes (every play counts once).
     var fy = Math.max(-15, Math.min(30, Math.round(yds))) + 15;
@@ -5538,7 +5555,10 @@ var PX_AGG_KEYS = ["rN", "rE", "pN", "pE", "sN", "sS", "hH", "rA", "rS", "pA", "
 // (count, sum of yards-to-goal, sum of squares), kickoffs received (count, start
 // sum, touchbacks), punts received (count, net-yard sum), turnovers lost, and
 // explosive plays (runs of 12+ yards, passes of 20+).
-var PX_AGG_TAIL = ["rr", "pp", "dr", "op", "opPts", "pts", "ds", "dY", "dY2", "koN", "koY", "koTB", "pnN", "pnY", "tO", "rEx", "pEx"];
+var PX_AGG_TAIL = ["rr", "pp", "dr", "op", "opPts", "pts", "ds", "dY", "dY2", "koN", "koY", "koTB", "pnN", "pnY", "tO", "rEx", "pEx", "sk", "stf", "d3", "c3"];
+// Weeks downloaded before sacks / run stuffs / third downs were counted have no W.x. This season's are fetched again once
+// (about three calls a week); past seasons are left alone, since only this season's team sheets use those counts.
+function pxWkOk(W){ return !!(W && W.done && W.v === PX_AGG_V && (W.x || W.y !== pxYear())); }
 function pxPack(T){ var a = []; ["w", "r"].forEach(function(v){ PX_AGG_KEYS.forEach(function(k){ a.push(Math.round(T[v][k] * 1000) / 1000); }); }); PX_AGG_TAIL.forEach(function(k){ a.push(Math.round((T[k] || 0) * 1000) / 1000); }); return a; }
 function pxUnpack(a){
   if(!a || !a.length) return null; if(!Array.isArray(a)) return a;
@@ -5596,7 +5616,7 @@ function pxLoadWx(W){
 }
 function pxLoadWeek(w, force){
   var S = pxState(), y = pxYear(), key = y + "-" + w, have = S.wk[key];
-  if(have && have.done && have.v === PX_AGG_V && !force) return Promise.resolve(have);
+  if(pxWkOk(have) && !force) return Promise.resolve(have);
   return pxFetchWeek(y, w, pxCall).then(function(W){ S.wk[key] = W; return W; });
 }
 // CFBD /lines -> { lines: {gameId: {c, o, t, to}} (consensus close / open), linesAll: every book }.
@@ -5645,7 +5665,7 @@ function pxRecheckLines(){
 // One week of any season (the current one, or a past one for backtesting): FBS-vs-FBS
 // games, lines, and aggregated plays. `call` is pxCall or a memoised wrapper of it.
 function pxFetchWeek(y, w, call){
-  var W = { y: y, w: w, v: PX_AGG_V, games: [], agg: {}, lg: null, lines: {}, linesAll: {}, done: false, at: Date.now() };
+  var W = { y: y, w: w, v: PX_AGG_V, x: 1, games: [], agg: {}, lg: null, lines: {}, linesAll: {}, done: false, at: Date.now() };
   return call("/games", { year: y, week: w, seasonType: "regular" }).then(function(gs){
     W.sch = pxSchFrom(gs);
     (gs || []).forEach(function(g){
@@ -6343,7 +6363,7 @@ function pxSync(force){
         // Weeks saved before the schedule and weather were kept: one light /games call fills the schedule in.
         function extras(){ var W = S.wk[key]; if(!W) return; return (W.sch ? Promise.resolve() : pxCall("/games", { year: W.y, week: W.w, seasonType: "regular" }).then(function(gs){ W.sch = pxSchFrom(gs); }).catch(function(){}))
           .then(function(){ return pxLoadWx(W); }).then(function(){ peSave(); }); }
-        if(have && have.done && have.v === PX_AGG_V && !force) return extras();
+        if(pxWkOk(have) && !force) return extras();
         PX.msg = "Loading week " + w + " plays…"; PX.step = "Week " + w; pxStatus();
         return pxLoadWeek(w, force).then(function(){ peSave(); return extras(); });
       });
@@ -6364,7 +6384,7 @@ function pxSync(force){
 // about three CFBD calls per week, and it continues from where a stopped download left off.
 function pxPendingWeeks(){
   var S = pxState(), y = pxYear(), cur = (PE.meta && PE.meta.espnWeek) || 0, out = [];
-  for(var w = 1; w <= cur; w++){ var h = S.wk[y + "-" + w]; if(!(h && h.done && h.v === PX_AGG_V)) out.push(w); }
+  for(var w = 1; w <= cur; w++){ var h = S.wk[y + "-" + w]; if(!pxWkOk(h)) out.push(w); }
   return out;
 }
 function pxResume(){
@@ -8483,8 +8503,12 @@ function pxRebuild(){
   var st = {};
   pxGames().forEach(function(x){ var A = x.g.c && x.W.agg && x.W.agg[x.g.id]; if(!A) return; var sh = pxUnpack(A.h), sa = pxUnpack(A.a); if(!sh || !sa) return;
     [[x.g.h, sh, sa], [x.g.a, sa, sh]].forEach(function(z){ var t = st[z[0]] = st[z[0]] || { kN: 0, kY: 0, kTB: 0, cN: 0, cY: 0, cTB: 0, pN: 0, pY: 0, aN: 0, aY: 0,
-        g: 0, dr: 0, pts: 0, op: 0, opPts: 0, ds: 0, dY: 0, oDr: 0, oPts: 0, oOp: 0, oOpPts: 0, oDs: 0, oDY: 0 };
+        g: 0, dr: 0, pts: 0, op: 0, opPts: 0, ds: 0, dY: 0, oDr: 0, oPts: 0, oOp: 0, oOpPts: 0, oDs: 0, oDY: 0,
+        xg: 0, db: 0, sk: 0, ru: 0, stf: 0, d3: 0, c3: 0, to: 0, oDb: 0, oSk: 0, oRu: 0, oStf: 0, oD3: 0, oC3: 0, oTo: 0 };
       var a = z[1], b = z[2];
+      // Line play and situations, only from weeks that counted them: this team's offense (a), then what its defense did to the other (b).
+      if(x.W.x){ t.xg++; t.db += a.pp; t.sk += a.sk; t.ru += a.rr; t.stf += a.stf; t.d3 += a.d3; t.c3 += a.c3; t.to += a.tO;
+                 t.oDb += b.pp; t.oSk += b.sk; t.oRu += b.rr; t.oStf += b.stf; t.oD3 += b.d3; t.oC3 += b.c3; t.oTo += b.tO; }
       t.kN += a.koN; t.kY += a.koY; t.kTB += a.koTB; t.cN += b.koN; t.cY += b.koY; t.cTB += b.koTB; t.aN += a.pnN; t.aY += a.pnY; t.pN += b.pnN; t.pY += b.pnY;
       // Drives, raw: this team's offense (a) and what its defense allowed (b).
       t.g++; t.dr += a.dr; t.pts += a.pts; t.op += a.op; t.opPts += a.opPts; t.ds += a.ds; t.dY += a.dY;
@@ -8507,10 +8531,10 @@ function pxMaybe(){
   var S = pxState();
   var rbSig = pxDataSig() + "|" + JSON.stringify(S.opts);
   // peLoad has usually just rebuilt from this exact data and settings; don't do the whole model twice at startup.
-  if(!PX.synced && PX.live && PX._rbSig === rbSig){ PX.synced = true; if(!pxCanFetch()) return pxMaybeTail(S); var old0 = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && W.v !== PX_AGG_V; }); if(S.prior && S.prior.v !== 3) old0 = true; if(!S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3 || old0) pxSync(false); return pxMaybeTail(S); }
+  if(!PX.synced && PX.live && PX._rbSig === rbSig){ PX.synced = true; if(!pxCanFetch()) return pxMaybeTail(S); var old0 = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && (W.v !== PX_AGG_V || (W.done && !W.x)); }); if(S.prior && S.prior.v !== 3) old0 = true; if(!S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3 || old0) pxSync(false); return pxMaybeTail(S); }
   if(!PX.synced && !PX.busy && !pxCanFetch()){ PX.synced = true; pxRebuild(); }     // members: the shared data as it stands
   if(!PX.synced && !PX.busy){ PX.synced = true; pxRebuild();
-    var old = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && W.v !== PX_AGG_V; });
+    var old = Object.keys(S.wk).some(function(k){ var W = S.wk[k]; return W.y === pxYear() && W.games.some(function(g){ return g.c; }) && (W.v !== PX_AGG_V || (W.done && !W.x)); });
     if(S.prior && S.prior.v !== 3) old = true;                                       // roster prior predates coaching data
     var stale = !S.syncedAt || Date.now() - S.syncedAt > 6 * 3600e3; if(stale || old || !PX.active) pxSync(false); }
   pxMaybeTail(S);
@@ -13377,78 +13401,128 @@ var PX_PAIRS = [
   ["#SCORING"], ["POINTS/GM", "ppg", "papg"], ["PTS/DRIVE", "xPpd", "xPpdD"], ["TRIPS/DRIVE", "xTrip", "xTripD"], ["PTS/TRIP", "xPpt", "xPptD"],
   ["#EFFICIENCY"], ["RUSH EPA", "xRush", "xRushD"], ["PASS EPA", "xPass", "xPassD"], ["RUSH SUCC", "xSR", "xSRD"], ["PASS SUCC", "xSP", "xSPD"], ["HAVOC", "xHav", "xHavC"],
   ["#EXPLOSIVENESS"], ["RUSH ISOEPA", "xIsoR", "xIsoRD"], ["PASS ISOEPA", "xIsoP", "xIsoPD"], ["RUNS 12+", "xExR", "xExRD"], ["PASSES 20+", "xExP", "xExPD"],
+  ["#LINE PLAY"], ["SACK RATE", "xSk", "xSkD"], ["RUN STUFFS", "xStf", "xStfD"],
+  ["#SITUATIONS"], ["3RD DOWN", "x3rd", "x3rdD"], ["TURNOVERS/GM", "xTO", "xTOD"],
   ["#FIELD POSITION"], ["START EP", "xFp", "xFpD"], ["AVG START", "xStart", "xStartD"], ["KO RETURN", "xKoR", "xKoC"], ["PUNT NET", "xPuntN", "xPuntNA"]
 ];
 // ── Game card: tale of the tape + key matchups (full width) ──
 var PEAR_TAPE = [["RECORD", null], ["RATING", "rating"], ["OFFENSE", "off"], ["DEFENSE", "def"], ["SCHEDULE", "sos"], ["MARGIN", "margin"], ["RUN %", "runRate"]];
-var PEAR_KEY = { "PTS/DRIVE": 1, "PTS/TRIP": 1, "RUSH SUCC": 1, "PASS SUCC": 1, "RUSH EPA": 1, "PASS EPA": 1, "PASSES 20+": 1, "HAVOC": 1, "AVG START": 1 };
+var PEAR_KEY = { "PTS/DRIVE": 1, "PTS/TRIP": 1, "RUSH SUCC": 1, "PASS SUCC": 1, "RUSH EPA": 1, "PASS EPA": 1, "PASSES 20+": 1, "HAVOC": 1, "AVG START": 1, "SACK RATE": 1, "3RD DOWN": 1 };
 // ── Game report: a written read of the game built from the tale of the tape ──
 // Everything it says comes from the same ranks and numbers in the tape (rating, offense/defense, and each offense-vs-defense
 // matchup), plus the model's projection and pick. It never adds anything the tape doesn't show.
-var PX_REP_NOUN = { "POINTS/GM": "scoring", "PTS/DRIVE": "points per drive", "TRIPS/DRIVE": "trips into scoring range", "PTS/TRIP": "points per scoring trip",
-  "RUSH EPA": "rushing efficiency", "PASS EPA": "passing efficiency", "RUSH SUCC": "rushing success rate", "PASS SUCC": "passing success rate", "HAVOC": "negative plays (havoc)",
-  "RUSH ISOEPA": "rushing explosiveness", "PASS ISOEPA": "passing explosiveness", "RUNS 12+": "big runs", "PASSES 20+": "big passes",
-  "START EP": "field position", "AVG START": "starting field position", "KO RETURN": "kick returns", "PUNT NET": "punting" };
+// Each stat can be said three ways: elite, good, bad. {o} = "12th"-style rank, {v} = the number.
+// Offense phrases follow the team name ("SMU is a top-5 passing offense"); defense phrases follow "a WAKE defense that …".
+var PX_REP_OFF = {
+  xPass: { n: "passing efficiency", e: "is a {t} passing offense", g: "throws it well ({o} in passing efficiency)", b: "has struggled to throw the ball ({o} in passing efficiency)" },
+  xExP:  { n: "passes of 20+", e: "hits big plays through the air as often as almost anyone ({o} in passes of 20+)", g: "can hit the deep ball ({o} in passes of 20+)", b: "rarely connects downfield ({o} in passes of 20+)" },
+  xRush: { n: "rushing efficiency", e: "is a {t} rushing offense", g: "runs it well ({o} in rushing efficiency)", b: "hasn’t been able to run the ball ({o} in rushing efficiency)" },
+  xExR:  { n: "runs of 12+", e: "rips off long runs as often as almost anyone ({o} in runs of 12+)", g: "can break a long run ({o} in runs of 12+)", b: "doesn’t break many long runs ({o} in runs of 12+)" },
+  xSk:   { n: "sack rate allowed", e: "keeps its quarterback as clean as anyone ({o} in sack rate allowed)", g: "protects the quarterback well ({o} in sack rate allowed)", b: "has struggled on the offensive line ({o} in sack rate allowed, {v} of dropbacks)" },
+  xStf:  { n: "runs stuffed", e: "almost never gets stopped at the line ({o} in runs stuffed)", g: "rarely gets stopped at the line ({o} in runs stuffed)", b: "gets stuffed at the line too often ({o}, {v} of its runs)" },
+  xHav:  { n: "negative plays allowed", e: "almost never goes backwards ({o} in negative plays allowed)", g: "avoids negative plays ({o})", b: "gives up a lot of negative plays ({o} in havoc allowed)" },
+  xPpt:  { n: "points per scoring trip", e: "finishes drives as well as anyone ({o} in points per scoring trip)", g: "finishes its drives ({o} in points per scoring trip)", b: "has left points on the field in scoring range ({o} in points per trip)" },
+  x3rd:  { n: "third down", e: "is one of the best third-down offenses around ({v}, {o})", g: "stays on the field on third down ({v}, {o})", b: "has been poor on third down ({v}, {o})" },
+  xTO:   { n: "giveaways", e: "almost never gives the ball away ({o} in giveaways)", g: "takes care of the ball ({o} in giveaways)", b: "has been loose with the ball ({v} giveaways a game, {o})" }
+};
+var PX_REP_DEF = {
+  xPassD: { n: "pass defense", e: "shuts down the pass as well as anyone ({o} in pass defense)", g: "defends the pass well ({o})", b: "has had trouble covering anyone ({o} against the pass)" },
+  xExPD:  { n: "passes of 20+ allowed", e: "takes away the deep ball as well as anyone ({o} in passes of 20+ allowed)", g: "limits the deep ball ({o} in passes of 20+ allowed)", b: "loves giving up explosives ({o} in passes of 20+ allowed)" },
+  xRushD: { n: "run defense", e: "shuts down the run as well as anyone ({o} in run defense)", g: "holds up against the run ({o})", b: "gets pushed around on the ground ({o} against the run)" },
+  xExRD:  { n: "runs of 12+ allowed", e: "almost never gives up a long run ({o} in runs of 12+ allowed)", g: "limits long runs ({o} in runs of 12+ allowed)", b: "gives up chunk runs ({o} in runs of 12+ allowed)" },
+  xSkD:   { n: "sack rate", e: "has one of the highest sack rates in the country ({o}, {v} of dropbacks)", g: "gets after the quarterback ({o} in sack rate)", b: "rarely gets to the quarterback ({o} in sack rate)" },
+  xStfD:  { n: "run stuffs", e: "lives in the backfield against the run ({o} in run stuffs)", g: "wins at the line against the run ({o} in run stuffs)", b: "rarely stops a run at the line ({o} in run stuffs)" },
+  xHavC:  { n: "havoc", e: "creates as much havoc as anyone ({o})", g: "creates negative plays ({o} in havoc)", b: "doesn’t create many negative plays ({o} in havoc)" },
+  xPptD:  { n: "points per trip allowed", e: "is as stingy as anyone in scoring range ({o} in points per trip allowed)", g: "stiffens in scoring range ({o} in points per trip allowed)", b: "has been easy to finish against ({o} in points per trip allowed)" },
+  x3rdD:  { n: "third-down defense", e: "gets off the field on third down as well as anyone ({o})", g: "gets off the field on third down ({o})", b: "can’t get off the field on third down ({o})" },
+  xTOD:   { n: "takeaways", e: "takes the ball away as well as anyone ({o} in takeaways)", g: "forces turnovers ({o} in takeaways)", b: "rarely forces a turnover ({o} in takeaways)" }
+};
+// Matchups worth a sentence: the offense stats on the left are set against the defense stats on the right.
+var PX_REP_CATS = [
+  { id: "pass", off: ["xPass", "xExP"], def: ["xPassD", "xExPD"] }, { id: "run", off: ["xRush", "xExR"], def: ["xRushD", "xExRD"] },
+  { id: "sack", off: ["xSk"], def: ["xSkD"] }, { id: "stuff", off: ["xStf"], def: ["xStfD"] }, { id: "havoc", off: ["xHav"], def: ["xHavC"], only: function(has){ return !has("xSk"); } },
+  { id: "finish", off: ["xPpt"], def: ["xPptD"] }, { id: "third", off: ["x3rd"], def: ["x3rdD"] }, { id: "ball", off: ["xTO"], def: ["xTOD"] }
+];
 function pearOrd(n){ var s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
 function pearReport(ra, rh, A, H, ranks, ctx){
   ctx = ctx || {};
-  var rk = function(id, k){ return ranks.rank[id] && ranks.rank[id][k]; }, nm = function(id){ return pearName(id); };
-  var top = function(id, k){ var r = rk(id, k), n = ranks.n[k]; return r && n && r <= Math.max(10, n * 0.12); }, bad = function(id, k){ var r = rk(id, k), n = ranks.n[k]; return r && n && r > n * 0.7; };
-  var P = [], rows = { a: ra, h: rh };
-  var rA = ra && ra.rating, rH = rh && rh.rating;
-  // 1. The two teams on paper.
-  if(rA != null && rH != null){
-    var best = rA >= rH ? A : H, other = best === A ? H : A, rb = best === A ? ra : rh, ro = best === A ? rh : ra, gapR = Math.abs(rA - rH);
-    var s1 = nm(best) + ' (' + (rb.n ? rb.w + '-' + rb.l + ', ' : '') + pearOrd(rk(best, "rating") || 0) + ' in rating at ' + pearFmt("rating", rb.rating) + ') is the ' + (gapR < 2 ? 'slightly ' : gapR >= 8 ? 'clearly ' : '') + 'better team on paper against ' + nm(other) + ' (' + (ro.n ? ro.w + '-' + ro.l + ', ' : '') + pearOrd(rk(other, "rating") || 0) + ', ' + pearFmt("rating", ro.rating) + ').';
-    var oS = [], pairs = [["off", "offense"], ["def", "defense"], ["sos", "schedule"], ["margin", "scoring margin"]];
-    pairs.forEach(function(q){ var a = rk(A, q[0]), h = rk(H, q[0]); if(!a || !h || Math.abs(a - h) < 25) return; oS.push((a < h ? nm(A) : nm(H)) + ' has the stronger ' + (q[0] === "sos" ? 'schedule' : q[1]) + ' (' + pearOrd(Math.min(a, h)) + ' vs ' + pearOrd(Math.max(a, h)) + ')'); });
-    P.push(s1 + (oS.length ? ' ' + oS.slice(0, 2).join('; ') + '.' : ''));
-  } else if(ra || rh){ P.push('Not enough rated games yet to compare these two teams on the whole.'); }
-  // 2. Each offense against the other's defense.
-  var seen = {};
-  var matchups = function(L, Lid, R, Rid, offLeft){
-    var out = [], hd = null, nOff = 0, nTot = 0;
-    PX_PAIRS.forEach(function(pr){
-      if(pr.length === 1) return;
-      var lk = offLeft ? pr[1] : pr[2], rk2 = offLeft ? pr[2] : pr[1]; if(!L || !R || L[lk] == null || R[rk2] == null || !isFinite(L[lk]) || !isFinite(R[rk2])) return;
-      var a = rk(Lid, lk), b = rk(Rid, rk2); if(!a || !b) return;
-      // pr[1]/pr[2]: the offense stat and the defense stat. Here left = the offense (offLeft) or the defense.
-      var offId = offLeft ? Lid : Rid, defId = offLeft ? Rid : Lid, ok = offLeft ? lk : rk2, dk = offLeft ? rk2 : lk;
-      var ro = rk(offId, ok), rd = rk(defId, dk); if(!ro || !rd) return;
-      var offV = pearFmt(ok, (offLeft ? L : R)[ok]), defV = pearFmt(dk, (offLeft ? R : L)[dk]);
-      nTot++; if(rd > ro) nOff++;
-      out.push({ lab: pr[0], diff: rd - ro, ro: ro, rd: rd, offV: offV, defV: defV, n: ranks.n[ok] || 130 });
+  var row = {}; row[A] = ra; row[H] = rh;
+  var rk = function(id, k){ return (ranks.rank[id] && ranks.rank[id][k]) || 0; }, nm = function(id){ return pearName(id); };
+  var seed = 0; (String(A) + "|" + String(H)).split("").forEach(function(c){ seed = (seed * 31 + c.charCodeAt(0)) % 9973; });
+  var pick = function(arr, salt){ return arr[(seed + (salt || 0)) % arr.length]; };
+  // One stat for one team: rank, share of the field, class (e elite / g good / m middle / b bad), and its phrase.
+  var look = function(id, k, T){
+    var r = row[id], rnk = rk(id, k), n = ranks.n[k] || 0; if(!r || r[k] == null || !isFinite(r[k]) || !rnk || !n) return null;
+    var pc = rnk / n, cls = rnk <= Math.max(12, n * 0.1) ? "e" : pc <= 0.3 ? "g" : pc >= 0.7 ? "b" : "m";
+    var tier = rnk <= 5 ? "top-5" : rnk <= 10 ? "top-10" : rnk <= 25 ? "top-25" : "top-" + (Math.ceil(rnk / 10) * 10);
+    var say = function(c){ return String(T[k][c] || "").replace("{t}", tier).replace("{o}", pearOrd(rnk)).replace("{v}", pearFmt(k, r[k])); };
+    return { k: k, rnk: rnk, pc: pc, cls: cls, ext: Math.abs(0.5 - pc), noun: T[k].n, say: say, ord: pearOrd(rnk) };
+  };
+  var most = function(id, keys, T){ var best = null; keys.forEach(function(k){ var o = look(id, k, T); if(o && (!best || o.ext > best.ext)) best = o; }); return best; };
+  // The storylines when `off` has the ball against `def`.
+  var stories = function(off, def){
+    var out = [], has = function(k){ return !!look(off, k, PX_REP_OFF); };
+    PX_REP_CATS.forEach(function(C, ci){
+      if(C.only && !C.only(has)) return;
+      var o = most(off, C.off, PX_REP_OFF), d = most(def, C.def, PX_REP_DEF); if(!o || !d) return;
+      var og = o.cls === "e" || o.cls === "g", ob = o.cls === "b", dg = d.cls === "e" || d.cls === "g", db = d.cls === "b";
+      if(!og && !ob && !dg && !db) return;
+      var O = nm(off), D = nm(def), t = "", an = function(n2){ return (/^[AEIOU]/.test(n2) ? "an " : "a ") + n2; }, oS = o.say(o.cls === "m" ? "g" : o.cls), dS = d.say(d.cls === "m" ? "g" : d.cls);
+      if(og && db) t = [O + " " + oS + " going against " + an(D) + " defense that " + dS + ".", O + " " + oS + ", and it gets " + an(D) + " defense that " + dS + "."];
+      else if(ob && dg) t = [O + " " + oS + ", which may hurt them against " + an(D) + " defense that " + dS + ".", "That\u2019s a bad draw for " + O + ", which " + oS + ": " + D + "\u2019s defense " + dS + "."];
+      else if(og && dg) t = "Strength on strength: " + O + " " + oS + ", but this " + D + " defense " + dS + ".";
+      else if(ob && db) t = "Something has to give: " + O + " " + oS + ", but " + D + "’s defense " + dS + ".";
+      else if(og) t = O + " " + oS + "; " + D + " is " + d.ord + " in " + d.noun + ", so nothing says it can take that away.";
+      else if(ob) t = O + " " + oS + ", and " + D + " (" + d.ord + " in " + d.noun + ") is good enough to make that matter.";
+      else if(dg) t = D + "’s defense " + dS + ", a real test for a " + O + " offense that is " + o.ord + " in " + o.noun + ".";
+      else t = D + "’s defense " + dS + ", though " + O + " (" + o.ord + " in " + o.noun + ") hasn’t been built to punish it.";
+      // The clearest mismatches lead; strength-on-strength next; one-sided notes last.
+      var sc = Math.max(o.ext, d.ext) + 0.5 * Math.min(o.ext, d.ext) + ((og && db) || (ob && dg) ? 0.25 : 0) + (o.cls === "e" || d.cls === "e" ? 0.08 : 0);
+      out.push({ t: t, sc: sc, adv: (og && db) ? 1 : (ob && dg) ? -1 : 0 });
     });
-    return { list: out, nOff: nOff, nTot: nTot };
+    out.sort(function(a, b){ return b.sc - a.sc; });
+    out = out.filter(function(s, i){ return i < 2 || (i === 2 && s.sc >= 0.7); });
+    // Sentences with two wordings alternate, so a paragraph never repeats the same turn of phrase.
+    out.forEach(function(s, i){ if(Array.isArray(s.t)) s.t = s.t[i === 0 ? 0 : (seed + i) % s.t.length]; });
+    return out;
   };
-  var side = function(offId, defId, offRow, defRow, offIsLeft){
-    var M = offIsLeft ? matchups(offRow, offId, defRow, defId, true) : matchups(defRow, defId, offRow, offId, false);
-    if(!M.nTot) return;
-    var wins = M.list.filter(function(m){ return m.diff >= 25; }).sort(function(a, b){ return b.diff - a.diff; }).slice(0, 2),
-        walls = M.list.filter(function(m){ return m.diff <= -25; }).sort(function(a, b){ return a.diff - b.diff; }).slice(0, 1);
-    var ph = function(m){ return (PX_REP_NOUN[m.lab] || m.lab.toLowerCase()) + ' (' + nm(offId) + ' ' + pearOrd(m.ro) + ' at ' + m.offV + ', ' + nm(defId) + '\u2019s defense ' + pearOrd(m.rd) + ' at ' + m.defV + ')'; };
-    var t = nm(offId) + '\u2019s offense ' + (M.nOff >= M.nTot * 0.6 ? 'has the better of most of the matchup' : M.nOff <= M.nTot * 0.4 ? 'is up against a defense that rates better in most areas' : 'meets this defense about even') + ' (' + M.nOff + ' of ' + M.nTot + ' compared stats).';
-    if(wins.length) t += ' The best chance to attack: ' + wins.map(ph).join(' and ') + '.';
-    if(walls.length) t += ' The tough spot: ' + ph(walls[0]) + '.';
-    P.push(t);
-  };
-  if(ra && rh){ side(A, H, ra, rh, true); side(H, A, rh, ra, false); }
-  // 3. What stands out about each team on its own.
-  [[A, ra], [H, rh]].forEach(function(z){
-    var id = z[0], r = z[1]; if(!r) return;
-    var s = [], w = [], keys = [["ppg", "scoring"], ["papg", "points allowed"], ["xPpd", "points per drive"], ["xRush", "rushing efficiency"], ["xPass", "passing efficiency"], ["xHav", "ball security"], ["xHavC", "havoc creation"], ["xIsoP", "explosive passing"], ["xRushD", "run defense"], ["xPassD", "pass defense"]];
-    keys.forEach(function(q){ if(r[q[0]] == null) return; if(top(id, q[0])) s.push(q[1] + ' (' + pearOrd(rk(id, q[0])) + ')'); else if(bad(id, q[0])) w.push(q[1] + ' (' + pearOrd(rk(id, q[0])) + ')'); });
-    if(s.length || w.length) P.push(nm(id) + (s.length ? ' is elite in ' + s.slice(0, 3).join(', ') : '') + (s.length && w.length ? ';' : '') + (w.length ? (s.length ? ' but weak in ' : ' is weak in ') + w.slice(0, 3).join(', ') : '') + '.');
-  });
-  // 4. The model.
+  var P = [];
+  // 1. Big picture.
+  var rA = ra && ra.rating, rH = rh && rh.rating;
+  if(rA != null && rH != null && rk(A, "rating") && rk(H, "rating")){
+    var best = rA >= rH ? A : H, oth = best === A ? H : A, rb = row[best], ro = row[oth], gp = Math.abs(rA - rH);
+    var rec = function(r){ return r && r.n ? " (" + r.w + "-" + r.l + ")" : ""; };
+    var t1 = gp < 3 ? nm(A) + rec(ra) + " and " + nm(H) + rec(rh) + " are close to even on paper, " + pearOrd(rk(A, "rating")) + " and " + pearOrd(rk(H, "rating")) + " in rating."
+           : gp < 9 ? nm(best) + rec(rb) + " is the better team on paper, " + pearOrd(rk(best, "rating")) + " in rating to " + nm(oth) + "’s " + pearOrd(rk(oth, "rating")) + rec(ro) + ", about " + Math.round(gp) + " points apart."
+           : nm(best) + rec(rb) + " is a clear step above " + nm(oth) + rec(ro) + ", " + pearOrd(rk(best, "rating")) + " in rating against " + pearOrd(rk(oth, "rating")) + ".";
+    var ident = function(id){ var o = rk(id, "off"), d = rk(id, "def"); if(!o || !d || Math.abs(o - d) < 15 || Math.min(o, d) > (ranks.n.off || 130) * 0.45) return ""; return o < d ? nm(id) + " leans on its offense (" + pearOrd(o) + ", defense " + pearOrd(d) + ")" : nm(id) + " wins with defense (" + pearOrd(d) + ", offense " + pearOrd(o) + ")"; };
+    var ia = ident(A), ih = ident(H);
+    if(ia && ih) t1 += " " + ia + ", while " + ih + "."; else if(ia || ih) t1 += " " + (ia || ih) + ".";
+    P.push(t1);
+  }
+  // 2. Each side of the ball.
+  if(ra && rh){
+    var sA = stories(A, H), sH = stories(H, A);
+    // Lead with whichever offense has the bigger story.
+    var first = (sH[0] ? sH[0].sc : 0) > (sA[0] ? sA[0].sc : 0) ? [H, sH, A, sA] : [A, sA, H, sH];
+    if(first[1].length) P.push(first[1].map(function(s){ return s.t; }).join(" "));
+    if(first[3].length){ var tx = first[3].map(function(s){ return s.t; }).join(" "); var lowS = /^(That|Strength|Something)/.test(tx);
+      P.push((lowS ? "On the other side of the ball, " : pick(["On the other side of the ball, ", "Flip it around: ", "When " + nm(first[2]) + " has the ball, it\u2019s a different story. "], 3)) + (lowS ? tx.charAt(0).toLowerCase() + tx.slice(1) : tx)); }
+    if(!first[1].length && !first[3].length) P.push("Nothing in the matchup numbers jumps out: neither offense has a clear weakness to attack on the other side.");
+    else {
+      var net = 0; sA.forEach(function(s){ net += s.adv; }); sH.forEach(function(s){ net -= s.adv; });
+      if(Math.abs(net) >= 2) P.push("Add it up and the matchups tilt toward " + nm(net > 0 ? A : H) + ".");
+    }
+  }
+  // 3. The model.
   var p = ctx.p, g = ctx.g;
   if(p){
-    var fav = p.margin > 0 ? H : A, dog = fav === H ? A : H, fs = Math.max(p.away, p.home), ds = Math.min(p.away, p.home);
-    var s4 = 'The model has ' + nm(fav) + ' winning ' + fs.toFixed(0) + '\u2013' + ds.toFixed(0) + ' (' + Math.round(Math.max(p.awayWin, p.homeWin) * 100) + '%), a total of ' + p.total.toFixed(1) + '.';
-    if(ctx.vt) s4 += ' Vegas has ' + ctx.vt + '.';
-    if(ctx.mp){ var KR = ctx.KR; s4 += ' The play is ' + ctx.mp.txt + (KR && !KR.none ? ', rated ' + KR.rating + '/10 at ' + Math.round(KR.chance * 100) + '% to cover' + (KR.parts && KR.parts.fade ? ' \u2014 a fade of the model, since it loses in that spot' : '') : '') + '.'; }
+    var fav = p.margin > 0 ? H : A, fs = Math.max(p.away, p.home), ds = Math.min(p.away, p.home), wp = Math.round(Math.max(p.awayWin, p.homeWin) * 100);
+    var s4 = (wp < 58 ? "The model sees a tight one: " + nm(fav) + " " + fs.toFixed(0) + "–" + ds.toFixed(0) + " (" + wp + "% to win)" : "The model has " + nm(fav) + " winning " + fs.toFixed(0) + "–" + ds.toFixed(0) + " (" + wp + "%)") + ", with about " + Math.round(p.total) + " total points.";
+    if(ctx.mp){ var KR = ctx.KR; s4 += (ctx.vt ? " Vegas has " + ctx.vt + ", so the play is " : " The play is ") + ctx.mp.txt + (KR && !KR.none ? " (" + KR.rating + "/10, " + Math.round(KR.chance * 100) + "% to cover" + (KR.parts && KR.parts.fade ? "; a fade, because the model loses in this kind of spot" : "") + ")" : "") + "."; }
+    else if(ctx.vt) s4 += " Vegas has " + ctx.vt + ".";
     var fin = g && g.state === "post" && g.away.score !== null && g.home.score !== null;
-    if(fin){ var fa = g.away.id === A ? g.away.score : g.home.score, fh = g.home.id === H ? g.home.score : g.away.score; s4 += ' Final: ' + pearAbbr(A) + ' ' + fa + ', ' + pearAbbr(H) + ' ' + fh + ' (the model had ' + p.away.toFixed(0) + '\u2013' + p.home.toFixed(0) + ').'; }
+    if(fin){ var fa = g.away.id === A ? g.away.score : g.home.score, fh = g.home.id === H ? g.home.score : g.away.score; s4 += " It finished " + pearAbbr(A) + " " + fa + ", " + pearAbbr(H) + " " + fh + "."; }
     P.push(s4);
   }
   return P;
