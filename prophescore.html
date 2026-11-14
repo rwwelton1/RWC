@@ -1934,6 +1934,12 @@ button{color:var(--text);font-family:'Nunito',sans-serif}
 .qp-legs{display:flex;flex-wrap:wrap;gap:5px}
 .qp-leg{display:inline-flex;align-items:center;gap:4px;background:#fff;border:2px solid var(--border);border-radius:999px;padding:3px 4px 3px 10px;font:900 12px 'Nunito',sans-serif;max-width:100%}
 .qp-leg button{width:24px;height:24px;border:none;border-radius:50%;background:#111;color:#fff;font:900 14px/1 'Nunito',sans-serif;cursor:pointer;flex:none}
+.qp-mode{display:flex;gap:6px;margin-top:8px}.qp-mode button{flex:1;height:34px;border:2px solid var(--border);border-radius:9px;background:#fff;font:900 13px 'Nunito',sans-serif;cursor:pointer}
+.qp-mode button.on{background:var(--ink,#111);color:#fff}.qp-mode .qp-clr{flex:0 0 auto;padding:0 12px;background:transparent;color:var(--muted)}
+.qp-acts{display:flex;gap:8px}.qp-acts .qp-post{flex:1}
+.qp-bar .qp-tx{min-height:42px;padding:0 12px;font-size:15px;flex:none;background:#fff;color:#111}
+.hb-send{display:flex;gap:8px;margin:8px 0 2px}.hb-send button{flex:1;min-height:40px;border:2px solid var(--border);border-radius:10px;background:#fff;box-shadow:2px 2px 0 var(--border);font:900 14px 'Nunito',sans-serif;cursor:pointer}
+.hb-send button:first-child{background:var(--gold,#e2c35a)}
 .qp-sum{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px;font:800 13px 'Nunito',sans-serif}
 .qp-un{margin-left:auto;display:flex;gap:4px}
 .qp-un button{min-width:38px;height:32px;border:2px solid var(--border);border-radius:8px;background:#fff;font:900 12px 'Nunito',sans-serif;cursor:pointer}
@@ -2726,6 +2732,56 @@ function psQpAutoSettle(){
     psRef("picks/" + p.id).update({ st: st, sa: Date.now(), auto: true });
   });
 }
+// ── Slates: several straight picks sent together ──
+// The slip is a slate (separate straight picks) or a parlay. Either one can be texted: the phone's share sheet opens
+// with the picks written out, so they go to Messages, a group chat or anywhere else in one tap.
+function psQpMode(){ var m = PS.ui.qm; if(!m){ try{ m = localStorage.getItem("ps_qm"); }catch(_){} } return (PS.ui.qm = m === "parlay" ? "parlay" : "slate"); }
+function psQpSort(legs){
+  return legs.slice().sort(function(a, b){ var ga = psQpFind(a.g), gb = psQpFind(b.g); return (ga ? new Date(ga.date) : 0) - (gb ? new Date(gb.date) : 0); });
+}
+// One leg as it reads in a text: "Baylor +8.5 at BYU · Sat 7:00 PM", "Over 52.5 · Wake Forest at SMU · Sat 12:00 PM".
+function psQpLine(L){
+  var g = psQpFind(L.g), when = "";
+  if(g){ var d = new Date(g.date); when = d.toLocaleDateString(undefined, { weekday: "short" }) + " " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); }
+  if(!g) return L.t;
+  if(L.sd === "over" || L.sd === "under") return (L.sd === "over" ? "Over " : "Under ") + L.ln + " · " + pearName(g.away.id) + " at " + pearName(g.home.id) + (when ? " · " + when : "");
+  var me = L.sd === "home" ? g.home.id : g.away.id, op = L.sd === "home" ? g.away.id : g.home.id;
+  return pearName(me) + " " + pearSpreadTxt(L.ln) + (L.sd === "home" ? (g.neutral ? " vs " : " vs ") : " at ") + pearName(op) + (when ? " · " + when : "");
+}
+function psQpBar(slip, edit){
+  var n = slip.length, par = psQpMode() === "parlay" && n > 1;
+  return '<div class="qp-bar"><span><b>' + (n === 1 ? x(slip[0].t) : par ? n + '-leg parlay' : n + ' picks') + '</b><small>' + (par ? psOddsTxt(psQpOdds(n)) + ' \u00B7 ' : '') + (PS.ui.un || 1) + 'u' + (par || n === 1 ? '' : ' each') + (edit ? ' \u00B7 <u data-ps-act="gopick">edit</u>' : '') + '</small></span>' +
+         '<button class="btn btn-ghost qp-tx" data-ps-act="qptext" aria-label="Text these picks">\ud83d\udcf2 Text</button><button class="btn btn-gold" data-ps-act="qppost">Post</button></div>';
+}
+function psSlateText(legs, mode, title){
+  legs = psQpSort(legs); var n = legs.length, wk = PEAR.week ? "Week " + PEAR.week + " " : "";
+  var head = title || (mode === "parlay" && n > 1 ? "🏈 " + n + "-leg parlay (" + psOddsTxt(psQpOdds(n)) + ")" : "🏈 My " + wk + (n === 1 ? "pick" : "picks"));
+  return head + "\n" + legs.map(function(L){ return "• " + psQpLine(L); }).join("\n") + "\n— scorecery.net";
+}
+function psSlateSend(text){
+  var copy = function(){
+    var ok = function(){ toast("Copied — paste it in your text", "ok"); }, fb = function(){ try{ var ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); ok(); }catch(_){ toast("Couldn’t copy", "err"); } };
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, fb); else fb();
+  };
+  if(navigator.share){ navigator.share({ text: text }).catch(function(e){ if(!e || e.name !== "AbortError") copy(); }); return; }
+  // No share sheet (most desktop browsers): open a text message where that works, and copy either way.
+  copy(); if(/iPhone|iPad|Android/i.test(navigator.userAgent || "")) location.href = "sms:" + (/iPhone|iPad/i.test(navigator.userAgent) ? "&" : "?") + "body=" + encodeURIComponent(text);
+}
+// The picks shown in a Home section (Best plays, Your games): the ones still open to pick.
+function psSecLegs(btn){
+  var sec = btn.closest(".ps-sec"), out = []; if(!sec) return out;
+  Array.prototype.forEach.call(sec.querySelectorAll('.hb-pp[data-ps-act="qpadd"]'), function(b){
+    var gid = b.getAttribute("data-gid"), sd = b.getAttribute("data-sd"), ln = +b.getAttribute("data-ln"), g0 = psQpFind(gid);
+    if(g0) out.push({ g: gid, sd: sd, ln: ln, t: psQpText(g0, sd, ln) }); });
+  return out;
+}
+// Same test psBetRow uses for a tappable pick: before kickoff with a model side on the board.
+function psSecHasPick(o){ try{ if(o.pk && !o.pk.none) return true; return !!(o.p && pearModelPick(o.g, o.p.margin)); }catch(_){ return false; } }
+function psSecBtns(n, what){
+  if(n < 1) return '';
+  return '<div class="hb-send"><button data-ps-act="sectext">📲 Text ' + (n === 1 ? 'this pick' : 'these ' + n) + '</button><button data-ps-act="secadd">+ Add ' + (n === 1 ? 'to slip' : 'all to slip') + '</button></div>';
+}
+
 function psQuickHtml(){
   psEnsureGames();
   var slip = psQpLegs(), n = slip.length, h = '<div class="qp">';
@@ -2734,16 +2790,17 @@ function psQuickHtml(){
   if(!n) h += '<div class="qp-empty">Tap a side or a total below. Pick two or more for a parlay.</div>';
   else {
     h += '<div class="qp-legs">' + slip.map(function(L, i){ return '<span class="qp-leg">' + x(L.t) + '<button data-ps-act="qpdel" data-i="' + i + '" aria-label="Remove">×</button></span>'; }).join('') + '</div>';
-    var o = psQpOdds(n), un = PS.ui.un || 1, win = un * (o > 0 ? o / 100 : 100 / Math.abs(o));
-    h += '<div class="qp-sum"><b>' + (n === 1 ? 'Straight pick' : n + '-leg parlay') + '</b> · ' + psOddsTxt(o) +
+    var md = psQpMode(), par = md === "parlay" && n > 1, o = par ? psQpOdds(n) : -110, un = PS.ui.un || 1, win = un * (o > 0 ? o / 100 : 100 / Math.abs(o)) * (par ? 1 : n);
+    if(n > 1) h += '<div class="qp-mode"><button class="' + (par ? '' : 'on') + '" data-ps-act="qpmode" data-v="slate">Separate picks</button><button class="' + (par ? 'on' : '') + '" data-ps-act="qpmode" data-v="parlay">Parlay</button><button class="qp-clr" data-ps-act="qpclear">Clear</button></div>';
+    h += '<div class="qp-sum"><b>' + (n === 1 ? 'Straight pick' : par ? n + '-leg parlay' : n + ' straight picks') + '</b> · ' + psOddsTxt(o) + (par || n === 1 ? '' : ' each') +
          '<span class="qp-un">' + [1, 2, 3, 5].map(function(u){ return '<button class="' + (un === u ? 'on' : '') + '" data-ps-act="qpun" data-v="' + u + '">' + u + 'u</button>'; }).join('') + '</span></div>' +
-         '<div class="qp-win">To win ' + win.toFixed(2) + 'u · settles itself at the final</div>' +
+         '<div class="qp-win">To win ' + win.toFixed(2) + 'u' + (par || n === 1 ? '' : ' if they all hit') + ' · settles itself at the final</div>' +
          '<textarea id="pk-no" class="ps-ta" rows="1" maxlength="600" placeholder="Why (optional)"></textarea>' +
-         '<button class="btn btn-gold qp-post" data-ps-act="qppost">Post ' + (n === 1 ? 'pick' : 'parlay') + '</button>';
+         '<div class="qp-acts"><button class="btn btn-ghost qp-post" data-ps-act="qptext">\ud83d\udcf2 Text ' + (n === 1 ? 'it' : par ? 'parlay' : 'picks') + '</button>' +
+         '<button class="btn btn-gold qp-post" data-ps-act="qppost">Post to group</button></div>';
   }
   h += '</div>';
-  if(n){ var _o = psQpOdds(n);
-    h += '<div class="qp-bar"><span><b>' + (n === 1 ? x(slip[0].t) : n + '-leg parlay') + '</b><small>' + psOddsTxt(_o) + ' \u00B7 ' + (PS.ui.un || 1) + 'u</small></span><button class="btn btn-gold" data-ps-act="qppost">Post</button></div>'; }
+  if(n) h += psQpBar(slip, false);
   if(!PEAR.games) return h + '<div class="pem-autosub">Loading this week’s lines…</div></div>';
   var pf = pearFitFor(PEAR.week);
   var L = PEAR.games.filter(function(g){ return g.state === "pre" && pearFbsGame(g) && (pearVegasHome(g) !== null || g.vegasOU !== null); })
@@ -2783,6 +2840,14 @@ function psQpPost(){
   var slip = psQpLegs(), n = slip.length; if(!n){ toast("Pick a side first", "err"); return; }
   var no = (document.getElementById("pk-no") || {}).value || "";
   var W = { y: PEAR.year || pxYear(), w: PEAR.week || psBoardWk().w };
+  if(n > 1 && psQpMode() !== "parlay"){
+    var nt = no.trim().slice(0, 600) || null, legs = psQpSort(slip);
+    Promise.all(legs.map(function(L, i){
+      return psRef("picks").push({ u: ME(), n: psName(), k: "pick", ti: L.t, lg: null, gl: [{ g: L.g, sd: L.sd, ln: L.ln }], o: -110, un: PS.ui.un || 1, no: i === 0 ? nt : null, at: Date.now() + i, st: "open", y: W.y, w: W.w });
+    })).then(function(){ PS.ui.slip = []; PS.ui.form = false; PS.ui.pk = "open"; psQpRender(); toast(n + " picks posted", "ok"); },
+             function(err){ toast("Couldn\u2019t post: " + ((err && (err.code || err.message)) || err), "err"); psQpRender(); });
+    return;
+  }
   var rec = { u: ME(), n: psName(), k: n > 1 ? "parlay" : "pick", ti: n > 1 ? n + "-leg parlay" : slip[0].t,
               lg: n > 1 ? slip.map(function(L){ return L.t; }) : null,
               gl: slip.map(function(L){ return { g: L.g, sd: L.sd, ln: L.ln }; }),
@@ -3336,17 +3401,17 @@ function psHomeHtml(){
   var live = L.filter(function(o){ return o.g.state === "in"; }).sort(function(a, b){ return ((b.e && b.e.edge) || 0) - ((a.e && a.e.edge) || 0); });
   var secBets = ed.length ? '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">' + (plays ? 'Best plays' : (graded ? 'Biggest edges' : 'Best bets')) + '</h2><button class="ps-link" data-pear-filter="edge" data-pe-view="games">' + (plays ? 'All plays' : 'All edges') + '</button></div>' +
        '<div class="hb-list">' + ed.map(function(o, i){ return psBetRow(o, String(i + 1)); }).join('') + '</div>' +
+       psSecBtns(ed.filter(function(o){ return o.g.state === "pre" && psSecHasPick(o); }).length) +
        (graded ? '' : '<div class="hb-note">Tap a pick to add it to your slip. ' + (plays ? 'Purple = chance to cover, from how the model has done on picks like it. <b>Fade</b> = it loses there, so the play goes the other way.' : 'Purple = the edge, points between the model and the line.') + '</div>') + '</section>' : '';
   var secLive = live.length ? '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h"><i class="hb-dot in"></i>Live now <small>' + live.length + '</small></h2><button class="ps-link" data-pear-filter="live" data-pe-view="games">All live</button></div>' +
        '<div class="hb-list">' + live.slice(0, 3).map(function(o){ return psBetRow(o, '<i class="hb-dot"></i>'); }).join('') + '</div></section>' : '';
   h += live.length ? secLive + secBets : secBets;
   var fav = L.filter(function(o){ return psFav(o.g.id); });
-  if(fav.length) h += '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Your games</h2><span class="ps-sm">' + fav.length + ' starred</span></div><div class="hb-list">' + fav.map(function(o){ return psBetRow(o, '★'); }).join('') + '</div></section>';
+  if(fav.length) h += '<section class="ps-sec"><div class="ps-ch"><h2 class="ps-h">Your games</h2><span class="ps-sm">' + fav.length + ' starred</span></div><div class="hb-list">' + fav.map(function(o){ return psBetRow(o, '★'); }).join('') + '</div>' + psSecBtns(fav.filter(function(o){ return o.g.state === "pre" && psSecHasPick(o); }).length) + '</section>';
   h += '<div class="hm-quick"><button data-pear-filter="all" data-pe-view="games">All games</button><button data-pear-filter="pool" data-pe-view="games">My pool</button><button data-pe-view="rank">Rankings</button><button data-pe-view="me">' + (fav.length ? 'Me' : '☆ Starred') + '</button></div>';
   if(!fav.length) h += '<div class="hb-note" style="text-align:center">Star a game on the Games tab and it shows up here.</div>';
   var slip = PS.ui.slip || [];
-  if(slip.length){ var _o = psQpOdds(slip.length);
-    h += '<div class="qp-bar"><span><b>' + (slip.length === 1 ? x(slip[0].t) : slip.length + '-leg parlay') + '</b><small>' + psOddsTxt(_o) + ' · ' + (PS.ui.un || 1) + 'u · <u data-ps-act="gopick">edit</u></small></span><button class="btn btn-gold" data-ps-act="qppost">Post</button></div>'; }
+  if(slip.length) h += psQpBar(slip, true);
   return h + '</div>';
 }
 function psMeNavHtml(sec){
@@ -4746,6 +4811,15 @@ document.addEventListener("click", function(e){
   if(act === "qpdel"){ psQpLegs().splice(+t.getAttribute("data-i"), 1); psQpRender(); return; }
   if(act === "qpun"){ PS.ui.un = +t.getAttribute("data-v") || 1; psQpRender(); return; }
   if(act === "qppost"){ t.disabled = true; psQpPost(); return; }
+  if(act === "qptext"){ var sl2 = psQpLegs(); if(!sl2.length) return; psSlateSend(psSlateText(sl2, psQpMode())); return; }
+  if(act === "qpmode"){ PS.ui.qm = t.getAttribute("data-v") === "parlay" ? "parlay" : "slate"; try{ localStorage.setItem("ps_qm", PS.ui.qm); }catch(_){} psQpRender(); return; }
+  if(act === "qpclear"){ PS.ui.slip = []; psQpRender(); return; }
+  if(act === "sectext"){ var lg = psSecLegs(t); if(!lg.length){ toast("Nothing left to pick here", "info"); return; } psSlateSend(psSlateText(lg, "slate")); return; }
+  if(act === "secadd"){ var lg2 = psSecLegs(t), sl3 = psQpLegs(), added = 0;
+    lg2.forEach(function(L){ var tot = L.sd === "over" || L.sd === "under";
+      for(var i = sl3.length - 1; i >= 0; i--){ if(sl3[i].g === L.g && ((sl3[i].sd === "over" || sl3[i].sd === "under") === tot)) sl3.splice(i, 1); }
+      if(sl3.length < 12){ sl3.push(L); added++; } });
+    toast(added + (added === 1 ? " pick" : " picks") + " in your slip", "ok"); psQpRender(); return; }
   if(act === "qpown"){ PS.ui.own = !PS.ui.own; psQpRender(); return; }
   if(act === "pkfilt"){ PS.ui.pk = t.getAttribute("data-v"); psBoardRender(); return; }
   if(act === "pkkind"){ PS.ui.kind = t.getAttribute("data-v"); psBoardRender(); return; }
