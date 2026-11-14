@@ -9766,19 +9766,22 @@ function sheetLink(weekId){
   var logo = function(id, url){ return id ? "" : (url || ""); };
   var d = { v: 1, w: ST.weekLabels[weekId] || weekId, by: (nameOf(ST.user) || "").trim(), ko: getFirstKickoff(weekId) || 0, y: (typeof SEASON_YEAR !== "undefined" ? SEASON_YEAR : ""),
     tb: tbReady(weekId) ? (ST.tiebreaker && ST.tiebreaker[weekId]) || null : null,
-    g: ids.map(function(gid){ var g = games[gid] || {}; return [g.away || "", g.home || "", g.favSide || "", g.spread || 0, g.awayId || "", g.homeId || "", logo(g.awayId, g.awayLogo), logo(g.homeId, g.homeLogo), g.kickoff || "", parseKickoffTs(g) || 0, g.awayAbbrev || "", g.homeAbbrev || ""]; }) };
-  return location.href.split("#")[0] + "#sheet=" + gsB64(JSON.stringify(d));
+    g: ids.map(function(gid){ var g = games[gid] || {}; return [g.away || "", g.home || "", g.favSide || "", g.spread || 0, g.awayId || "", g.homeId || "", logo(g.awayId, g.awayLogo), logo(g.homeId, g.homeLogo), parseKickoffTs(g) ? "" : (g.kickoff || ""), parseKickoffTs(g) || 0, g.awayAbbrev || "", g.homeAbbrev || ""]; }) };
+  // The sheet rides in the query (?sheet=), on the bare page address. Not in the #fragment: a member who already
+  // has this pool open would just get the same tab back with no reload, and some apps drop fragments. And not on
+  // the sender's own address, which carries their group and user, so a lost sheet can't open their pool.
+  return location.origin + location.pathname + "?sheet=" + gsB64(JSON.stringify(d));
 }
 function sendSheetLink(weekId){
   var url = sheetLink(weekId), label = ST.weekLabels[weekId] || weekId, who = (nameOf(ST.user) || "").trim();
   var text = (who ? who + " sent you" : "Here’s") + " the " + label + " pick sheet — pick a side and a confidence for each game, then send it back. Closes at kickoff.";
-  if(navigator.share){ navigator.share({ url: url }).catch(function(){}); return; }
-  try{ navigator.clipboard.writeText(url); toast("Link copied \u2014 paste it into a text"); }catch(e){ prompt("Copy this link:", url); }
+  if(navigator.share){ navigator.share({ text: text, url: url }).catch(function(){}); return; }
+  try{ navigator.clipboard.writeText(text + "\n" + url); toast("Link copied \u2014 paste it into a text"); }catch(e){ prompt("Copy this link:", url); }
 }
 // ── The guest page ──
 function gsLogo(id, url){ return url || (id ? "https://a.espncdn.com/i/teamlogos/ncaa/500/" + id + ".png" : ""); }
 function gsLoad(){
-  var m = String(location.hash || "").match(/^#sheet=([A-Za-z0-9_-]+)/); if(!m) return null;
+  var m = String(location.search || "").match(/[?&]sheet=([A-Za-z0-9_-]+)/) || String(location.hash || "").match(/^#sheet=([A-Za-z0-9_-]+)/); if(!m) return null;
   try{ var d = JSON.parse(gsUnB64(m[1])); if(!d || !d.g) return null; }catch(e){ return { bad: true }; }
   var key = "gs_" + (d.w + "|" + d.ko).replace(/[^A-Za-z0-9|]/g, "");
   var saved = {}; try{ saved = JSON.parse(localStorage.getItem(key) || "{}") || {}; }catch(_){}
@@ -9808,7 +9811,8 @@ function gsDraw(){
   d.g.forEach(function(r, i){
     var p = GS.picks[i] || {};
     h += '<div class="gs-card' + (p.side && p.conf ? ' gs-done' : '') + '">';
-    if(r[8]) h += '<div class="gs-ko">' + x(r[8]) + '</div>';
+    var kl = r[8] || (r[9] ? new Date(r[9]).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }) : "");
+    if(kl) h += '<div class="gs-ko">' + x(kl) + '</div>';
     h += '<div class="gs-teams">' + ["away", "home"].map(function(sd, k){
       var nm = r[k], lg = gsLogo(r[4 + k], r[6 + k]);
       return '<button class="gs-team' + (p.side === sd ? ' on' : '') + '" data-gs="side" data-i="' + i + '" data-v="' + sd + '"' + (closed ? ' disabled' : '') + '>' + (lg ? '<img src="' + x(lg) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<i></i>') +
@@ -9834,7 +9838,7 @@ function gsStage(){
   var pk = {};
   d.g.forEach(function(r, i){
     var gid = "gs" + i; if(GAME_IDS.indexOf(gid) < 0) GAME_IDS.push(gid);
-    ST.games[GS_WK][gid] = { away: r[0], home: r[1], favSide: r[2], spread: r[3], awayId: r[4], homeId: r[5], awayLogo: gsLogo(r[4], r[6]), homeLogo: gsLogo(r[5], r[7]), kickoff: r[8], kickoffTs: r[9], awayAbbrev: r[10], homeAbbrev: r[11] };
+    ST.games[GS_WK][gid] = { away: r[0], home: r[1], favSide: r[2], spread: r[3], awayId: r[4], homeId: r[5], awayLogo: gsLogo(r[4], r[6]), homeLogo: gsLogo(r[5], r[7]), kickoff: r[8] || (r[9] ? new Date(r[9]).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }) : ""), kickoffTs: r[9], awayAbbrev: r[10], homeAbbrev: r[11] };
     var p = GS.picks[i]; if(p && p.side && p.conf) pk[gid] = { side: p.side, conf: p.conf };
   });
   if(d.tb && String(GS.tb).trim() !== "") pk.tb = GS.tb;
@@ -9864,6 +9868,8 @@ document.addEventListener("input", function(e){
   if(t && t.id === "gs-name"){ GS.name = t.value; gsSave(); var b = document.querySelector(".gs-send"); if(b){ var ok = gsComplete() === GS.d.g.length && GS.name.trim(); b.disabled = !ok; b.textContent = ok ? "Send my picks back" : gsComplete() < GS.d.g.length ? "Pick all " + GS.d.g.length + " games to send" : "Add your name to send"; } }
   if(t && t.id === "gs-tb"){ GS.tb = t.value; gsSave(); }
 }, true);
+// An old-style #sheet link opened on top of a pool tab changes only the fragment, so the page never reloads: do it.
+window.addEventListener("hashchange", function(){ if(!GS && /^#sheet=/.test(location.hash)) location.reload(); });
 // Opened from a sheet link: take over the page before the pool loads anything.
 (function(){
   GS = gsLoad(); if(!GS) return;
